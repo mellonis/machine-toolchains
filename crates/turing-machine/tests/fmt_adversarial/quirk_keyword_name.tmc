@@ -1,0 +1,12 @@
+alphabet ab { '_', 'a' }
+
+machine {
+  tape main: ab;
+  state /* mid */ s {
+    [*] -> stop;
+  }
+  entry // why
+  state t {
+    [*] -> stop;
+  }
+}

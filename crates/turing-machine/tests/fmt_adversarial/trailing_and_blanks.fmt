@@ -1,0 +1,25 @@
+// a file-level own-line comment
+
+use a::b; // use trailing
+
+alphabet ab { '_', 'a' } // alphabet trailing
+
+namespace n {
+  // a namespace-level own-line comment
+  routine r(tape t: ab) {
+    entry state s {
+      // a state-level own-line comment
+      [*] -> stop; // rule trailing
+    }
+  }
+}
+
+machine {
+  tape main: ab; // tape trailing
+
+  // a world-level own-line comment
+  entry graft n::r(t = main) as one; // graft trailing
+  bind n::r(t = main) as two;        // bind trailing
+
+  state fin { [*] -> stop; }
+}

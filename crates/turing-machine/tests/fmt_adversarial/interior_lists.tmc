@@ -1,0 +1,50 @@
+use // before the first path
+  a::b, // after the first
+  c::d
+  // before the semicolon
+;
+
+alphabet ab {
+  // before the first glyph
+  '_', /* after the first */
+  'a'
+  // before the closer
+}
+
+namespace n {
+  export graph g(
+    // before the first parameter
+    tape t: ab, /* after the first */
+    state done
+    // before the closer
+  ) {
+    entry state s {
+      [*] -> done;
+    }
+  }
+}
+
+machine {
+  tape main: ab;
+
+  entry graft n::g(
+    // before the first binding
+    t = main with map {
+      // before the first pair
+      '_' -> '_', /* after the first pair */
+      'a' -> 'a'
+      // before the closing brace
+    },
+    done = fin
+    // before the closing paren
+  ) as inst;
+
+  state fin {
+    [ /* first cell */ *] -> write [{ 0 + 1 }] move [.] stop;
+    [*] -> call n::g(
+             // before the first call binding
+             t = main,
+             done = fin
+           ) then stop;
+  }
+}

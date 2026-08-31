@@ -23,4 +23,6 @@ pub mod linker;
 pub mod lsp;
 #[cfg(feature = "std")]
 pub mod source_path;
+#[cfg(feature = "std")]
+pub mod syntax;
 pub mod vm;

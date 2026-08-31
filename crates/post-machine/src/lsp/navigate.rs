@@ -22,12 +22,15 @@
 //! `None` when `DocState::analysis` is `None` (a post-parse fatal
 //! anywhere in the document), not just the part that failed.
 
+use std::rc::Rc;
+
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::DefTarget;
+use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 
 use crate::compiler::{Analysis, Resolution};
-use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
 use crate::stdlib::{materialized_std_uri, roster};
+use crate::syntax::{FileView, FunctionView, TopView, extract_statement};
 
 use super::DocState;
 use super::walk::{enclosing_function_chain, function_labels, label_refs, span_contains};
@@ -69,19 +72,23 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
         return resolve_call(state, uri, resolution, origin);
     }
 
-    let cst = state.cst.as_ref()?;
+    let green = state.green.as_ref()?;
+    let root = SyntaxNode::new_root(Rc::clone(green));
+    let file = FileView::cast(root).expect("root is FILE");
+    let index = TextLineIndex::new(&state.text);
+    let offset = index.offset(pos);
 
-    if let Some(function) = enclosing_function_chain(&cst.items, pos).pop()
-        && let Some((value, origin)) = label_reference_at(function, pos)
+    if let Some(function) = enclosing_function_chain(&file, offset).pop()
+        && let Some((value, origin)) = label_reference_at(&function, &index, pos)
     {
-        return label_span(function, value).map(|span| DefTarget {
+        return label_span(&function, &index, value).map(|span| DefTarget {
             uri: uri.to_string(),
             span,
             origin: Some(origin),
         });
     }
 
-    if let Some((full_path, origin)) = use_path_at(&cst.items, pos) {
+    if let Some((full_path, origin)) = use_path_at(&file, &index, offset) {
         return if full_path.starts_with("std::") {
             std_path_target(state, &full_path, origin)
         } else {
@@ -275,13 +282,18 @@ fn std_target(full_path: &str, origin: Span) -> Option<DefTarget> {
 /// its nested children are a separate label scope, reached only by
 /// `walk::enclosing_function_chain` descending into them for a `pos`
 /// that lands there.
-fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<(u32, Span)> {
-    for item in &function.body {
-        let BodyKind::Statement(stmt) = &item.kind else {
-            continue;
-        };
-        for comma in &stmt.items {
-            for (value, span) in label_refs(&comma.item).into_iter().flatten() {
+///
+/// The items come from `crate::syntax::extract_statement`, the parser's
+/// own production, so `label_refs` sees exactly the `Item` the compiler
+/// sees.
+fn label_reference_at(
+    function: &FunctionView,
+    index: &TextLineIndex,
+    pos: Pos,
+) -> Option<(u32, Span)> {
+    for stmt in function.statements() {
+        for item in extract_statement(&stmt, index).items {
+            for (value, span) in label_refs(&item).into_iter().flatten() {
                 if span_contains(span, pos) {
                     return Some((value, span));
                 }
@@ -294,8 +306,9 @@ fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<(u32, Span)> {
 /// `value`'s label declaration span within `function`'s OWN statements
 /// (labels are function-scoped — never searched in nested children or
 /// enclosing scopes), via `walk::function_labels`' shared scan.
-fn label_span(function: &FunctionCst, value: u32) -> Option<Span> {
-    function_labels(function)
+fn label_span(function: &FunctionView, index: &TextLineIndex, value: u32) -> Option<Span> {
+    function_labels(function, index)
+        .into_iter()
         .find(|label| label.value == value)
         .map(|label| label.span)
 }
@@ -315,25 +328,58 @@ fn label_span(function: &FunctionCst, value: u32) -> Option<Span> {
 /// `Analysis.docs`, the overlay's doc map, or the stdlib's — local,
 /// sibling, and `std::` names alike. Filtering by `std` here would only
 /// duplicate work every caller already does on its own.
-fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
-    for item in items {
-        match &item.kind {
-            TopKind::Namespace(ns) => {
-                if let Some(result) = use_path_at(&ns.items, pos) {
-                    return Some(result);
-                }
-            }
-            TopKind::Import(use_cst) => {
-                for path in &use_cst.paths {
-                    if span_contains(path.span, pos) {
-                        return Some((path.path.join("::"), path.span));
+fn use_path_at(file: &FileView, index: &TextLineIndex, offset: u32) -> Option<(String, Span)> {
+    fn descend(
+        items: impl Iterator<Item = TopView>,
+        index: &TextLineIndex,
+        offset: u32,
+    ) -> Option<(String, Span)> {
+        for item in items {
+            match item {
+                TopView::Namespace(ns) => {
+                    if ns.syntax().text_range().contains(offset)
+                        && let Some(result) = descend(ns.items(), index, offset)
+                    {
+                        return Some(result);
                     }
                 }
+                TopView::Use(use_decl) => {
+                    for path in use_decl.paths() {
+                        // Alias-exclusive on purpose: `UsePath.span`
+                        // (docs/core.md (syntax tree)) never covers an
+                        // `as` alias, so both the containment test and
+                        // the returned span are built from the segment
+                        // tokens the way `extract.rs::extract_import`
+                        // does — the node's own `text_range()` would
+                        // include the alias and let a cursor sitting on
+                        // it resolve to the path.
+                        let segments = path.segments();
+                        let first = segments
+                            .first()
+                            .expect("USE_PATH always carries at least one segment");
+                        let last = segments
+                            .last()
+                            .expect("USE_PATH always carries at least one segment");
+                        let range = mtc_core::syntax::TextRange::new(
+                            first.text_range().start,
+                            last.text_range().end,
+                        );
+                        if range.contains(offset) {
+                            let joined = segments
+                                .iter()
+                                .map(|t| t.text().to_string())
+                                .collect::<Vec<_>>()
+                                .join("::");
+                            return Some((joined, index.span(range)));
+                        }
+                    }
+                }
+                TopView::Function(_) => {}
             }
-            TopKind::Comment(_) | TopKind::Function(_) => {}
         }
+        None
     }
-    None
+    descend(file.items(), index, offset)
 }
 
 /// Hover's own position→target resolution (docs/lsp.md (hover)): the
@@ -341,7 +387,7 @@ fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
 /// form, or a cross-file overlay symbol's own key — plus the origin span
 /// of the reference under the cursor. Shares every WALK [`definition`]
 /// uses (the resolution table, and [`use_path_at`] above) instead of
-/// re-walking the CST a second time; only the OUTPUT shape differs (a
+/// re-walking the tree a second time; only the OUTPUT shape differs (a
 /// name here, a `DefTarget` location there). Step order:
 ///
 /// 1. a resolution-table entry whose span contains `pos` (a call site)
@@ -389,8 +435,12 @@ pub(super) fn hover_target(state: &DocState, pos: Pos) -> Option<(String, Span)>
         return Some((f.name.clone(), f.name_span));
     }
 
-    let cst = state.cst.as_ref()?;
-    use_path_at(&cst.items, pos)
+    let green = state.green.as_ref()?;
+    let root = SyntaxNode::new_root(Rc::clone(green));
+    let file = FileView::cast(root).expect("root is FILE");
+    let index = TextLineIndex::new(&state.text);
+    let offset = index.offset(pos);
+    use_path_at(&file, &index, offset)
 }
 
 /// The fully-qualified name a step-1 [`Resolution`] ultimately names —
@@ -573,6 +623,27 @@ mod tests {
             !span_contains(span, Pos { line: 1, col: 5 }),
             "end is exclusive"
         );
+    }
+
+    /// Go-to-definition on a label reference still finds the label's own
+    /// declaration in the same function — the walk that moved from the
+    /// hand-written CST to green-tree views. `007` also pins that the
+    /// label VALUE survives extraction: a token-text re-derivation
+    /// would either hand back
+    /// `007` (unparseable as a value) or lose the written form.
+    #[test]
+    fn label_reference_resolves_to_its_declaration_after_the_view_migration() {
+        const SRC: &str = "main() {\n    007: right;\n    goto 007;\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        // The `007` inside `goto 007;` — skip past `"goto "`.
+        let pos = pos_after(SRC, "goto 007", 5);
+        let target = service
+            .definition(URI, pos)
+            .expect("resolves to the label declaration");
+        assert_eq!(target.uri, URI);
+        assert_eq!(target.span.start, Pos { line: 2, col: 5 });
     }
 
     #[test]
@@ -788,6 +859,32 @@ mod tests {
             .expect("goToEnd is in the roster");
         assert_eq!(target.span, entry.name_span);
         assert_eq!(target.origin, Some(span_of(NAV_FIXTURE, "std::goToEnd")));
+    }
+
+    #[test]
+    fn pos_inside_a_namespaced_use_path_resolves_to_the_materialized_roster() {
+        // `use_path_at`'s `ns…contains(offset)` guard is a pure
+        // narrowing over the recursion into a namespace's own items, but
+        // nothing had exercised a `use` declaration NESTED inside a
+        // namespace through go-to-definition before this fixture — every
+        // other `use` test here sits at top level.
+        const SRC: &str =
+            "namespace ns {\n    use std::goToEnd;\n    export inner() { @goToEnd(); }\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        let pos = pos_at(SRC, "goToEnd");
+        let target = service
+            .definition(URI, pos)
+            .expect("pos sits inside the namespaced use std::goToEnd's path");
+
+        assert!(target.uri.starts_with("file://"), "uri: {}", target.uri);
+        let entry = roster()
+            .iter()
+            .find(|e| e.full_path == "std::goToEnd")
+            .expect("goToEnd is in the roster");
+        assert_eq!(target.span, entry.name_span);
+        assert_eq!(target.origin, Some(span_of(SRC, "std::goToEnd")));
     }
 
     #[test]

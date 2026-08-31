@@ -852,6 +852,57 @@ present it takes the mixed path, where the restrictions bind only the
 stamped closure reached from the bijection seeds, not the image at
 large.
 
+## Syntax trees
+
+The framework in `syntax/` provides language-agnostic lossless syntax
+trees for the toolchains' source languages. It follows the green/red
+model: an immutable **green tree** owns the exact source text — every
+token, including whitespace and comments, is an ordinary leaf, so the
+root's text equals the source byte for byte (the lossless law; its
+structural half — cached lengths always equal real text lengths — is
+held by property test) — and **red cursors** materialize on demand
+while walking, each knowing its absolute byte range and its parent.
+
+Kinds are opaque: `SyntaxKind` is a `u16` newtype whose values each
+language crate defines for itself, exactly as the VM core executes
+micro-ops without knowing opcodes. Core compares kinds only for
+equality; its own tests run against a fake kind space.
+
+Parsers emit trees through `TreeBuilder` — `start_node`/`finish_node`
+bracket children in document order, and a `checkpoint` lets a
+recursive-descent parser wrap an already-emitted prefix once it knows
+the enclosing kind. Balance errors are panics: an unbalanced build is
+a parser bug, not an input error.
+
+Typed access goes through the `AstNode` contract: a view is a
+zero-copy wrapper over a node of a known kind, declared with the
+`ast_node!` macro and written with the `child`/`children`/`token`
+lookup helpers. Concrete views live in the language crates.
+
+Positions are byte offsets (`TextRange`, half-open). Diagnostics keep
+the toolchains' line/column `Span` as their currency: a
+`TextLineIndex` built from the source converts byte offsets to
+1-based lines and 1-based **character** columns — the same counting
+the lexers use, so spans agree for the single-line tokens the lexers
+produce. For a token spanning multiple lines (a block comment), the
+`TextLineIndex` path yields the true multi-line end where the lexer's
+own span does not. The inverse `offset` method recovers byte offsets
+from line/column positions, clamping at line and column boundaries
+the way the LSP position decoder does, so the two directions cannot disagree.
+
+A free `debug_dump` function renders an indented tree dump for
+debugging and golden tests; core knows no kind names, so the caller
+supplies a kind-to-name function.
+
+Red cursors support navigation primitives — `ancestors`, sibling queries
+(`prev_sibling_or_token`, `next_sibling_or_token`), token edges
+(`first_token`, `last_token`), and descendant iteration (`descendant_tokens`)
+— enabling efficient traversals from any node. Core interprets no kinds
+throughout these operations, leaving semantic meaning to language consumers.
+
+Handles are `Rc`-based and single-threaded, matching the front ends
+that will use them.
+
 ## The thin-renderer rule
 
 **Library code never prints.** Every stage returns a structured value —

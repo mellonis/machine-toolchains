@@ -26,10 +26,8 @@ use mtc_core::diagnostics::Span;
 use mtc_core::formats::object::ObjectFile;
 
 use crate::compiler::{CompileOptions, VariantColumns, analyze_staged, compile};
-use crate::cst::TopKind;
-use crate::lexer::lex;
 use crate::optimizer::OptLevel;
-use crate::parser::{FnDoc, parse_cst};
+use crate::parser::FnDoc;
 
 pub const SOURCE: &str = include_str!("std.pmc");
 
@@ -72,36 +70,33 @@ pub(crate) struct RosterEntry {
     pub decl_line: u32,
 }
 
-/// Parses `SOURCE` once (lex → `parse_cst`, no hand parsing) into the
-/// roster of exported routines in the `std` namespace block.
+/// Parses `SOURCE` once (via [`crate::parser::parse`] — lex → green
+/// parse → extraction, no hand parsing) into the roster of exported
+/// routines in the `std` namespace block. Filters the extracted
+/// `Program` rather than walking the tree a second way: `parse` is the
+/// one front-end route `analyze` itself runs, so this cannot drift
+/// from what the compiler sees.
+/// `ns == ["std"]` is an exact match, not a prefix — a namespace nested
+/// inside `std` was never part of the roster.
+///
+/// The green tree and every view over it are `Rc`-based and die inside
+/// this initializer; only owned `RosterEntry` fields (String/Span/u32)
+/// reach the `OnceLock`, which requires `Sync`. Do not cache a
+/// `SyntaxNode` or a view here.
 pub(crate) fn roster() -> &'static [RosterEntry] {
     static ROSTER: OnceLock<Vec<RosterEntry>> = OnceLock::new();
     ROSTER.get_or_init(|| {
-        let tokens = lex(SOURCE).expect("the embedded stdlib lexes");
-        let cst = parse_cst(&tokens).expect("the embedded stdlib parses");
-        let mut entries = Vec::new();
-        for top in &cst.items {
-            let TopKind::Namespace(ns) = &top.kind else {
-                continue;
-            };
-            if ns.name != "std" {
-                continue;
-            }
-            for body in &ns.items {
-                let TopKind::Function(f) = &body.kind else {
-                    continue;
-                };
-                if !f.exported {
-                    continue;
-                }
-                entries.push(RosterEntry {
-                    full_path: format!("std::{}", f.name),
-                    name_span: f.name_span,
-                    decl_line: f.line,
-                });
-            }
-        }
-        entries
+        let program = crate::parser::parse(SOURCE).expect("the embedded stdlib parses");
+        program
+            .functions
+            .iter()
+            .filter(|f| f.exported && f.ns == ["std"])
+            .map(|f| RosterEntry {
+                full_path: format!("std::{}", f.name),
+                name_span: f.name_span,
+                decl_line: f.line,
+            })
+            .collect()
     })
 }
 
@@ -326,5 +321,41 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), SOURCE.as_bytes());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The roster is the eleven `std::` routines, in source order, each
+    /// with the declaration line the walk read its name from.
+    ///
+    /// The order is the load-bearing part and nothing else pins it: the
+    /// sibling tests here check every entry INDIVIDUALLY (that a
+    /// `name_span` slices its own name out of `SOURCE`, that its line is
+    /// ASCII) and the compiled-object test compares an unordered set, so
+    /// a walk that visited the namespace body backwards would pass all
+    /// three. This table was captured from the hand-written-CST walk
+    /// this roster replaced, while that path was still callable.
+    #[test]
+    fn the_roster_is_the_eleven_std_routines_in_source_order() {
+        let actual: Vec<(String, u32)> = roster()
+            .iter()
+            .map(|e| (e.full_path.clone(), e.decl_line))
+            .collect();
+        let expected: Vec<(String, u32)> = [
+            ("std::goToEnd", 13),
+            ("std::goToBegin", 21),
+            ("std::goToMarkRight", 29),
+            ("std::goToMarkLeft", 36),
+            ("std::goToBlankRight", 44),
+            ("std::goToBlankLeft", 51),
+            ("std::eraseSection", 59),
+            ("std::appendMark", 68),
+            ("std::prependMark", 76),
+            ("std::removeLastMark", 85),
+            ("std::removeFirstMark", 94),
+        ]
+        .into_iter()
+        .map(|(path, line)| (path.to_string(), line))
+        .collect();
+
+        assert_eq!(actual, expected);
     }
 }

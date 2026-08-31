@@ -1,0 +1,5 @@
+use a; /* one
+two */
+
+? doc
+alphabet b { '0' }

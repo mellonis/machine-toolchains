@@ -1,0 +1,40 @@
+// Contextual-keyword corpus fixture (docs/pmt/language.md): functions
+// literally named after pmc's contextual keywords — `export`, `use`,
+// `namespace` — none of which sits in the RESERVED definition-name
+// vocabulary (parser.rs's `is_reserved_definition_name` only blocks the
+// eight RESERVED command words plus `volatile`), so all three parse as
+// ordinary function names as long as the keyword's own triggering
+// look-ahead doesn't match: `export`/`use` need a following IDENT to
+// read as the modifier/import-list respectively, and `namespace` needs
+// IDENT then `{`; here each name is immediately followed by `(`
+// instead, so every site falls through to an ordinary function
+// definition. `export namespace()` pins the sharper two-ident header
+// shape too: `export` decodes as the MODIFIER (consumed because it is
+// followed by another IDENT), and the ident that follows — itself the
+// contextual keyword `namespace` — decodes as the plain function NAME,
+// not as a `namespace NAME { … }` block (that pattern only triggers
+// when `namespace` itself leads and is followed by IDENT then `{`).
+// Plus an aliased import (`end`) that shadows nothing in this file, and
+// calls that exercise all three names — through `@name()`, which only
+// rejects the eight RESERVED words, not these three contextual ones —
+// from `main`.
+use std::goToEnd as end;
+
+export() {
+    right;
+}
+
+use() {
+    left;
+}
+
+export namespace() {
+    mark;
+}
+
+main() {
+    @export();
+    @use();
+    @namespace();
+    @end();
+}

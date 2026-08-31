@@ -6,14 +6,15 @@
 //! (docs/pmt/cli.md).
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::{
     BlobDebug, BlobVariant, ObjectFile, Relocation, Symbol, SymbolDef,
 };
+use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
-use crate::cst::Cst;
 use crate::ir::IrProgram;
 use crate::lexer::{LexMode, Token};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, gated_pass_names, optimize};
@@ -413,11 +414,23 @@ fn lower_and_merge(
     Ok((ir, diagnostics))
 }
 
-/// lex → parse → duplicate-binding check → flatten → lower. Stops before
-/// the optimizer; `compile()` composes this with the back half.
+/// lex → green parse → extract → duplicate-binding check → flatten →
+/// lower. Stops before the optimizer; `compile()` composes this with the
+/// back half.
+///
+/// The parse is the green one (docs/core.md (syntax trees)): one
+/// `WithComments` lex feeds both `parse_green_from_tokens` and — through
+/// `significant_tokens` — the `tokens` field, which stays exactly the
+/// `WithoutComments` stream it has always been (pinned by
+/// `tests/syntax_green.rs::corpus_token_provenance_law`). `extract_program`
+/// survives every `.pmc` the crate ships, held to that by
+/// `tests/syntax_green.rs::every_corpus_file_parses_and_extracts`; what it
+/// rebuilds is pinned field by field in `syntax::extract`'s own tests.
 pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
-    let tokens = crate::lexer::lex(source)?;
-    let parsed = crate::parser::parse(&tokens)?;
+    let lexed = crate::lexer::lex_with(source, LexMode::WithComments)?;
+    let green = crate::parser::parse_green_from_tokens(source, &lexed)?;
+    let parsed = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
+    let tokens = crate::parser::significant_tokens(&lexed);
     check_duplicate_bindings(&parsed)?;
     let Flattened {
         program,
@@ -465,8 +478,10 @@ pub(crate) struct Analysis {
 pub(crate) struct StagedAnalysis {
     /// WithComments — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
-    /// `None` if lexing or parsing failed.
-    pub cst: Option<Cst>,
+    /// Green syntax tree of the current text (docs/core.md (syntax
+    /// trees)); `None` when lexing or parsing failed. The `.pmc` language
+    /// service's position walks index by byte range against this tree.
+    pub green: Option<Rc<GreenNode>>,
     /// `None` if any stage failed (parse, duplicate-binding check, or
     /// lowering).
     pub analysis: Option<Analysis>,
@@ -474,42 +489,44 @@ pub(crate) struct StagedAnalysis {
     pub fatal: Option<CompileError>,
 }
 
-/// lex (WithComments) → parse_cst → lower_cst → duplicate-binding check →
-/// flatten → ir::lower, retaining each stage's outcome instead of
-/// stopping at the first failure. `lower_cst` and `flatten` are
+/// lex (WithComments) → green parse → extract → duplicate-binding check
+/// → flatten → ir::lower, retaining each stage's outcome instead of
+/// stopping at the first failure. Extraction and `flatten` are
 /// infallible, so the only post-parse fatals are `DuplicateBinding` (the
 /// binding check) and `UndefinedLabel` (`ir::lower`) — the pipeline
 /// always runs through `ir::lower`, never stopping at `flatten`. The
 /// `IrProgram` itself is discarded once `ir::lower` has had its say: the
 /// LSP's tiers only need the flattened `Analysis`, not the CFG.
 pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
-    let tokens = match crate::lexer::lex_with(source, LexMode::WithComments) {
+    let lexed = match crate::lexer::lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
         Err(fatal) => {
             return StagedAnalysis {
                 tokens: None,
-                cst: None,
+                green: None,
                 analysis: None,
                 fatal: Some(fatal),
             };
         }
     };
-    let cst = match crate::parser::parse_cst(&tokens) {
-        Ok(cst) => cst,
+    let green = match crate::parser::parse_green_from_tokens(source, &lexed) {
+        Ok(green) => green,
         Err(fatal) => {
             return StagedAnalysis {
-                tokens: Some(tokens),
-                cst: None,
+                tokens: Some(lexed),
+                green: None,
                 analysis: None,
                 fatal: Some(fatal),
             };
         }
     };
-    let program = crate::parser::lower_cst(&cst);
+    let green_retained = Some(Rc::clone(&green));
+    let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
+    let tokens = lexed;
     if let Err(fatal) = check_duplicate_bindings(&program) {
         return StagedAnalysis {
             tokens: Some(tokens),
-            cst: Some(cst),
+            green: green_retained,
             analysis: None,
             fatal: Some(fatal),
         };
@@ -524,7 +541,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
     match lower_and_merge(&program, vis) {
         Ok((_ir, warnings)) => StagedAnalysis {
             tokens: Some(tokens),
-            cst: Some(cst),
+            green: green_retained,
             analysis: Some(Analysis {
                 ast: program,
                 scopes,
@@ -536,7 +553,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         },
         Err(fatal) => StagedAnalysis {
             tokens: Some(tokens),
-            cst: Some(cst),
+            green: green_retained,
             analysis: None,
             fatal: Some(fatal),
         },
@@ -2081,7 +2098,7 @@ main() { mark; }
         let staged = analyze_staged(src);
         assert!(staged.fatal.is_none());
         let tokens = staged.tokens.as_ref().expect("lexing succeeded");
-        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.green.is_some(), "parsing succeeded");
         let analysis = staged.analysis.as_ref().expect("the pipeline succeeded");
 
         let a = analyze(src).unwrap();
@@ -2114,35 +2131,35 @@ main() { mark; }
 
     #[test]
     fn analyze_staged_lex_failure_degrades_everything_to_none() {
-        // Tier 2: lexing itself fails — no tokens, no cst, no analysis.
+        // Tier 2: lexing itself fails — no tokens, no tree, no analysis.
         let staged = analyze_staged("/* never closed");
         assert!(staged.tokens.is_none());
-        assert!(staged.cst.is_none());
+        assert!(staged.green.is_none());
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "lex-error");
     }
 
     #[test]
-    fn analyze_staged_parse_failure_keeps_tokens_but_not_cst() {
+    fn analyze_staged_parse_failure_keeps_tokens_but_not_the_tree() {
         // Tier 3: lexing succeeds, parsing does not (a bare identifier
         // statement that is not a builtin — CompileErrorKind::UnknownCommand).
         let staged = analyze_staged("f() { gibberish; }");
         assert!(staged.tokens.is_some(), "lexing still succeeded");
-        assert!(staged.cst.is_none());
+        assert!(staged.green.is_none());
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "unknown-command");
     }
 
     #[test]
-    fn analyze_staged_duplicate_binding_keeps_cst_but_not_analysis() {
-        // Tier 4: parsing succeeds (the CST is a faithful reprint of two
-        // legal `use` lines), the post-parse duplicate-binding check
-        // fails before flatten/ir::lower ever run.
+    fn analyze_staged_duplicate_binding_keeps_the_tree_but_not_analysis() {
+        // Tier 4: parsing succeeds (the green tree is a faithful reprint
+        // of two legal `use` lines), the post-parse duplicate-binding
+        // check fails before flatten/ir::lower ever run.
         let staged = analyze_staged("use goToEnd; use std::goToEnd; main() { @goToEnd(); }");
         assert!(staged.tokens.is_some());
-        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.green.is_some(), "parsing succeeded");
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "duplicate-binding");
@@ -2156,7 +2173,7 @@ main() { mark; }
         // does not stop at flatten.
         let staged = analyze_staged("main() { goto 99; }");
         assert!(staged.tokens.is_some());
-        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.green.is_some(), "parsing succeeded");
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "undefined-label");
@@ -2217,6 +2234,44 @@ main() { mark; }
         assert!(
             diags.iter().any(|d| d.code == "unused-import"),
             "unrelated diagnostics are untouched"
+        );
+    }
+
+    /// `analyze`'s own contract, pinned by value rather than against a
+    /// second implementation of it. The hand-written-CST front end it
+    /// used to be compared against is gone; what survives is the part
+    /// that was never a tautology — token provenance, a claim about
+    /// `analyze`'s lex MODE, not about its parse: it lexes `WithComments`
+    /// internally (feeding the green parse) yet publishes the
+    /// `WithoutComments` stream on `AnalysisOutput.tokens`
+    /// (`significant_tokens`, `docs/core.md (syntax trees)`).
+    ///
+    /// The AST/diagnostics/scopes halves are covered by this module's
+    /// other tests and by `tests/compile_programs.rs`; re-asserting them
+    /// against `flatten(parse(src))` would now compare `analyze` with
+    /// itself.
+    #[test]
+    fn analyze_keeps_token_provenance_against_a_plain_lex() {
+        let src = "// lead\nuse std::goToEnd as end;\nnamespace ns { export inner() { right; } }\n? documented\nexport main() {\n    helper() { left; }\n    007: @helper();\n    @ns::inner();\n    @end();\n    goto 007;\n}\n";
+        let a = analyze(src).expect("analyzes");
+        let plain = crate::lexer::lex(src).expect("lexes");
+        assert_eq!(a.tokens, plain, "token provenance law");
+        let with_comments = crate::lexer::lex_with(src, LexMode::WithComments).expect("lexes");
+        assert!(
+            with_comments.len() > a.tokens.len(),
+            "fixture sanity: the source must carry a comment, or this proves nothing"
+        );
+    }
+
+    /// A source that fails to lex still fails at the lex stage, with
+    /// the same error — `analyze` now lexes `WithComments`, and the
+    /// mode must not change which diagnostic a malformed program gets.
+    #[test]
+    fn analyze_reports_the_same_lex_error_as_before() {
+        let src = "/* never closed\nmain() { right; }\n";
+        assert_eq!(
+            analyze(src).map(|_| ()).unwrap_err(),
+            crate::lexer::lex(src).map(|_| ()).unwrap_err()
         );
     }
 }

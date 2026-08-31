@@ -34,11 +34,10 @@ pub fn run(f: &mut IrFunction) -> u32 {
 mod tests {
     use super::*;
     use crate::ir::{IrTerm, lower};
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     fn fold_fn(src: &str) -> crate::ir::IrFunction {
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         run(&mut ir.functions[0]);
         crate::ir::validate_function(&ir.functions[0]).unwrap();
         ir.functions.remove(0)

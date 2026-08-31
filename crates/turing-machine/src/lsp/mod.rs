@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use mtc_core::diagnostics::{Applicability, Diagnostic, Pos, Span};
@@ -37,13 +38,17 @@ use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
+use mtc_core::syntax::{AstNode, GreenNode, SyntaxElement, SyntaxNode, TextLineIndex, TextRange};
 
 use crate::compiler::{CompileError, Resolved, analyze_staged};
 use crate::config;
-use crate::cst::{Cst, MachineCst, NamespaceCst, ReuseCst, TopItem, TopKind, WorldItem, WorldKind};
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::Token;
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
-use crate::parser::{Doc, Program};
+use crate::parser::{Doc, Program, significant_tokens};
+use crate::syntax::{
+    BindView, GraftView, MachineView, NamespaceView, ReuseView, RootView, StateView, TmcKind,
+    TopView,
+};
 
 mod complete;
 mod context;
@@ -188,8 +193,14 @@ pub(crate) struct DocState {
     /// WithComments token stream of the current text; `None` only when
     /// lexing itself failed.
     pub(crate) tokens: Option<Vec<Token>>,
-    /// The lossless CST (`None` when lexing or parsing failed).
-    pub(crate) cst: Option<Cst>,
+    /// Green syntax tree of the current text (docs/core.md (syntax
+    /// trees)); `None` when lexing or parsing failed. `Rc`, not `Arc`:
+    /// the language server is single-threaded by construction, and this
+    /// is the one field that would need to change for `DocState` to
+    /// become `Send` — every other field is (pinned below). Read by
+    /// `document_symbols` and by `quickfix.rs`'s `state_stub`, both
+    /// indexing into the SAME tree by byte range rather than reparsing.
+    pub(crate) green: Option<Rc<GreenNode>>,
     /// The flat program — survives a resolve-stage fatal.
     pub(crate) program: Option<Program>,
     /// The resolved module (`None` when any stage up to resolve failed).
@@ -223,6 +234,64 @@ pub(crate) struct DocState {
     /// outside that tree, so a wider modifier here would just be a
     /// `private_interfaces` mismatch waiting to happen.
     overlay: Option<overlay::Overlay>,
+}
+
+// Pins the `green` field doc comment above, in two halves.
+//
+// Half one: `DocState: !Send` fails to compile the moment that stops
+// holding, by any route. `AmbiguousIfSend<()>` is a blanket impl every
+// type gets; `AmbiguousIfSend<Invalid>` only lands on a `Send` type.
+// `DocState: Send` would make both apply, so the trailing type parameter
+// on `_marker` cannot be inferred and the crate stops compiling — there
+// is no positive way to assert a negative trait bound in stable Rust, so
+// this ambiguity is the mechanism, not a workaround for lacking one.
+#[allow(dead_code)]
+const _: fn() = || {
+    trait AmbiguousIfSend<A> {
+        fn _marker() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    struct Invalid;
+    impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
+    let _ = <DocState as AmbiguousIfSend<_>>::_marker;
+};
+
+// Half two: every OTHER field is independently `Send`, which is what
+// makes `green` "the one field" rather than merely "a field" — the half
+// the assertion above cannot check, since adding a second `!Send` field
+// leaves `DocState: !Send` (and that assertion) untouched. Destructured
+// exhaustively (no `..`) and by value on purpose: a field added to
+// `DocState` tomorrow fails to compile HERE until it is added below and
+// classified, rather than silently escaping the check the way a list
+// keyed by type alone would. A positive bound needs no ambiguity trick —
+// `assert_send(v)` type-checks each binding against `T: Send` whether or
+// not this function ever runs.
+#[allow(dead_code)]
+fn assert_every_other_docstate_field_is_send(state: DocState) {
+    fn assert_send<T: Send>(_: T) {}
+    let DocState {
+        text,
+        tokens,
+        green: _,
+        program,
+        resolved,
+        warnings,
+        lint,
+        fatal,
+        roster,
+        config_errors,
+        overlay,
+    } = state;
+    assert_send(text);
+    assert_send(tokens);
+    assert_send(program);
+    assert_send(resolved);
+    assert_send(warnings);
+    assert_send(lint);
+    assert_send(fatal);
+    assert_send(roster);
+    assert_send(config_errors);
+    assert_send(overlay);
 }
 
 /// Whether the embedded stdlib's `std::` surface should be offered at all
@@ -439,90 +508,166 @@ pub(crate) fn render_doc(doc: &Doc) -> Option<String> {
     Some(sections.join("\n\n"))
 }
 
-/// Walks one CST item list — the file level or a namespace block's own
-/// items — into document symbols. Comments and imports are skipped; a
-/// reopened namespace stays a separate sibling because the CST already
-/// keeps it apart.
-fn cst_symbols(items: &[TopItem]) -> Vec<SymbolNode> {
+/// The first child of `node` — token or node — that is neither its own
+/// bound doc run nor trivia (docs/core.md (syntax trees)): the keyword a
+/// documented declaration's symbol extent opens at — the green tree
+/// retro-wraps a bound doc run in front of the keyword, so the node's
+/// own start is a line or more earlier than that. Shared by
+/// `symbol_extent`, which reads only this element's start, and
+/// `machine_symbol`, which reads the whole element because it IS the
+/// answer to "where is this machine's name".
+fn first_significant_child(node: &SyntaxNode) -> Option<SyntaxElement> {
+    node.children_with_tokens().find(|e| {
+        e.kind() != TmcKind::DocRun.into()
+            && e.kind() != TmcKind::Whitespace.into()
+            && e.kind() != TmcKind::LineComment.into()
+            && e.kind() != TmcKind::BlockComment.into()
+    })
+}
+
+/// A declaration's C2 extent — its keyword (or, when one precedes the
+/// keyword, its leading modifier — `export`/`entry`) through the node's
+/// own end, EXCLUDING a bound doc run. `.tmc` retro-wraps a doc run as
+/// the declaration's own first child at seven symbol-level kinds — the
+/// file/namespace-level NAMESPACE, ALPHABET, REUSE, MACHINE, and the
+/// world-level STATE, GRAFT, BIND
+/// (`crates/turing-machine/src/syntax/mod.rs`'s module doc) — so
+/// `syntax().text_range()` on any of them starts at the `?`/`!` line
+/// rather than the keyword; taking the node's range whole would widen
+/// every doc-commented declaration's outline entry into its own leading
+/// comment. Ports the sibling's `function_extent`
+/// (`crates/post-machine/src/lsp/mod.rs`), generalized from the one kind
+/// PM retro-wraps at symbol level to `.tmc`'s seven — a helper trusted
+/// across kinds without checking each is exactly how a wrong assumption
+/// ships here (the module doc above names all seven explicitly for the
+/// same reason). `tree_symbols` and `world_symbols` are pinned
+/// separately, one fixture per kind, at both levels — see
+/// `a_documented_declarations_symbol_starts_at_its_keyword` and
+/// `a_documented_world_members_symbol_starts_at_its_keyword`
+/// (`crates/turing-machine/src/lsp/tests.rs`).
+fn symbol_extent(node: &SyntaxNode) -> TextRange {
+    let full = node.text_range();
+    let start = first_significant_child(node).map_or(full.start, |e| e.text_range().start);
+    TextRange::new(start, full.end)
+}
+
+/// Walks one item list — the file level or a namespace's own `items` —
+/// into document symbols. `use` declarations are skipped. A reopened
+/// namespace (`.tmc` permits it: the duplicate-binding check
+/// `crate::compiler::check_duplicate_bindings` only walks `Program`'s
+/// imports, never namespace occurrences) stays a separate sibling: each
+/// source occurrence is its own NAMESPACE node, and this walk builds one
+/// `SymbolNode` per node it visits with no merge step anywhere in it —
+/// unlike `Program`, which has no namespace-block type to merge in the
+/// first place, only a flat `ns: Vec<String>` path field per
+/// declaration (`crate::parser::Program`).
+fn tree_symbols(items: impl Iterator<Item = TopView>, index: &TextLineIndex) -> Vec<SymbolNode> {
     items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            TopKind::Comment(_) | TopKind::Import(_) => None,
-            TopKind::Alphabet(a) => Some(SymbolNode {
-                name: a.name.clone(),
+        .filter_map(|item| match item {
+            TopView::Use(_) => None,
+            TopView::Alphabet(a) => Some(SymbolNode {
+                name: a.name_token().text().to_string(),
                 kind: SymbolNodeKind::Function,
-                span: a.span,
-                selection_span: a.name_span,
+                span: index.span(symbol_extent(a.syntax())),
+                selection_span: index.span(a.name_token().text_range()),
                 children: Vec::new(),
             }),
-            TopKind::Namespace(ns) => Some(namespace_symbol(ns)),
-            TopKind::Reuse(r) => Some(reuse_symbol(r)),
-            TopKind::Machine(m) => Some(machine_symbol(m)),
+            TopView::Namespace(ns) => Some(namespace_symbol(&ns, index)),
+            TopView::Reuse(r) => Some(reuse_symbol(&r, index)),
+            TopView::Machine(m) => Some(machine_symbol(&m, index)),
         })
         .collect()
 }
 
-fn namespace_symbol(ns: &NamespaceCst) -> SymbolNode {
+fn namespace_symbol(ns: &NamespaceView, index: &TextLineIndex) -> SymbolNode {
     SymbolNode {
-        name: ns.name.clone(),
+        name: ns.name(),
         kind: SymbolNodeKind::Namespace,
-        span: ns.span,
-        selection_span: ns.name_span,
-        children: cst_symbols(&ns.items),
+        span: index.span(symbol_extent(ns.syntax())),
+        selection_span: index.span(ns.name_token().text_range()),
+        children: tree_symbols(ns.items(), index),
     }
 }
 
-fn reuse_symbol(r: &ReuseCst) -> SymbolNode {
+fn reuse_symbol(r: &ReuseView, index: &TextLineIndex) -> SymbolNode {
     SymbolNode {
-        name: r.name.clone(),
+        name: r.name_token().text().to_string(),
         kind: SymbolNodeKind::Function,
-        span: r.span,
-        selection_span: r.name_span,
-        children: world_symbols(&r.items),
+        span: index.span(symbol_extent(r.syntax())),
+        selection_span: index.span(r.name_token().text_range()),
+        children: r
+            .world()
+            .map(|w| world_symbols(w.syntax(), index))
+            .unwrap_or_default(),
     }
 }
 
-fn machine_symbol(m: &MachineCst) -> SymbolNode {
-    // The machine block has no name token of its own, so its selection
-    // span is the keyword's own position (a one-character point the
-    // client can still reveal).
+fn machine_symbol(m: &MachineView, index: &TextLineIndex) -> SymbolNode {
+    let node = m.syntax();
+    let extent = symbol_extent(node);
+    // A machine block has no name token of its own — unlike every other
+    // kind `tree_symbols`/`world_symbols` name — so this selection span
+    // is SYNTHESIZED rather than read off one: it is the `machine`
+    // keyword's own token, which is exactly `first_significant_child`'s
+    // answer here (the same element `symbol_extent`'s start above
+    // re-bases onto), never a name the tree could supply directly.
+    let selection = first_significant_child(node)
+        .map_or(TextRange::new(extent.start, extent.start), |e| {
+            e.text_range()
+        });
     SymbolNode {
         name: "machine".to_string(),
         kind: SymbolNodeKind::Function,
-        span: m.span,
-        selection_span: Span::point(m.line, m.col),
-        children: world_symbols(&m.items),
+        span: index.span(extent),
+        selection_span: index.span(selection),
+        children: m
+            .world()
+            .map(|w| world_symbols(w.syntax(), index))
+            .unwrap_or_default(),
     }
 }
 
-/// A world body's addressable children: states, graft instances, binds.
-/// Tape declarations and comments are not symbols.
-fn world_symbols(items: &[WorldItem]) -> Vec<SymbolNode> {
-    items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            WorldKind::Comment(_) | WorldKind::Tape(_) => None,
-            WorldKind::State(s) => Some(SymbolNode {
-                name: s.name.clone(),
-                kind: SymbolNodeKind::Function,
-                span: s.span,
-                selection_span: s.name_span,
-                children: Vec::new(),
-            }),
-            WorldKind::Graft(g) => g.as_name.as_ref().map(|(name, name_span)| SymbolNode {
-                name: name.clone(),
-                kind: SymbolNodeKind::Function,
-                span: g.span,
-                selection_span: *name_span,
-                children: Vec::new(),
-            }),
-            WorldKind::Bind(b) => Some(SymbolNode {
-                name: b.as_name.0.clone(),
-                kind: SymbolNodeKind::Function,
-                span: b.span,
-                selection_span: b.as_name.1,
-                children: Vec::new(),
-            }),
+/// A world body's addressable children, in document order: states,
+/// named graft instances, and binds. A WORLD's own direct children are a
+/// known-mixed set that also includes TAPE
+/// (`crates/turing-machine/src/syntax/mod.rs`'s module doc) — an
+/// expected kind that is simply never a symbol, not a wrong-shape tree —
+/// and a comment is trivia, never a node at all, so both are excluded
+/// by construction rather than by an explicit filter.
+fn world_symbols(world: &SyntaxNode, index: &TextLineIndex) -> Vec<SymbolNode> {
+    world
+        .children()
+        .filter_map(|child| {
+            if let Some(s) = StateView::cast(child.clone()) {
+                return Some(SymbolNode {
+                    name: s.name_token().text().to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: index.span(symbol_extent(s.syntax())),
+                    selection_span: index.span(s.name_token().text_range()),
+                    children: Vec::new(),
+                });
+            }
+            if let Some(g) = GraftView::cast(child.clone()) {
+                let name = g.as_name()?;
+                return Some(SymbolNode {
+                    name: name.text().to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: index.span(symbol_extent(g.syntax())),
+                    selection_span: index.span(name.text_range()),
+                    children: Vec::new(),
+                });
+            }
+            if let Some(b) = BindView::cast(child.clone()) {
+                let name = b.as_name();
+                return Some(SymbolNode {
+                    name: name.text().to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: index.span(symbol_extent(b.syntax())),
+                    selection_span: index.span(name.text_range()),
+                    children: Vec::new(),
+                });
+            }
+            None
         })
         .collect()
 }
@@ -618,8 +763,9 @@ impl LanguageService for TmcLanguageService {
 
         // 4. Lint over the resolved module when there is one. The rules also
         //    read the AST and a COMMENT-FREE token stream; the editor lexes
-        //    with comment trivia, so filter to `significant` to match the
-        //    batch path's comment-free stream (identical findings either way).
+        //    with comment trivia, so filter to `significant_tokens` to match
+        //    the batch path's stream (identical findings either way — the
+        //    batch `lint()` filters the very same way).
         //    The editor already has the comment-INCLUSIVE stream too
         //    (`raw_tokens`, pre-filter) — handed over as-is, at no extra cost.
         let lint = match (
@@ -628,7 +774,7 @@ impl LanguageService for TmcLanguageService {
             staged.tokens.as_deref(),
         ) {
             (Some(resolved), Some(program), Some(raw_tokens)) => {
-                let tokens = significant(raw_tokens);
+                let tokens = significant_tokens(raw_tokens);
                 let ctx = LintContext {
                     resolved,
                     diagnostics: &staged.diagnostics,
@@ -651,7 +797,7 @@ impl LanguageService for TmcLanguageService {
         let mut state = DocState {
             text: text.to_string(),
             tokens: staged.tokens,
-            cst: staged.cst,
+            green: staged.green,
             program: staged.program,
             resolved: staged.resolved,
             warnings: staged.diagnostics,
@@ -736,11 +882,15 @@ impl LanguageService for TmcLanguageService {
     }
 
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
-        // CST-tier: answered as long as parsing succeeded, even if the
-        // resolve or expansion stage then fatals.
+        // Green-tier: answered as long as parsing succeeded, even if the
+        // resolve or expansion stage then fatals. Indexes `state.green`
+        // directly — the tree `analyze_staged` already built — rather
+        // than reparsing the token stream.
         let state = self.docs.get(uri)?;
-        let cst = state.cst.as_ref()?;
-        Some(cst_symbols(&cst.items))
+        let green = state.green.as_ref()?;
+        let root = RootView::cast(SyntaxNode::new_root(Rc::clone(green)))?;
+        let index = TextLineIndex::new(&state.text);
+        Some(tree_symbols(root.items(), &index))
     }
 
     fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
@@ -774,17 +924,6 @@ fn actions_from_findings(findings: &[Diagnostic], span: Span) -> Vec<Action> {
                 edits: fix.edits.clone(),
             })
         })
-        .collect()
-}
-
-/// The significant token stream of a document: the WithComments stream
-/// minus comment trivia. Every position-classification walk in this module
-/// works over this, so a comment never shifts a context decision.
-pub(crate) fn significant(tokens: &[Token]) -> Vec<Token> {
-    tokens
-        .iter()
-        .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
-        .cloned()
         .collect()
 }
 

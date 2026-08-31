@@ -185,7 +185,7 @@ fn a_lex_failure_reports_one_error_and_keeps_no_stage() {
     assert_eq!(diagnostics[0].severity, ServiceSeverity::Error);
     let state = &service.docs["untitled:x.tmc"];
     assert!(state.tokens.is_none());
-    assert!(state.cst.is_none());
+    assert!(state.green.is_none());
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn a_parse_failure_keeps_the_tokens_and_reports_one_error() {
     assert_eq!(diagnostics[0].severity, ServiceSeverity::Error);
     let state = &service.docs["untitled:x.tmc"];
     assert!(state.tokens.is_some());
-    assert!(state.cst.is_none());
+    assert!(state.green.is_none());
     assert!(state.program.is_none());
 }
 
@@ -214,7 +214,7 @@ machine {
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, Some("undefined-state"));
     let state = &service.docs["untitled:x.tmc"];
-    assert!(state.cst.is_some());
+    assert!(state.green.is_some());
     assert!(state.program.is_some());
     assert!(state.resolved.is_none());
     // The staged seam raises its non-fatal findings only after the whole
@@ -1705,6 +1705,61 @@ machine {
 }
 
 #[test]
+fn a_documented_machines_state_stub_lands_past_its_bound_doc_run() {
+    // A doc-run-bound declaration's green node starts at the `?`/`!` line,
+    // not the keyword (docs/core.md (syntax trees)) — but `enclosing_body`
+    // reads only the node's END, which a leading doc run never moves. If
+    // that end ever regressed to reading a re-based start instead, this
+    // stub would land on the doc line rather than the closing brace.
+    let src = "\
+alphabet bits { '_', '1' }
+
+?A short description.
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> goto nowhere; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let at = span_of(src, "nowhere");
+    let actions = service.code_actions(&uri, at);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0].edits[0].replacement,
+        "  state nowhere { [*] -> stop; }\n"
+    );
+    let close_line = src.lines().count() as u32;
+    assert_eq!(actions[0].edits[0].span.start.line, close_line);
+}
+
+#[test]
+fn a_two_tape_reuses_state_stub_gets_the_reuses_own_arity_not_the_fallback() {
+    // The arity lookup's failure path (`enclosing_body`'s `.map_or(1, ...)`)
+    // returns 1 on a lookup miss, which is indistinguishable from a REUSE
+    // whose own arity genuinely is 1 — the shape every other REUSE fixture
+    // in this file has. An `export routine` with TWO tape parameters makes
+    // a broken `r.name_token()` read (falling through to the miss branch)
+    // produce `[*]` instead of the `[*, *]` asserted below, so this pins
+    // both `name_token()` under `export` and the arity-by-name lookup at
+    // once, on a value the fallback cannot coincidentally reproduce.
+    let src = "\
+alphabet bits { '_', '1' }
+
+export routine work2(tape a: bits, tape b: bits) {
+  entry state s { [*, *] -> goto nowhere; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let at = span_of(src, "nowhere");
+    let actions = service.code_actions(&uri, at);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0].edits[0].replacement,
+        "  state nowhere { [*, *] -> stop; }\n"
+    );
+}
+
+#[test]
 fn an_omitted_binding_map_offers_the_pairs_it_needs() {
     let src = "\
 alphabet marks { '_', 'x', 'y' }
@@ -1787,11 +1842,564 @@ fn document_symbols_name_the_alphabets_worlds_and_their_members() {
     assert!(members.contains(&"inc1"), "{members:?}");
 }
 
+/// Every top-level (and one nested) symbol reports the RIGHT
+/// `SymbolNodeKind`, asserted BY VALUE — not just that a symbol with
+/// that name exists. A kind swap (e.g. a REUSE symbol reporting
+/// `Namespace` instead of `Function`) passes any test that only checks
+/// names or counts; this is the one written to catch it.
+/// `NamespaceView` is the only `SymbolNodeKind::Namespace` producer, so
+/// distinguishing it from every Function-kind symbol here (two
+/// alphabets, a `graph`, a `routine`, and the machine block) exercises
+/// both variants the enum has.
+#[test]
+fn document_symbols_report_the_right_kind_for_each_top_level_declaration() {
+    let (mut service, uri) = opened(CROSS_WORLD);
+    let symbols = service.document_symbols(&uri).expect("symbols");
+    let kind_of = |name: &str| {
+        symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("no top-level symbol named {name:?} in {symbols:?}"))
+            .kind
+    };
+    assert_eq!(kind_of("bits"), SymbolNodeKind::Function, "alphabet `bits`");
+    assert_eq!(kind_of("wide"), SymbolNodeKind::Function, "alphabet `wide`");
+    assert_eq!(
+        kind_of("mylib"),
+        SymbolNodeKind::Namespace,
+        "namespace `mylib`"
+    );
+    assert_eq!(
+        kind_of("findX"),
+        SymbolNodeKind::Function,
+        "reuse (graph) `findX`"
+    );
+    assert_eq!(kind_of("machine"), SymbolNodeKind::Function, "machine");
+
+    let mylib = symbols.iter().find(|s| s.name == "mylib").unwrap();
+    let plus_one = mylib
+        .children
+        .iter()
+        .find(|s| s.name == "plusOne")
+        .expect("nested reuse symbol");
+    assert_eq!(
+        plus_one.kind,
+        SymbolNodeKind::Function,
+        "reuse (routine) `plusOne`, nested inside a namespace"
+    );
+}
+
 #[test]
 fn document_symbols_survive_a_resolve_stage_fatal() {
     let broken = CROSS_WORLD.replace("then done;", "then nowhere;");
     let (mut service, uri) = opened(&broken);
     assert!(service.document_symbols(&uri).is_some());
+}
+
+/// One parse per language-service request, MEASURED rather than
+/// asserted from reading the code: `did_update` parses the green tree
+/// exactly once (through `analyze_staged`'s single
+/// `parse_green_from_tokens` call), and a tree-backed request —
+/// `document_symbols` — must cost nothing further, since it reads
+/// `DocState.green` rather than reparsing. A regression reintroducing a
+/// reparse at either call site is invisible to every other test in this
+/// suite; this is the one written to catch it.
+#[test]
+fn one_parse_per_language_service_request_is_measured_not_assumed() {
+    use crate::parser::PARSE_GREEN_FROM_TOKENS_CALLS;
+
+    PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.set(0));
+
+    let mut service = TmcLanguageService::new();
+    let uri = "untitled:doc.tmc".to_string();
+    service.did_update(&uri, CROSS_WORLD);
+    let after_update = PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.get());
+    assert_eq!(
+        after_update, 1,
+        "did_update must parse the green tree exactly once"
+    );
+
+    let symbols = service.document_symbols(&uri);
+    assert!(symbols.is_some(), "sanity: the document does parse");
+    let after_symbols = PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.get());
+    assert_eq!(
+        after_symbols, after_update,
+        "document_symbols must read DocState.green rather than reparsing"
+    );
+}
+
+/// A documented declaration's green node opens at its doc run, so the
+/// raw node extent is NOT the symbol's range: a client revealing it
+/// would scroll to the comment above the declaration. Every symbol
+/// level re-bases its start past the doc run and any trivia
+/// (`symbol_extent`). All four kinds that can carry a doc run are
+/// covered — NAMESPACE, ALPHABET, REUSE, MACHINE — because a helper
+/// written for one and reused for three is how a wrong assumption
+/// ships.
+#[test]
+fn a_documented_declarations_symbol_starts_at_its_keyword() {
+    // namespace
+    let src = "? ns doc\nnamespace n {\n  alphabet a { '_' }\n}\n";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let ns = symbols
+        .iter()
+        .find(|s| s.name == "n")
+        .expect("namespace symbol");
+    assert_eq!(
+        ns.span.start,
+        span_of(src, "namespace").start,
+        "starts at `namespace`, not `? ns doc`"
+    );
+
+    // alphabet
+    let src = "? ab doc\nalphabet ab { '_' }\n";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let ab = symbols
+        .iter()
+        .find(|s| s.name == "ab")
+        .expect("alphabet symbol");
+    assert_eq!(
+        ab.span.start,
+        span_of(src, "alphabet").start,
+        "starts at `alphabet`, not `? ab doc`"
+    );
+
+    // reuse (a `routine`; `graph` parses to the same REUSE node kind)
+    let src = "\
+alphabet bits { '_' }
+
+? r doc
+routine r(tape t: bits) {
+  entry state s { [*] -> return; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let r = symbols
+        .iter()
+        .find(|s| s.name == "r")
+        .expect("reuse symbol");
+    assert_eq!(
+        r.span.start,
+        span_of(src, "routine").start,
+        "starts at `routine`, not `? r doc`"
+    );
+
+    // machine
+    let src = "\
+alphabet bits { '_' }
+
+? m doc
+machine {
+  tape t: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let m = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    assert_eq!(
+        m.span.start,
+        span_of(src, "machine").start,
+        "starts at `machine`, not `? m doc`"
+    );
+}
+
+/// `machine_symbol`'s selection span has no name token to read — a
+/// machine block is anonymous — so it is SYNTHESIZED from the `machine`
+/// keyword IDENT's own token range rather than a name the tree could
+/// supply directly. Pinned by value (the keyword's real width, not a
+/// one-column placeholder) so a change that quietly widens or narrows
+/// it is visible.
+#[test]
+fn machine_symbols_selection_span_is_the_machine_keyword() {
+    let src = "\
+alphabet bits { '_' }
+
+machine {
+  tape t: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let m = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    assert_eq!(
+        m.selection_span,
+        span_of(src, "machine"),
+        "the `machine` keyword's own span, not a synthesized one-column point"
+    );
+}
+
+/// The other three top-level kinds' selection spans, pinned by value.
+/// `machine_symbols_selection_span_is_the_machine_keyword` above covers
+/// MACHINE alone; NAMESPACE, ALPHABET, and REUSE each read a real name
+/// token off the tree, and nothing asserted that VALUE anywhere — a
+/// wrong implementation that reported the symbol's own `span` (its
+/// whole extent) as `selection_span` too would still pass every other
+/// document-symbols test, since none of them compares the two fields.
+/// Each fixture's declared name is a string found nowhere else in its
+/// source, so `span_of` cannot pick up a same-spelled substring inside
+/// a keyword or a doc line by accident.
+#[test]
+fn top_level_selection_spans_are_the_declared_name_not_the_whole_extent() {
+    // namespace
+    let src = "namespace zzns {
+  alphabet a { '_' }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let ns = symbols
+        .iter()
+        .find(|s| s.name == "zzns")
+        .expect("namespace symbol");
+    assert_eq!(ns.selection_span, span_of(src, "zzns"));
+    assert_ne!(
+        ns.selection_span, ns.span,
+        "selection span is the name alone, not the whole declaration"
+    );
+
+    // alphabet
+    let src = "alphabet zzab { '_' }
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let ab = symbols
+        .iter()
+        .find(|s| s.name == "zzab")
+        .expect("alphabet symbol");
+    assert_eq!(ab.selection_span, span_of(src, "zzab"));
+    assert_ne!(ab.selection_span, ab.span);
+
+    // reuse
+    let src = "alphabet bits { '_' }
+
+routine zzru(tape t: bits) {
+  entry state s { [*] -> return; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let r = symbols
+        .iter()
+        .find(|s| s.name == "zzru")
+        .expect("reuse symbol");
+    assert_eq!(r.selection_span, span_of(src, "zzru"));
+    assert_ne!(r.selection_span, r.span);
+}
+
+/// The three world-level kinds' selection spans, pinned by value — the
+/// same gap as the top-level test above, one level down: STATE reads
+/// its own name token, GRAFT and BIND read their `as NAME` token, and
+/// nothing asserted any of the three anywhere.
+#[test]
+fn world_level_selection_spans_are_the_declared_name_not_the_whole_extent() {
+    // state
+    let src = "alphabet bits { '_' }
+
+machine {
+  tape t: bits;
+  entry state zzst { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let st = machine
+        .children
+        .iter()
+        .find(|s| s.name == "zzst")
+        .expect("state symbol");
+    assert_eq!(st.selection_span, span_of(src, "zzst"));
+    assert_ne!(st.selection_span, st.span);
+
+    // graft
+    let src = "alphabet bits { '_' }
+
+graph g(tape t: bits) {
+  entry state gs { [*] -> stop; }
+}
+
+machine {
+  tape t: bits;
+  entry graft g(t = t) as zzgr;
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let gr = machine
+        .children
+        .iter()
+        .find(|s| s.name == "zzgr")
+        .expect("graft symbol");
+    assert_eq!(gr.selection_span, span_of(src, "zzgr"));
+    assert_ne!(gr.selection_span, gr.span);
+
+    // bind
+    let src = "alphabet bits { '_' }
+
+routine r(tape t: bits) {
+  entry state rs { [*] -> return; }
+}
+
+machine {
+  tape t: bits;
+  bind r(t = t) as zzbd;
+  entry state main { [*] -> call zzbd() then main; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let bd = machine
+        .children
+        .iter()
+        .find(|s| s.name == "zzbd")
+        .expect("bind symbol");
+    assert_eq!(bd.selection_span, span_of(src, "zzbd"));
+    assert_ne!(bd.selection_span, bd.span);
+}
+
+/// What a world body's children include is a rule, not a byproduct of
+/// the walk: states, named graft instances, and binds are symbols; a
+/// tape declaration and a comment are not. Asserting the exact kind
+/// sequence (not just a count) catches an accidentally-inclusive walk
+/// that would add a symbol nothing counts.
+#[test]
+fn world_symbols_include_states_grafts_and_binds_but_not_tapes_or_comments() {
+    let src = "\
+alphabet bits { '_' }
+
+routine helper(tape t: bits) {
+  entry state s { [*] -> return; }
+}
+
+graph g(tape t: bits) {
+  entry state walk { [*] -> stop; }
+}
+
+machine {
+  tape ctl: bits;
+  // a comment, not a symbol
+  bind helper(t = ctl) as callee;
+  graft g(t = ctl) as grafted;
+  entry state done { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let members: Vec<(&str, SymbolNodeKind)> = machine
+        .children
+        .iter()
+        .map(|s| (s.name.as_str(), s.kind))
+        .collect();
+    assert_eq!(
+        members,
+        vec![
+            ("callee", SymbolNodeKind::Function),
+            ("grafted", SymbolNodeKind::Function),
+            ("done", SymbolNodeKind::Function),
+        ],
+        "tapes and comments are excluded; states, grafts, and binds are \
+         symbols, in document order"
+    );
+}
+
+/// The world-level retro-wrapping kinds — STATE, GRAFT, BIND — carry
+/// their own doc run exactly like the four top-level kinds
+/// (`crates/turing-machine/src/syntax/mod.rs`'s module doc names
+/// `entry`/`state`/`graft`/`bind` inside a world body alongside the
+/// file-level four), so `world_symbols` must re-base past it through
+/// the same `symbol_extent` the top-level walk uses. One case per kind.
+#[test]
+fn a_documented_world_members_symbol_starts_at_its_keyword() {
+    // state
+    let src = "\
+alphabet bits { '_' }
+
+machine {
+  tape t: bits;
+  ? s doc
+  entry state s { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let s = machine
+        .children
+        .iter()
+        .find(|s| s.name == "s")
+        .expect("state symbol");
+    assert_eq!(
+        s.span.start,
+        span_of(src, "entry").start,
+        "starts at `entry`, not `? s doc`"
+    );
+
+    // graft — `entry` appears twice (the graph's own entry state, then
+    // the machine's entry graft), so the graft's own is occurrence 1.
+    let src = "\
+alphabet bits { '_' }
+
+graph g(tape t: bits) {
+  entry state gs { [*] -> stop; }
+}
+
+machine {
+  tape t: bits;
+  ? gr doc
+  entry graft g(t = t) as gr;
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let gr = machine
+        .children
+        .iter()
+        .find(|s| s.name == "gr")
+        .expect("graft symbol");
+    assert_eq!(
+        gr.span.start,
+        span_of_nth(src, "entry", 1).start,
+        "starts at the graft's own `entry`, not `? gr doc`"
+    );
+
+    // bind — never carries an `entry` prefix, so its own extent starts
+    // directly at `bind`.
+    let src = "\
+alphabet bits { '_' }
+
+routine r(tape t: bits) {
+  entry state rs { [*] -> return; }
+}
+
+machine {
+  tape t: bits;
+  ? b doc
+  bind r(t = t) as b1;
+  entry state main { [*] -> call b1() then main; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let b1 = machine
+        .children
+        .iter()
+        .find(|s| s.name == "b1")
+        .expect("bind symbol");
+    assert_eq!(
+        b1.span.start,
+        span_of(src, "bind").start,
+        "starts at `bind`, not `? b doc`"
+    );
+}
+
+/// A modifier-prefixed header — `export` before `routine`/`graph` — puts
+/// the retro-wrapped doc run ahead of the MODIFIER, not the keyword
+/// after it: `first_significant_child` lands on `export` itself, so
+/// `symbol_extent`'s start is `export`'s own position. Unpinned by the
+/// plain-`routine` case in
+/// `a_documented_declarations_symbol_starts_at_its_keyword`, which never
+/// exercises this branch — the same modifier-prefix shape the sibling's
+/// own `modifier_prefixed_and_nested_function_symbol_ranges_exclude_their_doc_runs`
+/// (`crates/post-machine/src/lsp/mod.rs`) pins for `.pmc`.
+#[test]
+fn an_export_prefixed_reuses_symbol_starts_at_export() {
+    let src = "\
+alphabet bits { '_' }
+
+? r doc
+export routine r(tape t: bits) {
+  entry state s { [*] -> return; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let r = symbols
+        .iter()
+        .find(|s| s.name == "r")
+        .expect("reuse symbol");
+    assert_eq!(
+        r.span.start,
+        span_of(src, "export").start,
+        "starts at `export`, not at `routine` and not at `? r doc`"
+    );
+}
+
+/// A reopened namespace — `.tmc` permits it: the duplicate-binding
+/// check (`crate::compiler::check_duplicate_bindings`) only walks
+/// `Program`'s imports, never namespace occurrences — stays two
+/// separate top-level symbols, each with only its own occurrence's
+/// items as children. Nothing in `tree_symbols` merges same-name
+/// blocks; unlike the sibling's `Program`, `.tmc`'s has no
+/// namespace-block type to merge in the first place, only a flat
+/// `ns: Vec<String>` path field per declaration.
+#[test]
+fn a_reopened_namespace_stays_two_separate_sibling_symbols() {
+    let src = "\
+namespace n {
+  alphabet a { '_' }
+}
+
+namespace n {
+  alphabet b { '_' }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let ns_symbols: Vec<&SymbolNode> = symbols.iter().filter(|s| s.name == "n").collect();
+    assert_eq!(
+        ns_symbols.len(),
+        2,
+        "two separate sibling `n` symbols, not one merged"
+    );
+    let first_children: Vec<&str> = ns_symbols[0]
+        .children
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    let second_children: Vec<&str> = ns_symbols[1]
+        .children
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(first_children, vec!["a"]);
+    assert_eq!(second_children, vec!["b"]);
 }
 
 #[test]

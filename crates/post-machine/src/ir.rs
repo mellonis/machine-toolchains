@@ -462,11 +462,10 @@ pub fn validate_function(f: &IrFunction) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     fn ir_of(src: &str) -> (IrProgram, Vec<Diagnostic>) {
-        lower(&parse(&lex(src).unwrap()).unwrap()).unwrap()
+        lower(&parse(src).unwrap()).unwrap()
     }
 
     #[test]
@@ -581,15 +580,15 @@ mod tests {
     /// — not the old degenerate `Span::point(line, 1)`.
     #[test]
     fn undefined_labels_error_with_the_reference_span_not_column_one() {
-        let e = lower(&parse(&lex("f() { goto 9; }").unwrap()).unwrap()).unwrap_err();
+        let e = lower(&parse("f() { goto 9; }").unwrap()).unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UndefinedLabel(9)));
         assert_eq!(e.span, Span::new(1, 12, 1, 13)); // the `9` in "goto 9;"
 
-        let e = lower(&parse(&lex("f() { left(7); }").unwrap()).unwrap()).unwrap_err();
+        let e = lower(&parse("f() { left(7); }").unwrap()).unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UndefinedLabel(7)));
         assert_eq!(e.span, Span::new(1, 12, 1, 13)); // the `7` in "left(7);"
 
-        let e = lower(&parse(&lex("f() { check(7, !); }").unwrap()).unwrap()).unwrap_err();
+        let e = lower(&parse("f() { check(7, !); }").unwrap()).unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UndefinedLabel(7)));
         assert_eq!(e.span, Span::new(1, 13, 1, 14)); // the `7` in "check(7, !);"
     }

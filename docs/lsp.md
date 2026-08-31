@@ -237,9 +237,9 @@ and the standard library), and at statement/label/comma-group position
 labels).
 
 **`.tmc`** classifies the cursor over the current *token stream* rather
-than the CST — a document being typed into is a document that does not
-parse, and anchoring on the CST would switch completions off exactly when
-they are wanted. Its contexts:
+than the syntax tree — a document being typed into is a document that
+does not parse, and anchoring on the tree would switch completions off
+exactly when they are wanted. Its contexts:
 
 - **Top-level and world-item position** — the reserved words legal there
   (`alphabet`, `export`, `graph`, `machine`, `namespace`, `routine`,
@@ -763,13 +763,13 @@ or not.
 |---|---|---|
 | Diagnostics: fatal error | the source lexes | one error at the failing stage, honest and singular |
 | Diagnostics: compile warnings + lint findings | a full successful analysis | omitted — the fatal is the only entry |
-| Completions | tokens/CST for cursor context | candidate *names* may fall back to the last successful analysis, so completion stays useful mid-edit |
+| Completions | tokens/tree for cursor context | candidate *names* may fall back to the last successful analysis, so completion stays useful mid-edit |
 | Hover | a full successful analysis (the resolution table) | `null` |
 | Go-to-definition | a full successful analysis (the resolution table) | `null` |
 | Code actions (quickfixes) | a full successful analysis (lint ran) | empty list |
 | Semantic tokens | a full successful analysis (resolution-aware) | `null` — clients keep the previous tokens or static grammar coloring |
-| Document symbols | a successful parse (CST only) | `null` |
-| Formatting | a successful parse (CST only) | `null` — the parse error is already on screen as a diagnostic |
+| Document symbols | a successful parse (the tree only) | `null` |
+| Formatting | a successful parse (the tree only) | `null` — the parse error is already on screen as a diagnostic |
 | Cross-file overlay (completion, hover, go-to-definition, the `undeclared-external` refinement) | membership in a declared project target (**Cross-file resolution (the project overlay)**, above) | the single-file view described everywhere above |
 
 ### Materialized standard library
@@ -834,8 +834,8 @@ service adds for its fatal (**Diagnostics**, above).
 | Go-to-definition | a successful parse | `null` |
 | Code actions (quickfixes) | a fatal the service knows how to repair, overlapping the request | empty list |
 | Semantic tokens | the source lexes | `null` |
-| Document symbols | a successful parse (CST only) | `null` |
-| Formatting | a successful parse (CST only) | `null` — the parse error is already on screen as a diagnostic |
+| Document symbols | a successful parse (the tree only) | `null` |
+| Formatting | a successful parse (the tree only) | `null` — the parse error is already on screen as a diagnostic |
 | Cross-file overlay (completion, hover, go-to-definition, the `undeclared-external` refinement) | membership in a declared project target (**Cross-file resolution (the project overlay)**, above) — semantic tokens are NOT part of this row: `.tmc`'s legend has no resolution tier for the overlay to extend | the single-file view described everywhere above |
 
 Two of those tiers are lower than the `.pmc` equivalents, deliberately.

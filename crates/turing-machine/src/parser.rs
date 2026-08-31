@@ -1,25 +1,28 @@
-//! `.tmc` recursive-descent parser (spec's language chapter): tokens → AST,
-//! via a lossless CST. The front-end mirror of the `.pmc` parser in the
-//! sibling PM-1 crate, using the same `parse = lower_cst ∘ parse_cst` seam:
-//! `parse_cst` builds the [`crate::cst::Cst`] (which the phase-7 fmt/LSP walk
-//! directly), and `lower_cst` copies it — infallibly — into the flat
-//! [`Program`] the rest of the front end consumes. Every fatal is raised by
-//! `parse_cst`; `lower_cst` never fails.
+//! `.tmc` recursive-descent parser (spec's language chapter): tokens →
+//! the green syntax tree via [`parse_green`]/[`parse_green_from_tokens`]
+//! — the path the compiler front end and the language service both run.
+//! [`parse`] is the convenience wrapper: source in, [`Program`] out,
+//! going through that same green tree and
+//! [`crate::syntax::extract_program`] (docs/core.md (syntax trees)).
+//! `Parser::file` builds the green tree and nothing else. The
+//! productions keep the values a caller still reads — the AST fragments
+//! the `reparse_*` shims hand back to extraction, and the pattern and
+//! write vector `check_char_arithmetic` inspects — and build no second
+//! node tree of their own alongside it.
 //!
 //! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
 //! expected. `deprecated` is contextual (an attribute word) and is not in that
 //! set.
 
-use mtc_core::diagnostics::{Pos, Span};
+use std::rc::Rc;
+
+use mtc_core::diagnostics::Span;
+use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::cst::{
-    AlphabetCst, AttrCst, BindCst, Cst, DocRunItem, DocRunKind, GraftCst, MachineCst, NamespaceCst,
-    ReuseCarrier, ReuseCst, RuleCst, RuleItem, RuleKind, StateCst, TapeCst, TopItem, TopKind,
-    UseCst, UsePath, WorldItem, WorldKind,
-};
-use crate::lexer::{Comment, RESERVED, Token, TokenKind};
+use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
+use crate::syntax::{self, GreenSink, TmcKind};
 
 /// The `.tmc` language acceptance-contract version (the spec's language
 /// chapter). Pre-1.0 the version is `0.N` and N bumps on ANY grammar change;
@@ -536,235 +539,168 @@ pub struct Doc {
 }
 
 // ---------------------------------------------------------------------------
-// parse / parse_cst / lower_cst
+// parse / parse_green / parse_green_from_tokens
 // ---------------------------------------------------------------------------
 
-/// tokens → AST, via the lossless CST.
-pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
-    parse_cst(tokens).map(|cst| lower_cst(&cst))
+/// Source → AST, through the one parse path this crate has: a
+/// `WithComments` lex, the green syntax tree, then extraction
+/// (docs/core.md (syntax trees)).
+///
+/// The convenience wrapper for callers that want only the `Program` —
+/// it keeps nothing else, and it is the only parse function here that
+/// yields one. A caller needing the token stream alongside it uses
+/// `compiler::analyze`; a caller needing the green tree uses
+/// `compiler::analyze_staged`, which is the one that retains it.
+pub fn parse(source: &str) -> Result<Program, CompileError> {
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    let green = parse_green_from_tokens(source, &tokens)?;
+    Ok(crate::syntax::extract_program(
+        &SyntaxNode::new_root(green),
+        source,
+    ))
 }
 
-/// tokens → lossless CST. Accepts a comment-free stream (the compiler's path)
-/// or a `WithComments` stream (fmt/LSP's path). Comment tokens are split off up
-/// front so the grammar walk over the significant tokens is unaffected; the
-/// dropped-in-lowering trivia (`blank_before`, comment nodes, `trailing`,
-/// `open_trailing`/`close_trailing`, doc runs) is attached by source position.
-pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
-    let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
-    let mut comments: Vec<CommentAt> = Vec::new();
-    for t in tokens {
-        if let TokenKind::Comment(c) = &t.kind {
-            comments.push(CommentAt {
-                comment: c.clone(),
-                line: t.line,
-                sig_index: sig.len(),
-            });
-        } else {
-            sig.push(t.clone());
-        }
-    }
-    let items = Parser {
+/// A `WithComments` token stream minus its comment trivia. `Comment` is the
+/// only trivia kind `.tmc` has at the lexer level — doc and attention lines
+/// are semantic tokens both lex modes emit — so filtering it is the whole
+/// job.
+///
+/// It lives at the parser level because the compiler front end is its main
+/// caller: [`crate::compiler::analyze`] lexes `WithComments` for the green
+/// parse and hands the filtered stream on to the lint layer, which walks
+/// token neighbourhoods by adjacency. The language service's own
+/// position-classification walks use it for the same reason — a comment must
+/// never shift a context decision.
+///
+/// Element for element, spans included, the result equals a
+/// `LexMode::WithoutComments` lex of the same source: the lexer's mode gate
+/// decides only whether a `Comment` token is pushed, never how any other
+/// token is consumed. That law is pinned over the shipped corpus by
+/// `tests/tmc_green_analyze.rs::corpus_significant_tokens_equal_a_comment_free_lex`
+/// (which re-derives the filter inline) and against this function itself by
+/// `tests::significant_tokens_is_the_comment_free_lex`.
+pub(crate) fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
+    tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+        .cloned()
+        .collect()
+}
+
+/// source → green syntax tree (docs/core.md (syntax trees)). Lexes
+/// `WithComments` and hands both halves to [`parse_green_from_tokens`].
+pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    parse_green_from_tokens(source, &tokens)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only call counter for [`parse_green_from_tokens`]
+    /// (docs/core.md (syntax trees)), read by `lsp::tests` to MEASURE —
+    /// rather than assume — that a tree-backed language-service request
+    /// costs zero additional parses once `DocState.green` is populated.
+    /// Thread-local, not a shared global: `cargo test`'s default harness
+    /// runs each test on its own thread, and this crate has hundreds of
+    /// tests calling this function, so a process-wide counter would be
+    /// corrupted by unrelated concurrent tests — a thread-local one
+    /// isolates each test's own calls from every other thread's.
+    pub(crate) static PARSE_GREEN_FROM_TOKENS_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Already-lexed tokens → green syntax tree, for callers that keep the
+/// token stream alongside the tree. `tokens` MUST be a
+/// `LexMode::WithComments` lex of `source`: [`crate::syntax::layout`]
+/// reconstructs verbatim token text and trivia from the two together, so
+/// a comment-free stream would lose every comment's own text and break
+/// the `text() == source` law. An empty `tokens` slice panics — every
+/// real lex result is EOF-terminated.
+///
+/// Runs `Parser::file`'s one grammar walk with a green sink attached:
+/// the sink mirrors token consumption and node boundaries alongside the
+/// parser logic, and the tree it builds is the walk's only product
+/// (docs/core.md (syntax trees)). The parser itself walks the
+/// significant tokens alone — [`significant_tokens`] strips the comment
+/// trivia the layout schedule already carries.
+pub fn parse_green_from_tokens(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Rc<GreenNode>, CompileError> {
+    #[cfg(test)]
+    PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.set(c.get() + 1));
+    let entries = syntax::layout(source, tokens);
+    let sig = significant_tokens(tokens);
+    let eof_pos = sig.len() - 1;
+    let mut sink = GreenSink::new(entries);
+    sink.start(TmcKind::Root);
+    let sink = Parser {
         tokens: &sig,
         pos: 0,
-        comments,
-        cpos: 0,
-        prev_end_line: 0,
         machine_seen: false,
+        sink: Some(sink),
     }
     .file()?;
-    Ok(Cst { items })
+    Ok(sink
+        .expect("parse_green_from_tokens always seeds a sink before calling file()")
+        .finish_tree(eof_pos))
 }
 
-/// Copy a CST into the flat [`Program`] — infallibly. Stamps each declaration's
-/// enclosing `ns` path, splits the machine body into tapes + behavior, reduces
-/// each doc run to a [`Doc`], and drops all trivia.
-pub fn lower_cst(cst: &Cst) -> Program {
-    let mut p = Program {
-        imports: Vec::new(),
-        alphabets: Vec::new(),
-        routines: Vec::new(),
-        graphs: Vec::new(),
-        machine: None,
-    };
-    lower_items(&cst.items, &[], &mut p);
-    p
+/// Which keyword introduced the `routine`/`graph` declaration
+/// `Parser::parse_reuse` is walking. Both keywords take that one
+/// production and open one green node kind ([`TmcKind::Reuse`]), so the
+/// carrier survives only to pick the error wording when the name after
+/// the keyword is missing or is a reserved word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReuseCarrier {
+    Routine,
+    Graph,
 }
 
-fn lower_items(items: &[TopItem], ns: &[String], p: &mut Program) {
-    for item in items {
-        match &item.kind {
-            TopKind::Comment(_) => {}
-            TopKind::Import(u) => {
-                for path in &u.paths {
-                    p.imports.push(Import {
-                        path: path.path.clone(),
-                        alias: path.alias.clone(),
-                        line: path.line,
-                        ns: ns.to_vec(),
-                        span: path.span,
-                    });
-                }
-            }
-            TopKind::Alphabet(a) => p.alphabets.push(lower_alphabet(a, ns)),
-            TopKind::Namespace(n) => {
-                let mut child = ns.to_vec();
-                child.push(n.name.clone());
-                lower_items(&n.items, &child, p);
-            }
-            TopKind::Reuse(r) => match r.carrier {
-                ReuseCarrier::Routine => p.routines.push(lower_routine(r, ns)),
-                ReuseCarrier::Graph => p.graphs.push(lower_graph(r, ns)),
-            },
-            TopKind::Machine(m) => p.machine = Some(lower_machine(m)),
-        }
-    }
+/// One line of a doc/attention run, plus whether a blank line precedes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRunItem {
+    pub blank_before: bool,
+    pub kind: DocRunKind,
 }
 
-fn lower_alphabet(a: &AlphabetCst, ns: &[String]) -> Alphabet {
-    Alphabet {
-        name: a.name.clone(),
-        name_span: a.name_span,
-        line: a.line,
-        col: a.col,
-        exported: a.exported,
-        ns: ns.to_vec(),
-        elems: a.elems.clone(),
-        doc: reduce_doc_run(&a.doc_run),
-    }
+/// A doc/attention run's line shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocRunKind {
+    /// A `?` line. `text` is the lexer's payload verbatim.
+    Doc { text: String, span: Span },
+    /// A `!` line. `attr` is `Some` when the payload opens with a valid
+    /// `[ident]` attribute (v1: only `[deprecated]`). `text` is the FULL raw
+    /// payload verbatim, attribute prefix included.
+    Attention {
+        attr: Option<AttrCst>,
+        text: String,
+        span: Span,
+    },
+    /// An ordinary comment inside the run.
+    Comment(Comment),
 }
 
-/// Split a world body's items into (tapes, states, grafts, binds), dropping
-/// comments. Routine/graph bodies carry no tapes (parsing rejects a `tape`
-/// there), so their tape vec is always empty.
-fn lower_world_body(items: &[WorldItem]) -> (Vec<TapeDecl>, Vec<State>, Vec<Graft>, Vec<Bind>) {
-    let mut tapes = Vec::new();
-    let mut states = Vec::new();
-    let mut grafts = Vec::new();
-    let mut binds = Vec::new();
-    for item in items {
-        match &item.kind {
-            WorldKind::Comment(_) => {}
-            WorldKind::Tape(t) => tapes.push(TapeDecl {
-                name: t.name.clone(),
-                name_span: t.name_span,
-                alphabet: t.alphabet.clone(),
-                alphabet_span: t.alphabet_span,
-                volatile: t.volatile,
-                line: t.line,
-                span: t.span,
-            }),
-            WorldKind::State(s) => states.push(lower_state(s)),
-            WorldKind::Graft(g) => grafts.push(lower_graft(g)),
-            WorldKind::Bind(b) => binds.push(lower_bind(b)),
-        }
-    }
-    (tapes, states, grafts, binds)
-}
-
-fn lower_state(s: &StateCst) -> State {
-    let rules = s
-        .rules
-        .iter()
-        .filter_map(|ri| match &ri.kind {
-            RuleKind::Rule(rc) => Some(rc.rule.clone()),
-            RuleKind::Comment(_) => None,
-        })
-        .collect();
-    State {
-        entry: s.entry,
-        name: s.name.clone(),
-        name_span: s.name_span,
-        line: s.line,
-        col: s.col,
-        rules,
-        span: s.span,
-        doc: reduce_doc_run(&s.doc_run),
-    }
-}
-
-fn lower_graft(g: &GraftCst) -> Graft {
-    Graft {
-        entry: g.entry,
-        target: g.target.clone(),
-        args: g.args.clone(),
-        as_name: g.as_name.as_ref().map(|(n, sp)| Ident {
-            name: n.clone(),
-            span: *sp,
-        }),
-        line: g.line,
-        span: g.span,
-        doc: reduce_doc_run(&g.doc_run),
-    }
-}
-
-fn lower_bind(b: &BindCst) -> Bind {
-    Bind {
-        target: b.target.clone(),
-        args: b.args.clone(),
-        as_name: Ident {
-            name: b.as_name.0.clone(),
-            span: b.as_name.1,
-        },
-        line: b.line,
-        span: b.span,
-        doc: reduce_doc_run(&b.doc_run),
-    }
-}
-
-fn lower_routine(r: &ReuseCst, ns: &[String]) -> Routine {
-    let (_tapes, states, grafts, binds) = lower_world_body(&r.items);
-    Routine {
-        name: r.name.clone(),
-        name_span: r.name_span,
-        line: r.line,
-        col: r.col,
-        exported: r.exported,
-        ns: ns.to_vec(),
-        sig: r.sig.clone(),
-        states,
-        grafts,
-        binds,
-        doc: reduce_doc_run(&r.doc_run),
-    }
-}
-
-fn lower_graph(r: &ReuseCst, ns: &[String]) -> Graph {
-    let (_tapes, states, grafts, binds) = lower_world_body(&r.items);
-    Graph {
-        name: r.name.clone(),
-        name_span: r.name_span,
-        line: r.line,
-        col: r.col,
-        exported: r.exported,
-        ns: ns.to_vec(),
-        sig: r.sig.clone(),
-        states,
-        grafts,
-        binds,
-        doc: reduce_doc_run(&r.doc_run),
-    }
-}
-
-fn lower_machine(m: &MachineCst) -> Machine {
-    let (tapes, states, grafts, binds) = lower_world_body(&m.items);
-    Machine {
-        line: m.line,
-        col: m.col,
-        span: m.span,
-        tapes,
-        states,
-        grafts,
-        binds,
-        doc: reduce_doc_run(&m.doc_run),
-    }
+/// An attention line's leading `[ident]` attribute; `span` covers the
+/// identifier alone, not the brackets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrCst {
+    pub name: String,
+    pub span: Span,
 }
 
 /// Reduce a doc/attention run into a [`Doc`] — `None` for an empty run.
 /// `?` lines join into paragraphs (an empty `?` line splits, leading/trailing
 /// blanks produce no empty paragraph); a `[deprecated]` attention line becomes
 /// `deprecated`; bare-prose `!` lines become `attention`; comments and empty
-/// lines contribute nothing. Mirrors PM-1's `reduce_doc_run`.
-fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
+/// lines contribute nothing. Mirrors PM-1's `reduce_doc_run`. `pub(crate)`
+/// rather than private: `crate::syntax::extract::extract_doc` is the
+/// production caller, folding the green tree's own retokenized run the
+/// same way; its own tests also reduce a green-side reparsed run
+/// directly, to check equality where a comment-interleaved run makes raw
+/// item equality impossible (a one-pass reparse drops interleaved
+/// comments as trivia).
+pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
     if doc_run.is_empty() {
         return None;
     }
@@ -810,47 +746,6 @@ fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
-
-/// A comment lifted out of the stream during the split, remembering where it
-/// sat relative to the significant tokens.
-struct CommentAt {
-    comment: Comment,
-    /// The comment's own start line (for `blank_before` gaps).
-    line: u32,
-    /// Number of significant tokens preceding it.
-    sig_index: usize,
-}
-
-/// A block loop's return shape: items, the block's `close_trailing` comment,
-/// and the closing `}` token's span (both `None` at file level).
-type TopItemsResult = Result<(Vec<TopItem>, Option<Comment>, Option<Span>), CompileError>;
-type WorldItemsResult = Result<(Vec<WorldItem>, Option<Comment>, Option<Span>), CompileError>;
-
-/// A comma-separated list's interior comments: pairs of (index of the entry
-/// the comment precedes, comment) — see `Parser::interior_comments`
-/// (docs/tmt/fmt.md (interior comments)).
-type InteriorComments = Vec<(usize, Comment)>;
-
-/// A binding list's `with map` interior comments, one level down from
-/// [`InteriorComments`]: triples of (binding-arg index, index of the map
-/// pair the comment precedes, comment) — see `Parser::binding_args`
-/// (docs/tmt/fmt.md (interior comments)).
-type MapInteriorComments = Vec<(usize, usize, Comment)>;
-
-/// `Parser::rule`'s return shape: the rule itself, its transition's
-/// interior comments (a `call`'s own binding list, then every `with map`
-/// pair list nested inside it — both empty for a non-`call` transition),
-/// then its pattern/write/move vectors' own interior comments, in that
-/// order — see [`RuleCst`]'s matching side-car fields (docs/tmt/fmt.md
-/// (interior comments)).
-type RuleParse = (
-    Rule,
-    InteriorComments,
-    MapInteriorComments,
-    InteriorComments,
-    InteriorComments,
-    InteriorComments,
-);
 
 fn join(a: Span, b: Span) -> Span {
     Span {
@@ -898,14 +793,16 @@ struct Parser<'a> {
     /// Significant (comment-free) tokens only.
     tokens: &'a [Token],
     pos: usize,
-    /// Comments split out of the stream, in source order.
-    comments: Vec<CommentAt>,
-    /// Cursor into `comments`: everything before it is already attached.
-    cpos: usize,
-    /// End line of the last emitted CST element, for `blank_before`.
-    prev_end_line: u32,
     /// A `machine` block has already been seen (multiplicity guard).
     machine_seen: bool,
+    /// Green-tree emission, when this walk is [`parse_green`]'s: `bump()`
+    /// mirrors every consumed token into it, and the `g_*` helpers below
+    /// bracket node boundaries. `None` only for [`bare_parser`]'s partial
+    /// re-parse of an already-retokenized node's own tokens (the
+    /// `reparse_*` shims), which never re-emits a green tree, only a
+    /// value — those helpers are then no-ops, so the underlying grammar
+    /// walk is unaffected by whether a sink is attached.
+    sink: Option<GreenSink>,
 }
 
 impl Parser<'_> {
@@ -915,7 +812,48 @@ impl Parser<'_> {
 
     fn bump(&mut self) {
         if !matches!(self.tokens[self.pos].kind, TokenKind::Eof) {
+            if let Some(sink) = &mut self.sink {
+                sink.token(self.pos, syntax::token_kind(&self.tokens[self.pos].kind));
+            }
             self.pos += 1;
+        }
+    }
+
+    /// Open a green node, flushing the upcoming token's trivia into the
+    /// PARENT first — the trivia-placement rule: a node starts at its
+    /// first significant token, so whitespace/comments before it belong
+    /// to whatever is still open. No-op when `sink` is `None`.
+    fn g_flush_start(&mut self, kind: TmcKind) {
+        if let Some(sink) = &mut self.sink {
+            sink.flush(self.pos);
+            sink.start(kind);
+        }
+    }
+
+    /// Close the innermost open green node. No-op when `sink` is `None`.
+    fn g_finish(&mut self) {
+        if let Some(sink) = &mut self.sink {
+            sink.finish();
+        }
+    }
+
+    /// Flush the upcoming token's trivia into the parent, then mark a
+    /// green checkpoint for a later [`Self::g_start_at`] — for
+    /// productions that only learn their node kind (or discover an
+    /// optional prefix, e.g. `export`) after parsing has started.
+    /// `None` when `sink` is `None`.
+    fn g_checkpoint(&mut self) -> Option<Checkpoint> {
+        self.sink.as_mut().map(|sink| {
+            sink.flush(self.pos);
+            sink.checkpoint()
+        })
+    }
+
+    /// Open a green node retroactively at a checkpoint taken by
+    /// [`Self::g_checkpoint`]. No-op when either is `None`.
+    fn g_start_at(&mut self, cp: Option<Checkpoint>, kind: TmcKind) {
+        if let (Some(sink), Some(cp)) = (&mut self.sink, cp) {
+            sink.start_at(cp, kind);
         }
     }
 
@@ -972,94 +910,42 @@ impl Parser<'_> {
         matches!(&self.peek().kind, TokenKind::Ident(k) if k == w)
     }
 
-    // ---- comment trivia helpers -------------------------------------------
-
-    /// Attach every pending comment at or before the current position, as
-    /// `(comment, start_line)` in source order.
-    fn drain_pending(&mut self) -> Vec<(Comment, u32)> {
-        let mut out = Vec::new();
-        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
-            let ca = &self.comments[self.cpos];
-            out.push((ca.comment.clone(), ca.line));
-            self.cpos += 1;
-        }
-        out
-    }
-
-    /// Capture comment(s) on the same physical line as a just-consumed `{`,
-    /// before the first body item (`sig_index == pos`, so a comment BEFORE the
-    /// brace is excluded even on the same line). Sets `prev_end_line`.
-    fn capture_open_trailing(&mut self, brace_line: u32) -> Vec<Comment> {
-        self.prev_end_line = brace_line;
-        let mut out = Vec::new();
-        while self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index == self.pos && ca.line == brace_line {
-                out.push(ca.comment.clone());
-                self.cpos += 1;
-            } else {
-                break;
-            }
-        }
-        if let Some(last) = out.last() {
-            self.prev_end_line = brace_line + last.text.matches('\n').count() as u32;
-        }
-        out
-    }
-
-    /// Capture a comment on the same physical line as a just-consumed closing
-    /// token (`}` or `;`) — `sig_index == pos` after the consume.
-    fn capture_close_trailing(&mut self, close_line: u32) -> Option<Comment> {
-        if self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index == self.pos && ca.line == close_line {
-                self.prev_end_line = close_line + ca.comment.text.matches('\n').count() as u32;
-                let c = ca.comment.clone();
-                self.cpos += 1;
-                return Some(c);
-            }
-        }
-        None
-    }
-
-    /// Take the one same-line trailing comment after a `;` (a non-own-line
-    /// pending comment on `end_line`).
-    fn take_trailing(&mut self, end_line: u32) -> Option<Comment> {
-        if self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index <= self.pos && !ca.comment.own_line && ca.line == end_line {
-                let c = ca.comment.clone();
-                self.cpos += 1;
-                return Some(c);
-            }
-        }
-        None
-    }
-
-    /// Drain every pending comment written before entry `index` of the list
-    /// being parsed, tagging each with that index. Called at the top of each
-    /// list-loop iteration and once more before the closer with
-    /// `index = entries.len()`, which is how a comment after the last entry
-    /// gets a home (docs/tmt/fmt.md (interior comments)).
-    fn interior_comments(&mut self, index: usize, out: &mut InteriorComments) {
-        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
-            out.push((index, self.comments[self.cpos].comment.clone()));
-            self.cpos += 1;
-        }
-    }
-
     // ---- doc runs ---------------------------------------------------------
 
-    /// Collect a doc/attention run at the current position (the caller has
-    /// confirmed the leading token is a `?`/`!` line). Fixed order: a `?` after
-    /// the run's first `!` is `DocLineOrder`. Blanks and ordinary comments are
-    /// tolerated within/after. Returns the items plus the run's first line span.
-    fn doc_run(&mut self) -> Result<(Vec<DocRunItem>, Span), CompileError> {
+    /// Consume a doc/attention run at the current position (the caller
+    /// has confirmed the leading token is a `?`/`!` line), enforcing its
+    /// ordering and attribute rules, and answer the run's first-line
+    /// span — which is what a `DanglingDocRun` error is reported at.
+    ///
+    /// The items themselves go nowhere on this walk: extraction rebuilds
+    /// them from the green tree, retokenizing a DOC_RUN node's own
+    /// extent and re-running the same production through
+    /// [`reparse_doc_items`]. `0` is passed for `prev_end_line` because
+    /// the only thing it seeds — the first item's `blank_before` — is
+    /// discarded here along with the items; the reparse supplies the
+    /// real value.
+    fn doc_run(&mut self) -> Result<Span, CompileError> {
+        Ok(self.doc_run_items(0)?.1)
+    }
+
+    /// [`Self::doc_run`]'s item-collecting form. `prev_end_line` is the
+    /// end line of whatever precedes the run, seeding the first item's
+    /// `blank_before`; every later item measures its gap against the
+    /// item before it.
+    ///
+    /// The items are `DocLine`/`AttentionLine` shapes only. [`DocRunKind`]'s
+    /// `Comment` variant is not dead — a comment written inside a run is
+    /// green-tree trivia, and `crate::syntax::extract::extract_doc_items`
+    /// constructs the item for it there, interleaving it with what this
+    /// production returns.
+    fn doc_run_items(
+        &mut self,
+        mut prev_end_line: u32,
+    ) -> Result<(Vec<DocRunItem>, Span), CompileError> {
         let first_span = self.peek().span();
         let mut items: Vec<DocRunItem> = Vec::new();
         let mut seen_attention = false;
         let mut seen_deprecated = false;
-        let mut prev_end_line = self.prev_end_line;
         loop {
             let t = self.peek().clone();
             match &t.kind {
@@ -1081,9 +967,22 @@ impl Parser<'_> {
                 }
                 TokenKind::AttentionLine(text) => {
                     let text = text.clone();
+                    // The lexer folds a `! [ident] …` line into ONE
+                    // `AttentionLine` payload (docs/core.md (syntax
+                    // trees)) — `[ident]` is never its own token, so ATTR
+                    // can only ever wrap this single token, never a
+                    // sub-span of it. Whether it does is known only
+                    // after `parse_attr` reads the payload below, i.e.
+                    // after the token is already bumped — hence the
+                    // checkpoint, taken before, to wrap retroactively.
+                    let attr_cp = self.g_checkpoint();
                     self.bump();
                     seen_attention = true;
                     let attr = Self::parse_attr(&text, &t);
+                    if attr.is_some() {
+                        self.g_start_at(attr_cp, TmcKind::Attr);
+                        self.g_finish(); // Attr — wraps the one AttentionLine token
+                    }
                     if let Some(a) = &attr {
                         if a.name == "deprecated" {
                             if seen_deprecated {
@@ -1113,16 +1012,7 @@ impl Parser<'_> {
                 }
                 _ => break,
             }
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > prev_end_line + 1;
-                prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                items.push(DocRunItem {
-                    blank_before,
-                    kind: DocRunKind::Comment(comment),
-                });
-            }
         }
-        self.prev_end_line = prev_end_line;
         Ok((items, first_span))
     }
 
@@ -1158,8 +1048,12 @@ impl Parser<'_> {
 
     // ---- top level --------------------------------------------------------
 
-    fn file(mut self) -> Result<Vec<TopItem>, CompileError> {
-        self.top_items(&[], None).map(|(items, _, _)| items)
+    /// The whole file is the `ns == []` namespace level. Hands back the
+    /// (possibly `None`) green sink alongside the items: `self` is
+    /// consumed by value, so this is the only place it can escape.
+    fn file(mut self) -> Result<Option<GreenSink>, CompileError> {
+        self.top_items(&[], None)?;
+        Ok(self.sink)
     }
 
     /// True iff the current token starts a declaration that accepts a doc run.
@@ -1169,74 +1063,80 @@ impl Parser<'_> {
                 "export" | "alphabet" | "routine" | "graph" | "machine" | "namespace"))
     }
 
-    /// One namespace level's item loop.
-    fn top_items(&mut self, ns: &[String], terminator: Option<&TokenKind>) -> TopItemsResult {
-        let mut items: Vec<TopItem> = Vec::new();
+    /// One namespace level's item loop. Consumes through the block's
+    /// closing `}` (or to EOF at file level).
+    fn top_items(
+        &mut self,
+        ns: &[String],
+        terminator: Option<&TokenKind>,
+    ) -> Result<(), CompileError> {
         loop {
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > self.prev_end_line + 1;
-                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                items.push(TopItem {
-                    blank_before,
-                    kind: TopKind::Comment(comment),
-                });
-            }
-            let doc_run = if matches!(
+            // Green checkpoint for whichever node this item turns out to
+            // be: taken at the top of the iteration, BEFORE the doc run
+            // (if any) — mirrors PM's `fn_cp` placement
+            // (crates/post-machine/src/parser.rs) so `g_start_at` below
+            // retro-wraps the run, an `export` prefix when present, and
+            // the header onward, all from one checkpoint. A declaration
+            // retro-wraps its bound doc run by design — see this
+            // crate's `syntax` module doc for the decision and its
+            // reasoning (docs/core.md (syntax trees)). Unused only when
+            // this token starts no valid top-level declaration at all;
+            // harmless, a fresh checkpoint is taken every loop
+            // iteration.
+            let cp = self.g_checkpoint();
+            if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
-                let (run, first_span) = self.doc_run()?;
+                self.g_flush_start(TmcKind::DocRun);
+                let first_span = self.doc_run()?;
+                self.g_finish(); // DocRun
                 if !self.next_is_top_doc_accepting() {
                     return Err(CompileError {
                         span: first_span,
                         kind: CompileErrorKind::DanglingDocRun,
                     });
                 }
-                run
-            } else {
-                Vec::new()
-            };
+            }
             let t = self.peek().clone();
             match (&t.kind, terminator) {
-                (TokenKind::Eof, None) => return Ok((items, None, None)),
+                (TokenKind::Eof, None) => return Ok(()),
                 (TokenKind::Eof, Some(_)) => {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
                 (k, Some(term)) if k == term => {
-                    let close_line = t.line;
-                    self.prev_end_line = close_line;
                     self.bump();
-                    let close_trailing = self.capture_close_trailing(close_line);
-                    return Ok((items, close_trailing, Some(t.span())));
+                    return Ok(());
                 }
                 _ => {}
             }
-            let saved = self.prev_end_line;
-            let decl_line = t.line;
-            let kind = match &t.kind {
+            match &t.kind {
                 TokenKind::Ident(w) => match w.as_str() {
-                    "use" => TopKind::Import(self.parse_use()?),
-                    "alphabet" => TopKind::Alphabet(self.parse_alphabet(
-                        false,
-                        t.span().start,
-                        t.col,
-                        doc_run,
-                    )?),
-                    "routine" => TopKind::Reuse(self.parse_reuse(
-                        ReuseCarrier::Routine,
-                        false,
-                        t.span().start,
-                        t.col,
-                        doc_run,
-                    )?),
-                    "graph" => TopKind::Reuse(self.parse_reuse(
-                        ReuseCarrier::Graph,
-                        false,
-                        t.span().start,
-                        t.col,
-                        doc_run,
-                    )?),
-                    "namespace" => TopKind::Namespace(self.parse_namespace(ns, doc_run)?),
+                    "use" => {
+                        self.g_start_at(cp, TmcKind::Use);
+                        self.parse_use()?;
+                        self.g_finish(); // Use — closes right after the `;`
+                    }
+                    "alphabet" => {
+                        self.g_start_at(cp, TmcKind::Alphabet);
+                        self.parse_alphabet()?;
+                        self.g_finish(); // Alphabet
+                    }
+                    "routine" => {
+                        self.g_start_at(cp, TmcKind::Reuse);
+                        self.parse_reuse(ReuseCarrier::Routine)?;
+                        self.g_finish(); // Reuse — closes right after the `}`
+                    }
+                    "graph" => {
+                        self.g_start_at(cp, TmcKind::Reuse);
+                        self.parse_reuse(ReuseCarrier::Graph)?;
+                        self.g_finish(); // Reuse — closes right after the `}`
+                    }
+                    "namespace" => {
+                        self.g_start_at(cp, TmcKind::Namespace);
+                        self.parse_namespace(ns)?;
+                        self.g_finish(); // Namespace — closes right after the `}`
+                    }
                     "machine" => {
                         if !ns.is_empty() {
                             return Err(Self::err_at(
@@ -1251,34 +1151,28 @@ impl Parser<'_> {
                             return Err(Self::err_at(&t, CompileErrorKind::MultipleMachines));
                         }
                         self.machine_seen = true;
-                        TopKind::Machine(self.parse_machine(doc_run)?)
+                        self.g_start_at(cp, TmcKind::Machine);
+                        self.parse_machine()?;
+                        self.g_finish(); // Machine — closes right after the `}`
                     }
                     "export" => {
-                        let export_start = t.span().start;
-                        let export_col = t.col;
                         self.bump();
                         let t2 = self.peek().clone();
                         match &t2.kind {
-                            TokenKind::Ident(w2) if w2 == "alphabet" => TopKind::Alphabet(
-                                self.parse_alphabet(true, export_start, export_col, doc_run)?,
-                            ),
+                            TokenKind::Ident(w2) if w2 == "alphabet" => {
+                                self.g_start_at(cp, TmcKind::Alphabet);
+                                self.parse_alphabet()?;
+                                self.g_finish(); // Alphabet — `export` included
+                            }
                             TokenKind::Ident(w2) if w2 == "routine" => {
-                                TopKind::Reuse(self.parse_reuse(
-                                    ReuseCarrier::Routine,
-                                    true,
-                                    export_start,
-                                    export_col,
-                                    doc_run,
-                                )?)
+                                self.g_start_at(cp, TmcKind::Reuse);
+                                self.parse_reuse(ReuseCarrier::Routine)?;
+                                self.g_finish(); // Reuse — `export` included
                             }
                             TokenKind::Ident(w2) if w2 == "graph" => {
-                                TopKind::Reuse(self.parse_reuse(
-                                    ReuseCarrier::Graph,
-                                    true,
-                                    export_start,
-                                    export_col,
-                                    doc_run,
-                                )?)
+                                self.g_start_at(cp, TmcKind::Reuse);
+                                self.parse_reuse(ReuseCarrier::Graph)?;
+                                self.g_finish(); // Reuse — `export` included
                             }
                             _ => {
                                 return Err(Self::expected(
@@ -1293,91 +1187,59 @@ impl Parser<'_> {
                     }
                 },
                 _ => return Err(Self::expected(&t, "a top-level declaration")),
-            };
-            let blank_before = decl_line > saved + 1;
-            items.push(TopItem { blank_before, kind });
+            }
         }
     }
 
-    fn parse_use(&mut self) -> Result<UseCst, CompileError> {
-        let use_tok = self.peek().clone();
+    fn parse_use(&mut self) -> Result<(), CompileError> {
         self.bump(); // `use`
-        let mut paths: Vec<UsePath> = Vec::new();
-        let mut interior: Vec<(usize, Comment)> = Vec::new();
-        let semi_line;
         loop {
-            self.interior_comments(paths.len(), &mut interior);
-            let (first, first_span) = self.name("an imported name")?;
-            let mut path = vec![first];
-            let mut end = first_span;
+            self.g_flush_start(TmcKind::UsePath);
+            self.name("an imported name")?;
             while matches!(self.peek().kind, TokenKind::ColonColon) {
                 self.bump();
-                let (seg, seg_span) = self.name("a path segment")?;
-                path.push(seg);
-                end = seg_span;
+                self.name("a path segment")?;
             }
-            let alias = if self.at_kw("as") {
+            if self.at_kw("as") {
                 self.bump();
-                let (a, _) = self.name("an alias")?;
-                Some(a)
-            } else {
-                None
-            };
-            paths.push(UsePath {
-                path,
-                alias,
-                line: first_span.start.line,
-                span: join(first_span, end),
-            });
+                self.name("an alias")?;
+            }
+            self.g_finish(); // UsePath — the alias, if any, is its last token
             let sep = self.peek().clone();
             match sep.kind {
                 TokenKind::Comma => self.bump(),
                 TokenKind::Semi => {
-                    semi_line = sep.line;
-                    // Drain interior comments HERE, before bumping past `;`:
-                    // `interior_comments` claims everything at or before
-                    // `self.pos`, so running it once the `;` has been
-                    // consumed would also claim a comment that follows the
-                    // statement — e.g. one documenting the *next* `use`
-                    // (docs/tmt/fmt.md (interior comments)).
-                    self.interior_comments(paths.len(), &mut interior);
                     self.bump();
                     break;
                 }
                 _ => return Err(Self::expected(&sep, "`,` or `;`")),
             }
         }
-        self.prev_end_line = semi_line;
-        let trailing = self.take_trailing(semi_line);
-        let span = join(
-            paths.first().expect("a use list has a path").span,
-            paths.last().expect("a use list has a path").span,
-        );
-        Ok(UseCst {
-            paths,
-            interior,
-            line: use_tok.line,
-            span: join(use_tok.span(), span),
-            trailing,
-        })
+        Ok(())
     }
 
-    fn parse_alphabet(
-        &mut self,
-        exported: bool,
-        header_start: Pos,
-        header_col: u32,
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<AlphabetCst, CompileError> {
+    fn parse_alphabet(&mut self) -> Result<(), CompileError> {
         self.bump(); // `alphabet`
-        let (name, name_span) = self.name("an alphabet name")?;
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the alphabet body")?;
-        let open_trailing = self.capture_open_trailing(brace.line);
+        self.name("an alphabet name")?;
+        self.expect(&TokenKind::LBrace, "`{` to open the alphabet body")?;
+        self.alphabet_elems()?;
+        self.expect(&TokenKind::RBrace, "`}` to close the alphabet body")?;
+        Ok(())
+    }
+
+    /// An alphabet body's element loop, from just past the opening `{`
+    /// up to (not consuming) the closing `}`. Split out of
+    /// [`Self::parse_alphabet`] so [`reparse_alphabet_elems`] runs this
+    /// exact loop rather than a second copy of it: the comma/`}`
+    /// separator rule has one owner. An empty body (`{ }`) skips the
+    /// loop and yields no elements, which is why the `RBrace` pre-check
+    /// sits inside here rather than at the call site — the shim hands
+    /// over a whole declaration's tokens and cannot make that decision
+    /// itself.
+    fn alphabet_elems(&mut self) -> Result<Vec<AlphabetElem>, CompileError> {
         let mut elems: Vec<AlphabetElem> = Vec::new();
-        let mut interior: Vec<(usize, Comment)> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             loop {
-                self.interior_comments(elems.len(), &mut interior);
                 elems.push(self.alphabet_elem()?);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
@@ -1386,26 +1248,7 @@ impl Parser<'_> {
                 }
             }
         }
-        self.interior_comments(elems.len(), &mut interior);
-        let close = self.expect(&TokenKind::RBrace, "`}` to close the alphabet body")?;
-        self.prev_end_line = close.line;
-        let close_trailing = self.capture_close_trailing(close.line);
-        Ok(AlphabetCst {
-            name,
-            name_span,
-            line: name_span.start.line,
-            col: header_col,
-            exported,
-            elems,
-            interior,
-            span: Span {
-                start: header_start,
-                end: close.span().end,
-            },
-            doc_run,
-            open_trailing,
-            close_trailing,
-        })
+        Ok(elems)
     }
 
     fn alphabet_elem(&mut self) -> Result<AlphabetElem, CompileError> {
@@ -1419,103 +1262,57 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_namespace(
-        &mut self,
-        ns: &[String],
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<NamespaceCst, CompileError> {
-        let ns_tok = self.peek().clone();
+    fn parse_namespace(&mut self, ns: &[String]) -> Result<(), CompileError> {
         self.bump(); // `namespace`
-        let (name, name_span) = self.name("a namespace name")?;
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the namespace body")?;
-        let open_trailing = self.capture_open_trailing(brace.line);
+        let (name, _) = self.name("a namespace name")?;
+        self.expect(&TokenKind::LBrace, "`{` to open the namespace body")?;
         let mut child = ns.to_vec();
-        child.push(name.clone());
-        let (child_items, close_trailing, close_span) =
-            self.top_items(&child, Some(&TokenKind::RBrace))?;
-        Ok(NamespaceCst {
-            name,
-            name_span,
-            line: ns_tok.line,
-            span: Span {
-                start: ns_tok.span().start,
-                end: close_span
-                    .expect("top_items with a terminator returns a close span")
-                    .end,
-            },
-            items: child_items,
-            doc_run,
-            open_trailing,
-            close_trailing,
-        })
+        child.push(name);
+        self.top_items(&child, Some(&TokenKind::RBrace))
     }
 
-    fn parse_reuse(
-        &mut self,
-        carrier: ReuseCarrier,
-        exported: bool,
-        header_start: Pos,
-        header_col: u32,
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<ReuseCst, CompileError> {
+    fn parse_reuse(&mut self, carrier: ReuseCarrier) -> Result<(), CompileError> {
         self.bump(); // `routine` / `graph`
         let what = match carrier {
             ReuseCarrier::Routine => "a routine name",
             ReuseCarrier::Graph => "a graph name",
         };
-        let (name, name_span) = self.name(what)?;
-        let (sig, sig_interior) = self.signature()?;
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the body")?;
-        let open_trailing = self.capture_open_trailing(brace.line);
-        let (items, close_trailing, close_span) = self.world_body(false)?;
-        Ok(ReuseCst {
-            carrier,
-            name,
-            name_span,
-            line: name_span.start.line,
-            col: header_col,
-            exported,
-            sig,
-            sig_interior,
-            items,
-            span: Span {
-                start: header_start,
-                end: close_span.expect("world_body returns a close span").end,
-            },
-            doc_run,
-            open_trailing,
-            close_trailing,
-        })
+        self.name(what)?;
+        self.signature()?;
+        // WORLD wraps the `{ … }` body — the shape `machine`/`routine`/
+        // `graph` share (docs/tmt/language.md (worlds)); see the
+        // `syntax` module doc for why it gets its own node kind rather
+        // than folding into REUSE/MACHINE directly. Opened before the
+        // `{` so the brace itself is WORLD's first token.
+        self.g_flush_start(TmcKind::World);
+        self.expect(&TokenKind::LBrace, "`{` to open the body")?;
+        self.world_body(false)?;
+        self.g_finish(); // World — closes right after the closing `}`
+        Ok(())
     }
 
-    fn parse_machine(&mut self, doc_run: Vec<DocRunItem>) -> Result<MachineCst, CompileError> {
-        let machine_tok = self.peek().clone();
+    fn parse_machine(&mut self) -> Result<(), CompileError> {
         self.bump(); // `machine`
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the machine body")?;
-        let open_trailing = self.capture_open_trailing(brace.line);
-        let (items, close_trailing, close_span) = self.world_body(true)?;
-        Ok(MachineCst {
-            line: machine_tok.line,
-            col: machine_tok.col,
-            items,
-            span: Span {
-                start: machine_tok.span().start,
-                end: close_span.expect("world_body returns a close span").end,
-            },
-            doc_run,
-            open_trailing,
-            close_trailing,
-        })
+        // WORLD wraps the `{ … }` body — see `parse_reuse`'s matching
+        // comment; the same shared shape, no signature to skip over here.
+        self.g_flush_start(TmcKind::World);
+        self.expect(&TokenKind::LBrace, "`{` to open the machine body")?;
+        self.world_body(true)?;
+        self.g_finish(); // World — closes right after the closing `}`
+        Ok(())
     }
 
-    fn signature(&mut self) -> Result<(Signature, InteriorComments), CompileError> {
-        let lp = self.expect(&TokenKind::LParen, "`(` to open the signature")?;
-        let mut params: Vec<SigParam> = Vec::new();
-        let mut interior: Vec<(usize, Comment)> = Vec::new();
+    fn signature(&mut self) -> Result<(), CompileError> {
+        self.expect(&TokenKind::LParen, "`(` to open the signature")?;
         if !matches!(self.peek().kind, TokenKind::RParen) {
             loop {
-                self.interior_comments(params.len(), &mut interior);
-                params.push(self.sig_param()?);
+                // SIG_PARAM opens at the parameter's first significant
+                // token, so a comment written between two parameters
+                // flushes into the enclosing REUSE rather than into
+                // either parameter (docs/core.md (syntax trees)).
+                self.g_flush_start(TmcKind::SigParam);
+                self.sig_param()?;
+                self.g_finish(); // SigParam
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
                     TokenKind::RParen => break,
@@ -1523,15 +1320,8 @@ impl Parser<'_> {
                 }
             }
         }
-        self.interior_comments(params.len(), &mut interior);
-        let rp = self.expect(&TokenKind::RParen, "`)` to close the signature")?;
-        Ok((
-            Signature {
-                params,
-                span: join(lp.span(), rp.span()),
-            },
-            interior,
-        ))
+        self.expect(&TokenKind::RParen, "`)` to close the signature")?;
+        Ok(())
     }
 
     fn sig_param(&mut self) -> Result<SigParam, CompileError> {
@@ -1630,6 +1420,10 @@ impl Parser<'_> {
     /// comment inside a signature or binding argument list).
     fn contract_clause(&mut self) -> Result<ContractClause, CompileError> {
         let kw_span = self.peek().span();
+        // Bracketed here rather than at the two call sites above, so the
+        // node opens at the clause keyword for both — its extent is then
+        // exactly `kw_span` → the closing `}`, i.e. `ContractClause::span`.
+        self.g_flush_start(TmcKind::ContractClause);
         self.bump(); // `writes` / `preserves`
         self.expect(&TokenKind::LBrace, "`{` to open the clause body")?;
         let mut elems: Vec<AlphabetElem> = Vec::new();
@@ -1644,6 +1438,7 @@ impl Parser<'_> {
             }
         }
         let close = self.expect(&TokenKind::RBrace, "`}` to close the clause body")?;
+        self.g_finish(); // ContractClause
         Ok(ContractClause {
             elems,
             kw_span,
@@ -1661,53 +1456,50 @@ impl Parser<'_> {
     /// A world body (machine / routine / graph), after its opening `{`.
     /// `in_machine` allows tape declarations (routines/graphs take tapes from
     /// the signature — a tape decl there is a `TapeNotInMachine` error).
-    fn world_body(&mut self, in_machine: bool) -> WorldItemsResult {
-        let mut items: Vec<WorldItem> = Vec::new();
+    fn world_body(&mut self, in_machine: bool) -> Result<(), CompileError> {
         loop {
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > self.prev_end_line + 1;
-                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                items.push(WorldItem {
-                    blank_before,
-                    kind: WorldKind::Comment(comment),
-                });
-            }
-            let doc_run = if matches!(
+            // Green checkpoint for whichever node this item turns out to
+            // be: same placement rule as `top_items`'s `cp` — top of the
+            // iteration, before the doc run (if any) — so
+            // `g_start_at` below retro-wraps the run and an `entry`
+            // prefix, when present, alongside the header. TAPE never
+            // accepts a doc run (`next_is_world_doc_accepting` excludes
+            // it), so this same checkpoint sits at TAPE's own header
+            // token whenever it fires there — no separate checkpoint
+            // needed.
+            let cp = self.g_checkpoint();
+            if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
-                let (run, first_span) = self.doc_run()?;
+                self.g_flush_start(TmcKind::DocRun);
+                let first_span = self.doc_run()?;
+                self.g_finish(); // DocRun
                 if !self.next_is_world_doc_accepting() {
                     return Err(CompileError {
                         span: first_span,
                         kind: CompileErrorKind::DanglingDocRun,
                     });
                 }
-                run
-            } else {
-                Vec::new()
-            };
+            }
             let t = self.peek().clone();
             if matches!(t.kind, TokenKind::RBrace) {
-                let close_line = t.line;
-                self.prev_end_line = close_line;
                 self.bump();
-                let close_trailing = self.capture_close_trailing(close_line);
-                return Ok((items, close_trailing, Some(t.span())));
+                return Ok(());
             }
             if matches!(t.kind, TokenKind::Eof) {
                 return Err(Self::expected(&t, "`}` to close the body"));
             }
-            let saved = self.prev_end_line;
-            let item_line = t.line;
-            let kind = if self.at_kw("entry") {
-                let entry_tok = self.peek().clone();
+            if self.at_kw("entry") {
                 self.bump();
-                let prefix = Some((entry_tok.span().start, entry_tok.col));
                 if self.at_kw("state") {
-                    WorldKind::State(self.parse_state(true, prefix, doc_run)?)
+                    self.g_start_at(cp, TmcKind::State);
+                    self.parse_state()?;
+                    self.g_finish(); // State — `entry` included
                 } else if self.at_kw("graft") {
-                    WorldKind::Graft(self.parse_graft(true, prefix, doc_run)?)
+                    self.g_start_at(cp, TmcKind::Graft);
+                    self.parse_graft(true)?;
+                    self.g_finish(); // Graft — `entry` included
                 } else {
                     return Err(Self::expected(
                         self.peek(),
@@ -1715,26 +1507,34 @@ impl Parser<'_> {
                     ));
                 }
             } else if self.at_kw("state") {
-                WorldKind::State(self.parse_state(false, None, doc_run)?)
+                self.g_start_at(cp, TmcKind::State);
+                self.parse_state()?;
+                self.g_finish(); // State
             } else if self.at_kw("graft") {
-                WorldKind::Graft(self.parse_graft(false, None, doc_run)?)
+                self.g_start_at(cp, TmcKind::Graft);
+                self.parse_graft(false)?;
+                self.g_finish(); // Graft
             } else if self.at_kw("bind") {
-                WorldKind::Bind(self.parse_bind(doc_run)?)
+                self.g_start_at(cp, TmcKind::Bind);
+                self.parse_bind()?;
+                self.g_finish(); // Bind
             } else if self.at_kw("volatile") {
-                let lead = self.peek().clone();
                 self.bump(); // `volatile`
                 if !self.at_kw("tape") {
                     return Err(Self::expected(self.peek(), "`tape` after `volatile`"));
                 }
                 if in_machine {
-                    WorldKind::Tape(self.parse_tape(true, lead)?)
+                    self.g_start_at(cp, TmcKind::Tape); // `volatile` included
+                    self.parse_tape()?;
+                    self.g_finish(); // Tape
                 } else {
                     return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
                 }
             } else if self.at_kw("tape") {
                 if in_machine {
-                    let lead = self.peek().clone();
-                    WorldKind::Tape(self.parse_tape(false, lead)?)
+                    self.g_start_at(cp, TmcKind::Tape);
+                    self.parse_tape()?;
+                    self.g_finish(); // Tape
                 } else {
                     return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
                 }
@@ -1743,85 +1543,38 @@ impl Parser<'_> {
                     &t,
                     "a tape declaration, `state`, `graft`, or `bind`",
                 ));
-            };
-            let blank_before = item_line > saved + 1;
-            items.push(WorldItem { blank_before, kind });
+            }
         }
     }
 
-    fn parse_tape(&mut self, volatile: bool, lead_tok: Token) -> Result<TapeCst, CompileError> {
+    fn parse_tape(&mut self) -> Result<(), CompileError> {
         self.bump(); // `tape`
-        let (name, name_span) = self.name("a tape name")?;
+        self.name("a tape name")?;
         self.expect(&TokenKind::Colon, "`:` after the tape name")?;
-        let (alphabet, alphabet_span) = self.name("an alphabet name")?;
-        let semi = self.expect(&TokenKind::Semi, "`;`")?;
-        self.prev_end_line = semi.line;
-        let trailing = self.take_trailing(semi.line);
-        Ok(TapeCst {
-            name,
-            name_span,
-            alphabet,
-            alphabet_span,
-            volatile,
-            line: lead_tok.line,
-            span: join(lead_tok.span(), semi.span()),
-            trailing,
-        })
+        self.name("an alphabet name")?;
+        self.expect(&TokenKind::Semi, "`;`")?;
+        Ok(())
     }
 
-    fn parse_state(
-        &mut self,
-        entry: bool,
-        prefix: Option<(Pos, u32)>,
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<StateCst, CompileError> {
-        let state_tok = self.peek().clone();
+    fn parse_state(&mut self) -> Result<(), CompileError> {
         self.bump(); // `state`
-        let (name, name_span) = self.name("a state name")?;
+        self.name("a state name")?;
         // `state name;` redirect form is not supported.
         if matches!(self.peek().kind, TokenKind::Semi) {
             return Err(Self::err_at(self.peek(), CompileErrorKind::StateRedirect));
         }
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the state body")?;
-        let open_trailing = self.capture_open_trailing(brace.line);
-        let (rules, close_trailing, close_span) = self.state_rules()?;
-        let (start, col) = prefix.unwrap_or((state_tok.span().start, state_tok.col));
-        Ok(StateCst {
-            entry,
-            name,
-            name_span,
-            line: name_span.start.line,
-            col,
-            rules,
-            span: Span {
-                start,
-                end: close_span.end,
-            },
-            doc_run,
-            open_trailing,
-            close_trailing,
-        })
+        self.expect(&TokenKind::LBrace, "`{` to open the state body")?;
+        self.state_rules()
     }
 
-    /// A state body's rule loop; returns rules, `close_trailing`, `}` span.
-    fn state_rules(&mut self) -> Result<(Vec<RuleItem>, Option<Comment>, Span), CompileError> {
-        let mut rules: Vec<RuleItem> = Vec::new();
+    /// A state body's rule loop, from just past the opening `{` through
+    /// the closing `}`.
+    fn state_rules(&mut self) -> Result<(), CompileError> {
         loop {
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > self.prev_end_line + 1;
-                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                rules.push(RuleItem {
-                    blank_before,
-                    kind: RuleKind::Comment(comment),
-                });
-            }
             let t = self.peek().clone();
             if matches!(t.kind, TokenKind::RBrace) {
-                let close_line = t.line;
-                self.prev_end_line = close_line;
                 self.bump();
-                let close_trailing = self.capture_close_trailing(close_line);
-                return Ok((rules, close_trailing, t.span()));
+                return Ok(());
             }
             if matches!(t.kind, TokenKind::Eof) {
                 return Err(Self::expected(&t, "`}` to close the state body"));
@@ -1837,35 +1590,20 @@ impl Parser<'_> {
             if !matches!(t.kind, TokenKind::LBracket) {
                 return Err(Self::expected(&t, "a rule (`[…] -> …;`) or `}`"));
             }
-            let saved = self.prev_end_line;
-            let rule_line = t.line;
-            let (rule, call_args, map_pairs, pattern_cells, write_cells, move_cells) =
-                self.rule()?;
-            let trailing = self.take_trailing(self.prev_end_line);
-            let blank_before = rule_line > saved + 1;
-            rules.push(RuleItem {
-                blank_before,
-                kind: RuleKind::Rule(Box::new(RuleCst {
-                    rule,
-                    trailing,
-                    call_args,
-                    map_pairs,
-                    pattern_cells,
-                    write_cells,
-                    move_cells,
-                })),
-            });
+            self.g_flush_start(TmcKind::Rule);
+            self.rule()?;
+            self.g_finish(); // Rule
         }
     }
 
     // ---- rules ------------------------------------------------------------
 
-    /// Parses one rule; also returns the transition's interior comments and
-    /// each glyph vector's own — [`Rule`] is handed to the AST verbatim, so
-    /// `state_rules` stores these on [`RuleCst`]'s side-car fields instead
-    /// (docs/tmt/fmt.md (interior comments)).
-    fn rule(&mut self) -> Result<RuleParse, CompileError> {
-        let (pattern, pattern_cells) = self.pattern()?;
+    /// Parses one rule. The pattern and the write vector are kept as
+    /// values because [`Self::check_char_arithmetic`] reads them once
+    /// the rule's bindings are known; everything else this walk parses
+    /// is dropped, and extraction rebuilds it from the green tree.
+    fn rule(&mut self) -> Result<(), CompileError> {
+        let pattern = self.pattern()?;
         self.expect(&TokenKind::Arrow, "`->` after the pattern")?;
         let debugger = if self.at_kw("debugger") {
             self.bump();
@@ -1873,58 +1611,37 @@ impl Parser<'_> {
         } else {
             false
         };
-        let (write, write_cells) = if self.at_kw("write") {
+        let write = if self.at_kw("write") {
             self.bump();
-            let (w, cells) = self.write_vec()?;
-            (Some(w), cells)
+            Some(self.write_vec()?)
         } else {
-            (None, InteriorComments::new())
+            None
         };
-        let (mov, move_cells) = if self.at_kw("move") {
+        let mov = if self.at_kw("move") {
             self.bump();
-            let (m, cells) = self.move_vec()?;
-            (Some(m), cells)
+            Some(self.move_vec()?)
         } else {
-            (None, InteriorComments::new())
+            None
         };
         // The transition may be omitted (`stay in the current state`) only
         // when the rule already carries an action — write, move, or a leading
         // `debugger`. With no action, `-> ;` stays the "expected a transition"
         // error (docs/tmt/language.md (rules)).
+        //
+        // Only a WRITTEN transition is bracketed: `Stay` is the green
+        // tree's ABSENCE of a TRANSITION node under the rule, never a
+        // zero-width one. That asymmetry is the point — it is the one
+        // fact about a rule that no token run can carry.
         let has_action = debugger || write.is_some() || mov.is_some();
-        let (transition, call_args, map_pairs) =
-            if has_action && matches!(self.peek().kind, TokenKind::Semi) {
-                (
-                    Transition::Stay {
-                        span: self.peek().span(),
-                    },
-                    InteriorComments::new(),
-                    MapInteriorComments::new(),
-                )
-            } else {
-                self.transition()?
-            };
-        let semi = self.expect(&TokenKind::Semi, "`;` to end the rule")?;
-        self.prev_end_line = semi.line;
+        if !(has_action && matches!(self.peek().kind, TokenKind::Semi)) {
+            self.g_flush_start(TmcKind::Transition);
+            self.transition()?;
+            self.g_finish(); // Transition
+        }
+        self.expect(&TokenKind::Semi, "`;` to end the rule")?;
         // Char arithmetic is deliberately absent: a `{c±k}` on a glyph-bound
         // pattern name is rejected here, where the rule's bindings are known.
-        self.check_char_arithmetic(&pattern, &write)?;
-        Ok((
-            Rule {
-                pattern: pattern.clone(),
-                debugger,
-                write,
-                mov,
-                transition,
-                line: pattern.span.start.line,
-                span: join(pattern.span, semi.span()),
-            },
-            call_args,
-            map_pairs,
-            pattern_cells,
-            write_cells,
-            move_cells,
-        ))
+        self.check_char_arithmetic(&pattern, &write)
     }
 
     fn check_char_arithmetic(
@@ -1975,16 +1692,13 @@ impl Parser<'_> {
         }
     }
 
-    /// Parses a bracketed pattern; also returns its interior comments — a
-    /// [`Pattern`] is handed to the AST verbatim, so `rule` stores these on
-    /// [`RuleCst`]'s side-car field instead (docs/tmt/fmt.md (interior
-    /// comments)).
-    fn pattern(&mut self) -> Result<(Pattern, InteriorComments), CompileError> {
+    /// Parses a bracketed pattern. The [`Pattern`] is what
+    /// [`Self::check_char_arithmetic`] reads before the rule ends, and
+    /// what [`reparse_pattern`] hands back to extraction.
+    fn pattern(&mut self) -> Result<Pattern, CompileError> {
         let lb = self.expect(&TokenKind::LBracket, "`[` to open the pattern")?;
         let mut cells: Vec<PatternCell> = Vec::new();
-        let mut interior: InteriorComments = Vec::new();
         loop {
-            self.interior_comments(cells.len(), &mut interior);
             cells.push(self.pattern_cell()?);
             match self.peek().kind {
                 TokenKind::Comma => self.bump(),
@@ -1992,19 +1706,11 @@ impl Parser<'_> {
                 _ => return Err(Self::expected(self.peek(), "`,` or `]`")),
             }
         }
-        // Drain HERE, before consuming `]`: `interior_comments` claims
-        // everything at or before `self.pos`, so running it after the `]`
-        // has been consumed would also claim whatever comes next
-        // (docs/tmt/fmt.md (interior comments)).
-        self.interior_comments(cells.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBracket, "`]` to close the pattern")?;
-        Ok((
-            Pattern {
-                cells,
-                span: join(lb.span(), rb.span()),
-            },
-            interior,
-        ))
+        Ok(Pattern {
+            cells,
+            span: join(lb.span(), rb.span()),
+        })
     }
 
     fn pattern_cell(&mut self) -> Result<PatternCell, CompileError> {
@@ -2092,16 +1798,19 @@ impl Parser<'_> {
         }
     }
 
-    /// Parses a bracketed write vector; also returns its interior comments —
-    /// a [`WriteVec`] is handed to the AST verbatim, so `rule` stores these
-    /// on [`RuleCst`]'s side-car field instead (docs/tmt/fmt.md (interior
-    /// comments)).
-    fn write_vec(&mut self) -> Result<(WriteVec, InteriorComments), CompileError> {
+    /// Parses a bracketed write vector. The [`WriteVec`] is what
+    /// [`Self::check_char_arithmetic`] reads before the rule ends, and
+    /// what [`reparse_write_vec`] hands back to extraction.
+    fn write_vec(&mut self) -> Result<WriteVec, CompileError> {
+        // The node opens at `[`, not at the `write` keyword the caller
+        // already consumed, so its extent is exactly `WriteVec::span`.
+        // The keyword stays a token of the enclosing RULE — nothing has
+        // to read it, since the node's own KIND says which vector this
+        // is (docs/core.md (syntax trees)).
+        self.g_flush_start(TmcKind::WriteVec);
         let lb = self.expect(&TokenKind::LBracket, "`[` to open the write vector")?;
         let mut cells: Vec<WriteCell> = Vec::new();
-        let mut interior: InteriorComments = Vec::new();
         loop {
-            self.interior_comments(cells.len(), &mut interior);
             cells.push(self.write_cell()?);
             match self.peek().kind {
                 TokenKind::Comma => self.bump(),
@@ -2109,16 +1818,12 @@ impl Parser<'_> {
                 _ => return Err(Self::expected(self.peek(), "`,` or `]`")),
             }
         }
-        // Drain HERE, before consuming `]` — see `pattern`'s identical note.
-        self.interior_comments(cells.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBracket, "`]` to close the write vector")?;
-        Ok((
-            WriteVec {
-                cells,
-                span: join(lb.span(), rb.span()),
-            },
-            interior,
-        ))
+        self.g_finish(); // WriteVec
+        Ok(WriteVec {
+            cells,
+            span: join(lb.span(), rb.span()),
+        })
     }
 
     fn write_cell(&mut self) -> Result<WriteCell, CompileError> {
@@ -2244,16 +1949,15 @@ impl Parser<'_> {
         }
     }
 
-    /// Parses a bracketed move vector; also returns its interior comments —
-    /// a [`MoveVec`] is handed to the AST verbatim, so `rule` stores these
-    /// on [`RuleCst`]'s side-car field instead (docs/tmt/fmt.md (interior
-    /// comments)).
-    fn move_vec(&mut self) -> Result<(MoveVec, InteriorComments), CompileError> {
+    /// Parses a bracketed move vector. The [`MoveVec`] is what
+    /// [`reparse_move_vec`] hands back to extraction; the main walk
+    /// drops it.
+    fn move_vec(&mut self) -> Result<MoveVec, CompileError> {
+        // Opens at `[` — see `write_vec`'s identical note.
+        self.g_flush_start(TmcKind::MoveVec);
         let lb = self.expect(&TokenKind::LBracket, "`[` to open the move vector")?;
         let mut cells: Vec<MoveCell> = Vec::new();
-        let mut interior: InteriorComments = Vec::new();
         loop {
-            self.interior_comments(cells.len(), &mut interior);
             cells.push(self.move_cell()?);
             match self.peek().kind {
                 TokenKind::Comma => self.bump(),
@@ -2261,16 +1965,12 @@ impl Parser<'_> {
                 _ => return Err(Self::expected(self.peek(), "`,` or `]`")),
             }
         }
-        // Drain HERE, before consuming `]` — see `pattern`'s identical note.
-        self.interior_comments(cells.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBracket, "`]` to close the move vector")?;
-        Ok((
-            MoveVec {
-                cells,
-                span: join(lb.span(), rb.span()),
-            },
-            interior,
-        ))
+        self.g_finish(); // MoveVec
+        Ok(MoveVec {
+            cells,
+            span: join(lb.span(), rb.span()),
+        })
     }
 
     fn move_cell(&mut self) -> Result<MoveCell, CompileError> {
@@ -2290,32 +1990,35 @@ impl Parser<'_> {
         })
     }
 
-    /// Parses one transition; also returns its interior comments — a
-    /// `call`'s own binding-list comments, and every `with map` pair-list
-    /// comment nested inside that binding list — both empty for every
-    /// non-`call` variant (docs/tmt/fmt.md (interior comments)).
-    fn transition(
-        &mut self,
-    ) -> Result<(Transition, InteriorComments, MapInteriorComments), CompileError> {
+    /// Parses one written transition — `goto`, `call … then …`,
+    /// `return`, `stop`, `halt`, or a bare state name (goto sugar).
+    ///
+    /// The [`Transition`] outlives this walk only for
+    /// [`reparse_transition`]'s sake: extraction retokenizes a
+    /// TRANSITION node and re-runs this exact production, so a `call`'s
+    /// `args` have to be built faithfully here rather than left empty.
+    /// [`Self::rule`], the only other caller, drops the value.
+    ///
+    /// `Transition::Stay` is not among the variants this can answer. An
+    /// omitted transition is the ABSENCE of a TRANSITION node, which
+    /// [`Self::rule`] decides before it would call in here at all
+    /// (docs/tmt/language.md (transitions)).
+    fn transition(&mut self) -> Result<Transition, CompileError> {
         let t = self.peek().clone();
         match &t.kind {
             TokenKind::Ident(w) if w == "goto" => {
                 self.bump();
                 let (name, name_span) = self.name("a goto target")?;
-                Ok((
-                    Transition::Goto {
-                        name,
-                        explicit: true,
-                        span: join(t.span(), name_span),
-                    },
-                    InteriorComments::new(),
-                    MapInteriorComments::new(),
-                ))
+                Ok(Transition::Goto {
+                    name,
+                    explicit: true,
+                    span: join(t.span(), name_span),
+                })
             }
             TokenKind::Ident(w) if w == "call" => {
                 self.bump();
                 let target = self.qual_name("a call target")?;
-                let (args, call_args, map_pairs) = self.binding_args()?;
+                let args = self.binding_args()?;
                 self.expect_kw("then", "`then` after the call target")?;
                 let then = self.continuation()?;
                 let end = match &then {
@@ -2324,53 +2027,33 @@ impl Parser<'_> {
                     | Continuation::Stop { span }
                     | Continuation::Halt { span } => *span,
                 };
-                Ok((
-                    Transition::Call {
-                        target,
-                        args,
-                        then,
-                        span: join(t.span(), end),
-                    },
-                    call_args,
-                    map_pairs,
-                ))
+                Ok(Transition::Call {
+                    target,
+                    args,
+                    then,
+                    span: join(t.span(), end),
+                })
             }
             TokenKind::Ident(w) if w == "return" => {
                 self.bump();
-                Ok((
-                    Transition::Return { span: t.span() },
-                    InteriorComments::new(),
-                    MapInteriorComments::new(),
-                ))
+                Ok(Transition::Return { span: t.span() })
             }
             TokenKind::Ident(w) if w == "stop" => {
                 self.bump();
-                Ok((
-                    Transition::Stop { span: t.span() },
-                    InteriorComments::new(),
-                    MapInteriorComments::new(),
-                ))
+                Ok(Transition::Stop { span: t.span() })
             }
             TokenKind::Ident(w) if w == "halt" => {
                 self.bump();
-                Ok((
-                    Transition::Halt { span: t.span() },
-                    InteriorComments::new(),
-                    MapInteriorComments::new(),
-                ))
+                Ok(Transition::Halt { span: t.span() })
             }
             TokenKind::Ident(w) if !RESERVED.contains(&w.as_str()) => {
                 // Bare-name transition = goto sugar.
                 self.bump();
-                Ok((
-                    Transition::Goto {
-                        name: w.clone(),
-                        explicit: false,
-                        span: t.span(),
-                    },
-                    InteriorComments::new(),
-                    MapInteriorComments::new(),
-                ))
+                Ok(Transition::Goto {
+                    name: w.clone(),
+                    explicit: false,
+                    span: t.span(),
+                })
             }
             _ => Err(Self::expected(
                 &t,
@@ -2433,28 +2116,22 @@ impl Parser<'_> {
         })
     }
 
-    /// Parses a `(args)` binding list; also returns the list's own interior
-    /// comments and every `with map` pair-list comment nested inside one of
-    /// its arguments, the latter re-keyed by the owning argument's index
-    /// (docs/tmt/fmt.md (interior comments)).
-    fn binding_args(
-        &mut self,
-    ) -> Result<(Vec<BindingArg>, InteriorComments, MapInteriorComments), CompileError> {
+    /// A parenthesised binding list. The arguments themselves survive
+    /// the walk: a `call`'s list becomes [`Transition::Call`]'s `args`,
+    /// which [`reparse_transition`] must reproduce faithfully. A
+    /// `graft`/`bind`'s list is dropped by its caller.
+    fn binding_args(&mut self) -> Result<Vec<BindingArg>, CompileError> {
         self.expect(&TokenKind::LParen, "`(` to open the binding")?;
         let mut args: Vec<BindingArg> = Vec::new();
-        let mut interior: InteriorComments = Vec::new();
-        let mut map_interior: MapInteriorComments = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RParen) {
             loop {
-                self.interior_comments(args.len(), &mut interior);
-                let arg_index = args.len();
-                let (arg, arg_map_interior) = self.binding_arg()?;
-                map_interior.extend(
-                    arg_map_interior
-                        .into_iter()
-                        .map(|(pair_index, comment)| (arg_index, pair_index, comment)),
-                );
-                args.push(arg);
+                // BINDING_ARG opens at the argument's own name IDENT, so
+                // its extent is exactly `BindingArg::span` and a comment
+                // between two arguments flushes into the enclosing
+                // GRAFT/BIND/TRANSITION instead.
+                self.g_flush_start(TmcKind::BindingArg);
+                args.push(self.binding_arg()?);
+                self.g_finish(); // BindingArg
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
                     TokenKind::RParen => break,
@@ -2462,21 +2139,17 @@ impl Parser<'_> {
                 }
             }
         }
-        self.interior_comments(args.len(), &mut interior);
         self.expect(&TokenKind::RParen, "`)` to close the binding")?;
-        Ok((args, interior, map_interior))
+        Ok(args)
     }
 
-    /// Parses one `name = value` binding argument; also returns its map's
-    /// interior comments, if `value` carries one (empty otherwise) — a
-    /// [`BindingArg`] is handed to the AST verbatim, so `binding_args`
-    /// re-keys these by the argument's own index before returning them
-    /// (docs/tmt/fmt.md (interior comments)).
-    fn binding_arg(&mut self) -> Result<(BindingArg, InteriorComments), CompileError> {
+    /// Parses one `name = value` binding argument — the unit
+    /// [`reparse_binding_arg`] re-runs, `with map { … }` included.
+    fn binding_arg(&mut self) -> Result<BindingArg, CompileError> {
         let (name, name_span) = self.name("a binding argument name")?;
         self.expect(&TokenKind::Eq, "`=` in the binding argument")?;
         let t = self.peek().clone();
-        let (value, end, map_interior) = match &t.kind {
+        let (value, end) = match &t.kind {
             TokenKind::Ident(w) if w == "return" => {
                 self.bump();
                 (
@@ -2485,7 +2158,6 @@ impl Parser<'_> {
                         span: t.span(),
                     },
                     t.span(),
-                    InteriorComments::new(),
                 )
             }
             TokenKind::Ident(w) if w == "stop" => {
@@ -2496,7 +2168,6 @@ impl Parser<'_> {
                         span: t.span(),
                     },
                     t.span(),
-                    InteriorComments::new(),
                 )
             }
             TokenKind::Ident(w) if w == "halt" => {
@@ -2507,20 +2178,19 @@ impl Parser<'_> {
                         span: t.span(),
                     },
                     t.span(),
-                    InteriorComments::new(),
                 )
             }
             TokenKind::Ident(w) if !RESERVED.contains(&w.as_str()) => {
                 let target = w.clone();
                 let target_span = t.span();
                 self.bump();
-                let (map, end, map_interior) = if self.at_kw("with") {
+                let (map, end) = if self.at_kw("with") {
                     self.bump();
-                    let (m, interior) = self.sym_map()?;
+                    let m = self.sym_map()?;
                     let sp = m.span;
-                    (Some(m), sp, interior)
+                    (Some(m), sp)
                 } else {
-                    (None, target_span, InteriorComments::new())
+                    (None, target_span)
                 };
                 (
                     BindingValue::Named {
@@ -2529,7 +2199,6 @@ impl Parser<'_> {
                         map,
                     },
                     end,
-                    map_interior,
                 )
             }
             _ => {
@@ -2539,27 +2208,27 @@ impl Parser<'_> {
                 ));
             }
         };
-        Ok((
-            BindingArg {
-                name,
-                name_span,
-                value,
-                span: join(name_span, end),
-            },
-            map_interior,
-        ))
+        Ok(BindingArg {
+            name,
+            name_span,
+            value,
+            span: join(name_span, end),
+        })
     }
 
-    /// `map { pairs }` after a consumed `with`; returns its own interior
-    /// list, mirroring [`Parser::binding_args`].
-    fn sym_map(&mut self) -> Result<(SymMap, InteriorComments), CompileError> {
+    /// `map { pairs }` after a consumed `with` — the production
+    /// [`reparse_sym_map`] re-runs over a SYM_MAP node's own tokens.
+    fn sym_map(&mut self) -> Result<SymMap, CompileError> {
+        // Opens at `map`, not at the `with` the caller already consumed:
+        // `SymMap::span` runs `map` → `}`, and keeping the node's extent
+        // equal to that span is what lets extraction copy it rather than
+        // recompute it.
+        self.g_flush_start(TmcKind::SymMap);
         let map_tok = self.expect_kw_tok("map", "`map` after `with`")?;
         self.expect(&TokenKind::LBrace, "`{` to open the map")?;
         let mut pairs: Vec<MapPair> = Vec::new();
-        let mut interior: InteriorComments = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             loop {
-                self.interior_comments(pairs.len(), &mut interior);
                 pairs.push(self.map_pair()?);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
@@ -2568,15 +2237,12 @@ impl Parser<'_> {
                 }
             }
         }
-        self.interior_comments(pairs.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBrace, "`}` to close the map")?;
-        Ok((
-            SymMap {
-                pairs,
-                span: join(map_tok.span(), rb.span()),
-            },
-            interior,
-        ))
+        self.g_finish(); // SymMap
+        Ok(SymMap {
+            pairs,
+            span: join(map_tok.span(), rb.span()),
+        })
     }
 
     fn expect_kw_tok(
@@ -2610,72 +2276,240 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_graft(
-        &mut self,
-        entry: bool,
-        prefix: Option<(Pos, u32)>,
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<GraftCst, CompileError> {
+    /// `entry` is not decoration here: it is what decides whether the
+    /// missing `as` clause below is legal — a non-entry graft must be
+    /// named (docs/tmt/language.md (grafts)).
+    fn parse_graft(&mut self, entry: bool) -> Result<(), CompileError> {
         let graft_tok = self.peek().clone();
         self.bump(); // `graft`
-        let target = self.qual_name("a graft target")?;
-        let (args, interior, map_pairs) = self.binding_args()?;
-        let as_name = if self.at_kw("as") {
+        self.qual_name("a graft target")?;
+        self.binding_args()?;
+        let named = if self.at_kw("as") {
             self.bump();
-            let (n, sp) = self.name("a graft instance name")?;
-            Some((n, sp))
+            self.name("a graft instance name")?;
+            true
         } else {
-            None
+            false
         };
         // A non-entry graft must be named.
-        if !entry && as_name.is_none() {
+        if !entry && !named {
             return Err(Self::err_at(&graft_tok, CompileErrorKind::GraftNeedsName));
         }
-        let semi = self.expect(&TokenKind::Semi, "`;` to end the graft")?;
-        self.prev_end_line = semi.line;
-        let trailing = self.take_trailing(semi.line);
-        let start = prefix
-            .map(|(p, _)| p)
-            .unwrap_or_else(|| graft_tok.span().start);
-        Ok(GraftCst {
-            entry,
-            target,
-            args,
-            interior,
-            map_pairs,
-            as_name,
-            line: graft_tok.line,
-            span: Span {
-                start,
-                end: semi.span().end,
-            },
-            doc_run,
-            trailing,
-        })
+        self.expect(&TokenKind::Semi, "`;` to end the graft")?;
+        Ok(())
     }
 
-    fn parse_bind(&mut self, doc_run: Vec<DocRunItem>) -> Result<BindCst, CompileError> {
-        let bind_tok = self.peek().clone();
+    fn parse_bind(&mut self) -> Result<(), CompileError> {
         self.bump(); // `bind`
-        let target = self.qual_name("a bind target")?;
-        let (args, interior, map_pairs) = self.binding_args()?;
+        self.qual_name("a bind target")?;
+        self.binding_args()?;
         self.expect_kw("as", "`as` (a bind needs an instance name)")?;
-        let (n, sp) = self.name("a bind instance name")?;
-        let semi = self.expect(&TokenKind::Semi, "`;` to end the bind")?;
-        self.prev_end_line = semi.line;
-        let trailing = self.take_trailing(semi.line);
-        Ok(BindCst {
-            target,
-            args,
-            interior,
-            map_pairs,
-            as_name: (n, sp),
-            line: bind_tok.line,
-            span: join(bind_tok.span(), semi.span()),
-            doc_run,
-            trailing,
-        })
+        self.name("a bind instance name")?;
+        self.expect(&TokenKind::Semi, "`;` to end the bind")?;
+        Ok(())
     }
+}
+
+/// Builds a bare `Parser` over already-retokenized tokens
+/// (`crate::syntax::extract::sig_tokens`'s own output) — `sink: None`,
+/// since a reparse shim never re-emits a green tree, only a value.
+/// Shared by every `reparse_*` shim below so the field list lives once.
+/// No `#[allow(dead_code)]` of its own, and none needed: all but one of
+/// the shims below are live callees of
+/// `crate::syntax::extract::extract_program`, so this is reachable from
+/// real code.
+fn bare_parser(tokens: &[Token]) -> Parser<'_> {
+    Parser {
+        tokens,
+        pos: 0,
+        machine_seen: false,
+        sink: None,
+    }
+}
+
+/// Retokenization reuse shim (`crate::syntax::extract::sig_tokens`'s
+/// counterpart) for a RULE's own TRANSITION node: re-parse it through
+/// the SAME production the original parse used
+/// (`Parser::transition`), so a green-tree reparse and the original
+/// parse can never disagree on what a transition means. `expect`s on
+/// error: extraction only ever runs on a tree that already parsed
+/// once, so a failure here is a bug in the retokenization, not a
+/// malformed program.
+///
+/// **Structurally uncallable for one of `Transition`'s six variants,
+/// `Stay`.** `Stay` is the ABSENCE of a TRANSITION node — an omitted
+/// transition, legal only when the rule already carries an action
+/// (docs/tmt/language.md (transitions)) — so `RuleView::transition()`
+/// answers `None` for it and there is never a node to retokenize in
+/// the first place. A caller (extraction) must synthesize `Stay`
+/// itself from that `None`; this shim only ever runs for the other
+/// five (`Goto` in both its `explicit` spellings, `Call`, `Return`,
+/// `Stop`, `Halt`).
+pub(crate) fn reparse_transition(tokens: &[Token]) -> Transition {
+    bare_parser(tokens)
+        .transition()
+        .expect("reparse_transition: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a GRAFT/BIND's own BINDING_ARG node:
+/// re-parses it through `Parser::binding_arg`, the exact unit
+/// `crate::syntax::kinds`'s own module doc names as what a caller
+/// "retokenizes and hands back" — `BINDING_ARG` carries no dedicated
+/// list wrapper (the `(`/`)` are its parent GRAFT/BIND's own tokens), so
+/// the reparse unit is one argument at a time, mirroring
+/// `Parser::sig_param`'s identical shape.
+pub(crate) fn reparse_binding_arg(tokens: &[Token]) -> BindingArg {
+    bare_parser(tokens)
+        .binding_arg()
+        .expect("reparse_binding_arg: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for an ALPHABET node: re-parses its
+/// element list through [`Parser::alphabet_elems`], the same production
+/// `parse_alphabet` itself runs.
+///
+/// Takes the WHOLE declaration's token run and walks to just past its
+/// first `{`, rather than asking the caller to slice the body out. That
+/// run is `DocLine|AttentionLine* export? alphabet NAME { … }` — the
+/// node retro-wraps its bound doc run, so those lines are part of it —
+/// and NEITHER prefix can carry an `LBrace`: a `?`/`!` line lexes to
+/// one whole-line token, never a brace, and the header is exactly
+/// `export? alphabet NAME`. So the first `LBrace` in the run is always
+/// the body's opener. Doing the slice here rather than at the call site
+/// keeps "where an alphabet body begins" next to the production that
+/// decides it.
+pub(crate) fn reparse_alphabet_elems(tokens: &[Token]) -> Vec<AlphabetElem> {
+    let mut p = bare_parser(tokens);
+    while !matches!(p.peek().kind, TokenKind::LBrace | TokenKind::Eof) {
+        p.bump();
+    }
+    p.bump(); // `{`
+    p.alphabet_elems()
+        .expect("reparse_alphabet_elems: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a RULE's own pattern: re-parses it
+/// through [`Parser::pattern`]. Unlike every other shim here the input
+/// is not a node's token run — a pattern is deliberately unbracketed
+/// (`crate::syntax::kinds`'s own module doc: mandatory and first, so
+/// nothing optional has to be decided to find it) — so the caller
+/// supplies the `[` … `]` token slice instead
+/// (`crate::syntax::views::RuleView::pattern_tokens`).
+pub(crate) fn reparse_pattern(tokens: &[Token]) -> Pattern {
+    bare_parser(tokens)
+        .pattern()
+        .expect("reparse_pattern: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a RULE's own WRITE_VEC node:
+/// re-parses it through [`Parser::write_vec`]. The node's tokens
+/// already start at `[`, not at the `write` keyword its caller
+/// consumed — `crate::syntax::kinds`'s own module doc records why (the
+/// node's extent is chosen to match `WriteVec::span` exactly) — which
+/// is where that production expects to begin.
+pub(crate) fn reparse_write_vec(tokens: &[Token]) -> WriteVec {
+    bare_parser(tokens)
+        .write_vec()
+        .expect("reparse_write_vec: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a RULE's own MOVE_VEC node:
+/// re-parses it through [`Parser::move_vec`] — the same `[`-opening
+/// extent rule as [`reparse_write_vec`].
+pub(crate) fn reparse_move_vec(tokens: &[Token]) -> MoveVec {
+    bare_parser(tokens)
+        .move_vec()
+        .expect("reparse_move_vec: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a GRAFT/BIND target: re-parses it
+/// through [`Parser::qual_name`], so the `::` walk and the
+/// first-segment-start → last-segment-end span join stay in the parser.
+///
+/// A qualified name has no node of its own (`IDENT (:: IDENT)*` sits
+/// directly under GRAFT/BIND), so the caller supplies a token slice.
+/// That slice may run PAST the name — `qual_name` continues only while
+/// the next token is `::`, so it stops of its own accord at the `(`
+/// that always follows a target — which means a caller need only skip
+/// the header keywords, never find the name's end.
+pub(crate) fn reparse_qual_name(tokens: &[Token]) -> QualName {
+    bare_parser(tokens)
+        .qual_name("a reuse target")
+        .expect("reparse_qual_name: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a BINDING_ARG's own SYM_MAP node:
+/// re-parses it through `Parser::sym_map`. A SYM_MAP node's own tokens
+/// already start at `map`, not at the `with` its caller consumed —
+/// `crate::syntax::kinds`'s own module doc records why (the node's
+/// extent is chosen to match `SymMap::span` exactly) — which is
+/// exactly where `Parser::sym_map` expects to begin.
+///
+/// The one shim here that keeps its `#[allow(dead_code)]`: extraction
+/// never calls it, because a map is reached through the argument that
+/// owns it and [`reparse_binding_arg`] parses `with map { … }` as part
+/// of the argument's own value. It stays because a SYM_MAP node is
+/// separately addressable (a language service asking about one map, not
+/// the whole argument, is the case it exists for), and its fidelity
+/// test in `crate::syntax::extract`'s own test module holds
+/// `Parser::sym_map` reachable from a green node independently of that.
+#[allow(dead_code)]
+pub(crate) fn reparse_sym_map(tokens: &[Token]) -> SymMap {
+    bare_parser(tokens)
+        .sym_map()
+        .expect("reparse_sym_map: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a REUSE's own SIG_PARAM node:
+/// re-parses it through `Parser::sig_param`. Covers both shapes the
+/// production itself branches on — `Tape` (with its optional
+/// `writes`/`preserves` clauses) and the plain `State` parameter.
+pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
+    bare_parser(tokens)
+        .sig_param()
+        .expect("reparse_sig_param: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a bound DOC_RUN node: re-parses its
+/// `DocLine`/`AttentionLine` tokens through `Parser::doc_run_items`
+/// itself, rather than a hand-rolled reimplementation of its item loop.
+/// Sound even though that production also re-enforces the
+/// `DocLineOrder` ordering check and the duplicate-/unknown-attribute
+/// checks: those checks already passed once, over these exact tokens,
+/// during the parse that produced the tree this run was retokenized
+/// from, so re-running them is redundant work, never a new failure
+/// mode. It is also the only place the items exist at all — the walk
+/// that built the tree discards its own.
+///
+/// The items are `?`/`!` lines only. A comment written inside a run is
+/// green-tree trivia, which `crate::syntax::extract::sig_tokens`
+/// filters out before this ever runs;
+/// `crate::syntax::extract::extract_doc_items` builds that comment's
+/// own `DocRunKind::Comment` item straight from the tree and
+/// interleaves it with what this shim returns.
+///
+/// `prev_end_line` seeds the run's FIRST item's `blank_before` gap
+/// check — the end line of whatever preceded this run in the real
+/// file (`0` when the run opens the file). The caller MUST supply the
+/// real value: `tokens` holds only the DOC_RUN node's own descendant
+/// tokens (`crate::syntax::extract::sig_tokens`'s whole contract), and
+/// whether a blank line preceded the run's own first line is a
+/// property of whatever came BEFORE the node — information the
+/// node's own tokens can never carry. Every item AFTER the first computes
+/// its own gap from the item before it, entirely inside `tokens`, so
+/// only the first item's `blank_before` is at stake here; passing the
+/// wrong value claims a blank line the source does not have (or misses
+/// one it does), on exactly that one field of exactly that one item.
+/// Mirrors the
+/// sibling crate's own
+/// `reparse_item(tokens, in_group)`, whose `in_group` flag is the same
+/// shape of caller-supplied context an isolated retokenized node
+/// cannot recover on its own.
+pub(crate) fn reparse_doc_items(tokens: &[Token], prev_end_line: u32) -> Vec<DocRunItem> {
+    bare_parser(tokens)
+        .doc_run_items(prev_end_line)
+        .expect("reparse_doc_items: extraction only ever runs on an already-parsed tree")
+        .0
 }
 
 #[cfg(test)]

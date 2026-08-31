@@ -8,13 +8,16 @@
 //! a state stub, the two alphabets for a binding map — so neither invents a
 //! shape the language would then reject.
 
+use std::rc::Rc;
+
 use mtc_core::diagnostics::{Edit, Pos, Span};
 use mtc_core::lsp::Action;
+use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 
 use super::{DocState, spans_overlap};
 use crate::compiler::{CompileErrorKind, Resolved, full_name};
-use crate::cst::{Cst, MachineCst, ReuseCst, TopItem, TopKind};
 use crate::parser::{BindingArg, BindingValue, Program, SigParamKind, Signature};
+use crate::syntax::{MachineView, ReuseView, RootView, TopView};
 
 /// Quickfixes for the document's fatal, when it overlaps `span`.
 pub(super) fn fatal_actions(state: &DocState, span: Span) -> Vec<Action> {
@@ -25,12 +28,9 @@ pub(super) fn fatal_actions(state: &DocState, span: Span) -> Vec<Action> {
         return Vec::new();
     }
     match &fatal.kind {
-        CompileErrorKind::UndefinedState(name) => state
-            .cst
-            .as_ref()
-            .and_then(|cst| state_stub(cst, state.program.as_ref(), name, fatal.span))
-            .into_iter()
-            .collect(),
+        CompileErrorKind::UndefinedState(name) => {
+            state_stub(state, name, fatal.span).into_iter().collect()
+        }
         CompileErrorKind::IdentityGlyphMismatch => state
             .program
             .as_ref()
@@ -55,8 +55,18 @@ struct BodyExtent {
 /// body the unresolved `goto` sits in, with a catch-all rule of the right
 /// arity that stops. The arity matters — a stub with the wrong vector
 /// width would trade one error for another.
-fn state_stub(cst: &Cst, program: Option<&Program>, name: &str, at: Span) -> Option<Action> {
-    let extent = enclosing_body(cst, program, at)?;
+///
+/// Green-tier: indexes `state.green` (docs/core.md (syntax trees))
+/// directly — the same tree `document_symbols`
+/// (`crate::lsp::document_symbols`) reads, an `Rc` clone of the one
+/// `analyze_staged` built rather than a reparse. Availability is
+/// `state.green.is_some()`, the parse-tier gate `analyze_staged` already
+/// applied.
+fn state_stub(state: &DocState, name: &str, at: Span) -> Option<Action> {
+    let green = state.green.as_ref()?;
+    let root = RootView::cast(SyntaxNode::new_root(Rc::clone(green)))?;
+    let index = TextLineIndex::new(&state.text);
+    let extent = enclosing_body(&root, state.program.as_ref(), at, &index)?;
     let cells = vec!["*"; extent.arity.max(1)].join(", ");
     // Insert on its own line just before the closing brace, one level in
     // from it. The block's own depth is read off that brace rather than
@@ -83,29 +93,68 @@ fn state_stub(cst: &Cst, program: Option<&Program>, name: &str, at: Span) -> Opt
 }
 
 /// The innermost world block containing `at`, with its tape count.
-fn enclosing_body(cst: &Cst, program: Option<&Program>, at: Span) -> Option<BodyExtent> {
-    fn walk(items: &[TopItem], at: Span, out: &mut Option<(Span, Option<String>)>) {
+///
+/// A mechanical port off the green tree: MACHINE and REUSE never nest
+/// inside one another (a world's own direct children are TAPE/STATE/
+/// GRAFT/BIND, never another MACHINE or REUSE — `crates/turing-machine/
+/// src/syntax/mod.rs`'s module doc), so the only nesting a real program
+/// can put between the root and a candidate is NAMESPACE, and recursing
+/// into every namespace's own `items()` is what makes the walk find the
+/// one that actually contains `at`.
+///
+/// Reads only each candidate's range END (`span.end`, below) — never its
+/// start, so a bound doc run retro-wrapped at the front of a MACHINE or
+/// REUSE node (`crates/turing-machine/src/syntax/mod.rs`'s module doc)
+/// never moves where the stub lands; the containment check reads the
+/// full node range (doc run included), which only makes it MORE
+/// inclusive of `at`, never less — an unreachable divergence in
+/// practice, since `at` is always a reference inside the world's own
+/// body, never inside the header the doc run sits in front of.
+fn enclosing_body(
+    root: &RootView,
+    program: Option<&Program>,
+    at: Span,
+    index: &TextLineIndex,
+) -> Option<BodyExtent> {
+    fn walk(
+        items: impl Iterator<Item = TopView>,
+        at: Span,
+        index: &TextLineIndex,
+        out: &mut Option<(Span, Option<String>)>,
+    ) {
         for item in items {
-            match &item.kind {
-                TopKind::Namespace(ns) => walk(&ns.items, at, out),
-                TopKind::Machine(m) => consider_machine(m, at, out),
-                TopKind::Reuse(r) => consider_reuse(r, at, out),
+            match item {
+                TopView::Namespace(ns) => walk(ns.items(), at, index, out),
+                TopView::Machine(m) => consider_machine(&m, at, index, out),
+                TopView::Reuse(r) => consider_reuse(&r, at, index, out),
                 _ => {}
             }
         }
     }
-    fn consider_machine(m: &MachineCst, at: Span, out: &mut Option<(Span, Option<String>)>) {
-        if contains(m.span, at) {
-            *out = Some((m.span, None));
+    fn consider_machine(
+        m: &MachineView,
+        at: Span,
+        index: &TextLineIndex,
+        out: &mut Option<(Span, Option<String>)>,
+    ) {
+        let span = index.span(m.syntax().text_range());
+        if contains(span, at) {
+            *out = Some((span, None));
         }
     }
-    fn consider_reuse(r: &ReuseCst, at: Span, out: &mut Option<(Span, Option<String>)>) {
-        if contains(r.span, at) {
-            *out = Some((r.span, Some(r.name.clone())));
+    fn consider_reuse(
+        r: &ReuseView,
+        at: Span,
+        index: &TextLineIndex,
+        out: &mut Option<(Span, Option<String>)>,
+    ) {
+        let span = index.span(r.syntax().text_range());
+        if contains(span, at) {
+            *out = Some((span, Some(r.name_token().text().to_string())));
         }
     }
     let mut found: Option<(Span, Option<String>)> = None;
-    walk(&cst.items, at, &mut found);
+    walk(root.items(), at, index, &mut found);
     let (span, reuse_name) = found?;
     let arity = match (&reuse_name, program) {
         (None, Some(program)) => program.machine.as_ref().map_or(1, |m| m.tapes.len()),

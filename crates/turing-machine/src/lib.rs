@@ -11,7 +11,6 @@ pub mod codegen;
 pub mod compiler;
 pub mod completions;
 mod config;
-pub mod cst;
 pub mod dap;
 pub mod expand;
 pub mod fmt;
@@ -25,6 +24,7 @@ pub mod parser;
 mod project;
 pub mod rept_emit;
 pub mod stdlib;
+pub mod syntax;
 
 pub use asm::{TM1_TMA_DIALECT_VERSION, tm1_syntax};
 pub use compiler::{CompileError, CompileErrorKind};

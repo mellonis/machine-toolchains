@@ -1,15 +1,14 @@
 //! `.pmc` recursive-descent parser (docs/pmt/language.md): tokens → AST.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
-use mtc_core::diagnostics::{Pos, Span};
+use mtc_core::diagnostics::Span;
+use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::cst::{
-    AttrCst, BodyItem, BodyKind, CommaItem, Cst, DocRunItem, DocRunKind, FunctionCst, NamespaceCst,
-    StatementCst, TopItem, TopKind, TrailingComment, UseCst, UsePath,
-};
-use crate::lexer::{Comment, Token, TokenKind};
+use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
+use crate::syntax::{self, GreenSink, PmcKind};
 
 /// docs/pmt/language.md: words that cannot name a function.
 pub const RESERVED: [&str; 8] = [
@@ -112,10 +111,10 @@ pub struct Function {
     /// `std::api.helper`.
     pub ns: Vec<String>,
     /// The bound `?`/`!` run — `docs/pmt/language.md (doc lines and attention
-    /// lines)` — reduced from
-    /// [`crate::cst::FunctionCst::doc_run`] by [`lower_cst`]. `None` for
-    /// an undocumented function (an empty `doc_run`); every compiler
-    /// pass past `lower_cst` ignores this field — `flatten` copies it
+    /// lines)` — reduced by [`reduce_doc_run`] from the [`DocRunItem`]s
+    /// extraction reads back off the green tree's `DOC_RUN` node. `None`
+    /// for an undocumented function (an empty `doc_run`); every compiler
+    /// pass past extraction ignores this field — `flatten` copies it
     /// into `Analysis.docs`, keyed by the same fully-qualified name it
     /// already computes, and nothing downstream reads it off `Function`
     /// again.
@@ -291,147 +290,159 @@ fn describe(kind: &TokenKind) -> String {
     }
 }
 
-/// tokens → AST, via the one unified lossless CST. The compiler consumes
-/// the `Program`; fmt
-/// reads the CST directly through [`parse_cst`]. The signature is
-/// unchanged from the pre-C1 parser — verified byte-identical, for the
-/// whole CST migration, against a frozen pre-C1 reference
-/// implementation; that reference parser and its parity harness were
-/// removed once the CST-based parser was confirmed a sound replacement.
-pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
-    parse_cst(tokens).map(|cst| lower_cst(&cst))
+/// Source → AST, through the one parse path this crate has: a
+/// `WithComments` lex, the green syntax tree, then extraction
+/// (docs/core.md (syntax trees)).
+///
+/// The convenience wrapper for callers that want only the `Program` —
+/// it keeps nothing else, and it is the only parse function here that
+/// yields one. A caller needing the token stream alongside it uses
+/// `compiler::analyze`; a caller needing the green tree uses
+/// `compiler::analyze_staged`, which is the one that retains it.
+pub fn parse(source: &str) -> Result<Program, CompileError> {
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    let green = parse_green_from_tokens(source, &tokens)?;
+    Ok(crate::syntax::extract_program(
+        &SyntaxNode::new_root(green),
+        source,
+    ))
 }
 
-/// tokens → lossless CST. Accepts either a `WithoutComments` stream (the
-/// compiler's path, no trivia) or a `WithComments` stream (fmt's path,
-/// comments interleaved). Comment tokens are split off up front so the
-/// grammar walk over the significant tokens is identical to the pre-C1
-/// parser — spans, control flow, and the duplicate-name/-label checks all
-/// carry over verbatim. The dropped-in-lowering trivia (`blank_before`,
-/// `label_break`, comment nodes, `trailing`, `CommaItem::leading`) is
-/// attached from the split-off comments by source position;
-/// `CommaItem::newline_before` is attached instead from the significant
-/// tokens' own line numbers (it records a source newline, not a comment).
-pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
-    let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
-    let mut comments: Vec<CommentAt> = Vec::new();
-    for t in tokens {
-        if let TokenKind::Comment(c) = &t.kind {
-            comments.push(CommentAt {
-                comment: c.clone(),
-                line: t.line,
-                col: t.col,
-                sig_index: sig.len(),
-            });
-        } else {
-            sig.push(t.clone());
-        }
-    }
-    let items = Parser {
+/// Every token that is not comment trivia — the stream `Parser` walks,
+/// since comments reach the green tree as trivia through
+/// [`crate::syntax::layout`] rather than through the walk. Equal,
+/// element for element, to a
+/// `LexMode::WithoutComments` lex of the same source: the lexer's mode
+/// switch decides only whether a `Comment` token is pushed. That law is
+/// checked corpus-wide by
+/// `tests/syntax_green.rs::corpus_token_provenance_law` — which
+/// re-derives the filter inline rather than calling this function — and
+/// against this function directly by
+/// `parse_green_from_tokens_matches_parse_green`. Together they are what
+/// lets `compiler::analyze` fill `AnalysisOutput.tokens` from the one
+/// `WithComments` lex the green parse already needs.
+pub fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
+    tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+        .cloned()
+        .collect()
+}
+
+/// source → green syntax tree (docs/core.md (syntax trees)). Lexes
+/// `WithComments` and hands both halves to
+/// [`parse_green_from_tokens`].
+pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    parse_green_from_tokens(source, &tokens)
+}
+
+/// Already-lexed tokens → green syntax tree, for callers that need to
+/// keep the token stream even when the parse fails (the staged
+/// pipeline's degradation tiers, docs/lsp.md (staged analysis)).
+///
+/// `tokens` MUST be a `LexMode::WithComments` lex of `source`:
+/// `crate::syntax::layout` reconstructs verbatim token text and trivia
+/// from the two together, so a comment-free stream would lose every
+/// comment's own text and break the `text() == source` law. An empty
+/// `tokens` slice panics — every real lex result is EOF-terminated.
+///
+/// Runs the same grammar walk `Parser::file` always has, with a green
+/// sink attached: the sink mirrors token consumption and node
+/// boundaries alongside the unchanged parser logic, and the tree it
+/// builds is the walk's whole product (see [`Parser::sink`]'s own doc).
+pub fn parse_green_from_tokens(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Rc<GreenNode>, CompileError> {
+    let entries = syntax::layout(source, tokens);
+    let sig = significant_tokens(tokens);
+    let eof_pos = sig.len() - 1;
+    let mut sink = GreenSink::new(entries);
+    sink.start(PmcKind::File);
+    let sink = Parser {
         tokens: &sig,
         pos: 0,
         namespaces: HashSet::new(),
         declared_fns: HashSet::new(),
-        comments,
-        cpos: 0,
-        prev_end_line: 0,
+        sink: Some(sink),
     }
     .file()?;
-    Ok(Cst { items })
+    Ok(sink
+        .expect("parse_green_from_tokens always seeds a sink before calling file()")
+        .into_tree(eof_pos))
 }
 
-/// Copy a CST into the flat `Program` the compiler consumes — exactly the
-/// namespace-flattening + nested-function hoisting the pre-C1 parser did
-/// inline. Stamps each definition's enclosing `ns` path, hoists nested
-/// functions out of body order into `Function::nested`, and drops all
-/// trivia. `local` is left `false` (flatten computes it), matching the
-/// pre-C1 parser. Spans/lines/cols are copied verbatim.
-pub fn lower_cst(cst: &Cst) -> Program {
-    let mut functions = Vec::new();
-    let mut imports = Vec::new();
-    lower_items(&cst.items, &[], &mut functions, &mut imports);
-    Program { functions, imports }
+/// One line of a function's bound `?`/`!` run, plus whether a blank
+/// line precedes it in source. Built by [`reparse_doc_items`] over a
+/// retokenized `DOC_RUN` node, which is the one route a run reaches
+/// [`reduce_doc_run`] by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRunItem {
+    pub blank_before: bool,
+    pub kind: DocRunKind,
 }
 
-fn lower_items(
-    items: &[TopItem],
-    ns: &[String],
-    functions: &mut Vec<Function>,
-    imports: &mut Vec<Import>,
-) {
-    for item in items {
-        match &item.kind {
-            TopKind::Comment(_) => {}
-            TopKind::Import(use_cst) => {
-                for p in &use_cst.paths {
-                    imports.push(Import {
-                        path: p.path.clone(),
-                        alias: p.alias.clone(),
-                        line: p.line,
-                        ns: ns.to_vec(),
-                        span: p.span,
-                    });
-                }
-            }
-            TopKind::Namespace(nsc) => {
-                let mut child = ns.to_vec();
-                child.push(nsc.name.clone());
-                lower_items(&nsc.items, &child, functions, imports);
-            }
-            TopKind::Function(f) => functions.push(lower_function(f, ns)),
-        }
-    }
+/// A doc/attention run's own line shapes (docs/pmt/language.md (doc lines)):
+/// a `?` doc line, a `!` attention line, or an ordinary comment
+/// interleaved within/after the run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocRunKind {
+    /// A `?` line. `text` is the lexer's payload verbatim (raw text
+    /// after the sigil, minus one canonical leading space if present) —
+    /// unprocessed, so a pretty-printer reprints it byte-for-byte.
+    Doc { text: String, span: Span },
+    /// A `!` line. `attr` is `Some` when the payload opens with a valid
+    /// `[ident]` attribute (v1: only `[deprecated]` is accepted —
+    /// anything else is a parse-time `UnknownAttribute` error, so every
+    /// `Some` that survives the parse already named
+    /// `"deprecated"`). `text` is the FULL raw payload verbatim,
+    /// attribute prefix included when present — mirrors `Doc::text`'s
+    /// unprocessed-token convention; a consumer that only wants the
+    /// free-form message recovers it from `text` using `attr`'s own
+    /// span.
+    Attention {
+        attr: Option<AttrCst>,
+        text: String,
+        span: Span,
+    },
+    /// An ordinary `//`/`/* */` comment inside the run (between run
+    /// lines, or between the run's last line and the bound
+    /// declaration). Never produced by [`reparse_doc_items`], the one
+    /// route a run reaches [`reduce_doc_run`] by — a retokenized
+    /// `DOC_RUN` has already had its comments filtered out as trivia
+    /// (that shim's own doc explains why dropping them is harmless).
+    Comment(Comment),
 }
 
-/// Lower one function. Nested functions are hoisted into `nested` (out of
-/// body order) and, like the pre-C1 parser, carry an EMPTY `ns` — flatten
-/// resolves nesting through the top-level ancestor. `exported` is copied
-/// from the CST (the caller stamped top-level `main`'s auto-export);
-/// nested functions are never exported. `volatile` is copied straight
-/// from `has_volatile` — by the time a `FunctionCst` reaches here the
-/// parser has already rejected every illegal carrier (`VolatileNotOnMain`),
-/// so a `true` here can only be the un-namespaced top-level `main`. `doc`
-/// is [`reduce_doc_run`] over the CST's bound `doc_run`.
-fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
-    let mut body = Vec::new();
-    let mut nested = Vec::new();
-    for bi in &f.body {
-        match &bi.kind {
-            BodyKind::Comment(_) => {}
-            BodyKind::Statement(s) => body.push(Statement {
-                labels: s.labels.clone(),
-                items: s.items.iter().map(|ci| ci.item.clone()).collect(),
-                line: s.line,
-                span: s.span,
-            }),
-            BodyKind::Nested(g) => nested.push(lower_function(g, &[])),
-        }
-    }
-    Function {
-        name: f.name.clone(),
-        line: f.line,
-        col: f.col,
-        name_span: f.name_span,
-        body,
-        exported: f.exported,
-        volatile: f.has_volatile,
-        local: false,
-        nested,
-        ns: ns.to_vec(),
-        doc: reduce_doc_run(&f.doc_run),
-    }
+/// An attention line's leading `[ident]` attribute (docs/pmt/language.md
+/// (doc lines)): v1 accepts exactly `"deprecated"`. `span` covers the
+/// identifier alone, not the surrounding brackets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrCst {
+    pub name: String,
+    pub span: Span,
 }
 
-/// Reduce a [`FunctionCst::doc_run`] into an [`FnDoc`] — `None` for an
-/// empty run (undocumented). `DocRunKind::Comment` items are transparent:
+/// Reduce a function's bound `?`/`!` run into an [`FnDoc`]. The run
+/// arrives as the [`DocRunItem`]s [`reparse_doc_items`] rebuilds off an
+/// emitted `DOC_RUN` node — the one route in. `pub(crate)` for
+/// cross-module use by `crate::syntax::extract::extract_function`, the
+/// green-tree extraction's own production caller, and by that module's
+/// fidelity tests, which lean on the `DocRunKind::Comment` inertness
+/// documented right below to prove two
+/// RAW `Vec<DocRunItem>`s that differ only by a dropped comment still
+/// reduce to the identical [`FnDoc`] (`reparse_doc_items`'s own doc
+/// comment explains why they can differ in the first place). `None` for
+/// an empty run (undocumented). `DocRunKind::Comment` items are transparent:
 /// they contribute nothing and never split a paragraph, matching the
 /// design doc's "comments/blanks don't participate" rule for the run's
 /// own order check. A `?` line's text is the join key; an EMPTY `?` line
 /// (the lexer's bare-sigil payload) closes the current paragraph without
 /// emitting an empty one, so leading/trailing/repeated blanks are all
 /// absorbed. An attention line with `attr.name == "deprecated"` (at most
-/// one — a second is rejected at parse time, before any `FunctionCst`
-/// exists) is excluded from `attention`; its message is the FULL raw
+/// one — a second is rejected at parse time) is excluded from
+/// `attention`; its message is the FULL raw
 /// payload's text after the attribute's closing `]`, trimmed — finding
 /// `]` in `text` directly is equivalent to (and simpler than) mapping
 /// `attr.span.end` back into the string, since `parse_attr` only
@@ -440,7 +451,7 @@ fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
 /// same "an empty line carries no content" rule the `?` side already
 /// applies — so a lone bare `!` can't leave `FnDoc` with a single empty
 /// attention entry and no other content.
-fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
+pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
     if doc_run.is_empty() {
         return None;
     }
@@ -483,28 +494,22 @@ fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
     })
 }
 
-/// A comment token lifted out of the stream during [`parse_cst`]'s split,
-/// remembering where it sat relative to the significant tokens.
-struct CommentAt {
-    comment: Comment,
-    /// The comment's own start line (for `blank_before` gaps).
+/// What [`Parser::function`] still tells its callers: the name token's
+/// own identity. Both call sites key their duplicate-name checks on it,
+/// and the top-level one also needs the name to decide whether a leading
+/// `volatile` is on `main` (`VolatileNotOnMain`) — everything else about
+/// a function declaration is read back off the green tree.
+struct FnName {
+    name: String,
     line: u32,
-    /// The comment's own start column (`docs/pmt/fmt.md`, comments) — the
-    /// trailing-comment alignment rule's source-column detection.
     col: u32,
-    /// Number of significant tokens preceding this comment — the `pos`
-    /// the significant-token walk is at when the comment is "pending".
-    sig_index: usize,
 }
-
-/// [`Parser::top_items`]'s return shape: the items, the block's
-/// `close_trailing` comment, and the closing `}` token's own span.
-type TopItemsResult = Result<(Vec<TopItem>, Option<Comment>, Option<Span>), CompileError>;
 
 struct Parser<'a> {
     /// Significant (comment-free) tokens only — identical to the
-    /// `WithoutComments` stream, so the grammar walk matches the pre-C1
-    /// parser exactly.
+    /// `WithoutComments` stream, so a `WithComments` lex changes what
+    /// the green sink records as trivia and nothing about the grammar
+    /// walk itself.
     tokens: &'a [Token],
     pos: usize,
     /// Every namespace path declared so far (reopened blocks insert the
@@ -514,17 +519,49 @@ struct Parser<'a> {
     /// and `a.x` cannot collide; the pool rule just stops both spellings
     /// coexisting confusingly in one file.
     namespaces: HashSet<Vec<String>>,
-    /// Every `(ns, name)` function declared so far — the pre-C1 parser
-    /// scanned its flat `functions` vec for the same-scope duplicate
-    /// check; a set keyed on `(ns, name)` is the equivalent membership
-    /// test and independent of the CST's block nesting.
+    /// Every `(ns, name)` function declared so far — the same-scope
+    /// duplicate check is a membership test on this set, so it stays
+    /// independent of how the walk happens to nest its blocks and of
+    /// the order [`crate::syntax::extract_program`] later flattens
+    /// them in.
     declared_fns: HashSet<(Vec<String>, String)>,
-    /// Comments split out of the stream, in source order.
-    comments: Vec<CommentAt>,
-    /// Cursor into `comments`: everything before it is already attached.
-    cpos: usize,
-    /// End line of the last emitted CST element, for `blank_before`.
-    prev_end_line: u32,
+    /// Green-tree emission: `bump()` mirrors every consumed token into
+    /// it, and the `g_*` helpers below bracket node boundaries. `Some`
+    /// on [`parse_green_from_tokens`]'s walk — [`Parser::file`]'s only
+    /// production caller; `None` on the isolated re-parses
+    /// ([`reparse_item`], [`reparse_doc_items`]), which are handed a
+    /// bare token slice with no source string to lay out and so cannot
+    /// be given a sink at all; there the `g_*` helpers are all no-ops
+    /// and the production's own return value is the whole result.
+    sink: Option<GreenSink>,
+}
+
+/// Map a significant `TokenKind` to its green-tree kind — the sink's
+/// counterpart to `TokenKind`, since `PmcKind`'s token variants mirror
+/// it 1:1 (`crate::syntax::kinds` doc). Called only from `bump()`,
+/// which never bumps `Eof`, and only over the sig stream, which never
+/// carries `Comment` ([`significant_tokens`] filters it out up front) —
+/// both are unreachable here.
+fn sig_kind(kind: &TokenKind) -> PmcKind {
+    match kind {
+        TokenKind::Ident(_) => PmcKind::Ident,
+        TokenKind::Number(_, _) => PmcKind::Number,
+        TokenKind::At => PmcKind::At,
+        TokenKind::Bang => PmcKind::Bang,
+        TokenKind::Comma => PmcKind::Comma,
+        TokenKind::Semi => PmcKind::Semi,
+        TokenKind::Colon => PmcKind::Colon,
+        TokenKind::ColonColon => PmcKind::ColonColon,
+        TokenKind::LParen => PmcKind::LParen,
+        TokenKind::RParen => PmcKind::RParen,
+        TokenKind::LBrace => PmcKind::LBrace,
+        TokenKind::RBrace => PmcKind::RBrace,
+        TokenKind::DocLine(_) => PmcKind::DocLine,
+        TokenKind::AttentionLine(_) => PmcKind::AttentionLine,
+        TokenKind::Comment(_) | TokenKind::Eof => {
+            unreachable!("comments are stripped from the significant stream; Eof is never bumped")
+        }
+    }
 }
 
 impl Parser<'_> {
@@ -535,7 +572,47 @@ impl Parser<'_> {
 
     fn bump(&mut self) {
         if !matches!(self.tokens[self.pos].kind, TokenKind::Eof) {
+            if let Some(sink) = &mut self.sink {
+                sink.token(self.pos, sig_kind(&self.tokens[self.pos].kind));
+            }
             self.pos += 1;
+        }
+    }
+
+    /// Open a green node, flushing the upcoming token's trivia into the
+    /// PARENT first — the trivia-placement rule: a node starts at its
+    /// first significant token, so whitespace/comments before it belong
+    /// to whatever is still open. No-op when `sink` is `None`.
+    fn g_flush_start(&mut self, kind: PmcKind) {
+        if let Some(sink) = &mut self.sink {
+            sink.flush(self.pos);
+            sink.start(kind);
+        }
+    }
+
+    /// Close the innermost open green node. No-op when `sink` is `None`.
+    fn g_finish(&mut self) {
+        if let Some(sink) = &mut self.sink {
+            sink.finish();
+        }
+    }
+
+    /// Flush the upcoming token's trivia into the parent, then mark a
+    /// green checkpoint for a later [`Self::g_start_at`] — for
+    /// productions that only learn their node kind after parsing a
+    /// prefix. `None` when `sink` is `None`.
+    fn g_checkpoint(&mut self) -> Option<Checkpoint> {
+        self.sink.as_mut().map(|sink| {
+            sink.flush(self.pos);
+            sink.checkpoint()
+        })
+    }
+
+    /// Open a green node retroactively at a checkpoint taken by
+    /// [`Self::g_checkpoint`]. No-op when either is `None`.
+    fn g_start_at(&mut self, cp: Option<Checkpoint>, kind: PmcKind) {
+        if let (Some(sink), Some(cp)) = (&mut self.sink, cp) {
+            sink.start_at(cp, kind);
         }
     }
 
@@ -565,57 +642,13 @@ impl Parser<'_> {
         }
     }
 
-    /// Attach every pending comment at or before the current sig position,
-    /// returning `(comment, start_line)` in source order. Never drops.
-    fn drain_pending(&mut self) -> Vec<(Comment, u32)> {
-        let mut out = Vec::new();
-        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
-            let ca = &self.comments[self.cpos];
-            out.push((ca.comment.clone(), ca.line));
-            self.cpos += 1;
-        }
-        out
-    }
-
-    /// Like [`Self::drain_pending`] but dropping line info — for
-    /// mid-comma-group leading trivia, which carries no `blank_before`.
-    fn drain_pending_comments(&mut self) -> Vec<Comment> {
-        self.drain_pending().into_iter().map(|(c, _)| c).collect()
-    }
-
-    /// Drain every pending comment written before entry `index` of the list
-    /// being parsed, tagging each with that index. Called at the top of each
-    /// list-loop iteration and once more before the closer with
-    /// `index = entries.len()`, which is how a comment after the last entry
-    /// gets a home (docs/pmt/fmt.md (comments inside a use list)).
-    fn interior_comments(&mut self, index: usize, out: &mut Vec<(usize, Comment)>) {
-        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
-            out.push((index, self.comments[self.cpos].comment.clone()));
-            self.cpos += 1;
-        }
-    }
-
-    /// Take the one same-line trailing comment after a `;` (the pending
-    /// comment that follows code on `end_line`), if any. Carries the
-    /// comment's source column (brief §A) alongside it.
-    fn take_trailing(&mut self, end_line: u32) -> Option<TrailingComment> {
-        if self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index <= self.pos && !ca.comment.own_line && ca.line == end_line {
-                let out = TrailingComment {
-                    comment: ca.comment.clone(),
-                    col: ca.col,
-                };
-                self.cpos += 1;
-                return Some(out);
-            }
-        }
-        None
-    }
-
-    /// The whole file is the `ns == []` namespace level.
-    fn file(mut self) -> Result<Vec<TopItem>, CompileError> {
-        self.top_items(&[], None).map(|(items, _, _)| items)
+    /// The whole file is the `ns == []` namespace level. Hands back the
+    /// (possibly `None`) green sink, which is the walk's whole product:
+    /// `self` is consumed by value, so this is the only place it can
+    /// escape.
+    fn file(mut self) -> Result<Option<GreenSink>, CompileError> {
+        self.top_items(&[], None)?;
+        Ok(self.sink)
     }
 
     /// Collects a doc/attention run (docs/pmt/language.md (doc lines))
@@ -628,38 +661,27 @@ impl Parser<'_> {
     /// ANY `?` after the first `!` violates the fixed order). Blank
     /// lines and ordinary comments are tolerated within/after the run
     /// without affecting that order check (spec: "comments/blanks don't
-    /// participate") — `drain_pending` after each consumed line picks up
-    /// anything sitting between it and whatever comes next, including
-    /// comments between the run's last line and the bound declaration.
+    /// participate") — they are trivia the green sink attaches on its
+    /// own, and this walk simply steps over them.
     /// An attention line's `[ident]` attribute (if any) is validated
     /// against the v1 vocabulary here, since this is the only place the
-    /// run's lines are walked in order. Returns the run's items plus the
-    /// run's OWN first line's span, for the caller's `DanglingDocRun`
-    /// error if what follows isn't the declaration the run must bind to.
-    fn doc_run(&mut self) -> Result<(Vec<DocRunItem>, Span), CompileError> {
+    /// run's lines are walked in order. Returns the run's OWN first
+    /// line's span, for the caller's `DanglingDocRun` error if what
+    /// follows isn't the declaration the run must bind to. The run's
+    /// [`DocRunItem`]s are extraction's to rebuild off the emitted
+    /// `DOC_RUN` node, through [`reparse_doc_items`].
+    fn doc_run(&mut self) -> Result<Span, CompileError> {
         let first_span = self.peek().span();
-        let mut items: Vec<DocRunItem> = Vec::new();
         let mut seen_attention = false;
         let mut seen_deprecated: Option<Span> = None;
-        let mut prev_end_line = self.prev_end_line;
         loop {
             let t = self.peek().clone();
             match &t.kind {
-                TokenKind::DocLine(text) => {
+                TokenKind::DocLine(_) => {
                     if seen_attention {
                         return Err(Self::err_at(&t, CompileErrorKind::DocLineOrder));
                     }
-                    let text = text.clone();
                     self.bump();
-                    let blank_before = t.line > prev_end_line + 1;
-                    prev_end_line = t.line;
-                    items.push(DocRunItem {
-                        blank_before,
-                        kind: DocRunKind::Doc {
-                            text,
-                            span: t.span(),
-                        },
-                    });
                 }
                 TokenKind::AttentionLine(text) => {
                     let text = text.clone();
@@ -682,30 +704,11 @@ impl Parser<'_> {
                             });
                         }
                     }
-                    let blank_before = t.line > prev_end_line + 1;
-                    prev_end_line = t.line;
-                    items.push(DocRunItem {
-                        blank_before,
-                        kind: DocRunKind::Attention {
-                            attr,
-                            text,
-                            span: t.span(),
-                        },
-                    });
                 }
                 _ => break,
             }
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > prev_end_line + 1;
-                prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                items.push(DocRunItem {
-                    blank_before,
-                    kind: DocRunKind::Comment(comment),
-                });
-            }
         }
-        self.prev_end_line = prev_end_line;
-        Ok((items, first_span))
+        Ok(first_span)
     }
 
     /// Parses a leading `[ident]` attribute off an attention line's raw
@@ -845,31 +848,20 @@ impl Parser<'_> {
         )
     }
 
-    /// One namespace level's item loop, building `TopItem`s in source
-    /// order. Handles `use` (legal at any namespace depth, never in
-    /// function bodies), `namespace NAME { … }` (contextual; recurse with
-    /// the extended path), `export`, and function definitions, and
-    /// interleaves own-line comments as [`TopKind::Comment`] items.
-    /// `terminator` is `Some(RBrace)` inside a block, `None` at file level
-    /// (ends at Eof). Duplicate-name checks run here, exactly as the pre-C1
-    /// parser did. Returns the items, the block's `close_trailing` comment
-    /// (c-brace fix, mirrors `function`'s close_trailing), and the closing
-    /// `}` token's own span (for the caller's `NamespaceCst::span` extent)
-    /// — both always `None` when `terminator` is `None` (a file has no
-    /// closing brace).
-    fn top_items(&mut self, ns: &[String], terminator: Option<&TokenKind>) -> TopItemsResult {
-        let mut items: Vec<TopItem> = Vec::new();
+    /// One namespace level's item loop, walking the level's items in
+    /// source order and bracketing a green node around each. Handles
+    /// `use` (legal at any namespace depth, never in function bodies),
+    /// `namespace NAME { … }` (contextual; recurse with the extended
+    /// path), `export`, and function definitions. `terminator` is
+    /// `Some(RBrace)` inside a block, `None` at file level (ends at Eof).
+    /// Duplicate-name checks run here, during the walk — never over the
+    /// extracted `Program` afterwards.
+    fn top_items(
+        &mut self,
+        ns: &[String],
+        terminator: Option<&TokenKind>,
+    ) -> Result<(), CompileError> {
         loop {
-            // Own-line comments (leading/standalone/dangling) become their
-            // own items at this level, in source position.
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > self.prev_end_line + 1;
-                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                items.push(TopItem {
-                    blank_before,
-                    kind: TopKind::Comment(comment),
-                });
-            }
             // Doc/attention run (docs/pmt/language.md (doc lines)): a `?`/`!`
             // line at item position starts a run that must bind to the
             // NEXT function declaration at this scope — anything else
@@ -879,52 +871,37 @@ impl Parser<'_> {
             // loop's own dispatch conditions exactly, so classifying
             // "true" here guarantees the fallthrough function-parsing
             // code below is what actually runs next.
-            let doc_run = if matches!(
+            // The green checkpoint for the FUNCTION node this run (if any)
+            // binds to, or — with no run — for the header token about to
+            // be consumed (`volatile`/`export`/name): taken here, before
+            // either, so `g_start_at` below retro-wraps whichever prefix
+            // was actually present. Unused whenever this token turns out to start a
+            // `use`/`namespace` item instead — harmless, a fresh
+            // checkpoint is taken every loop iteration.
+            let fn_cp = self.g_checkpoint();
+            if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
-                let (run, first_span) = self.doc_run()?;
+                self.g_flush_start(PmcKind::DocRun);
+                let first_span = self.doc_run()?;
+                self.g_finish();
                 if !self.next_is_top_level_function_start(terminator) {
                     return Err(CompileError {
                         span: first_span,
                         kind: CompileErrorKind::DanglingDocRun,
                     });
                 }
-                run
-            } else {
-                Vec::new()
-            };
+            }
             let t = self.peek().clone();
             match (&t.kind, terminator) {
-                (TokenKind::Eof, None) => return Ok((items, None, None)),
+                (TokenKind::Eof, None) => return Ok(()),
                 (TokenKind::Eof, Some(_)) => {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
                 (k, Some(term)) if k == term => {
-                    let close_line = t.line;
-                    self.prev_end_line = close_line;
                     self.bump();
-                    // c-brace fix, symmetric to the namespace's own
-                    // `open_trailing` capture below `top_items`'s caller:
-                    // a comment on the SAME line as `}` rides the closing
-                    // brace instead of becoming the next sibling's
-                    // leading own-line comment. The top-of-loop
-                    // `drain_pending()` above already caught up
-                    // `self.cpos` to the pre-`}` `self.pos`, so nothing
-                    // is pending here except a comment genuinely
-                    // following `}` (`sig_index == self.pos`, the
-                    // position `}` just advanced to).
-                    let mut close_trailing: Option<Comment> = None;
-                    if self.cpos < self.comments.len() {
-                        let ca = &self.comments[self.cpos];
-                        if ca.sig_index == self.pos && ca.line == close_line {
-                            self.prev_end_line =
-                                close_line + ca.comment.text.matches('\n').count() as u32;
-                            close_trailing = Some(ca.comment.clone());
-                            self.cpos += 1;
-                        }
-                    }
-                    return Ok((items, close_trailing, Some(t.span())));
+                    return Ok(());
                 }
                 _ => {}
             }
@@ -967,13 +944,9 @@ impl Parser<'_> {
                     Some(TokenKind::Ident(_))
                 )
             {
-                let use_line = t.line;
+                self.g_flush_start(PmcKind::UseDecl);
                 self.bump();
-                let mut paths: Vec<UsePath> = Vec::new();
-                let mut interior: Vec<(usize, Comment)> = Vec::new();
-                let semi_line;
                 loop {
-                    self.interior_comments(paths.len(), &mut interior);
                     // path := IDENT (`::` IDENT)*  [ `as` IDENT ]
                     let t = self.peek().clone();
                     let TokenKind::Ident(name) = &t.kind else {
@@ -982,10 +955,7 @@ impl Parser<'_> {
                     if RESERVED.contains(&name.as_str()) {
                         return Err(Self::expected(&t, "an imported function name"));
                     }
-                    let mut path = vec![name.clone()];
-                    let path_start = t.span().start;
-                    let mut path_end = t.span().end;
-                    let path_line = t.line;
+                    self.g_flush_start(PmcKind::UsePath);
                     self.bump();
                     while matches!(self.peek().kind, TokenKind::ColonColon) {
                         self.bump();
@@ -1002,45 +972,23 @@ impl Parser<'_> {
                                 },
                             ));
                         }
-                        path.push(seg.clone());
-                        path_end = t.span().end;
                         self.bump();
                     }
-                    let alias = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "as") {
+                    if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "as") {
                         self.bump();
                         let t = self.peek().clone();
-                        let TokenKind::Ident(a) = &t.kind else {
+                        let TokenKind::Ident(_) = &t.kind else {
                             return Err(Self::expected(&t, "an alias after `as`"));
                         };
                         self.bump();
-                        Some(a.clone())
-                    } else {
-                        None
-                    };
-                    paths.push(UsePath {
-                        path,
-                        alias,
-                        line: path_line,
-                        span: Span {
-                            start: path_start,
-                            end: path_end,
-                        },
-                    });
+                    }
+                    self.g_finish(); // UsePath — the alias, if any, is its last token
                     let sep = self.peek().clone();
                     match sep.kind {
                         TokenKind::Comma => {
                             self.bump();
                         }
                         TokenKind::Semi => {
-                            semi_line = sep.line;
-                            // Drain interior comments HERE, before bumping
-                            // past `;`: `interior_comments` claims
-                            // everything at or before `self.pos`, so running
-                            // it once the `;` has been consumed would also
-                            // claim a comment that follows the statement —
-                            // e.g. one documenting the *next* `use`
-                            // (docs/pmt/fmt.md (comments inside a use list)).
-                            self.interior_comments(paths.len(), &mut interior);
                             self.bump();
                             break;
                         }
@@ -1050,36 +998,7 @@ impl Parser<'_> {
                         _ => return Err(Self::expected(&sep, "`,` or `;`")),
                     }
                 }
-                // The whole `use` list's trailing comment rides the node.
-                let trailing = self.take_trailing(semi_line);
-                let use_span = Span {
-                    start: paths
-                        .first()
-                        .expect("a use list has at least one path")
-                        .span
-                        .start,
-                    end: paths
-                        .last()
-                        .expect("a use list has at least one path")
-                        .span
-                        .end,
-                };
-                // One TopItem for the whole grouped `use` list — `blank_before`
-                // reads the `use`
-                // keyword's own line, matching what the FIRST path would
-                // have reported under the old per-path scheme.
-                let blank_before = use_line > self.prev_end_line + 1;
-                self.prev_end_line = paths.last().expect("a use list has at least one path").line;
-                items.push(TopItem {
-                    blank_before,
-                    kind: TopKind::Import(UseCst {
-                        paths,
-                        line: use_line,
-                        span: use_span,
-                        trailing,
-                        interior,
-                    }),
-                });
+                self.g_finish(); // UseDecl — closes right after the `;`
                 continue;
             }
             // Contextual keyword: `namespace NAME {` opens a (reopenable)
@@ -1094,8 +1013,7 @@ impl Parser<'_> {
                     Some(TokenKind::LBrace)
                 )
             {
-                let ns_saved = self.prev_end_line;
-                let ns_line = t.line;
+                self.g_flush_start(PmcKind::Namespace);
                 self.bump(); // `namespace`
                 let name_tok = self.peek().clone();
                 let TokenKind::Ident(name) = &name_tok.kind else {
@@ -1122,60 +1040,16 @@ impl Parser<'_> {
                         },
                     ));
                 }
-                let name_span = name_tok.span();
                 self.bump(); // the name
-                let brace = self.peek().clone();
                 self.bump(); // `{`
                 let mut child = ns.to_vec();
                 child.push(name.clone());
                 self.namespaces.insert(child.clone());
-                self.prev_end_line = brace.line;
-                // c-brace fix (`cst.rs`'s "Comment placement" doc,
-                // mirrors `function`'s `open_trailing` capture): comment(s)
-                // riding the SAME physical line as the namespace's `{`,
-                // before the first body item, are captured here instead
-                // of falling into `top_items`'s ordinary leading-comment
-                // drain (which would print them as their own body item,
-                // moving them off the header line). `sig_index ==
-                // self.pos` (not `<=`) excludes a comment that sits
-                // BEFORE `{` even when it shares `{`'s physical line.
-                let mut open_trailing: Vec<Comment> = Vec::new();
-                while self.cpos < self.comments.len() {
-                    let ca = &self.comments[self.cpos];
-                    if ca.sig_index == self.pos && ca.line == brace.line {
-                        open_trailing.push(ca.comment.clone());
-                        self.cpos += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if let Some(last) = open_trailing.last() {
-                    self.prev_end_line = brace.line + last.text.matches('\n').count() as u32;
-                }
-                let (child_items, close_trailing, close_span) =
-                    self.top_items(&child, Some(&TokenKind::RBrace))?;
-                // `top_items` set `prev_end_line` to the closing `}` line
-                // (or its close_trailing comment's last line).
-                let blank_before = ns_line > ns_saved + 1;
-                items.push(TopItem {
-                    blank_before,
-                    kind: TopKind::Namespace(NamespaceCst {
-                        name,
-                        name_span,
-                        line: ns_line,
-                        span: Span {
-                            start: t.span().start,
-                            end: close_span
-                                .expect(
-                                    "top_items with Some(terminator) always returns a close span",
-                                )
-                                .end,
-                        },
-                        items: child_items,
-                        open_trailing,
-                        close_trailing,
-                    }),
-                });
+                self.top_items(&child, Some(&TokenKind::RBrace))?;
+                // The recursive `top_items` call above already bumped the
+                // closing `}` into the still-open NAMESPACE node; close it
+                // now that its full span — including that `}` — is emitted.
+                self.g_finish(); // Namespace
                 continue;
             }
             // Contextual keyword: `volatile` + identifier = the volatile
@@ -1184,8 +1058,6 @@ impl Parser<'_> {
             // reserved name, so it is never treated as the modifier
             // here. Fixed order: `volatile` precedes `export` when both
             // are written.
-            let fn_saved = self.prev_end_line;
-            let fn_line = self.peek().line;
             let volatile_tok = if self.peek_is_volatile_modifier() {
                 let tok = self.peek().clone();
                 self.bump();
@@ -1194,37 +1066,23 @@ impl Parser<'_> {
                 None
             };
             // Contextual keyword: `export` + identifier = exported def;
-            // `export` + `(` is a function NAMED export.
-            let export_start = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
+            // `export` + `(` is a function NAMED export. Whether a
+            // function is exported is extraction's own reading of the
+            // green tree; this walk only consumes the keyword.
+            if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
                 && matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
                     Some(TokenKind::Ident(_))
-                ) {
-                let export_tok = self.peek().clone();
+                )
+            {
                 self.bump();
-                Some(export_tok.span().start)
-            } else {
-                None
-            };
-            let exported = export_start.is_some();
-            // Threaded through so `FunctionCst::span` starts at the
-            // earliest header token written (`volatile` if present, else
-            // `export`) rather than the name — see `cst.rs`'s
-            // `FunctionCst::span` doc. `doc_run` is empty unless the loop
-            // above just collected and validated one.
-            let header_start = volatile_tok
-                .as_ref()
-                .map(|t| t.span().start)
-                .or(export_start);
-            let mut f = self.function(header_start, doc_run)?;
-            // The literal keyword presence — unlike `exported` below, this
-            // does NOT
-            // fold in `main`'s auto-export.
-            f.has_export = exported;
-            // Only the un-namespaced top-level `main` auto-exports (and is
-            // the entry); a namespaced `main` is an ordinary function.
-            f.exported = exported || (ns.is_empty() && f.name == "main");
-            f.has_volatile = volatile_tok.is_some();
+            }
+            // The header is confirmed now (a function IS what follows):
+            // retro-open FUNCTION at `fn_cp`, so it wraps the doc run
+            // (if any) and/or the `volatile`/`export` tokens already
+            // emitted above. `function` closes it after the `}`.
+            self.g_start_at(fn_cp, PmcKind::Function);
+            let f = self.function()?;
             // `volatile` is legal ONLY on the un-namespaced top-level
             // `main` — checked before the duplicate-name checks below so
             // the more specific rule is the one that surfaces.
@@ -1259,35 +1117,29 @@ impl Parser<'_> {
                 });
             }
             self.declared_fns.insert((ns.to_vec(), f.name.clone()));
-            // `function` set `prev_end_line` to the closing `}` line.
-            let blank_before = fn_line > fn_saved + 1;
-            items.push(TopItem {
-                blank_before,
-                kind: TopKind::Function(f),
-            });
         }
     }
 
-    // `header_start`: the earliest header modifier's span start when the
-    // caller already consumed one for this function — `volatile`'s start
-    // if a leading `volatile` was consumed (top level or nested — both
-    // paths thread it; `VolatileNotOnMain` is decided by the CALLER once
-    // this returns), else `export`'s start when a leading `export` was
-    // consumed (top level only — a nested definition passes `None` for
-    // this half, `NestedExport` bars a nested `export` before this is
-    // ever called). Threaded in rather than re-detected here because the
-    // caller already consumed the token(s); `FunctionCst::span` starts
-    // here when present, at the name token otherwise (cst.rs's
-    // `FunctionCst::span` doc). `doc_run`: the run the caller already
-    // collected and validated as bound to THIS declaration (empty when
-    // undocumented) — this function only stores it, it never collects one
+    // Walks one function definition — its name, its empty parameter
+    // parens, and its brace-delimited body — and hands back the name
+    // token's own identity, which is all either call site still needs:
+    // the duplicate-name and shared-name-pool checks in `top_items`, the
+    // sibling-name check in this method's own nested-definition branch,
+    // and `VolatileNotOnMain`'s message all key on it. A leading doc run
+    // and a leading `volatile`/`export` are the CALLER's to consume and
+    // to judge — this method never sees them, and never collects a run
     // itself (the caller owns the "what comes next" dispatch a run's
     // dangling check depends on).
-    fn function(
-        &mut self,
-        header_start: Option<Pos>,
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<FunctionCst, CompileError> {
+    //
+    // Green FUNCTION node: opened by the CALLER (`g_start_at` at a
+    // checkpoint taken before either call site invokes this method) and
+    // closed HERE, right after the closing `}` is bumped — the one
+    // `Ok` exit this loop has. Both call sites call `g_start_at`
+    // unconditionally, immediately before invoking this method, so the
+    // open/close pair always balances; a future third call site (or a
+    // second `Ok` exit added here) must preserve both halves of that
+    // contract or the green builder mis-nests.
+    fn function(&mut self) -> Result<FnName, CompileError> {
         let name_tok = self.peek().clone();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(Self::expected(&name_tok, "a function name"));
@@ -1305,80 +1157,43 @@ impl Parser<'_> {
         self.bump();
         self.expect(&TokenKind::LParen, "`(` after the function name")?;
         self.expect(&TokenKind::RParen, "`)` (functions take no parameters)")?;
-        let brace = self.peek().clone();
         self.expect(&TokenKind::LBrace, "`{`")?;
 
-        let mut body: Vec<BodyItem> = Vec::new();
         let mut nested_names: HashSet<String> = HashSet::new();
         let mut seen_labels: HashSet<u32> = HashSet::new();
-        self.prev_end_line = brace.line;
-        // c-brace fix (`cst.rs`'s "Comment placement" doc): comment(s)
-        // riding the SAME physical line as `{`, before the first body
-        // item, are captured here instead of falling into the ordinary
-        // leading-comment drain below (which would print them as their
-        // own body item, moving them off the header line). `sig_index ==
-        // self.pos` (not `<=`) is deliberate — it excludes a comment that
-        // sits BEFORE `{` (e.g. `f() /* x */ { ... }`, sig_index one
-        // token earlier) even when that comment happens to share `{`'s
-        // physical line; only a comment genuinely AFTER `{` has
-        // `sig_index` equal to the position `{` just advanced `self.pos`
-        // to.
-        let mut open_trailing: Vec<Comment> = Vec::new();
-        while self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index == self.pos && ca.line == brace.line {
-                open_trailing.push(ca.comment.clone());
-                self.cpos += 1;
-            } else {
-                break;
-            }
-        }
-        if let Some(last) = open_trailing.last() {
-            self.prev_end_line = brace.line + last.text.matches('\n').count() as u32;
-        }
-        let mut close_trailing: Option<Comment> = None;
-        // Assigned exactly once, in the `RBrace`-closing branch below,
-        // right before the `break` that is this loop's only non-error
-        // exit — the closing `}` token's own span, for
-        // `FunctionCst::span`'s extent end.
-        let close_span: Span;
         loop {
-            // Own-line comments (leading/standalone/dangling) become body
-            // items in source position.
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > self.prev_end_line + 1;
-                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                body.push(BodyItem {
-                    blank_before,
-                    kind: BodyKind::Comment(comment),
-                });
-            }
             if matches!(self.peek().kind, TokenKind::Eof) {
                 return Err(Self::expected(
                     self.peek(),
                     "`}` to close the function body",
                 ));
             }
+            // The green checkpoint for whichever body construct follows —
+            // a nested FUNCTION (with this run, if any, bound to it) or a
+            // labeled STATEMENT — taken once, before either is known.
+            // Exactly one of the two `g_start_at` calls below ever
+            // consumes it in a given iteration; the other path's checkpoint
+            // just goes unused, same as `top_items`'s `fn_cp`.
+            let cp = self.g_checkpoint();
             // Doc/attention run (docs/pmt/language.md (doc lines)): a `?`/`!`
             // line at body item position starts a run that must bind to
             // the NEXT nested function definition — anything else next
             // (a statement, the closing `}`, `export` before a nested
             // def) is `DanglingDocRun` at the run's own first line.
-            let doc_run = if matches!(
+            if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
-                let (run, first_span) = self.doc_run()?;
+                self.g_flush_start(PmcKind::DocRun);
+                let first_span = self.doc_run()?;
+                self.g_finish();
                 if !self.next_is_nested_function_start() {
                     return Err(CompileError {
                         span: first_span,
                         kind: CompileErrorKind::DanglingDocRun,
                     });
                 }
-                run
-            } else {
-                Vec::new()
-            };
+            }
             // Nested definition: `[volatile] IDENT ( ) {` — visibility-only
             // nesting. A leading `volatile` is syntactically part of the
             // same shape but always illegal here — nesting can never be
@@ -1400,12 +1215,8 @@ impl Parser<'_> {
                         CompileErrorKind::VolatileNotOnMain(name.clone()),
                     ));
                 }
-                let nested_saved = self.prev_end_line;
-                let nested_line = self.peek().line;
-                // Nested definitions can never carry a leading `export`
-                // (`NestedExport` bars it above), so the extent always
-                // starts at the name token.
-                let child = self.function(None, doc_run)?;
+                self.g_start_at(cp, PmcKind::Function);
+                let child = self.function()?;
                 if nested_names.contains(&child.name) {
                     return Err(CompileError {
                         span: mtc_core::diagnostics::Span::point(child.line, child.col),
@@ -1415,13 +1226,7 @@ impl Parser<'_> {
                         },
                     });
                 }
-                nested_names.insert(child.name.clone());
-                // `function` set `prev_end_line` to the nested `}` line.
-                let blank_before = nested_line > nested_saved + 1;
-                body.push(BodyItem {
-                    blank_before,
-                    kind: BodyKind::Nested(child),
-                });
+                nested_names.insert(child.name);
                 continue;
             }
             // `export` before a nested definition is an error.
@@ -1435,23 +1240,21 @@ impl Parser<'_> {
                 return Err(Self::err_at(&t, CompileErrorKind::NestedExport));
             }
             // Labels announced before the next statement (possibly stacked).
-            let stmt_saved = self.prev_end_line;
-            let stmt_line = self.peek().line;
             let mut labels = Vec::new();
-            let mut last_colon_line: u32 = 0;
             loop {
                 let tok = self.peek().clone();
                 let TokenKind::Number(n, written) = &tok.kind else {
                     break;
                 };
                 let (n, written) = (*n, written.clone());
+                self.g_flush_start(PmcKind::Label);
                 self.bump();
                 let colon = self.peek().clone();
                 self.expect(&TokenKind::Colon, "`:` after a label number")?;
+                self.g_finish();
                 if !seen_labels.insert(n) {
                     return Err(Self::err_at(&tok, CompileErrorKind::DuplicateLabel(n)));
                 }
-                last_colon_line = colon.line;
                 labels.push(Label {
                     value: n,
                     span: Span {
@@ -1469,88 +1272,42 @@ impl Parser<'_> {
                         CompileErrorKind::DanglingLabel(label.value),
                     ));
                 }
-                let close_tok = self.peek().clone();
-                let close_line = close_tok.line;
-                close_span = close_tok.span();
-                self.prev_end_line = close_line;
                 self.bump();
-                // c-brace fix, symmetric to `open_trailing` above: a
-                // comment on the SAME line as `}` rides the closing
-                // brace instead of becoming the next sibling's leading
-                // own-line comment. The top-of-loop `drain_pending()`
-                // above already caught up `self.cpos` to the pre-`}`
-                // `self.pos`, so nothing is pending here except a
-                // comment genuinely following `}` (`sig_index ==
-                // self.pos`, the position `}` just advanced to).
-                if self.cpos < self.comments.len() {
-                    let ca = &self.comments[self.cpos];
-                    if ca.sig_index == self.pos && ca.line == close_line {
-                        self.prev_end_line =
-                            close_line + ca.comment.text.matches('\n').count() as u32;
-                        close_trailing = Some(ca.comment.clone());
-                        self.cpos += 1;
-                    }
-                }
+                // FUNCTION was retro-opened by the caller (top level:
+                // `top_items`; nested: the `g_start_at` above) at a
+                // checkpoint taken before this call — closing it here,
+                // right after the `}` bump, is the one shared exit for
+                // both call sites.
+                self.g_finish();
                 break;
             }
-            let stmt = self.statement(labels, last_colon_line)?;
-            // `statement` set `prev_end_line` to the `;` line.
-            let blank_before = stmt_line > stmt_saved + 1;
-            body.push(BodyItem {
-                blank_before,
-                kind: BodyKind::Statement(stmt),
-            });
+            self.g_start_at(cp, PmcKind::Statement);
+            self.statement()?;
+            self.g_finish();
         }
-        Ok(FunctionCst {
+        Ok(FnName {
             name,
-            name_span: name_tok.span(),
             line: name_tok.line,
             col: name_tok.col,
-            span: Span {
-                start: header_start.unwrap_or_else(|| name_tok.span().start),
-                end: close_span.end,
-            },
-            has_volatile: false,
-            exported: false,
-            has_export: false,
-            body,
-            open_trailing,
-            close_trailing,
-            doc_run,
         })
     }
 
-    fn statement(
-        &mut self,
-        labels: Vec<Label>,
-        last_colon_line: u32,
-    ) -> Result<StatementCst, CompileError> {
-        let start = labels
-            .first()
-            .map(|l| l.span.start)
-            .unwrap_or_else(|| self.peek().span().start);
-        let line = self.peek().line;
-        // The author put a newline after the final label `:` (own-line
-        // label) iff the first command sits on a later line.
-        let label_break = !labels.is_empty() && line > last_colon_line;
-        // A comment between the label and the first command (rare) rides
-        // the first item's leading; the common case leaves it empty.
-        let leading = self.drain_pending_comments();
-        let mut items = vec![CommaItem {
-            item: self.item(false)?,
-            leading,
-            // The first entry's `newline_before` is always false (fmt
-            // design doc, "Comma-group layout").
-            newline_before: false,
-        }];
-        // `pos` has advanced past the item just parsed; `pos - 1` is its
-        // last significant token, whose line is the "item K-1's last
-        // token" side of the next entry's newline comparison.
-        let mut last_item_end_line = self.tokens[self.pos - 1].line;
+    /// One labeled statement: a comma group of items and its closing
+    /// `;`. The labels are the CALLER's — it announces them, checks them
+    /// for duplicates and for dangling, and brackets the green STATEMENT
+    /// node around this walk. The items are collected here only so the
+    /// comma-group position rules below can look at the one that
+    /// precedes each `,` (docs/pmt/language.md (comma groups)); nothing
+    /// else reads them.
+    fn statement(&mut self) -> Result<(), CompileError> {
+        self.g_flush_start(PmcKind::Item);
+        let first_item = self.item(false)?;
+        self.g_finish();
+        let mut items = vec![first_item];
         while matches!(self.peek().kind, TokenKind::Comma) {
             let comma = self.peek().clone();
             // Whatever precedes a `,` must be bare (docs/pmt/language.md).
-            match &items.last().expect("items is never empty").item {
+            match items.last().expect("items is never empty") {
                 Item::Check { .. } => {
                     return Err(Self::err_at(
                         &comma,
@@ -1586,38 +1343,29 @@ impl Parser<'_> {
                 _ => {}
             }
             self.bump();
-            // A mid-group comment attaches to the following item's leading.
-            let leading = self.drain_pending_comments();
-            // The comments are a side channel (split off before the
-            // significant-token walk, see `parse_cst`), so `self.peek()`
-            // here already sits on this item's real first token, whatever
-            // comments were just drained.
-            let item_start_line = self.peek().line;
-            let newline_before = item_start_line > last_item_end_line;
-            items.push(CommaItem {
-                item: self.item(true)?,
-                leading,
-                newline_before,
-            });
-            last_item_end_line = self.tokens[self.pos - 1].line;
+            // The comma just bumped above stays outside both ITEM nodes,
+            // at STATEMENT level — `g_flush_start` opens ITEM only now,
+            // at this item's own first token.
+            self.g_flush_start(PmcKind::Item);
+            let item = self.item(true)?;
+            self.g_finish();
+            items.push(item);
         }
-        let semi = self.peek().clone();
         self.expect(&TokenKind::Semi, "`;`")?;
-        let trailing = self.take_trailing(semi.line);
-        self.prev_end_line = semi.line;
-        Ok(StatementCst {
-            labels,
-            items,
-            line,
-            span: Span {
-                start,
-                end: semi.span().end,
-            },
-            label_break,
-            trailing,
-        })
+        Ok(())
     }
 
+    /// One statement item. `in_group` selects the comma-group grammar
+    /// path (docs/pmt/language.md (comma groups)): inside a group,
+    /// `goto` is illegal and a successor may only be the trailing item.
+    ///
+    /// Reached from two places. The statement production passes its own
+    /// group position. [`reparse_item`] — the retokenization reuse shim
+    /// extraction calls — must be told: a green `ITEM` node retokenized
+    /// on its own carries no record of the group it came from, so its
+    /// caller in `crate::syntax::extract` recovers the flag from the
+    /// node's position among its siblings. Any new branch on `in_group`
+    /// here is therefore a change to extraction's contract too.
     fn item(&mut self, in_group: bool) -> Result<Item, CompileError> {
         let tok = self.peek().clone();
         match &tok.kind {
@@ -1712,9 +1460,13 @@ impl Parser<'_> {
                 "check" => {
                     self.bump();
                     self.expect(&TokenKind::LParen, "`(` after `check`")?;
+                    self.g_flush_start(PmcKind::CheckArm);
                     let (marked, marked_span, marked_written) = self.check_arm()?;
+                    self.g_finish();
                     self.expect(&TokenKind::Comma, "`,` between check arms")?;
+                    self.g_flush_start(PmcKind::CheckArm);
                     let (blank, blank_span, blank_written) = self.check_arm()?;
+                    self.g_finish();
                     let rparen = self.peek().clone();
                     self.expect(&TokenKind::RParen, "`)`")?;
                     Ok(Item::Check {
@@ -1847,131 +1599,151 @@ impl Parser<'_> {
     }
 }
 
+/// Retokenization reuse shim (`crate::syntax::extract::sig_tokens`'s
+/// counterpart): re-parse one already-extracted `.pmc` item from a green
+/// tree's own retokenized `ITEM` node through the SAME production the
+/// original parse used, so an extraction and the original parse can
+/// never disagree on what an item means. Lives here, not in
+/// `crate::syntax::extract`, so it can build a bare `Parser` and reach
+/// the private [`Parser::item`] production directly. `in_group` selects
+/// the same grammar path `Parser::item` already branches on
+/// (docs/pmt/language.md: `goto` is illegal, and a non-trailing
+/// successor is illegal, only INSIDE a comma group) — the caller
+/// supplies it because a lone `ITEM` node carries no memory of its own
+/// former comma-group position. `expect`s on error: extraction only
+/// ever runs on a tree that already parsed once, so a failure here is a
+/// bug in the retokenization, not a malformed program.
+pub(crate) fn reparse_item(tokens: &[Token], in_group: bool) -> Item {
+    Parser {
+        tokens,
+        pos: 0,
+        namespaces: HashSet::new(),
+        declared_fns: HashSet::new(),
+        sink: None,
+    }
+    .item(in_group)
+    .expect("reparse_item: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a `DOC_RUN` node's own `DocLine`/
+/// `AttentionLine` tokens: converts each into a [`DocRunItem`]. This is
+/// the ONE route a run reaches [`reduce_doc_run`] by —
+/// [`Parser::doc_run`] walks the same lines during the parse but keeps
+/// none of them, so the items are rebuilt here off the emitted node.
+/// The run-binding logic stays where it was: the `DocLineOrder`
+/// ordering check, the duplicate-`[deprecated]` check, and the "what
+/// follows must be a declaration" rule are all properties of the
+/// ORIGINAL parse, validated once by `doc_run` and its caller; an
+/// isolated retokenized `DOC_RUN` slice has nothing left to validate,
+/// only to convert. Attention attributes are still decoded through
+/// [`Parser::parse_attr`], the exact helper `doc_run` itself calls, so
+/// `[deprecated]` decodes identically either way. `blank_before` counts
+/// from a fresh `prev_end_line` of 0 — the isolated slice's own start,
+/// not the original file position (nothing downstream reads
+/// `blank_before` off a reduced [`FnDoc`], so this is cosmetic
+/// fidelity, not load-bearing).
+///
+/// **Interleaved comments are dropped, not reproduced.** `tokens` comes
+/// from `crate::syntax::extract::sig_tokens`, which filters comments as
+/// trivia before this ever runs — so a `DOC_RUN` with an interior
+/// `//`/`/* */` comment yields a sequence strictly SHORTER than the
+/// run as WRITTEN (no `DocRunKind::Comment` item ever appears here).
+/// This is behavior-preserving where it matters: [`reduce_doc_run`]
+/// treats every `DocRunKind::Comment` as fully inert
+/// (`DocRunKind::Comment(_) => {}` — no paragraph split, no join, no
+/// attention/`deprecated` effect, regardless of position), so a
+/// comment-dropped run and a hand-built comment-ful one reduce to the
+/// IDENTICAL [`FnDoc`] even though the two raw `Vec<DocRunItem>`s
+/// differ. A caller wanting raw item-for-item parity (spans, `Comment`
+/// entries included) has no such guarantee — only [`reduce_doc_run`]
+/// equality holds.
+pub(crate) fn reparse_doc_items(tokens: &[Token]) -> Vec<DocRunItem> {
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        namespaces: HashSet::new(),
+        declared_fns: HashSet::new(),
+        sink: None,
+    };
+    let mut items = Vec::new();
+    // The isolated slice's own start, not the original file position.
+    let mut prev_end_line = 0;
+    loop {
+        let t = p.peek().clone();
+        match &t.kind {
+            TokenKind::DocLine(text) => {
+                let text = text.clone();
+                p.bump();
+                let blank_before = t.line > prev_end_line + 1;
+                prev_end_line = t.line;
+                items.push(DocRunItem {
+                    blank_before,
+                    kind: DocRunKind::Doc {
+                        text,
+                        span: t.span(),
+                    },
+                });
+            }
+            TokenKind::AttentionLine(text) => {
+                let text = text.clone();
+                p.bump();
+                let attr = Parser::parse_attr(&text, &t);
+                let blank_before = t.line > prev_end_line + 1;
+                prev_end_line = t.line;
+                items.push(DocRunItem {
+                    blank_before,
+                    kind: DocRunKind::Attention {
+                        attr,
+                        text,
+                        span: t.span(),
+                    },
+                });
+            }
+            TokenKind::Eof => break,
+            _ => unreachable!(
+                "reparse_doc_items: extraction only ever feeds a DOC_RUN's own tokens \
+                 (DocLine/AttentionLine) plus the synthetic trailing Eof"
+            ),
+        }
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::compiler::CompileErrorKind;
     use crate::lexer::lex;
 
-    fn parse_src(src: &str) -> Result<Program, CompileError> {
-        parse(&lex(src).unwrap())
+    /// The crate's one parse entry point: source in, `Program` out, with
+    /// the `WithComments` lex it needs done internally. Pinned here
+    /// because every other test module in the crate calls it and none of
+    /// them assert its contract.
+    #[test]
+    fn parse_takes_source_and_lexes_with_comments_itself() {
+        // The comment sits BETWEEN two significant tokens and on a line
+        // it does not lengthen, so every span below it is unmoved: the
+        // two programs must be equal field for field. A comment on its
+        // own line would shift every following line and the comparison
+        // would fail for a reason that has nothing to do with trivia —
+        // measured, not assumed.
+        let src = "main() { /* c */\n    right;\n}\n";
+        let bare = "main() {\n    right;\n}\n";
+        let p = parse(src).expect("parses");
+        assert_eq!(p.functions.len(), 1);
+        assert_eq!(p.functions[0].name, "main");
+        assert_eq!(p.functions, parse(bare).expect("parses").functions);
     }
 
-    /// `parse_cst` on a `WithComments` stream must retain every comment as
-    /// trivia and record the layout signals (`blank_before`,
-    /// `label_break`, per-item `leading`, `trailing`) that `lower_cst`
-    /// drops. Reads each of those fields, and confirms no comment is lost.
+    /// A lex failure surfaces as the lexer's own error, unchanged by the
+    /// mode `parse` picks internally.
     #[test]
-    fn parse_cst_captures_comment_trivia_and_layout() {
-        use crate::cst::{BodyKind, TopKind};
-        use crate::lexer::{LexMode, lex_with};
-
-        let src = "\
-// top comment
-use std::goToEnd; // import trailing
-
-f() {
-    1:
-        left; // trailing
-    right, /* mid */ mark;
-}
-";
-        let tokens = lex_with(src, LexMode::WithComments).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-
-        // An own-line comment is lifted to its own top-level Comment item.
-        let TopKind::Comment(c0) = &cst.items[0].kind else {
-            panic!(
-                "expected a leading comment item, got {:?}",
-                cst.items[0].kind
-            );
-        };
-        assert_eq!(c0.text, "// top comment");
-        assert!(c0.own_line);
-
-        // The import keeps its same-line trailing comment.
-        let TopKind::Import(use_cst) = &cst.items[1].kind else {
-            panic!("expected an import item");
-        };
-        assert_eq!(use_cst.paths.len(), 1);
-        assert_eq!(use_cst.paths[0].path, vec!["std", "goToEnd"]);
+    fn parse_reports_the_lexers_own_error() {
+        let src = "/* never closed\nmain() { right; }\n";
         assert_eq!(
-            use_cst.trailing.as_ref().map(|tc| tc.comment.text.as_str()),
-            Some("// import trailing")
+            parse(src).map(|_| ()).unwrap_err(),
+            crate::lexer::lex(src).map(|_| ()).unwrap_err()
         );
-
-        // A blank line precedes the function in source.
-        assert!(cst.items[2].blank_before, "blank line precedes f()");
-        let TopKind::Function(f) = &cst.items[2].kind else {
-            panic!("expected a function item");
-        };
-
-        // Own-line label => `label_break`; same-line `;` trailing comment.
-        let BodyKind::Statement(s0) = &f.body[0].kind else {
-            panic!("expected the first body statement");
-        };
-        assert!(s0.label_break, "the label sits on its own line");
-        assert_eq!(
-            s0.trailing.as_ref().map(|tc| tc.comment.text.as_str()),
-            Some("// trailing")
-        );
-        assert_eq!(s0.items.len(), 1);
-        assert!(s0.items[0].leading.is_empty());
-
-        // A mid-group comment rides the FOLLOWING comma item's `leading`.
-        // Both items sit on the same source line, so `newline_before` is
-        // false for both (the comment alone doesn't count as a break).
-        let BodyKind::Statement(s1) = &f.body[1].kind else {
-            panic!("expected the second body statement");
-        };
-        assert_eq!(s1.items.len(), 2);
-        assert!(s1.items[0].leading.is_empty());
-        assert!(!s1.items[0].newline_before);
-        assert!(!s1.items[1].newline_before);
-        assert_eq!(
-            s1.items[1]
-                .leading
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<Vec<_>>(),
-            vec!["/* mid */"]
-        );
-
-        // Nothing dropped: every comment token is placed somewhere.
-        let comment_count = tokens
-            .iter()
-            .filter(|t| matches!(t.kind, TokenKind::Comment(_)))
-            .count();
-        assert_eq!(comment_count, 4);
-    }
-
-    /// `CommaItem::newline_before` (fmt design doc, "Comma-group
-    /// layout"): the first entry is always `false`; a later entry is
-    /// `true` iff the author put a newline before it, compared by token
-    /// line — not by whether a comment happens to sit between the items.
-    #[test]
-    fn parse_cst_records_comma_group_newline_before() {
-        use crate::cst::BodyKind;
-        use crate::lexer::{LexMode, lex_with};
-
-        let src = "f() {\n1: left, right,\nmark, unmark;\n}\n";
-        let tokens = lex_with(src, LexMode::WithComments).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        let BodyKind::Statement(s) = &f.body[0].kind else {
-            panic!("expected the body statement");
-        };
-        assert_eq!(s.items.len(), 4);
-        // `left` (first item), never a break by contract.
-        assert!(!s.items[0].newline_before);
-        // `right` shares `left`'s source line.
-        assert!(!s.items[1].newline_before);
-        // `mark` sits on a new source line — the author's break.
-        assert!(s.items[2].newline_before);
-        // `unmark` shares `mark`'s source line.
-        assert!(!s.items[3].newline_before);
     }
 
     #[test]
@@ -1998,7 +1770,7 @@ main() {
 4:  mark;
 }
 "#;
-        let p = parse_src(src).unwrap();
+        let p = parse(src).unwrap();
         assert_eq!(
             p.functions
                 .iter()
@@ -2053,22 +1825,22 @@ main() {
 
     #[test]
     fn comma_groups_parse_and_enforce_positions() {
-        let p = parse_src("f() { 1: right, right, mark(5); 5: left, check(1, !); }").unwrap();
+        let p = parse("f() { 1: right, right, mark(5); 5: left, check(1, !); }").unwrap();
         assert_eq!(p.functions[0].body[0].items.len(), 3);
         assert_eq!(p.functions[0].body[1].items.len(), 2);
 
-        let e = parse_src("f() { left(1), left(2); 1: mark; 2: mark; }").unwrap_err();
+        let e = parse("f() { left(1), left(2); 1: mark; 2: mark; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("successor")));
 
-        let e = parse_src("f() { check(1, 2), left; 1: mark; 2: mark; }").unwrap_err();
+        let e = parse("f() { check(1, 2), left; 1: mark; 2: mark; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("check")));
 
-        let e = parse_src("f() { halt, left; }").unwrap_err();
+        let e = parse("f() { halt, left; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("halt")));
 
-        let e = parse_src("f() { goto 1, left; 1: mark; }").unwrap_err();
+        let e = parse("f() { goto 1, left; 1: mark; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("goto")));
-        let e = parse_src("f() { left, goto 1; 1: mark; }").unwrap_err();
+        let e = parse("f() { left, goto 1; 1: mark; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("goto")));
     }
 
@@ -2077,25 +1849,25 @@ main() {
         // At top level a reserved-word ident is now a `TopLevelStatement`
         // (docs/pmt/language.md) — the naming check runs only once a keyword
         // has consumed the leading token (e.g. `export <reserved>()`).
-        let e = parse_src("check() { }").unwrap_err();
+        let e = parse("check() { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::TopLevelStatement(ref n) if n.contains("check"))
         );
         // `export` isn't reserved, so it slips past the top-level guard;
         // `function()` itself then sees the reserved name.
-        let e = parse_src("export check() { }").unwrap_err();
+        let e = parse("export check() { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "check" && what == "function")
         );
 
-        let e = parse_src("f() { @left(); }").unwrap_err();
+        let e = parse("f() { @left(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::BuiltinCalled(n) if n == "left"));
 
-        let e = parse_src("f() { flip; }").unwrap_err();
+        let e = parse("f() { flip; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "flip"));
 
         // A user function called without `@` is the same error (docs/pmt/language.md).
-        let e = parse_src("f() { goToEnd(); }").unwrap_err();
+        let e = parse("f() { goToEnd(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "goToEnd"));
     }
 
@@ -2104,7 +1876,7 @@ main() {
         // docs/pmt/language.md: `()` on a tape builtin, if written, must carry
         // a successor — empty parens are no longer fall-through sugar.
         for name in ["left", "right", "mark", "unmark"] {
-            let e = parse_src(&format!("f() {{ {name}(); }}")).unwrap_err();
+            let e = parse(&format!("f() {{ {name}(); }}")).unwrap_err();
             assert!(
                 matches!(e.kind, CompileErrorKind::EmptyBuiltinParens { name: ref n } if n == name),
                 "{name}(): got {:?}",
@@ -2113,40 +1885,40 @@ main() {
         }
 
         // Bare, and both successor forms, stay legal.
-        assert!(parse_src("f() { left; }").is_ok());
-        assert!(parse_src("f() { left(5); }").is_ok());
-        assert!(parse_src("f() { left(!); }").is_ok());
+        assert!(parse("f() { left; }").is_ok());
+        assert!(parse("f() { left(5); }").is_ok());
+        assert!(parse("f() { left(!); }").is_ok());
 
         // Scope limit: user calls keep mandatory-but-emptyable parens.
-        assert!(parse_src("f() { @f(); }").is_ok());
+        assert!(parse("f() { @f(); }").is_ok());
     }
 
     #[test]
     fn goto_bang_is_a_dedicated_error() {
-        let e = parse_src("f() { goto !; }").unwrap_err();
+        let e = parse("f() { goto !; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GotoReturn));
     }
 
     #[test]
     fn duplicate_and_dangling_diagnostics() {
-        let e = parse_src("f() { } f() { }").unwrap_err();
+        let e = parse("f() { } f() { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
         );
 
-        let e = parse_src("f() { 1: left; 1: right; }").unwrap_err();
+        let e = parse("f() { 1: left; 1: right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DuplicateLabel(1)));
 
-        let e = parse_src("f() { left; 2: }").unwrap_err();
+        let e = parse("f() { left; 2: }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DanglingLabel(2)));
     }
 
     #[test]
     fn empty_function_and_stacked_labels() {
-        let p = parse_src("f() { }").unwrap();
+        let p = parse("f() { }").unwrap();
         assert!(p.functions[0].body.is_empty());
 
-        let p = parse_src("f() { 1: 2: left; }").unwrap();
+        let p = parse("f() { 1: 2: left; }").unwrap();
         assert_eq!(
             p.functions[0].body[0]
                 .labels
@@ -2159,7 +1931,7 @@ main() {
 
     #[test]
     fn unicode_function_names_and_calls() {
-        let p = parse_src("идиВКонец() { right(!); } main() { @идиВКонец(); }").unwrap();
+        let p = parse("идиВКонец() { right(!); } main() { @идиВКонец(); }").unwrap();
         assert_eq!(p.functions[0].name, "идиВКонец");
         match &p.functions[1].body[0].items[0] {
             Item::Call { name, .. } => assert_eq!(name, "идиВКонец"),
@@ -2169,17 +1941,17 @@ main() {
 
     #[test]
     fn export_is_contextual_and_main_auto_exports() {
-        let p = parse_src("export api() { left; } helper() { right; } main() { mark; }").unwrap();
+        let p = parse("export api() { left; } helper() { right; } main() { mark; }").unwrap();
         assert!(p.functions[0].exported);
         assert!(!p.functions[1].exported);
         assert!(p.functions[2].exported); // main
-        let p = parse_src("export() { left; } main() { @export(); }").unwrap();
+        let p = parse("export() { left; } main() { @export(); }").unwrap();
         assert_eq!(p.functions[0].name, "export"); // a function NAMED export
     }
 
     #[test]
     fn nested_definitions_parse_recursively() {
-        let p = parse_src("main() { walk() { step() { right; } @step(); } @walk(); }").unwrap();
+        let p = parse("main() { walk() { step() { right; } @step(); } @walk(); }").unwrap();
         let main = &p.functions[0];
         assert_eq!(main.nested.len(), 1);
         assert_eq!(main.nested[0].name, "walk");
@@ -2188,9 +1960,8 @@ main() {
 
     #[test]
     fn namespace_blocks_stamp_paths_and_nest() {
-        let p =
-            parse_src("namespace a { f() { left; } namespace b { g() { right; } } } h() { mark; }")
-                .unwrap();
+        let p = parse("namespace a { f() { left; } namespace b { g() { right; } } } h() { mark; }")
+            .unwrap();
         let tagged: Vec<(&str, Vec<&str>)> = p
             .functions
             .iter()
@@ -2201,13 +1972,13 @@ main() {
             vec![("f", vec!["a"]), ("g", vec!["a", "b"]), ("h", vec![])]
         );
         // `namespace` + `(` stays a function NAMED namespace.
-        let p = parse_src("namespace() { left; } main() { @namespace(); }").unwrap();
+        let p = parse("namespace() { left; } main() { @namespace(); }").unwrap();
         assert_eq!(p.functions[0].name, "namespace");
     }
 
     #[test]
     fn import_paths_aliases_and_scopes_parse() {
-        let p = parse_src("use a, std::b as c; namespace ns { use d::e; }").unwrap();
+        let p = parse("use a, std::b as c; namespace ns { use d::e; }").unwrap();
         assert_eq!(p.imports.len(), 3);
         assert_eq!(p.imports[0].path, vec!["a"]);
         assert_eq!(p.imports[0].alias, None);
@@ -2223,52 +1994,51 @@ main() {
 
     #[test]
     fn qualified_calls_parse_to_joined_names() {
-        let p = parse_src("main() { @std::api::run(); }").unwrap();
+        let p = parse("main() { @std::api::run(); }").unwrap();
         match &p.functions[0].body[0].items[0] {
             Item::Call { name, .. } => assert_eq!(name, "std::api::run"),
             other => panic!("unexpected {other:?}"),
         }
-        let e = parse_src("main() { @std::(); }").unwrap_err();
+        let e = parse("main() { @std::(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::Expected { what, .. } if what.contains("::")));
     }
 
     #[test]
     fn namespace_name_pool_and_reopening_rules() {
         // Reopening the same namespace is legal (scopes merge by path).
-        assert!(parse_src("namespace a { f() { left; } } namespace a { g() { right; } }").is_ok());
+        assert!(parse("namespace a { f() { left; } } namespace a { g() { right; } }").is_ok());
         // Same (path, name) across reopened blocks is a duplicate.
-        let e =
-            parse_src("namespace a { f() { left; } } namespace a { f() { right; } }").unwrap_err();
+        let e = parse("namespace a { f() { left; } } namespace a { f() { right; } }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
         );
         // The same bare name in different namespaces is legal.
-        assert!(parse_src("namespace a { f() { left; } } namespace b { f() { right; } }").is_ok());
+        assert!(parse("namespace a { f() { left; } } namespace b { f() { right; } }").is_ok());
         // Namespace and function names share one pool per scope.
-        let e = parse_src("namespace a { } a() { left; }").unwrap_err();
+        let e = parse("namespace a { } a() { left; }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "a" && what == "namespace")
         );
-        let e = parse_src("a() { left; } namespace a { }").unwrap_err();
+        let e = parse("a() { left; } namespace a { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "a" && what == "function")
         );
         // An unclosed block is an error, not silent Eof acceptance.
-        let e = parse_src("namespace a { f() { left; }").unwrap_err();
+        let e = parse("namespace a { f() { left; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::Expected { .. }));
     }
 
     #[test]
     fn use_stays_illegal_inside_function_bodies() {
-        let e = parse_src("main() { use go; }").unwrap_err();
+        let e = parse("main() { use go; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::KeywordInBody(kw) if kw == "use"));
     }
 
     #[test]
     fn nested_export_and_same_scope_duplicates_error() {
-        let e = parse_src("main() { export inner() { left; } }").unwrap_err();
+        let e = parse("main() { export inner() { left; } }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::NestedExport));
-        let e = parse_src("main() { f() { left; } f() { right; } }").unwrap_err();
+        let e = parse("main() { f() { left; } f() { right; } }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
         );
@@ -2276,7 +2046,7 @@ main() {
 
     #[test]
     fn spans_are_retained_for_labels_names_and_items() {
-        let p = parse_src("f() {\n  5 : right(7);\n7:  left;\n}").unwrap();
+        let p = parse("f() {\n  5 : right(7);\n7:  left;\n}").unwrap();
         let f = &p.functions[0];
         assert_eq!(
             (f.name_span.start.col, f.name_span.end.col),
@@ -2299,7 +2069,7 @@ main() {
 
     #[test]
     fn call_and_check_spans() {
-        let p = parse_src("f() { @a::b(); check(1, !); 1: left; }").unwrap();
+        let p = parse("f() { @a::b(); check(1, !); 1: left; }").unwrap();
         let f = &p.functions[0];
         let Item::Call {
             name,
@@ -2324,7 +2094,7 @@ main() {
     /// `f() { 1: right(2); check(1, !); goto 1; left, mark(3); }`.
     #[test]
     fn reference_spans_on_goto_check_and_builtin_successors() {
-        let p = parse_src("f() { 1: right(2); check(1, !); goto 1; left, mark(3); }").unwrap();
+        let p = parse("f() { 1: right(2); check(1, !); goto 1; left, mark(3); }").unwrap();
         let f = &p.functions[0];
 
         // `1: right(2);` — the successor's number token alone, inside the
@@ -2377,7 +2147,7 @@ main() {
     #[test]
     fn succ_label_span_is_none_without_a_label_successor() {
         // Bare, no parens at all.
-        let p = parse_src("f() { right; }").unwrap();
+        let p = parse("f() { right; }").unwrap();
         let Item::Builtin {
             succ_label_span, ..
         } = &p.functions[0].body[0].items[0]
@@ -2387,7 +2157,7 @@ main() {
         assert!(succ_label_span.is_none());
 
         // Parenthesised but a `!` (return) successor, not a label.
-        let p = parse_src("f() { right(!); }").unwrap();
+        let p = parse("f() { right(!); }").unwrap();
         let Item::Builtin {
             succ_label_span, ..
         } = &p.functions[0].body[0].items[0]
@@ -2399,7 +2169,7 @@ main() {
 
     #[test]
     fn call_succ_label_span_covers_the_number() {
-        let p = parse_src("main() { @g(7); }").unwrap();
+        let p = parse("main() { @g(7); }").unwrap();
         let Item::Call {
             succ_label_span, ..
         } = &p.functions[0].body[0].items[0]
@@ -2412,84 +2182,96 @@ main() {
         );
     }
 
+    /// A green FUNCTION/NAMESPACE node's own `text_range()`, converted
+    /// to a `line`/`col` `Span` via `TextLineIndex`. With no bound doc
+    /// run this opens at the declaration's first significant token:
+    /// `top_items`'s green checkpoint (`fn_cp`) is taken before
+    /// `volatile`/`export`/the name token (docs/core.md (syntax
+    /// trees)). A bound doc run retro-wraps in front of that, which is
+    /// why the LSP trims the extent back down (`lsp::function_extent`).
+    fn extent(src: &str) -> Span {
+        use mtc_core::syntax::{AstNode, TextLineIndex};
+
+        let index = TextLineIndex::new(src);
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let file = syntax::FileView::cast(root).expect("root is FILE");
+        match file.items().next().expect("one top-level item") {
+            syntax::TopView::Function(f) => index.span(f.syntax().text_range()),
+            syntax::TopView::Namespace(ns) => index.span(ns.syntax().text_range()),
+            syntax::TopView::Use(_) => panic!("expected a function or namespace item"),
+        }
+    }
+
     #[test]
     fn function_and_namespace_extent_spans() {
-        use crate::cst::TopKind;
-
         // Two-line function: name token start → closing `}` end.
-        let tokens = lex("f() {\n    left;\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(f.span, Span::new(1, 1, 3, 2));
+        assert_eq!(extent("f() {\n    left;\n}\n"), Span::new(1, 1, 3, 2));
 
         // Namespace block: `namespace` keyword start → closing `}` end.
-        let tokens = lex("namespace ns {\n    f() { left; }\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Namespace(ns) = &cst.items[0].kind else {
-            panic!("expected a namespace item");
-        };
-        assert_eq!(ns.span, Span::new(1, 1, 3, 2));
+        assert_eq!(
+            extent("namespace ns {\n    f() { left; }\n}\n"),
+            Span::new(1, 1, 3, 2)
+        );
 
-        // A leading `export` is consumed by `top_items` before
-        // `function()` ever sees it, but its span start is threaded
-        // through so `FunctionCst::span` still starts at `export` — the
-        // header's true first token (`f.name_span`/`.line`/`.col` stay
-        // name-token-anchored; only the extent `span` reaches back).
-        // Pinned explicitly since it's the one place the doc comment's
-        // "header first token" reading is load-bearing.
-        let tokens = lex("export f() {\n    left;\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "export", not "f"
+        // A leading `export` is consumed before the green FUNCTION node's
+        // own checkpoint, but the checkpoint is taken ahead of it, so the
+        // node's extent still starts at `export` — the header's true
+        // first token (the name token's own line/col stay name-anchored;
+        // only the extent reaches back). Pinned explicitly since it's the
+        // one place the "header first token" reading is load-bearing.
+        assert_eq!(
+            extent("export f() {\n    left;\n}\n"),
+            Span::new(1, 1, 3, 2) // starts at "export", not "f"
+        );
         // The bare (non-exported) case above ("Two-line function") already
         // pins the name-token-anchored start for the un-exported path —
         // together the two assertions in this test cover both cases.
     }
 
-    /// The CST-level counterpart to the `volatile`/`export` parser tests
-    /// below: `FunctionCst::span` starts at `volatile` (not `export`, not
-    /// the name) when a leading `volatile` was written, mirroring how
+    /// The green-tree counterpart to the `volatile`/`export` parser tests
+    /// below: a FUNCTION node's extent starts at `volatile` (not `export`,
+    /// not the name) when a leading `volatile` was written, mirroring how
     /// `function_and_namespace_extent_spans` pins `export`'s own extent
-    /// start — and `has_volatile` records the token losslessly, the same
-    /// way `has_export` does, for the formatter to read.
+    /// start — and `FnHeader::has_volatile` records the token losslessly,
+    /// the same way `has_export` does, for the formatter to read.
     #[test]
-    fn volatile_extent_and_has_volatile_are_recorded_on_the_cst() {
-        use crate::cst::TopKind;
+    fn volatile_starts_the_function_extent_and_is_recorded_on_the_header() {
+        use mtc_core::syntax::AstNode;
 
-        let tokens = lex("volatile main() {\n    mark;\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
+        let src = "volatile main() {\n    mark;\n}\n";
+        assert_eq!(extent(src), Span::new(1, 1, 3, 2)); // starts at "volatile", not "main"
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let file = syntax::FileView::cast(root).expect("root is FILE");
+        let syntax::TopView::Function(f) = file.items().next().expect("one item") else {
             panic!("expected a function item");
         };
-        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "volatile", not "main"
-        assert!(f.has_volatile);
-        assert!(!f.has_export);
+        let header = f.header();
+        assert!(header.has_volatile);
+        assert!(!header.has_export);
 
         // Fixed order: `volatile` still wins the extent start over
         // `export` when both are written.
-        let tokens = lex("volatile export main() {\n    mark;\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
+        let src = "volatile export main() {\n    mark;\n}\n";
+        assert_eq!(extent(src), Span::new(1, 1, 3, 2)); // starts at "volatile", not "export"
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let file = syntax::FileView::cast(root).expect("root is FILE");
+        let syntax::TopView::Function(f) = file.items().next().expect("one item") else {
             panic!("expected a function item");
         };
-        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "volatile", not "export"
-        assert!(f.has_volatile);
-        assert!(f.has_export);
+        let header = f.header();
+        assert!(header.has_volatile);
+        assert!(header.has_export);
     }
 
     #[test]
     fn import_spans_exclude_the_alias() {
-        let p = parse_src("use std::go as g;\nmain() { @g(); }").unwrap();
+        let p = parse("use std::go as g;\nmain() { @g(); }").unwrap();
         let imp = &p.imports[0];
         assert_eq!((imp.span.start.col, imp.span.end.col), (5, 12)); // "std::go"
     }
 
     fn err_msg(src: &str) -> String {
-        parse_src(src).unwrap_err().to_string()
+        parse(src).unwrap_err().to_string()
     }
 
     #[test]
@@ -2556,9 +2338,9 @@ main() {
 
     #[test]
     fn spaced_label_colons_and_paths_stay_legal() {
-        assert!(parse_src("main() { 1 : right; }").is_ok());
-        assert!(parse_src("main() { 1: 2: right; }").is_ok());
-        assert!(parse_src("use std :: goToEnd;\nmain() { @goToEnd(); }").is_ok());
+        assert!(parse("main() { 1 : right; }").is_ok());
+        assert!(parse("main() { 1: 2: right; }").is_ok());
+        assert!(parse("use std :: goToEnd;\nmain() { @goToEnd(); }").is_ok());
     }
 
     #[test]
@@ -2567,54 +2349,66 @@ main() {
         assert!(m.contains("`mark`"), "got: {m}");
         assert!(m.contains("successor"), "got: {m}");
         // Calls are unaffected: `@f()` stays legal, no error at all.
-        assert!(parse_src("f() { } main() { @f(); }").is_ok());
+        assert!(parse("f() { } main() { @f(); }").is_ok());
     }
 
     // -- Doc/attention runs (docs/pmt/language.md (doc lines)) ----------------
     //
     // Grammar-fixed run order (`?` block, then `!` block), attachment to
-    // the next `FunctionCst` at the run's own scope, and the two
-    // attention-line attribute checks. `lower_cst` still ignores
-    // `doc_run` entirely in this task (Task 3's job) — these tests read
-    // `parse_cst`'s `Cst` directly.
+    // the next declaration at the run's own scope, and the two
+    // attention-line attribute checks.
+
+    /// Retokenizes `src`'s `?`/`!` lines the way `syntax::extract::sig_tokens`
+    /// feeds a bound `DOC_RUN` into [`reparse_doc_items`] — every other
+    /// token (comments included) stripped, a synthetic `Eof` appended.
+    /// Comment mode makes no difference to `DocLine`/`AttentionLine`
+    /// tokens (only `TokenKind::Comment` is mode-gated), so plain `lex`
+    /// already strips `//`/`/* */` trivia the same `reparse_doc_items`
+    /// precondition requires — matching why its own doc calls an
+    /// interleaved comment "dropped, not reproduced" by this route.
+    fn doc_run_items(src: &str) -> Vec<DocRunItem> {
+        let mut tokens: Vec<Token> = lex(src)
+            .unwrap()
+            .into_iter()
+            .filter(|t| matches!(t.kind, TokenKind::DocLine(_) | TokenKind::AttentionLine(_)))
+            .collect();
+        tokens.push(Token {
+            kind: TokenKind::Eof,
+            line: 0,
+            col: 0,
+            len: 0,
+        });
+        reparse_doc_items(&tokens)
+    }
 
     #[test]
     fn doc_run_collects_a_docs_only_run() {
-        let tokens = lex("? line one\n? line two\nmain() { right; }").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert!(!cst.items[0].blank_before);
-        assert_eq!(f.doc_run.len(), 2);
-        let DocRunKind::Doc { text, .. } = &f.doc_run[0].kind else {
+        let doc_run = doc_run_items("? line one\n? line two\nmain() { right; }");
+        assert_eq!(doc_run.len(), 2);
+        let DocRunKind::Doc { text, .. } = &doc_run[0].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, "line one");
-        assert!(!f.doc_run[0].blank_before);
-        let DocRunKind::Doc { text, .. } = &f.doc_run[1].kind else {
+        assert!(!doc_run[0].blank_before);
+        let DocRunKind::Doc { text, .. } = &doc_run[1].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, "line two");
-        assert!(!f.doc_run[1].blank_before);
+        assert!(!doc_run[1].blank_before);
     }
 
     #[test]
     fn doc_run_collects_an_attention_only_run() {
-        let tokens =
-            lex("! bare prose line\n! [deprecated] use goToStart instead\nmain() { right; }")
-                .unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(f.doc_run.len(), 2);
-        let DocRunKind::Attention { attr, text, .. } = &f.doc_run[0].kind else {
+        let doc_run = doc_run_items(
+            "! bare prose line\n! [deprecated] use goToStart instead\nmain() { right; }",
+        );
+        assert_eq!(doc_run.len(), 2);
+        let DocRunKind::Attention { attr, text, .. } = &doc_run[0].kind else {
             panic!("expected an attention line");
         };
         assert!(attr.is_none());
         assert_eq!(text, "bare prose line");
-        let DocRunKind::Attention { attr, text, .. } = &f.doc_run[1].kind else {
+        let DocRunKind::Attention { attr, text, .. } = &doc_run[1].kind else {
             panic!("expected an attention line");
         };
         assert_eq!(attr.as_ref().expect("has an attribute").name, "deprecated");
@@ -2623,48 +2417,50 @@ main() {
 
     #[test]
     fn doc_run_collects_docs_then_attention_in_order() {
-        let tokens = lex("? doc line\n! [deprecated] msg\nexport helper() { right; }").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert!(f.exported, "export threads through unaffected by the run");
-        assert_eq!(f.doc_run.len(), 2);
-        assert!(matches!(f.doc_run[0].kind, DocRunKind::Doc { .. }));
-        assert!(matches!(f.doc_run[1].kind, DocRunKind::Attention { .. }));
+        let doc_run = doc_run_items("? doc line\n! [deprecated] msg\nexport helper() { right; }");
+        assert_eq!(doc_run.len(), 2);
+        assert!(matches!(doc_run[0].kind, DocRunKind::Doc { .. }));
+        assert!(matches!(doc_run[1].kind, DocRunKind::Attention { .. }));
     }
 
     #[test]
     fn doc_run_binds_to_a_nested_function_at_its_own_indent() {
         // Indentation before both the sigil and the nested function's
         // name — the run still lexes/attaches correctly (design doc:
-        // "runs sit at the bound declaration's own indent").
-        let tokens =
-            lex("main() {\n    ? step one\n    step() { right; }\n    @step();\n}").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(main) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert!(
-            main.doc_run.is_empty(),
-            "the run binds to `step`, not `main`"
-        );
-        let BodyKind::Nested(step) = &main.body[0].kind else {
-            panic!("expected the nested function first");
-        };
+        // "runs sit at the bound declaration's own indent"). Read through
+        // `parse` (the binding decision itself is the parser's, not
+        // `reparse_doc_items`'s — that helper only reduces an already-
+        // bound run's own items).
+        let prog =
+            parse("main() {\n    ? step one\n    step() { right; }\n    @step();\n}").unwrap();
+        let main = &prog.functions[0];
+        assert!(main.doc.is_none(), "the run binds to `step`, not `main`");
+        let step = &main.nested[0];
         assert_eq!(step.name, "step");
-        assert_eq!(step.doc_run.len(), 1);
-        let DocRunKind::Doc { text, .. } = &step.doc_run[0].kind else {
-            panic!("expected a doc line");
-        };
-        assert_eq!(text, "step one");
-        assert!(matches!(main.body[1].kind, BodyKind::Statement(_)));
+        let doc = step.doc.as_ref().expect("documented");
+        assert_eq!(doc.paragraphs, vec!["step one"]);
     }
 
+    /// `reparse_doc_items`'s `blank_before` is computed purely from the
+    /// line-number GAP between the doc run's own SURVIVING tokens
+    /// (`DocLine`/`AttentionLine` — comments are stripped before this
+    /// ever runs, per `reparse_doc_items`'s own doc: "dropped, not
+    /// reproduced"). Originally named as though it distinguished "a real
+    /// blank line" from "a comment sitting in the gap"; renamed after
+    /// measuring that it CANNOT — a probe fixture with a comment-only
+    /// gap and no literal blank line (`"? first\n// mid comment\n?
+    /// second\n..."`) read `blank_before: true` on the second `Doc`
+    /// line, identically to the real-blank case below, because both
+    /// leave the same >1 line-number gap between the two surviving
+    /// `DocLine` tokens once the comment is stripped out. Matches
+    /// `reparse_doc_items`'s own doc ("cosmetic fidelity, not
+    /// load-bearing" — nothing downstream reads `blank_before` off a
+    /// reduced `FnDoc`). Comment inertness in the REDUCED `FnDoc` —
+    /// a comment contributing nothing and never splitting a paragraph —
+    /// is pinned separately, directly against `reduce_doc_run`, by
+    /// `fn_doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph`.
     #[test]
-    fn doc_run_tolerates_blanks_and_comments_within_and_after() {
-        use crate::lexer::{LexMode, lex_with};
-
+    fn doc_run_items_blank_before_tracks_a_token_line_gap_not_a_real_blank_line() {
         let src = "\
 ? first
 // mid comment
@@ -2674,71 +2470,63 @@ main() {
 // trailing comment before fn
 main() { right; }
 ";
-        let tokens = lex_with(src, LexMode::WithComments).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(f.doc_run.len(), 4);
-        let DocRunKind::Doc { text, .. } = &f.doc_run[0].kind else {
+        let doc_run = doc_run_items(src);
+        assert_eq!(doc_run.len(), 2);
+        let DocRunKind::Doc { text, .. } = &doc_run[0].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, "first");
-        assert!(!f.doc_run[0].blank_before);
-        let DocRunKind::Comment(c) = &f.doc_run[1].kind else {
-            panic!("expected the mid-run comment");
-        };
-        assert_eq!(c.text, "// mid comment");
-        assert!(!f.doc_run[1].blank_before);
-        let DocRunKind::Doc { text, .. } = &f.doc_run[2].kind else {
+        assert!(!doc_run[0].blank_before);
+        let DocRunKind::Doc { text, .. } = &doc_run[1].kind else {
             panic!("expected the second doc line");
         };
         assert_eq!(text, "second");
-        assert!(f.doc_run[2].blank_before, "a blank line precedes it");
-        let DocRunKind::Comment(c) = &f.doc_run[3].kind else {
-            panic!("expected the trailing comment");
-        };
-        assert_eq!(c.text, "// trailing comment before fn");
-        assert!(f.doc_run[3].blank_before, "a blank line precedes it");
-        // No blank between the run's last line and the bound function.
-        assert!(!cst.items[0].blank_before);
+        assert!(doc_run[1].blank_before, "a blank line precedes it");
+
+        // Same shape, but the gap is a lone comment with NO literal
+        // blank line — reads `true` too, the same as the real-blank
+        // case above: the mechanism cannot tell them apart.
+        let src_no_blank = "? first\n// mid comment\n? second\nmain() { right; }\n";
+        let doc_run = doc_run_items(src_no_blank);
+        assert_eq!(doc_run.len(), 2);
+        assert!(
+            doc_run[1].blank_before,
+            "a comment-only gap reads as blank too, with no literal blank line present"
+        );
     }
 
     #[test]
     fn doc_run_before_a_nested_function_amid_sibling_statements() {
-        let tokens = lex(
+        // Read through `parse`, same reasoning as
+        // `doc_run_binds_to_a_nested_function_at_its_own_indent`: the AST
+        // hoists `helper` out of body order, so `main.body` holds the
+        // THREE statements (`left; @helper(); left;`) and `main.nested`
+        // the one documented nested function, separately.
+        let prog = parse(
             "main() {\n    left;\n    ? helper doc\n    helper() { right; }\n    @helper();\n    left;\n}",
         )
         .unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(main) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(main.body.len(), 4);
-        assert!(matches!(main.body[0].kind, BodyKind::Statement(_)));
-        let BodyKind::Nested(helper) = &main.body[1].kind else {
-            panic!("expected the nested function");
-        };
+        let main = &prog.functions[0];
+        assert_eq!(main.body.len(), 3);
+        assert_eq!(main.nested.len(), 1);
+        let helper = &main.nested[0];
         assert_eq!(helper.name, "helper");
-        assert_eq!(helper.doc_run.len(), 1);
-        assert!(matches!(main.body[2].kind, BodyKind::Statement(_)));
-        assert!(matches!(main.body[3].kind, BodyKind::Statement(_)));
+        let doc = helper.doc.as_ref().expect("documented");
+        assert_eq!(doc.paragraphs, vec!["helper doc"]);
     }
 
-    /// The C1 parity guard (`parse == lower_cst ∘ parse_cst`) exercised on
-    /// an actual documented program, not just argued from `parse`'s own
-    /// definition. Task 3 lands the `doc_run` → `FnDoc` reduction, so a
-    /// documented function no longer lowers to the exact same `Program`
-    /// as its undocumented twin — `doc` is now the one field that
-    /// differs. Isolates the comparison to "does the reduction leak
-    /// anything ELSE into the rest of the AST": strip `doc` back off the
-    /// documented function and the two programs must match exactly (the
-    /// twin is padded with blank lines so `main`'s own line/col line up
-    /// too).
+    /// The `doc_run` → `FnDoc` reduction is the ONLY thing a doc run
+    /// changes about the lowered `Program`. Both sides here run `parse`,
+    /// so this is not a claim about which recipe `parse` uses; it
+    /// isolates one question — "does the reduction leak anything ELSE
+    /// into the rest of the AST?" — by stripping `doc` back off the
+    /// documented function and requiring the two programs to match
+    /// exactly (the twin is padded with blank lines so `main`'s own
+    /// line/col line up too).
     #[test]
     fn documented_function_lowers_to_its_undocumented_twin_plus_a_doc() {
-        let doc = parse_src("? doc\n! [deprecated] msg\nmain() { right; }").unwrap();
-        let bare = parse_src("\n\nmain() { right; }").unwrap();
+        let doc = parse("? doc\n! [deprecated] msg\nmain() { right; }").unwrap();
+        let bare = parse("\n\nmain() { right; }").unwrap();
         assert_eq!(bare.functions[0].doc, None);
         assert_eq!(
             doc.functions[0].doc,
@@ -2756,25 +2544,26 @@ main() { right; }
     #[test]
     fn doc_run_round_trips_and_keeps_text_verbatim() {
         // Pins the WARM-UP lexer contract (minus-ONE-space rule) at the
-        // CST layer too, plus verbatim internal spacing in an attention
-        // line's full payload — no extra normalization happens here.
+        // doc-run-item layer too, plus verbatim internal spacing in an
+        // attention line's full payload — no extra normalization happens
+        // here.
         let src = "?text\n?  text\n! [deprecated] msg with  double  spaces\nmain() { right; }";
-        let tokens = lex(src).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        assert_eq!(cst.clone(), cst, "lossless round-trip: clone() == self");
+        let doc_run = doc_run_items(src);
+        assert_eq!(
+            doc_run.clone(),
+            doc_run,
+            "lossless round-trip: clone() == self"
+        );
 
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        let DocRunKind::Doc { text, .. } = &f.doc_run[0].kind else {
+        let DocRunKind::Doc { text, .. } = &doc_run[0].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, "text");
-        let DocRunKind::Doc { text, .. } = &f.doc_run[1].kind else {
+        let DocRunKind::Doc { text, .. } = &doc_run[1].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, " text"); // one space consumed, one remains
-        let DocRunKind::Attention { attr, text, .. } = &f.doc_run[2].kind else {
+        let DocRunKind::Attention { attr, text, .. } = &doc_run[2].kind else {
             panic!("expected an attention line");
         };
         assert_eq!(attr.as_ref().expect("has an attribute").name, "deprecated");
@@ -2783,12 +2572,12 @@ main() { right; }
 
     #[test]
     fn doc_line_order_rejects_interleave_and_wrong_order() {
-        let e = parse_src("? doc\n! attn\n? doc2\nmain() { right; }").unwrap_err();
+        let e = parse("? doc\n! attn\n? doc2\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DocLineOrder));
         assert_eq!(e.kind.code(), "doc-line-order");
         assert_eq!((e.span.start.line, e.span.start.col), (3, 1));
 
-        let e = parse_src("! attn only\n? doc after\nmain() { right; }").unwrap_err();
+        let e = parse("! attn only\n? doc after\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DocLineOrder));
         assert_eq!(e.kind.code(), "doc-line-order");
         assert_eq!((e.span.start.line, e.span.start.col), (2, 1));
@@ -2805,7 +2594,7 @@ main() { right; }
             "? orphan doc\n",
         ];
         for src in top_level {
-            let e = parse_src(src).unwrap_err();
+            let e = parse(src).unwrap_err();
             assert!(
                 matches!(e.kind, CompileErrorKind::DanglingDocRun),
                 "{src:?} got {:?}",
@@ -2820,7 +2609,7 @@ main() { right; }
             ("main() {\nright;\n? orphan\n}", 3), // dangling before the close brace
         ];
         for (src, want_line) in in_body {
-            let e = parse_src(src).unwrap_err();
+            let e = parse(src).unwrap_err();
             assert!(
                 matches!(e.kind, CompileErrorKind::DanglingDocRun),
                 "{src:?} got {:?}",
@@ -2837,7 +2626,7 @@ main() { right; }
 
     #[test]
     fn unknown_attribute_is_rejected_with_the_attr_span() {
-        let e = parse_src("! [depercated] old api\nmain() { right; }").unwrap_err();
+        let e = parse("! [depercated] old api\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownAttribute(ref n) if n == "depercated"));
         assert_eq!(e.kind.code(), "unknown-attribute");
         assert_eq!((e.span.start.line, e.span.start.col), (1, 4));
@@ -2851,7 +2640,7 @@ main() { right; }
     /// `[xx]`'s position depends on what follows it.
     #[test]
     fn unknown_attribute_span_is_char_counted_past_a_non_ascii_payload() {
-        let e = parse_src("! [xx] café\nmain() { right; }").unwrap_err();
+        let e = parse("! [xx] café\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownAttribute(ref n) if n == "xx"));
         assert_eq!(e.kind.code(), "unknown-attribute");
         assert_eq!(
@@ -2867,8 +2656,8 @@ main() { right; }
 
     #[test]
     fn duplicate_deprecated_attribute_is_rejected_at_the_second_occurrence() {
-        let e = parse_src("! [deprecated] first\n! [deprecated] second\nmain() { right; }")
-            .unwrap_err();
+        let e =
+            parse("! [deprecated] first\n! [deprecated] second\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DuplicateAttribute));
         assert_eq!(e.kind.code(), "duplicate-attribute");
         assert_eq!((e.span.start.line, e.span.start.col), (2, 4));
@@ -2881,8 +2670,7 @@ main() { right; }
 
     #[test]
     fn fn_doc_paragraphs_join_with_a_single_space_and_split_on_an_empty_doc_line() {
-        let prog =
-            parse_src("? line one\n? line two\n?\n? second para\nmain() { right; }").unwrap();
+        let prog = parse("? line one\n? line two\n?\n? second para\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.paragraphs, vec!["line one line two", "second para"]);
         assert!(doc.attention.is_empty());
@@ -2891,7 +2679,7 @@ main() { right; }
 
     #[test]
     fn fn_doc_leading_and_trailing_empty_doc_lines_produce_no_empty_paragraphs() {
-        let prog = parse_src("?\n?\n? doc\n?\n?\nmain() { right; }").unwrap();
+        let prog = parse("?\n?\n? doc\n?\n?\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.paragraphs, vec!["doc"]);
     }
@@ -2906,7 +2694,7 @@ main() { right; }
         // paragraphs, no attention, no deprecation) rather than an
         // `attention: [""]` entry that would otherwise render as a
         // note-only hover popup with nothing in it.
-        let prog = parse_src("?\n!\nmain() { right; }").unwrap();
+        let prog = parse("?\n!\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("run is non-empty");
         assert!(doc.paragraphs.is_empty());
         assert!(doc.attention.is_empty());
@@ -2915,7 +2703,7 @@ main() { right; }
 
     #[test]
     fn fn_doc_attention_prose_is_captured_verbatim_in_order() {
-        let prog = parse_src("! first note\n! second note\nmain() { right; }").unwrap();
+        let prog = parse("! first note\n! second note\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert!(doc.paragraphs.is_empty());
         assert_eq!(doc.attention, vec!["first note", "second note"]);
@@ -2928,17 +2716,14 @@ main() { right; }
     // whole line is bare prose that lands verbatim in `attention`.
     #[test]
     fn fn_doc_attention_bracket_mid_prose_has_no_attr_and_lands_verbatim() {
-        let tokens = lex("! see [deprecated] docs\nmain() { right; }").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        let DocRunKind::Attention { attr, .. } = &f.doc_run[0].kind else {
+        let src = "! see [deprecated] docs\nmain() { right; }";
+        let doc_run = doc_run_items(src);
+        let DocRunKind::Attention { attr, .. } = &doc_run[0].kind else {
             panic!("expected an attention line");
         };
         assert!(attr.is_none(), "bracket mid-prose is not an attribute");
 
-        let prog = lower_cst(&cst);
+        let prog = parse(src).unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.attention, vec!["see [deprecated] docs"]);
         assert_eq!(doc.deprecated, None);
@@ -2946,12 +2731,12 @@ main() { right; }
 
     #[test]
     fn fn_doc_deprecated_message_captured_with_and_without_a_message() {
-        let prog = parse_src("! [deprecated] use goToStart instead\nmain() { right; }").unwrap();
+        let prog = parse("! [deprecated] use goToStart instead\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.deprecated, Some("use goToStart instead".to_string()));
         assert!(doc.attention.is_empty());
 
-        let prog = parse_src("! [deprecated]\nmain() { right; }").unwrap();
+        let prog = parse("! [deprecated]\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.deprecated, Some(String::new()));
     }
@@ -2959,28 +2744,66 @@ main() { right; }
     #[test]
     fn fn_doc_deprecated_line_is_excluded_from_attention_while_bare_prose_survives() {
         let prog =
-            parse_src("! note one\n! [deprecated] use bar instead\n! note two\nmain() { right; }")
+            parse("! note one\n! [deprecated] use bar instead\n! note two\nmain() { right; }")
                 .unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.attention, vec!["note one", "note two"]);
         assert_eq!(doc.deprecated, Some("use bar instead".to_string()));
     }
 
+    /// Builds the `Vec<DocRunItem>` by hand — `parse(src)` cannot pin
+    /// this: the production path into `reduce_doc_run` is
+    /// `extract_function`'s `reduce_doc_run(&reparse_doc_items(&tokens))`
+    /// (`crate::syntax::extract`), where `tokens` comes from
+    /// `sig_tokens`, which strips comment tokens unconditionally — by the
+    /// time `reduce_doc_run` runs on that path, no `DocRunKind::Comment`
+    /// item has ever existed to feed it, so a `parse(src)` round trip
+    /// through a comment-bearing source proves nothing about the
+    /// `DocRunKind::Comment(_) => {}` arm below. Only a hand-built run
+    /// can exercise that arm directly.
+    ///
+    /// Proven to discriminate: changed `DocRunKind::Comment(_) => {}` to
+    /// `DocRunKind::Comment(_) => paragraphs.push("BOGUS".to_string())`
+    /// and confirmed this test — and only this one among the doc-run/
+    /// fn-doc suite — failed
+    /// (`paragraphs: ["first", "BOGUS", "second"]` vs. the expected
+    /// `["first second"]`); reverted, confirmed green again.
     #[test]
     fn fn_doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph() {
-        use crate::lexer::{LexMode, lex_with};
-        let src =
-            "? first\n// mid comment\n? second\n// trailing comment before fn\nmain() { right; }";
-        let tokens = lex_with(src, LexMode::WithComments).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let prog = lower_cst(&cst);
-        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        use crate::lexer::CommentKind;
+
+        let dummy_span = Span::new(1, 1, 1, 1);
+        let doc_run = vec![
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Doc {
+                    text: "first".to_string(),
+                    span: dummy_span,
+                },
+            },
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Comment(Comment {
+                    text: "// mid comment".to_string(),
+                    kind: CommentKind::Line,
+                    own_line: true,
+                }),
+            },
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Doc {
+                    text: "second".to_string(),
+                    span: dummy_span,
+                },
+            },
+        ];
+        let doc = reduce_doc_run(&doc_run).expect("documented");
         assert_eq!(doc.paragraphs, vec!["first second"]);
     }
 
     #[test]
     fn undocumented_function_has_no_doc() {
-        let prog = parse_src("main() { right; }").unwrap();
+        let prog = parse("main() { right; }").unwrap();
         assert_eq!(prog.functions[0].doc, None);
     }
 
@@ -2993,7 +2816,7 @@ main() { right; }
     /// line only ever closes a paragraph, never starts one.
     #[test]
     fn fn_doc_a_run_of_only_empty_doc_lines_is_some_with_every_field_empty() {
-        let prog = parse_src("?\n?\nmain() { right; }").unwrap();
+        let prog = parse("?\n?\nmain() { right; }").unwrap();
         assert_eq!(
             prog.functions[0].doc,
             Some(FnDoc {
@@ -3011,7 +2834,7 @@ main() { right; }
     /// "b".
     #[test]
     fn fn_doc_a_double_empty_separator_still_yields_exactly_two_paragraphs() {
-        let prog = parse_src("? a\n?\n?\n? b\nmain() { right; }").unwrap();
+        let prog = parse("? a\n?\n?\n? b\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.paragraphs, vec!["a", "b"]);
     }
@@ -3022,7 +2845,7 @@ main() { right; }
     /// away just like a single one would.
     #[test]
     fn fn_doc_deprecated_message_trims_whitespace_after_the_attribute() {
-        let prog = parse_src("! [deprecated]  two spaces\nmain() { right; }").unwrap();
+        let prog = parse("! [deprecated]  two spaces\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.deprecated, Some("two spaces".to_string()));
     }
@@ -3034,14 +2857,14 @@ main() { right; }
 
     #[test]
     fn volatile_main_parses_and_sets_the_flag() {
-        let p = parse_src("volatile main() { mark; }").unwrap();
+        let p = parse("volatile main() { mark; }").unwrap();
         assert!(p.functions[0].volatile);
         assert!(p.functions[0].exported);
     }
 
     #[test]
     fn volatile_export_main_parses_with_fixed_order() {
-        let p = parse_src("volatile export main() { mark; }").unwrap();
+        let p = parse("volatile export main() { mark; }").unwrap();
         assert!(p.functions[0].volatile);
         assert!(p.functions[0].exported);
 
@@ -3050,7 +2873,7 @@ main() { right; }
         // modifier (it's followed by an identifier), leaving `function()`
         // to parse "volatile" itself as the name — which the reserved-name
         // check rejects.
-        let e = parse_src("export volatile main() { mark; }").unwrap_err();
+        let e = parse("export volatile main() { mark; }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "function"),
             "got: {:?}",
@@ -3060,7 +2883,7 @@ main() { right; }
 
     #[test]
     fn volatile_on_a_non_main_function_errors() {
-        let e = parse_src("volatile foo() { mark; }").unwrap_err();
+        let e = parse("volatile foo() { mark; }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::VolatileNotOnMain(ref name) if name == "foo"),
             "got: {:?}",
@@ -3076,7 +2899,7 @@ main() { right; }
         // A nested `main` is not top-level `main` — the flag never
         // survives nesting, so this fails the same way a nested
         // non-`main` name would.
-        let e = parse_src("main() { volatile inner() { mark; } }").unwrap_err();
+        let e = parse("main() { volatile inner() { mark; } }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::VolatileNotOnMain(ref name) if name == "inner"),
             "got: {:?}",
@@ -3086,13 +2909,13 @@ main() { right; }
 
     #[test]
     fn volatile_as_a_definition_name_is_reserved() {
-        let e = parse_src("volatile() { mark; }").unwrap_err();
+        let e = parse("volatile() { mark; }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "function"),
             "got: {:?}",
             e.kind
         );
-        let e = parse_src("namespace volatile { }").unwrap_err();
+        let e = parse("namespace volatile { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "namespace"),
             "got: {:?}",

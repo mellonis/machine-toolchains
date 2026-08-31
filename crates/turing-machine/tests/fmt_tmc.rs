@@ -1,7 +1,8 @@
 //! The `.tmc` formatter's objective guard: on every `.tmc` source in the
 //! repository — the Appendix-A examples, the nested-graft fixture, the
-//! flagship brainfuck UTM doc example, and the embedded standard library —
-//! formatting must be IDEMPOTENT and must not change a single token.
+//! worked doc examples (the flagship brainfuck UTM and the rpn family),
+//! and the embedded standard library — formatting must be IDEMPOTENT and
+//! must not change a single token.
 //!
 //! "Not a single token" is checked by re-lexing the formatted text and
 //! comparing the token stream with the original's, not by checking that the
@@ -40,14 +41,27 @@ fn corpus() -> Vec<(String, String)> {
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/stdlib/std.tmc"))
             .expect("the embedded stdlib source is readable"),
     ));
-    out.push((
-        "docs/examples/brainfuck-utm/brainfuck-utm.tmc".to_string(),
-        std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/examples/brainfuck-utm/brainfuck-utm.tmc"
-        ))
-        .expect("the flagship UTM doc example is readable"),
-    ));
+    // The worked doc examples, one directory each under docs/examples/
+    // — the guard test below set-compares this list against the real
+    // directory in both directions, so a new example lands here or
+    // fails loudly.
+    for name in [
+        "brainfuck-utm/brainfuck-utm.tmc",
+        "pow2/pow2.tmc",
+        "rpn/rpn.tmc",
+        "rpnhex/rpnhex.tmc",
+        "rpnreg/rpnreg.tmc",
+        "rpnwide/rpnwide.tmc",
+    ] {
+        out.push((
+            format!("docs/examples/{name}"),
+            std::fs::read_to_string(
+                std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/examples"))
+                    .join(name),
+            )
+            .unwrap_or_else(|e| panic!("doc example {name} is unreadable: {e}")),
+        ));
+    }
     out
 }
 
@@ -643,4 +657,153 @@ fn a_range_element_inside_a_clause_formats_canonically() {
     );
     let twice = format(&out).expect("the formatted output re-formats");
     assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// The adversarial fixtures, by name. A directory scan alone cannot guard
+/// this set: renaming a fixture off `.tmc` leaves its `.fmt` sidecar
+/// orphaned and is caught, but DELETING both files shrinks the set with
+/// every scan-based check still green — which a bare count floor (this
+/// test once demanded `seen >= 6` against eight files) allows outright.
+/// The list is the floor; the scan below compares against it in both
+/// directions.
+const ADVERSARIAL: [&str; 8] = [
+    "brace_comments",
+    "divergence_semicolon_block_comment",
+    "doc_run_interior_comment",
+    "docs_and_attention",
+    "interior_lists",
+    "quirk_bracket_space",
+    "quirk_keyword_name",
+    "trailing_and_blanks",
+];
+
+/// The adversarial sources — shapes the shipped corpus does not carry, one
+/// per derived field the pre-green CST stored. They are deliberately NOT
+/// fmt-clean (seven of the eight change under the printer), so `corpus()`,
+/// whose dogfood lock demands exactly that, must never sweep them: each
+/// carries a committed `.fmt` sidecar holding its canonical output
+/// instead.
+///
+/// The sidecars are what pins these files' bytes. They were generated from
+/// the printer that formatted them before the green-tree cutover, so the
+/// assertion here is the same one the pre-cutover differential made — that
+/// the formatter's output on these shapes has not moved — with the text
+/// itself standing in for the printer that is gone. A sidecar is never
+/// regenerated from a run whose output changed: a diff here means the
+/// formatter changed, which on a whitespace-only canonical printer is a
+/// finding, not a fixture to refresh.
+#[test]
+fn every_adversarial_source_formats_to_its_committed_sidecar() {
+    let dir = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fmt_adversarial"
+    ));
+    let mut seen: Vec<String> = std::fs::read_dir(dir)
+        .expect("the adversarial directory exists")
+        .map(|e| e.expect("a readable entry").path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("tmc"))
+        .map(|p| {
+            p.file_stem()
+                .expect("a fixture has a stem")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    seen.sort();
+    assert_eq!(
+        seen,
+        ADVERSARIAL.map(str::to_string).to_vec(),
+        "the adversarial set changed — update ADVERSARIAL deliberately"
+    );
+    for name in ADVERSARIAL {
+        let src =
+            std::fs::read_to_string(dir.join(format!("{name}.tmc"))).expect("a readable fixture");
+        let expected = std::fs::read_to_string(dir.join(format!("{name}.fmt")))
+            .unwrap_or_else(|e| panic!("{name}.fmt is missing or unreadable: {e}"));
+        let out = format(&src).unwrap_or_else(|e| panic!("{name}.tmc does not format: {e:?}"));
+        assert_eq!(out, expected, "{name}.tmc no longer formats to {name}.fmt");
+    }
+}
+
+/// The dogfood lock's REACH, pinned in both directions. `corpus()` walks
+/// `tests/golden` but names `src/stdlib/std.tmc` and the worked doc
+/// examples explicitly, so a `.tmc` dropped into the stdlib directory or
+/// into a `docs/examples/` example directory would otherwise ship with
+/// no byte pin at all — and the whole-corpus differential that used to
+/// walk those directories is gone with the C1 printer. This is the guard
+/// that replaces its enumeration: the stdlib directory holds exactly the
+/// one embedded source, and the `docs/examples/` tree (each example a
+/// directory of its own, one level deep) set-compares against the
+/// `docs/examples/` names `corpus()` carries — a file without a corpus
+/// entry and a corpus entry without a file both fail.
+#[test]
+fn the_corpus_names_every_tmc_source_outside_the_golden_directory() {
+    let stdlib_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/stdlib");
+    let mut stdlib_found: Vec<String> = std::fs::read_dir(stdlib_dir)
+        .unwrap_or_else(|e| panic!("{stdlib_dir} is unreadable: {e}"))
+        .map(|e| e.expect("a readable entry").path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("tmc"))
+        .map(|p| {
+            p.file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    stdlib_found.sort();
+    assert_eq!(
+        stdlib_found,
+        vec!["std.tmc".to_string()],
+        "{stdlib_dir} holds a .tmc source `corpus()` does not name"
+    );
+
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/examples"));
+    let mut found: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(root).expect("docs/examples is readable") {
+        let path = entry.expect("a readable entry").path();
+        let name = |p: &std::path::Path| {
+            p.file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned()
+        };
+        if path.is_dir() {
+            for sub in std::fs::read_dir(&path).expect("an example directory is readable") {
+                let sub = sub.expect("a readable entry").path();
+                if sub.extension().and_then(|x| x.to_str()) == Some("tmc") {
+                    found.push(format!("docs/examples/{}/{}", name(&path), name(&sub)));
+                }
+            }
+        } else if path.extension().and_then(|x| x.to_str()) == Some("tmc") {
+            found.push(format!("docs/examples/{}", name(&path)));
+        }
+    }
+    found.sort();
+    let mut named: Vec<String> = corpus()
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|n| n.starts_with("docs/examples/"))
+        .collect();
+    named.sort();
+    assert_eq!(
+        found, named,
+        "docs/examples and corpus() disagree about the shipped .tmc set"
+    );
+}
+
+/// `.tmc` fmt is idempotent with one exception, and this is it: a comment
+/// written between a declaration's keyword and its name relocates into the
+/// brace-delimited body (pass 1), where it re-parses as a comment on the
+/// opening brace — which forces the body multi-line (pass 2). Stable from
+/// pass 2 on. Pinned by value rather than by "settles eventually", so a
+/// printer that changed either intermediate form fails here
+/// (docs/tmt/fmt.md (idempotency)).
+#[test]
+fn a_comment_between_a_keyword_and_its_name_settles_on_the_second_pass() {
+    let pass1 = format("alphabet /* a */ ab { '_' }\n").expect("formats");
+    assert_eq!(pass1, "alphabet ab { /* a */ '_' }\n");
+    let pass2 = format(&pass1).expect("formats");
+    assert_eq!(pass2, "alphabet ab { /* a */\n  '_'\n}\n");
+    let pass3 = format(&pass2).expect("formats");
+    assert_eq!(pass3, pass2, "the settle must be stable from pass 2");
 }

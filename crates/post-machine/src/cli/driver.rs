@@ -787,10 +787,7 @@ struct SourceScan {
 }
 
 fn scan_source(text: &str) -> SourceScan {
-    let Some(program) = crate::lexer::lex(text)
-        .ok()
-        .and_then(|tokens| crate::parser::parse(&tokens).ok())
-    else {
+    let Ok(program) = crate::parser::parse(text) else {
         return SourceScan::default();
     };
     SourceScan {
@@ -1238,5 +1235,39 @@ mod tests {
         let err = build_target_for_launch(Some(&dir), "nosuch", true).unwrap_err();
         assert!(err.contains("nosuch"), "{err}");
         assert!(err.contains("app"), "{err}");
+    }
+
+    /// `scan_source`'s own reduction — the volatile flag and the
+    /// export names it derives from the `Program` — agrees with reading
+    /// those same two facts off `parser::parse` directly. A check on
+    /// the REDUCTION, not on the parse: `scan_source` calls
+    /// `parser::parse` itself, so a parse bug would show up identically
+    /// on both sides, not just here. Also confirms `scan_source` still
+    /// degrades to an empty scan on a source that does not parse.
+    #[test]
+    fn scan_source_agrees_with_the_parse_entry_point() {
+        let src = "use std::goToEnd as end;\nnamespace ns { export inner() { right; } }\nvolatile main() {\n    helper() { left; }\n    @helper();\n}\n";
+        let expected = crate::parser::parse(src).expect("parses");
+        let mut expected_exports: Vec<String> = expected
+            .functions
+            .iter()
+            .filter(|f| f.exported)
+            .map(|f| crate::compiler::full_name(&f.ns, &f.name))
+            .collect();
+        expected_exports.sort();
+        let scan = scan_source(src);
+        let mut scan_exports = scan.exports.clone();
+        scan_exports.sort();
+        assert_eq!(scan.volatile, expected.functions.iter().any(|f| f.volatile));
+        assert_eq!(scan_exports, expected_exports);
+        assert!(scan.exports.iter().any(|e| e == "main"));
+        assert!(scan.exports.iter().any(|e| e == "ns::inner"));
+    }
+
+    #[test]
+    fn scan_source_degrades_on_a_broken_source() {
+        let scan = scan_source("main() { right");
+        assert!(!scan.volatile);
+        assert!(scan.exports.is_empty());
     }
 }

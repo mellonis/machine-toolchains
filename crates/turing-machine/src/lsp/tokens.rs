@@ -1,8 +1,8 @@
 //! Semantic tokens (docs/lsp.md (semantic tokens)).
 //!
-//! Emitted from the significant token stream rather than the CST, for the
-//! same reason classification is: highlighting must not switch off the
-//! moment a brace is unbalanced. Each identifier takes its type from the
+//! Emitted from the significant token stream rather than the green tree,
+//! for the same reason classification is: highlighting must not switch off
+//! the moment a brace is unbalanced. Each identifier takes its type from the
 //! keyword or punctuation immediately around it, which is enough to
 //! separate the six legend types the service advertises without needing a
 //! parse to have succeeded.
@@ -15,12 +15,13 @@ use mtc_core::lsp::SemToken;
 
 use super::{
     DocState, MODIFIER_DECLARATION, TOKEN_TYPE_FUNCTION, TOKEN_TYPE_NAMESPACE, TOKEN_TYPE_NUMBER,
-    TOKEN_TYPE_STRING, TOKEN_TYPE_TYPE, TOKEN_TYPE_VARIABLE, significant,
+    TOKEN_TYPE_STRING, TOKEN_TYPE_TYPE, TOKEN_TYPE_VARIABLE,
 };
 use crate::lexer::{RESERVED, Token, TokenKind};
+use crate::parser::significant_tokens;
 
 pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
-    let sig = significant(state.tokens.as_ref()?);
+    let sig = significant_tokens(state.tokens.as_ref()?);
     let mut out = Vec::new();
     for (i, token) in sig.iter().enumerate() {
         let Some((token_type, modifiers)) = classify(&sig, i, token) else {

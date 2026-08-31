@@ -1,14 +1,15 @@
 //! Position classification: what is the cursor *in*? (docs/lsp.md
 //! (completions)).
 //!
-//! # Why the token stream, not the CST
+//! # Why the token stream, not the green tree
 //!
 //! A document being typed into is a document that does not parse. Anchoring
-//! classification on the CST would switch completions off exactly when they
-//! are wanted, so every judgement here is made over the current SIGNIFICANT
-//! token stream (WithComments minus comment trivia), which survives every
-//! failure except a lex error. The CST and the resolved module supply
-//! ROSTERS — names, glyphs, tape tables — never positions.
+//! classification on the green tree would switch completions off exactly
+//! when they are wanted, so every judgement here is made over the current
+//! SIGNIFICANT token stream (WithComments minus comment trivia), which
+//! survives every failure except a lex error. The resolved module (with the
+//! flat program, for numeric labels) supplies ROSTERS — names, glyphs, tape
+//! tables — never positions.
 //!
 //! # The three walks
 //!

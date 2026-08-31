@@ -93,7 +93,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
 /// table (`mtc_core::asm::lint::RULES`): a `pmt.json` shared by both
 /// languages carries one `lint.allow` list, so a `.pma`-only code must
 /// not error when validated for a `.pmc` file, and vice versa. Split out
-/// of `lint()` so the LSP (a future `PmcLanguageService`) can validate an
+/// of `lint()` so the LSP (the `PmcLanguageService`) can validate an
 /// IDE-settings or `pmt.json` allow-list up front, independently of
 /// running the rules over any particular analysis.
 pub(crate) fn validate_allow(codes: &[String]) -> Result<(), LintError> {

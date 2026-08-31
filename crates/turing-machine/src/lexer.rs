@@ -186,6 +186,32 @@ fn is_ident_continue(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// The doc/attention payload-normalization rule (docs/tmt/language.md
+/// (doc lines and attention lines)): strips ONE leading space from the
+/// raw text after the `?`/`!` sigil, if present; verbatim otherwise.
+/// Shared by this module's own [`TokenKind::DocLine`]/
+/// [`TokenKind::AttentionLine`] construction below and by green-tree
+/// retokenization (`crate::syntax::extract`), which rebuilds the same
+/// normalized payload from an already-parsed `DOC_LINE`/
+/// `ATTENTION_LINE` token's verbatim (unnormalized) source text.
+pub(crate) fn normalize_doc_payload(raw_after_sigil: &str) -> String {
+    raw_after_sigil
+        .strip_prefix(' ')
+        .unwrap_or(raw_after_sigil)
+        .to_string()
+}
+
+/// The two characters legal immediately after `\` inside a glyph
+/// literal (docs/tmt/language.md (program structure)) — each escapes to
+/// itself (`\'` -> `'`, `\\` -> `\`); any other backslash sequence is
+/// a lex error. Single source for this module's own scan below,
+/// `crate::syntax::extract::decode_glyph_body` (a second decoder over
+/// already-lexed text — see its own doc comment for why one is
+/// unavoidable), and both functions' property-test generators, so a
+/// THIRD escape added here can never leave one of the other two
+/// silently untested against it.
+pub(crate) const GLYPH_ESCAPES: [char; 2] = ['\'', '\\'];
+
 struct Cursor<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     line: u32,
@@ -225,7 +251,11 @@ fn err(line: u32, col: u32, message: String) -> CompileError {
     }
 }
 
-/// Lex with comments discarded — the compiler's path. Equivalent to
+/// Lex with comments discarded — every production caller lexes
+/// `WithComments` instead (`compiler::analyze`/`analyze_staged`,
+/// `fmt::format`), so this convenience is test-only now: parser tests
+/// that don't care about comment trivia, and the tests that compare a
+/// filtered `WithComments` stream against it. Equivalent to
 /// `lex_with(source, LexMode::WithoutComments)`.
 pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
     lex_with(source, LexMode::WithoutComments)
@@ -265,7 +295,7 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
                 cur.bump();
             }
             let len = 1 + raw.chars().count() as u32;
-            let text = raw.strip_prefix(' ').unwrap_or(&raw).to_string();
+            let text = normalize_doc_payload(&raw);
             let kind = if c == '?' {
                 TokenKind::DocLine(text)
             } else {
@@ -366,13 +396,8 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
                         cur.bump();
                         src_len += 1;
                         match cur.peek() {
-                            Some('\'') => {
-                                value.push('\'');
-                                cur.bump();
-                                src_len += 1;
-                            }
-                            Some('\\') => {
-                                value.push('\\');
+                            Some(c) if GLYPH_ESCAPES.contains(&c) => {
+                                value.push(c); // both legal escapes resolve to themselves
                                 cur.bump();
                                 src_len += 1;
                             }

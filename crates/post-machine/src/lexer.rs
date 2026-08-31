@@ -103,6 +103,21 @@ fn is_ident_continue(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// The doc/attention payload-normalization rule (docs/pmt/language.md (doc
+/// lines)): strips ONE leading space from the raw text after the `?`/`!`
+/// sigil, if present; verbatim otherwise. Shared by the lexer's own
+/// [`TokenKind::DocLine`]/[`TokenKind::AttentionLine`] construction below
+/// and by green-tree retokenization (`crate::syntax::extract`), which
+/// rebuilds the same normalized payload from an already-parsed
+/// `DOC_LINE`/`ATTENTION_LINE` token's verbatim (unnormalized) source
+/// text.
+pub(crate) fn normalize_doc_payload(raw_after_sigil: &str) -> String {
+    raw_after_sigil
+        .strip_prefix(' ')
+        .unwrap_or(raw_after_sigil)
+        .to_string()
+}
+
 struct Cursor<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     line: u32,
@@ -183,7 +198,7 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
                 cur.bump();
             }
             let len = 1 + raw.chars().count() as u32;
-            let text = raw.strip_prefix(' ').unwrap_or(&raw).to_string();
+            let text = normalize_doc_payload(&raw);
             let kind = if c == '?' {
                 TokenKind::DocLine(text)
             } else {

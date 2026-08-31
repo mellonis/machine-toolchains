@@ -21,13 +21,15 @@
 //! comments-only-file / empty-function-body edge cases. `SIMPLE` is
 //! scoped to exactly that subset.
 //!
-//! Task 8b's own contribution needed no renderer changes: `parse_cst`
-//! never hands the printer the author's original spacing (a path's
-//! segments print tight regardless of source spacing), so the
-//! spaced-form entries below normalize for free — they widen the
+//! Task 8b's own contribution needed no renderer changes: the printer's
+//! own `render_use_path` joins a path's segment texts with a hardcoded
+//! `"::"`, never consulting the source's own interior spacing around
+//! it (a path's segments print tight regardless of source spacing), so
+//! the spaced-form entries below normalize for free — they widen the
 //! corpus to PIN that, not to fix a gap. (A number's own digits are a
-//! separate matter — the CST carries those as WRITTEN, leading zeros
-//! and all; see `zero_token_changes_over_every_fixture` below.)
+//! separate matter — a `Number` token carries its digits as WRITTEN,
+//! leading zeros and all; see `zero_token_changes_over_every_fixture`
+//! below.)
 //!
 //! **`comment_fidelity` was VACUOUS through Task 6** — `SIMPLE` carried
 //! no comments, so `comment_texts(src)` was always `[]` on both sides.
@@ -515,4 +517,53 @@ fn interior_use_trailing_comment_does_not_migrate_into_the_next_use() {
     );
     let twice = format(&out).expect("the formatted output must still parse");
     assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// The corpus-wide gate for the printer: every `.pmc` file the repo
+/// ships formats, formats again to the same bytes, and comes back with
+/// an unchanged token stream — the whitespace-only contract, checked on
+/// real sources rather than generated ones. `fmt_property.rs` proves the
+/// same two properties over generated programs, but its generator
+/// deliberately emits no namespaces, imports or comments; this covers
+/// exactly those.
+///
+/// Idempotence rather than fmt-cleanliness is the property here because
+/// only five of the shipped files are committed in canonical form. The
+/// three that are load-bearing already have a stronger pin in
+/// [`dogfood_stdlib_and_goldens_are_already_fmt_clean`], which stays.
+///
+/// Unlike [`all_sources`] this walks the directories rather than an
+/// `include_str!` list, so a `.pmc` fixture added later is covered
+/// without anyone remembering to add it here.
+#[test]
+fn every_shipped_pmc_file_formats_idempotently() {
+    let mut checked = 0;
+    for dir in ["tests/golden", "tests/syntax", "tests/lint", "src/stdlib"] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("readable entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("pmc") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("readable source");
+            let once = format(&src)
+                .unwrap_or_else(|e| panic!("{} failed to format: {e:?}", path.display()));
+            let twice = format(&once)
+                .unwrap_or_else(|e| panic!("{} failed to re-format: {e:?}", path.display()));
+            assert_eq!(once, twice, "{} is not idempotent", path.display());
+            assert_eq!(
+                kinds(&src),
+                kinds(&once),
+                "{} changed tokens",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 13,
+        "expected the whole .pmc corpus, saw {checked}"
+    );
 }

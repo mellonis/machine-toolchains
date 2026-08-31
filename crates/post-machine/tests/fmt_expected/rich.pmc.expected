@@ -1,0 +1,28 @@
+// Rich-shape corpus fixture (docs/pmt/language.md): a `use` list with an
+// interior comment and an alias, a top-level `volatile main` carrying
+// its own doc+attention run, a nested function with its own `?` doc
+// run, a multi-line block comment inside a body, stacked labels on one
+// statement, and a comma group — exercised end to end by the corpus
+// walker in tests/syntax_green.rs, not pinned to a golden dump.
+use std::goToEnd,
+    // pulled in for the return leg
+    std::goToBegin as backToStart;
+
+? Drives the head to the far end of the section and back again, using
+? both the direct import and its aliased sibling along the way.
+! bare prose line — no attribute, just a caution
+! [deprecated] call goToEnd/goToBegin directly instead
+volatile main() {
+    ? Local helper: mark the starting cell then step back — its own
+    ? doc run, distinct from main's above.
+    step() {
+        /* a block comment
+           spanning two lines, inside the body */
+  1: 2: right, mark;
+     3: left;
+    }
+
+    @step();
+    @goToEnd();
+    @backToStart(!);
+}

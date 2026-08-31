@@ -14,20 +14,21 @@
 //! `compile()`; each carries its own `dead_code` allow with the reason.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::ObjectFile;
+use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
-use crate::cst::Cst;
 use crate::footprint::SymSet;
 use crate::ir::{IrProgram, lower, validate_world};
-use crate::lexer::{LexMode, Token, lex, lex_with};
+use crate::lexer::{LexMode, Token, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
     Graft, Machine, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
-    Transition, lower_cst, parse, parse_cst,
+    Transition, parse_green_from_tokens,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -1002,33 +1003,50 @@ pub(crate) enum ResolvedCallTarget {
 /// batch lint layer) need. Mirrors the `.pmc` compiler's `AnalysisOutput`
 /// shape.
 ///
-/// The token stream and the flat program stay local to [`analyze`]: nothing
-/// downstream reads them off this bundle. The language service needs both, but
-/// takes them from [`TmcStagedAnalysis`], which retains every stage's outcome
-/// independently — a partial-results shape this success-only bundle cannot
-/// express.
+/// The token stream and the flat program are here for the batch lint layer,
+/// which is the only thing that reads them off this bundle — and reads them
+/// with a constraint: `tokens` carries comment trivia, and the
+/// adjacency-walking rules need [`crate::parser::significant_tokens`] of it
+/// first (`crate::lint::lint` does the filtering, once, for all of them).
+/// Nothing on the compile path past [`analyze`] touches either field. The
+/// language service needs both too, but takes them from
+/// [`TmcStagedAnalysis`], which retains every stage's outcome independently —
+/// a partial-results shape this success-only bundle cannot express.
 #[derive(Debug)]
 pub(crate) struct Analysis {
     pub resolved: Resolved,
     pub diagnostics: Vec<Diagnostic>,
-    /// The parsed AST, retained so the lint layer can reach source-level
-    /// detail the resolved module elides (e.g. a signature parameter's own
-    /// span). Comment-free — `analyze` lexes without comment trivia.
+    /// The flat AST, extracted from the green tree. Retained so the lint
+    /// layer can reach source-level detail the resolved module elides (e.g. a
+    /// signature parameter's own span). Trivia-free: extraction flattens the
+    /// tree and keeps no comments.
     pub program: Program,
-    /// The lexed token stream (comment-free — the `analyze` path never emits
-    /// comment trivia). Retained so lint rules can recover a span no earlier
-    /// artifact keeps — the `as` keyword of a graft's `as NAME` clause.
+    /// The lexed token stream, COMMENT-INCLUSIVE — the green parse needs the
+    /// trivia, so this is the `LexMode::WithComments` stream it was built
+    /// from. Retained so lint rules can recover a span no earlier artifact
+    /// keeps (the `as` keyword of a graft's `as NAME` clause) and so the one
+    /// lex serves both channels of [`crate::lint::LintContext`]. Rules that
+    /// walk token neighbourhoods by ADJACENCY must take
+    /// [`crate::parser::significant_tokens`] of this first; `lint()` does.
     pub tokens: Vec<Token>,
 }
 
-/// lex → parse → duplicate-binding check → resolve alphabets → flatten +
-/// world checks. The `.tmc` analog of the `.pmc` compiler's `analyze`;
-/// `compile` composes it with codegen. Fatals stop at the first offending
-/// span; non-fatal findings (undeclared external, unused import) accumulate as
-/// diagnostics.
+/// lex → green parse → extract → duplicate-binding check → resolve alphabets
+/// → flatten + world checks. The `.tmc` analog of the `.pmc` compiler's
+/// `analyze`; `compile` composes it with codegen. Fatals stop at the first
+/// offending span; non-fatal findings (undeclared external, unused import)
+/// accumulate as diagnostics.
+///
+/// The lex is `WithComments` because the green tree is built from the source
+/// text and its trivia together (docs/core.md (syntax trees)) — a
+/// comment-free stream could not reconstruct a comment's own text. What this
+/// front accepts, and the exact kind and span of every error it rejects
+/// with, are pinned by `tests/tmc_green_analyze.rs` over a deliberately
+/// broken set.
 pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
-    let tokens = lex(source)?;
-    let program = parse(&tokens)?;
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    let green = parse_green_from_tokens(source, &tokens)?;
+    let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
     let (resolved, diagnostics) = resolve_program(&program)?;
     Ok(Analysis {
         resolved,
@@ -1237,10 +1255,15 @@ fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnos
 pub(crate) struct TmcStagedAnalysis {
     /// WithComments token stream — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
-    /// The lossless CST — `None` if lexing or parsing failed.
-    pub cst: Option<Cst>,
-    /// The flat program (`lower_cst` is infallible, so present whenever the
-    /// CST is), retained even when the resolve stage then fails.
+    /// Green syntax tree of the current text (docs/core.md (syntax
+    /// trees)); `None` when lexing or parsing failed. Read by
+    /// `document_symbols` and `quickfix.rs`'s `state_stub` (`lsp/mod.rs`,
+    /// `lsp/quickfix.rs`), both indexing into it by byte range rather
+    /// than reparsing.
+    pub green: Option<Rc<GreenNode>>,
+    /// The flat program, extracted from the green tree — present whenever
+    /// the green parse succeeded, retained even when the resolve stage then
+    /// fails.
     pub program: Option<Program>,
     /// The resolved module — `Some` only when the whole resolve stage ran
     /// clean; `Resolved.docs` carries the doc map hover / the deprecation lint
@@ -1256,13 +1279,18 @@ pub(crate) struct TmcStagedAnalysis {
     pub fatal: Option<CompileError>,
 }
 
-/// lex (WithComments) → `parse_cst` → `lower_cst` → the resolve stage,
-/// retaining each stage's outcome instead of stopping at the first failure.
-/// `lower_cst` is infallible, so once parsing succeeds the flat `program` is
-/// always available; the resolve stage ([`resolve_program`]) is the only
-/// post-parse source of a fatal, and its non-fatal diagnostics ride alongside
-/// a clean resolve. Additive: [`analyze`] and [`compile`] are unchanged, so a
-/// partial fatal a document recovers from never leaks into the batch pipeline.
+/// lex (WithComments) → green parse → extract → the resolve stage, retaining
+/// each stage's outcome instead of stopping at the first failure. The green
+/// parse is the AUTHORITY: it produces both `program` (via
+/// `syntax::extract_program`, infallible once the tree exists) and any parse
+/// fatal; `green` retains that same tree — one `Rc` clone, not a second
+/// parse — so the language service's tree-backed readers (`lsp/mod.rs`'s
+/// `document_symbols`, `lsp/quickfix.rs`'s `state_stub`) index into it
+/// directly instead of reparsing the token stream. Past the parse, the
+/// resolve stage ([`resolve_program`]) is the only source of a fatal, and
+/// its non-fatal diagnostics ride alongside a clean resolve. Additive:
+/// [`analyze`] and [`compile`] are unchanged, so a partial fatal a document
+/// recovers from never leaks into the batch pipeline.
 ///
 /// Consumed by the phase-7 `.tmc` language service, not by `compile()`.
 pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
@@ -1271,7 +1299,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
         Err(fatal) => {
             return TmcStagedAnalysis {
                 tokens: None,
-                cst: None,
+                green: None,
                 program: None,
                 resolved: None,
                 diagnostics: Vec::new(),
@@ -1279,12 +1307,12 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
             };
         }
     };
-    let cst = match parse_cst(&tokens) {
-        Ok(cst) => cst,
+    let green = match parse_green_from_tokens(source, &tokens) {
+        Ok(green) => green,
         Err(fatal) => {
             return TmcStagedAnalysis {
                 tokens: Some(tokens),
-                cst: None,
+                green: None,
                 program: None,
                 resolved: None,
                 diagnostics: Vec::new(),
@@ -1292,11 +1320,12 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
             };
         }
     };
-    let program = lower_cst(&cst);
+    let green_retained = Some(Rc::clone(&green));
+    let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
     match resolve_program(&program) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
-            cst: Some(cst),
+            green: green_retained,
             program: Some(program),
             resolved: Some(resolved),
             diagnostics,
@@ -1304,7 +1333,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
         },
         Err(fatal) => TmcStagedAnalysis {
             tokens: Some(tokens),
-            cst: Some(cst),
+            green: green_retained,
             program: Some(program),
             resolved: None,
             diagnostics: Vec::new(),
@@ -2877,6 +2906,13 @@ pub(crate) fn refine_undeclared(diags: &mut Vec<Diagnostic>, defined: &HashSet<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `analyze` no longer calls either directly: `lex` derives the
+    // comment-free token stream a few tests compare `analyze`'s filtered
+    // `WithComments` stream against, and `parser::parse` — itself now a
+    // source-in green-tree convenience wrapper — is the plain entry point
+    // checked for agreement with the tiered `analyze_staged` path.
+    use crate::lexer::lex;
+    use crate::parser::parse;
     use proptest::prelude::*;
 
     /// Every `CompileErrorKind` code is a stable kebab identifier, and no two
@@ -4299,6 +4335,43 @@ machine {
         assert!(out.tma.contains(".func main"), "{}", out.tma);
     }
 
+    /// `analyze` is WIRED to the comment-bearing front end, not merely
+    /// equivalent to one.
+    ///
+    /// The corpus/broken-source parity in `tests/tmc_green_analyze.rs` pins
+    /// that the two front-end RECIPES agree; by construction it passes
+    /// against the pre-migration tree too, because it computes both recipes
+    /// itself and never calls `analyze`. This is the assertion that fails if
+    /// `analyze`'s body is reverted to `lex` + `parse`.
+    ///
+    /// The lever is the lex mode: on the reverted body `Analysis.tokens` is a
+    /// comment-free stream and this `assert!` fails. That is the half of the
+    /// wiring carrying the hazard — a comment-bearing `tokens` is exactly why
+    /// `lint()` must filter through `significant_tokens`
+    /// (`tests/lint_quickfix_comments.rs`). The parse half is NOT observable
+    /// from `Analysis` at all — `analyze` keeps no tree — so no assertion
+    /// here could see it; what pins that half is the crate's own downstream
+    /// crossfire over `extract_program` (`syntax::extract`'s module doc).
+    #[test]
+    fn analyze_keeps_comment_trivia_in_its_token_stream() {
+        let src = format!("// leading comment\n{A1}");
+        let a = analyze(&src).expect("A1 with a leading comment analyzes");
+        assert!(
+            a.tokens
+                .iter()
+                .any(|t| matches!(t.kind, crate::lexer::TokenKind::Comment(_))),
+            "`analyze` must lex WithComments — the green parse reconstructs \
+             trivia from the token stream, and `lint()` filters this same \
+             stream back down for the adjacency-walking rules"
+        );
+        // …and the filtered view is still exactly the old comment-free lex,
+        // so nothing downstream of that filter sees a different neighbourhood.
+        assert_eq!(
+            crate::parser::significant_tokens(&a.tokens),
+            lex(&src).expect("lexes")
+        );
+    }
+
     // -- staged analysis (the language-service substrate) ------------------
 
     #[test]
@@ -4310,15 +4383,30 @@ machine {
         // exactly, and `compile()` still succeeds — the seam is purely
         // additive.
         //
-        // The lex/parse halves compare against `lex`/`parse` directly, since
-        // those are exactly the two calls `analyze` makes before resolving;
-        // `analyze` itself keeps neither result, so the resolved module and
-        // the diagnostics are what it has left to agree on.
+        // The lex/parse halves compare against `lex`/`parse` — the PRE-green
+        // front end, which neither `analyze` nor `analyze_staged` calls any
+        // more; both now build `program` the same way, off the green parse
+        // (`analyze_staged` additionally retains that same tree as `green`,
+        // one `Rc` clone rather than a second parse — see that field's own
+        // doc).
+        //
+        // What the `program` comparison below is, precisely: `parse` now
+        // runs the same three-stage route `analyze_staged` builds `program`
+        // by — `lex_with(WithComments)` → `parse_green_from_tokens` →
+        // `syntax::extract_program`. So this checks that `analyze_staged`'s
+        // staged construction — the tiering, the intermediate early
+        // returns, the `Rc::clone` that retains `green` — reproduces the
+        // same extracted `Program` a plain, unstaged `parse` of the same
+        // source would. It does NOT pin which recipe `parse` runs: the two
+        // sides are computed the same way on purpose, so this stays green
+        // for whatever `parse` is defined as. `analyze` itself keeps
+        // neither the pre-green tokens nor the green tree, so the resolved
+        // module and the diagnostics are what it has left to agree on.
         let src = format!("// leading comment\n{A1}");
         let staged = analyze_staged(&src);
         assert!(staged.fatal.is_none(), "{:?}", staged.fatal);
         let tokens = staged.tokens.as_ref().expect("lexing succeeded");
-        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.green.is_some(), "parsing succeeded");
         let program = staged.program.as_ref().expect("lowering succeeded");
         let resolved = staged.resolved.as_ref().expect("resolve succeeded");
 
@@ -4332,8 +4420,11 @@ machine {
                 .any(|t| matches!(t.kind, crate::lexer::TokenKind::Comment(_))),
             "leading comment should surface as a Comment token"
         );
-        // The comment-filtered WithComments stream is byte-identical to
-        // `analyze()`'s WithoutComments stream.
+        // The comment-filtered WithComments stream is byte-identical to a
+        // WithoutComments lex of the same source. (`analyze` no longer keeps
+        // one — it keeps the WithComments stream and lets `lint()` filter it
+        // — so `lex` below is the pre-green front end, not a second view of
+        // what `analyze` returned.)
         let significant: Vec<_> = tokens
             .iter()
             .filter(|t| !matches!(t.kind, crate::lexer::TokenKind::Comment(_)))
@@ -4343,18 +4434,65 @@ machine {
         let expected: Vec<_> = batch_tokens.iter().map(|t| t.kind.clone()).collect();
         assert_eq!(significant, expected);
 
-        assert_eq!(program, &parse(&batch_tokens).unwrap());
+        assert_eq!(program, &parse(&src).unwrap());
         assert_eq!(resolved, &a.resolved);
         assert_eq!(staged.diagnostics, a.diagnostics);
+        // The remaining field, compared directly rather than each side
+        // against a third party: both entries now lex WithComments and keep
+        // that stream, so `tokens` agrees token for token, spans included.
+        // Without this line nothing in the crate compares the two token
+        // streams to each other at all.
+        assert_eq!(tokens, &a.tokens);
 
         assert!(compile(&src, CompileOptions::default()).is_ok());
+    }
+
+    /// `analyze` and `analyze_staged` build `program` by the SAME route
+    /// (`lex_with(WithComments)` → `parse_green_from_tokens` →
+    /// `syntax::extract_program`) rather than by two independently-proven
+    /// equal ones. This source carries the three shapes the two lex modes
+    /// used to differ on before `analyze` moved onto the green tree: a
+    /// comment, a doc run, and a namespace. Verified clean against the real
+    /// CLI (`tmt lint`) before being trusted here.
+    #[test]
+    fn analyze_staged_and_analyze_agree_on_program_with_comments_docs_and_a_namespace() {
+        let src = "\
+alphabet bits { '_', '0', '1' }
+
+namespace mylib {
+  // a helper routine
+  ? adds one to the tape
+  export routine plusOne(tape t: bits) { entry state g { [*] -> stop; } }
+}
+
+use mylib::plusOne;
+
+machine {
+  tape m: bits;
+  entry state s { [*] -> call plusOne(t = m) then stop; }
+}
+";
+        let staged = analyze_staged(src);
+        assert!(staged.fatal.is_none(), "{:?}", staged.fatal);
+        let staged_program = staged.program.as_ref().expect("program survives");
+
+        let a = analyze(src).expect("analyzes clean");
+
+        assert_eq!(staged_program, &a.program);
     }
 
     #[test]
     fn analyze_staged_agrees_with_analyze_at_every_broken_stage() {
         // Each source breaks at exactly one stage; the fatal `analyze_staged`
-        // reports at its final stage agrees, by code, with what the
-        // all-or-nothing `analyze` and the full `compile` report.
+        // reports at its final stage agrees with what the all-or-nothing
+        // `analyze` and the full `compile` report — as a WHOLE
+        // `CompileError`, kind and span alike, not merely by `code()`.
+        //
+        // Comparing whole errors is what makes "the two entries agree" a
+        // pinned claim rather than a structural expectation: on `code()`
+        // alone, a one-column shift in either entry's parse fatal survives
+        // the entire crate suite (measured — that is why this compares more
+        // than it used to).
         let cases = [
             // Unterminated block comment — a lexical fatal.
             ("lex", "/* never closed"),
@@ -4368,17 +4506,15 @@ machine {
             ),
         ];
         for (stage, src) in cases {
-            let staged_code = analyze_staged(src).fatal.map(|e| e.kind.code());
-            let analyze_code = analyze(src).err().map(|e| e.kind.code());
-            let compile_code = compile(src, CompileOptions::default())
-                .err()
-                .map(|e| e.kind.code());
+            let staged_fatal = analyze_staged(src).fatal;
+            let analyze_fatal = analyze(src).err();
+            let compile_fatal = compile(src, CompileOptions::default()).err();
             assert!(
-                staged_code.is_some(),
+                staged_fatal.is_some(),
                 "{stage}: staged should carry a fatal"
             );
-            assert_eq!(staged_code, analyze_code, "{stage}: staged vs analyze");
-            assert_eq!(staged_code, compile_code, "{stage}: staged vs compile");
+            assert_eq!(staged_fatal, analyze_fatal, "{stage}: staged vs analyze");
+            assert_eq!(staged_fatal, compile_fatal, "{stage}: staged vs compile");
         }
     }
 
@@ -4387,26 +4523,27 @@ machine {
         // lex-fail: nothing survives.
         let s = analyze_staged("/* never closed");
         assert!(s.tokens.is_none());
-        assert!(s.cst.is_none());
+        assert!(s.green.is_none());
         assert!(s.program.is_none());
         assert!(s.resolved.is_none());
         assert_eq!(s.fatal.unwrap().kind.code(), "lex-error");
 
-        // parse-fail: tokens survive, nothing past the CST.
+        // parse-fail: tokens survive, nothing past the green tree.
         let s = analyze_staged("}");
         assert!(s.tokens.is_some(), "lexing still succeeded");
-        assert!(s.cst.is_none());
+        assert!(s.green.is_none());
         assert!(s.program.is_none());
         assert!(s.resolved.is_none());
         assert!(s.fatal.is_some());
 
-        // resolve-fail: tokens + CST + the flat program survive; the resolved
-        // module does not, and no diagnostics leak out of a mid-resolve fatal.
+        // resolve-fail: tokens + the green tree + the flat program survive;
+        // the resolved module does not, and no diagnostics leak out of a
+        // mid-resolve fatal.
         let s = analyze_staged(
             "alphabet b { '_' }\nmachine { tape t: b; entry state s { [*] -> goto missing; } }",
         );
         assert!(s.tokens.is_some());
-        assert!(s.cst.is_some());
+        assert!(s.green.is_some());
         assert!(s.program.is_some(), "program survives a resolve fatal");
         assert!(s.resolved.is_none());
         assert!(s.diagnostics.is_empty());
@@ -4415,7 +4552,7 @@ machine {
         // success: every stage's product is present.
         let s = analyze_staged(A1);
         assert!(s.tokens.is_some());
-        assert!(s.cst.is_some());
+        assert!(s.green.is_some());
         assert!(s.program.is_some());
         assert!(s.resolved.is_some());
         assert!(s.fatal.is_none());

@@ -4,7 +4,9 @@
 //! project's de-facto house style; the stdlib is uniformly camelCase.
 //! Report-only: a rename is a multi-site edit and, for exports, changes
 //! the mangled symbol name (link-time ABI). The message carries a
-//! mechanically derived suggestion instead.
+//! mechanically derived suggestion where one exists; a name whose
+//! derivation doesn't land inside the convention's alphabet has none,
+//! and says so instead.
 
 use std::collections::HashSet;
 
@@ -44,6 +46,20 @@ pub(super) fn to_camel(name: &str) -> String {
     out
 }
 
+/// The convention's alphabet, named literally in both messages below
+/// wherever no rename is offered.
+const ASCII_ALPHABET: &str = "ASCII [a-z][a-zA-Z0-9]*";
+
+/// The mechanical rename for `name`, or `None` when [`to_camel`]'s
+/// derivation doesn't land inside the convention's alphabet
+/// (docs/pmt/lint.md (non-camel-case)) — offering it anyway would send
+/// the author in a circle: `Шаг` derives `шаг`, which is no more
+/// camelCase than what they wrote.
+fn suggestion(name: &str) -> Option<String> {
+    let camel = to_camel(name);
+    is_lower_camel(&camel).then_some(camel)
+}
+
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     // Functions: judge the user-authored final segment of the flattened
     // name (`std::api.helper` → `helper`; plain `api` → `api`).
@@ -55,13 +71,20 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             .and_then(|s| s.rsplit('.').next())
             .expect("rsplit always yields at least one item");
         if !is_lower_camel(last) {
+            let message = match suggestion(last) {
+                Some(camel) => {
+                    format!("function '{last}' is not camelCase — rename to '{camel}'")
+                }
+                None => {
+                    format!(
+                        "function '{last}' is not camelCase — camelCase names are {ASCII_ALPHABET}"
+                    )
+                }
+            };
             out.push(Diagnostic {
                 code: "non-camel-case",
                 span: f.name_span,
-                message: format!(
-                    "function '{last}' is not camelCase — rename to '{}'",
-                    to_camel(last)
-                ),
+                message,
                 fix: None,
             });
         }
@@ -78,13 +101,18 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 continue;
             }
             if !is_lower_camel(&segment) {
+                let message = match suggestion(&segment) {
+                    Some(camel) => {
+                        format!("namespace '{segment}' is not camelCase — rename to '{camel}'")
+                    }
+                    None => format!(
+                        "namespace '{segment}' is not camelCase — camelCase names are {ASCII_ALPHABET}"
+                    ),
+                };
                 out.push(Diagnostic {
                     code: "non-camel-case",
                     span: f.name_span,
-                    message: format!(
-                        "namespace '{segment}' is not camelCase — rename to '{}'",
-                        to_camel(&segment)
-                    ),
+                    message,
                     fix: None,
                 });
             }
@@ -94,14 +122,20 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for imp in &ctx.ast.imports {
         let binding = imp.binding();
         if !is_lower_camel(binding) {
+            let message = match suggestion(binding) {
+                Some(camel) => format!(
+                    "import binding '{binding}' is not camelCase — alias it: 'use {} as {camel}'",
+                    imp.full_path()
+                ),
+                None => format!(
+                    "import binding '{binding}' is not camelCase — \
+                     alias it to an {ASCII_ALPHABET} name"
+                ),
+            };
             out.push(Diagnostic {
                 code: "non-camel-case",
                 span: imp.span,
-                message: format!(
-                    "import binding '{binding}' is not camelCase — alias it: 'use {} as {}'",
-                    imp.full_path(),
-                    to_camel(binding)
-                ),
+                message,
                 fix: None,
             });
         }
@@ -164,5 +198,61 @@ mod tests {
         assert_eq!(to_camel("sum_bits"), "sumBits");
         assert_eq!(to_camel("Foo"), "foo");
         assert_eq!(to_camel("do_thing_2"), "doThing2");
+    }
+
+    /// The identity case: `шагВперёд` has no `_` and already starts
+    /// lowercase, so [`to_camel`] hands back the same string. The
+    /// message must not advise a rename to the name the author already
+    /// wrote. (The case below covers a derivation that DOES change the
+    /// name and still fails to conform.)
+    #[test]
+    fn non_ascii_function_fires_without_a_tautological_suggestion() {
+        let m = messages("export шагВперёд() { right; }\nmain() { @шагВперёд(); }\n");
+        assert_eq!(
+            m,
+            vec![
+                "function 'шагВперёд' is not camelCase — camelCase names are ASCII [a-z][a-zA-Z0-9]*"
+            ]
+        );
+    }
+
+    /// The case the old `camel != name` predicate got wrong: `Шаг`'s
+    /// derivation IS a different string (`шаг`, lowercased) — so the old
+    /// check offered it — but `шаг` is no more camelCase than `Шаг` was,
+    /// so suggesting it would send the author in a circle.
+    #[test]
+    fn non_ascii_function_whose_derivation_changes_but_still_fails_has_no_suggestion() {
+        let m = messages("export Шаг() { right; }\nmain() { @Шаг(); }\n");
+        assert_eq!(
+            m,
+            vec!["function 'Шаг' is not camelCase — camelCase names are ASCII [a-z][a-zA-Z0-9]*"]
+        );
+    }
+
+    #[test]
+    fn non_ascii_namespace_fires_without_a_tautological_suggestion() {
+        let m = messages(
+            "namespace ыHelpers { export inner() { right; } }\nmain() { @ыHelpers::inner(); }\n",
+        );
+        assert_eq!(
+            m,
+            vec![
+                "namespace 'ыHelpers' is not camelCase — camelCase names are ASCII [a-z][a-zA-Z0-9]*"
+            ]
+        );
+    }
+
+    /// The import site keeps its actionable advice — aliasing IS the fix
+    /// for a binding — but stops naming an alias identical to the
+    /// binding it would replace.
+    #[test]
+    fn non_ascii_import_binding_advises_an_alias_without_naming_one() {
+        let m = messages("use their::шаг;\nmain() { @шаг(); }\n");
+        assert_eq!(
+            m,
+            vec![
+                "import binding 'шаг' is not camelCase — alias it to an ASCII [a-z][a-zA-Z0-9]* name"
+            ]
+        );
     }
 }

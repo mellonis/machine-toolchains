@@ -1,16 +1,17 @@
 //! Semantic tokens (docs/lsp.md (semantic tokens)): a deliberately
 //! MINIMAL, resolution-aware legend — `namespace` / `function` / `number`
 //! types, `declaration` / `defaultLibrary` modifiers — walked straight
-//! off the CST, with call names cross-referenced against the
-//! analysis-tier resolution table. Analysis-tier: `state.analysis` gates
-//! the whole answer (a post-parse fatal anywhere in the document yields
-//! `None`, never a resolution-free subset that would need its own
-//! legend).
+//! off the green tree (docs/core.md (syntax trees)), with call names
+//! cross-referenced against the analysis-tier resolution table.
+//! Analysis-tier: `state.analysis` gates the whole answer (a post-parse
+//! fatal anywhere in the document yields `None`, never a
+//! resolution-free subset that would need its own legend).
 //!
 //! A `use`-path or call-name's per-segment spans are never re-tokenized
 //! by the lexer here — they're computed ARITHMETICALLY from the WRITTEN
-//! text (`UsePath.span`/`Item::Call.name_span`'s start, plus each
-//! segment's own character length, +2 per `::`). Sound only because
+//! text (a `use`-path's first segment token's own start /
+//! `Item::Call.name_span`'s start, plus each segment's own character
+//! length, +2 per `::`). Sound only because
 //! `.pmc` identifiers are single-line ASCII: no multi-byte segment-length
 //! surprises, no line-spanning path.
 //!
@@ -20,13 +21,15 @@
 //! construction, so this holds without special-casing.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::SemToken;
+use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 
 use crate::compiler::Resolution;
-use crate::cst::{BodyKind, FunctionCst, StatementCst, TopItem, TopKind, UsePath};
 use crate::parser::Item;
+use crate::syntax::{FileView, FunctionView, TopView, UsePathView, extract_statement};
 
 use super::walk::label_refs;
 use super::{
@@ -39,13 +42,17 @@ use super::{
 /// resolution-free subset.
 pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
     let analysis = state.analysis.as_ref()?;
-    let cst = state.cst.as_ref()?;
+    let green = state.green.as_ref()?;
+    let root = SyntaxNode::new_root(Rc::clone(green));
+    let file = FileView::cast(root).expect("root is FILE");
+    let index = TextLineIndex::new(&state.text);
 
     // `Span` has no `Hash` (only `Ord`) — a `BTreeMap` is the map-keyed
     // lookup this table needs without adding a derive to the shared
     // core type. Keyed by the call's own `name_span`: flatten mutates
     // only the AST's `Item::Call::name` string in place, never its
-    // span, so the CST's untouched `name_span` matches exactly.
+    // span, so `extract_statement`'s untouched `name_span` matches
+    // exactly.
     let resolutions: BTreeMap<Span, &Resolution> = analysis
         .resolutions
         .iter()
@@ -53,7 +60,7 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
         .collect();
 
     let mut out = Vec::new();
-    walk_items(&cst.items, &resolutions, state, &mut out);
+    walk_items(file.items(), &index, &resolutions, state, &mut out);
     out.sort_by_key(|token| token.span.start);
     debug_assert!(
         out.windows(2)
@@ -69,72 +76,63 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
 /// the written digits rather than the parser's span) and its `overlay`
 /// (consulted by `emit_call_name` for an `Unresolved` call's name).
 fn walk_items(
-    items: &[TopItem],
+    items: impl Iterator<Item = TopView>,
+    index: &TextLineIndex,
     resolutions: &BTreeMap<Span, &Resolution>,
     state: &DocState,
     out: &mut Vec<SemToken>,
 ) {
     for item in items {
-        match &item.kind {
-            TopKind::Comment(_) => {}
-            TopKind::Import(use_cst) => {
-                for path in &use_cst.paths {
-                    emit_use_path(path, state, out);
+        match item {
+            TopView::Use(use_decl) => {
+                for path in use_decl.paths() {
+                    emit_use_path(&path, index, state, out);
                 }
             }
-            TopKind::Namespace(ns) => {
+            TopView::Namespace(ns) => {
                 out.push(SemToken {
-                    span: ns.name_span,
+                    span: index.span(ns.name_token().text_range()),
                     token_type: TOKEN_TYPE_NAMESPACE,
                     modifiers: MODIFIER_DECLARATION,
                 });
-                walk_items(&ns.items, resolutions, state, out);
+                walk_items(ns.items(), index, resolutions, state, out);
             }
-            TopKind::Function(f) => walk_function(f, resolutions, state, out),
+            TopView::Function(f) => walk_function(&f, index, resolutions, state, out),
         }
     }
 }
 
-/// One function definition — top-level or nested (`BodyKind::Nested`) —
-/// plus its own body: statements and further nested definitions,
-/// interleaved exactly as written.
+/// One function definition — top-level or nested — plus its own body.
+/// Statements and nested definitions come from two separate view
+/// iterators rather than one interleaved list; the caller sorts the
+/// finished stream, so source interleaving is not load-bearing here.
 fn walk_function(
-    f: &FunctionCst,
+    f: &FunctionView,
+    index: &TextLineIndex,
     resolutions: &BTreeMap<Span, &Resolution>,
     state: &DocState,
     out: &mut Vec<SemToken>,
 ) {
     out.push(SemToken {
-        span: f.name_span,
+        span: index.span(f.header().name.text_range()),
         token_type: TOKEN_TYPE_FUNCTION,
         modifiers: MODIFIER_DECLARATION,
     });
-    for item in &f.body {
-        match &item.kind {
-            BodyKind::Comment(_) => {}
-            BodyKind::Statement(stmt) => walk_statement(stmt, resolutions, state, out),
-            BodyKind::Nested(nested) => walk_function(nested, resolutions, state, out),
+    for stmt in f.statements() {
+        let extracted = extract_statement(&stmt, index);
+        for label in &extracted.labels {
+            out.push(SemToken {
+                span: label_def_span(label.span, &state.text),
+                token_type: TOKEN_TYPE_NUMBER,
+                modifiers: MODIFIER_DECLARATION,
+            });
+        }
+        for item in &extracted.items {
+            walk_item(item, resolutions, state, out);
         }
     }
-}
-
-/// One statement: its own labels (definitions), then each comma-group
-/// item's label references and (for a resolved call) its name segments.
-fn walk_statement(
-    stmt: &StatementCst,
-    resolutions: &BTreeMap<Span, &Resolution>,
-    state: &DocState,
-    out: &mut Vec<SemToken>,
-) {
-    for label in &stmt.labels {
-        out.push(SemToken {
-            span: label_def_span(label.span, &state.text),
-            token_type: TOKEN_TYPE_NUMBER,
-            modifiers: MODIFIER_DECLARATION,
-        });
-    }
-    for comma in &stmt.items {
-        walk_item(&comma.item, resolutions, state, out);
+    for nested in f.nested() {
+        walk_function(&nested, index, resolutions, state, out);
     }
 }
 
@@ -217,18 +215,34 @@ fn digit_run_len(text: &str, pos: Pos) -> u32 {
 /// ANY `std::` name once `"stdlib": false` removes the embedded surface
 /// entirely — the modifier must track WHERE the name actually resolves,
 /// not the bare prefix, exactly as this module's own test doc says.
-fn emit_use_path(path: &UsePath, state: &DocState, out: &mut Vec<SemToken>) {
-    let full_path = path.path.join("::");
-    let default_library = path.path.first().map(String::as_str) == Some("std")
+fn emit_use_path(
+    path: &UsePathView,
+    index: &TextLineIndex,
+    state: &DocState,
+    out: &mut Vec<SemToken>,
+) {
+    let segments = path.segments();
+    let texts: Vec<String> = segments.iter().map(|t| t.text().to_string()).collect();
+    let full_path = texts.join("::");
+    let default_library = texts.first().map(String::as_str) == Some("std")
         && std_enabled(state)
         && !overlay_owns(state, &full_path);
-    let segments: Vec<&str> = path.path.iter().map(String::as_str).collect();
-    emit_path_segments(&segments, path.span.start, default_library, out);
+    let borrowed: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let start = index
+        .span(
+            segments
+                .first()
+                .expect("USE_PATH always carries at least one segment")
+                .text_range(),
+        )
+        .start;
+    emit_path_segments(&borrowed, start, default_library, out);
 }
 
 /// A resolved call name's per-segment tokens. Looked up in the
-/// resolution table by the CST's own `name_span` — identical to the
-/// AST's (flatten mutates only the `name` string, never its span).
+/// resolution table by `extract_statement`'s own `name_span` —
+/// identical to the AST's (flatten mutates only the `name` string,
+/// never its span).
 /// `defaultLibrary` applies to the final segment when the resolution is
 /// `ImportBinding`/`QualifiedExternal` with a `std::`-prefixed full path,
 /// the project hasn't opted out of the stdlib ([`std_enabled`]), AND the
@@ -356,7 +370,7 @@ mod tests {
     const RICH_FIXTURE: &str = "namespace ns {\n    export inner() {\n        right;\n    }\n}\nuse std::goToEnd as ge;\nlocal() {\n    right;\n}\nmain() {\n    helper() {\n        1: right;\n        goto 1;\n    }\n    2: left;\n    check(2, !);\n    right(2);\n    @ge();\n    @std::goToEnd();\n    @local();\n    @mystery();\n}\n";
 
     /// `goto 99` — a well-formed statement that references a label the
-    /// function never declares; `ir::lower` fatals well past the CST
+    /// function never declares; `ir::lower` fatals well past the parse
     /// stage, so `analysis` (and therefore `semantic_tokens`) is `None`.
     const UNDEFINED_LABEL_FIXTURE: &str = "main() {\nright;\ngoto 99;\n}\n";
 
@@ -893,5 +907,39 @@ mod tests {
                 bits &= bits - 1; // clear the lowest set bit
             }
         }
+    }
+
+    /// A nested definition's own name surfaces and the whole stream
+    /// stays sorted — the property `semantic_tokens` asserts internally.
+    /// Pins that emitting statements and nested definitions from two
+    /// separate view iterators, rather than one interleaved body list,
+    /// changes nothing, because the output is sorted.
+    ///
+    /// `inner` declares its OWN `2:` and gotos it: a `goto` across the
+    /// function boundary would fatal `ir::lower` with an undefined
+    /// label, `analysis` would be `None`, and `semantic_tokens` would
+    /// return `None` before reaching anything this test is about.
+    #[test]
+    fn nested_definition_tokens_survive_the_view_migration() {
+        const SRC: &str = "outer() {\n    1: right;\n    inner() {\n        2: left;\n        goto 2;\n    }\n    goto 1;\n}\nmain() { @outer(); }\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        let tokens = service.semantic_tokens(URI).expect("analysis succeeds");
+        assert!(
+            tokens
+                .windows(2)
+                .all(|p| p[0].span.start <= p[1].span.start),
+            "stream must be sorted by span start"
+        );
+        let declared: Vec<Pos> = tokens
+            .iter()
+            .filter(|t| t.token_type == TOKEN_TYPE_FUNCTION)
+            .map(|t| t.span.start)
+            .collect();
+        assert!(
+            declared.contains(&Pos { line: 3, col: 5 }),
+            "inner's declaration name must be emitted, got {declared:?}"
+        );
     }
 }

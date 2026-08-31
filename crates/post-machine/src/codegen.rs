@@ -173,7 +173,7 @@ mod tests {
     use super::*;
 
     fn emit_src(src: &str, strip: bool) -> PmaOutput {
-        let program = crate::parser::parse(&crate::lexer::lex(src).unwrap()).unwrap();
+        let program = crate::parser::parse(src).unwrap();
         let (ir, _) = crate::ir::lower(&program).unwrap();
         emit_program(
             &ir,
