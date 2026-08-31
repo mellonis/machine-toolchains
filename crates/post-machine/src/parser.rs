@@ -7,7 +7,7 @@ use mtc_core::diagnostics::Span;
 use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::cst::{CommaItem, StatementCst, TrailingComment};
+use crate::cst::TrailingComment;
 use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
 use crate::syntax::{self, GreenSink, PmcKind};
 
@@ -1420,7 +1420,6 @@ impl Parser<'_> {
             }
             // Labels announced before the next statement (possibly stacked).
             let mut labels = Vec::new();
-            let mut last_colon_line: u32 = 0;
             loop {
                 let tok = self.peek().clone();
                 let TokenKind::Number(n, written) = &tok.kind else {
@@ -1435,7 +1434,6 @@ impl Parser<'_> {
                 if !seen_labels.insert(n) {
                     return Err(Self::err_at(&tok, CompileErrorKind::DuplicateLabel(n)));
                 }
-                last_colon_line = colon.line;
                 labels.push(Label {
                     value: n,
                     span: Span {
@@ -1480,7 +1478,7 @@ impl Parser<'_> {
                 break;
             }
             self.g_start_at(cp, PmcKind::Statement);
-            self.statement(labels, last_colon_line)?;
+            self.statement()?;
             self.g_finish();
         }
         Ok(FnName {
@@ -1490,40 +1488,26 @@ impl Parser<'_> {
         })
     }
 
-    fn statement(
-        &mut self,
-        labels: Vec<Label>,
-        last_colon_line: u32,
-    ) -> Result<StatementCst, CompileError> {
-        let start = labels
-            .first()
-            .map(|l| l.span.start)
-            .unwrap_or_else(|| self.peek().span().start);
-        let line = self.peek().line;
-        // The author put a newline after the final label `:` (own-line
-        // label) iff the first command sits on a later line.
-        let label_break = !labels.is_empty() && line > last_colon_line;
-        // A comment between the label and the first command (rare) rides
-        // the first item's leading; the common case leaves it empty.
-        let leading = self.drain_pending_comments();
+    /// One labeled statement: a comma group of items and its closing
+    /// `;`. The labels are the CALLER's — it announces them, checks them
+    /// for duplicates and for dangling, and brackets the green STATEMENT
+    /// node around this walk. The items are collected here only so the
+    /// comma-group position rules below can look at the one that
+    /// precedes each `,` (docs/pmt/language.md (comma groups)); nothing
+    /// else reads them.
+    fn statement(&mut self) -> Result<(), CompileError> {
+        // A comment between the label and the first command (rare) is
+        // trivia the green sink attaches on its own; the walk only steps
+        // its comment cursor past it.
+        self.drain_pending_comments();
         self.g_flush_start(PmcKind::Item);
         let first_item = self.item(false)?;
         self.g_finish();
-        let mut items = vec![CommaItem {
-            item: first_item,
-            leading,
-            // The first entry's `newline_before` is always false (fmt
-            // design doc, "Comma-group layout").
-            newline_before: false,
-        }];
-        // `pos` has advanced past the item just parsed; `pos - 1` is its
-        // last significant token, whose line is the "item K-1's last
-        // token" side of the next entry's newline comparison.
-        let mut last_item_end_line = self.tokens[self.pos - 1].line;
+        let mut items = vec![first_item];
         while matches!(self.peek().kind, TokenKind::Comma) {
             let comma = self.peek().clone();
             // Whatever precedes a `,` must be bare (docs/pmt/language.md).
-            match &items.last().expect("items is never empty").item {
+            match items.last().expect("items is never empty") {
                 Item::Check { .. } => {
                     return Err(Self::err_at(
                         &comma,
@@ -1559,42 +1543,24 @@ impl Parser<'_> {
                 _ => {}
             }
             self.bump();
-            // A mid-group comment attaches to the following item's leading.
-            let leading = self.drain_pending_comments();
-            // The comments are a side channel (split off before the
-            // significant-token walk, see `split_comments`), so
-            // `self.peek()` here already sits on this item's real first
-            // token, whatever comments were just drained.
-            let item_start_line = self.peek().line;
-            let newline_before = item_start_line > last_item_end_line;
+            // A mid-group comment is trivia; step the comment cursor
+            // past it the same way the first item's does.
+            self.drain_pending_comments();
             // The comma just bumped above stays outside both ITEM nodes,
             // at STATEMENT level — `g_flush_start` opens ITEM only now,
             // at this item's own first token.
             self.g_flush_start(PmcKind::Item);
             let item = self.item(true)?;
             self.g_finish();
-            items.push(CommaItem {
-                item,
-                leading,
-                newline_before,
-            });
-            last_item_end_line = self.tokens[self.pos - 1].line;
+            items.push(item);
         }
         let semi = self.peek().clone();
         self.expect(&TokenKind::Semi, "`;`")?;
-        let trailing = self.take_trailing(semi.line);
+        // Claim the statement's own same-line trailing comment so the
+        // walk's comment cursor stays in step past it.
+        self.take_trailing(semi.line);
         self.prev_end_line = semi.line;
-        Ok(StatementCst {
-            labels,
-            items,
-            line,
-            span: Span {
-                start,
-                end: semi.span().end,
-            },
-            label_break,
-            trailing,
-        })
+        Ok(())
     }
 
     /// One statement item. `in_group` selects the comma-group grammar
