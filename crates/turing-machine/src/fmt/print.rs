@@ -59,7 +59,7 @@
 //!   does not just force its own vector onto several lines, it takes the
 //!   WHOLE enclosing rule off the grid, so the rule renders across several
 //!   lines without widening the columns its neighbours share
-//!   (docs/tmt/fmt.md (interior comments)).
+//!   (docs/tmt/fmt.md (comments inside a list)).
 //!
 //! # Two inputs, two owners
 //!
@@ -119,7 +119,7 @@
 //! inline and leaves the rule on the grid. An off-grid rule is excluded from
 //! the group's width computation in both directions: it does not consume the
 //! group's shared columns, and it does not widen them for its neighbours
-//! (docs/tmt/fmt.md (interior comments)).
+//! (docs/tmt/fmt.md (comments inside a list)).
 //!
 //! # Single-line states
 //!
@@ -347,7 +347,7 @@ fn open_trailing_text(comments: &[Comment]) -> String {
 
 /// One list's interior comments, bucketed per slot. `slots` has one entry
 /// per position `0..=entry_count`; the last bucket is the tail slot, printed
-/// before the closer (docs/tmt/fmt.md (interior comments)).
+/// before the closer (docs/tmt/fmt.md (comments inside a list)).
 struct Interior<'a> {
     slots: Vec<Vec<&'a Comment>>,
     /// A LINE comment anywhere in the list forces it multi-line — nothing
@@ -423,7 +423,7 @@ fn interior_trailing(comments: &[&Comment]) -> String {
 // written in the declaration's own HEADER. `alphabet /* a */ ab { '_' }`
 // prints `alphabet ab { /* a */ '_' }`, and so does the same comment
 // written after the name; `routine /* c */ r(…)` opens its signature
-// with it (docs/tmt/fmt.md (interior comments)).
+// with it (docs/tmt/fmt.md (comments inside a list)).
 //
 // So each surface's stream is: the header — the declaration's first
 // significant token through the opening delimiter — then the
@@ -501,7 +501,7 @@ fn entry_stream(elems: &[SyntaxElement]) -> Vec<SyntaxElement> {
 /// One delimited list's interior comments, keyed by entries started —
 /// the header, then the delimiter's interior past the `open_run`
 /// comments the opening brace already claimed (see this section's own
-/// note above; docs/tmt/fmt.md (interior comments)).
+/// note above; docs/tmt/fmt.md (comments inside a list)).
 ///
 /// `open_run` is a COUNT rather than the comments themselves because
 /// that is exactly what the brace's run is: the leading comment tokens
@@ -964,7 +964,7 @@ fn binding_value_text(value: &BindingValue, col: usize, map_interior: &Interior<
 /// lands) — the column its closing `}` returns to once broken. `interior` is
 /// this map's OWN interior comments, one level down from the binding list's
 /// (module doc, "Argument lists and the width threshold";
-/// docs/tmt/fmt.md (interior comments)).
+/// docs/tmt/fmt.md (comments inside a list)).
 fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
     let pairs: Vec<String> = map
         .pairs
@@ -1021,7 +1021,7 @@ fn map_pair_count(value: &BindingValue) -> usize {
 /// One binding argument's `with map` interior comments, filtered out of a
 /// binding list's flat `(arg index, pair index, comment)` side-car and
 /// re-keyed to the plain `(pair index, comment)` shape [`bucket`] expects
-/// (docs/tmt/fmt.md (interior comments)).
+/// (docs/tmt/fmt.md (comments inside a list)).
 fn map_interior_for(
     map_pairs: &[(usize, usize, Comment)],
     arg_index: usize,
@@ -1180,7 +1180,7 @@ fn prepare_rule(view: &RuleView, index: &TextLineIndex) -> PreparedRule {
 /// silently flip its own `own_line` flag on the next parse if inlined
 /// onto a cell's line. Either way the rule cannot be a grid row, so it
 /// renders multi-line and is excluded from the grid's width computation
-/// (docs/tmt/fmt.md (interior comments)).
+/// (docs/tmt/fmt.md (comments inside a list)).
 ///
 /// Read off the three lists the row renderer PRINTS with, not off a
 /// second walk of the tree: the grid's widths are measured with these
@@ -1396,7 +1396,7 @@ fn render_rule_off_grid(prepared: &PreparedRule, indent: usize) -> String {
 /// [`paren_list`]'s multi-line branch and the same indexing rule as every
 /// other list: slot `i`'s own-line comments print above cell `i`; slot
 /// `i + 1`'s same-line comments print at the end of cell `i`'s line
-/// (docs/tmt/fmt.md (interior comments)).
+/// (docs/tmt/fmt.md (comments inside a list)).
 fn glyph_vec_multiline(
     head: &str,
     cells: &[String],
@@ -2048,7 +2048,7 @@ fn prepared_rules(view: &StateView, index: &TextLineIndex) -> Vec<PreparedRule> 
 /// Whether a rule's `call` binding list — or a `with map` nested inside
 /// one — carries an interior comment. Such a comment breaks its own list
 /// across physical lines, which a single-line state cannot absorb
-/// (docs/tmt/fmt.md (interior comments)).
+/// (docs/tmt/fmt.md (comments inside a list)).
 ///
 /// Deliberately NOT the glyph vectors' lists: a same-line block comment
 /// in a pattern or a `write` vector stays inline, so the old printer
