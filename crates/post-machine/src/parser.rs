@@ -7,7 +7,6 @@ use mtc_core::diagnostics::Span;
 use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::cst::TrailingComment;
 use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
 use crate::syntax::{self, GreenSink, PmcKind};
 
@@ -112,8 +111,8 @@ pub struct Function {
     /// `std::api.helper`.
     pub ns: Vec<String>,
     /// The bound `?`/`!` run — `docs/pmt/language.md (doc lines and attention
-    /// lines)` — reduced from
-    /// [`crate::cst::FunctionCst::doc_run`] by [`reduce_doc_run`]. `None`
+    /// lines)` — reduced by [`reduce_doc_run`] from the [`DocRunItem`]s
+    /// extraction reads back off the green tree's `DOC_RUN` node. `None`
     /// for an undocumented function (an empty `doc_run`); every compiler
     /// pass past extraction ignores this field — `flatten` copies it
     /// into `Analysis.docs`, keyed by the same fully-qualified name it
@@ -309,32 +308,10 @@ pub fn parse(source: &str) -> Result<Program, CompileError> {
     ))
 }
 
-/// Split a token stream into its significant tokens and its comment
-/// trivia — the shape both parse paths hand to `Parser`. `sig_index`
-/// records how many significant tokens precede each comment, which is
-/// the `pos` the significant-token walk sits at while that comment is
-/// pending. A `LexMode::WithoutComments` stream yields an empty
-/// `comments` and clones straight through.
-fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
-    let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
-    let mut comments: Vec<CommentAt> = Vec::new();
-    for t in tokens {
-        if let TokenKind::Comment(c) = &t.kind {
-            comments.push(CommentAt {
-                comment: c.clone(),
-                line: t.line,
-                col: t.col,
-                sig_index: sig.len(),
-            });
-        } else {
-            sig.push(t.clone());
-        }
-    }
-    (sig, comments)
-}
-
-/// The significant half of [`split_comments`] — every token that is not
-/// comment trivia. Equal, element for element, to a
+/// Every token that is not comment trivia — the stream `Parser` walks,
+/// since comments reach the green tree as trivia through
+/// [`crate::syntax::layout`] rather than through the walk. Equal,
+/// element for element, to a
 /// `LexMode::WithoutComments` lex of the same source: the lexer's mode
 /// switch decides only whether a `Comment` token is pushed. That law is
 /// checked corpus-wide by
@@ -345,7 +322,11 @@ fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
 /// lets `compiler::analyze` fill `AnalysisOutput.tokens` from the one
 /// `WithComments` lex the green parse already needs.
 pub fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
-    split_comments(tokens).0
+    tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+        .cloned()
+        .collect()
 }
 
 /// source → green syntax tree (docs/core.md (syntax trees)). Lexes
@@ -367,16 +348,15 @@ pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
 /// `tokens` slice panics — every real lex result is EOF-terminated.
 ///
 /// Runs the same grammar walk `Parser::file` always has, with a green
-/// sink attached: the sink only mirrors token consumption and node
-/// boundaries alongside the unchanged parser logic — the CST it builds
-/// internally along the way is unaffected by whether a sink is present
-/// (see [`Parser::sink`]'s own doc).
+/// sink attached: the sink mirrors token consumption and node
+/// boundaries alongside the unchanged parser logic, and the tree it
+/// builds is the walk's whole product (see [`Parser::sink`]'s own doc).
 pub fn parse_green_from_tokens(
     source: &str,
     tokens: &[Token],
 ) -> Result<Rc<GreenNode>, CompileError> {
     let entries = syntax::layout(source, tokens);
-    let (sig, comments) = split_comments(tokens);
+    let sig = significant_tokens(tokens);
     let eof_pos = sig.len() - 1;
     let mut sink = GreenSink::new(entries);
     sink.start(PmcKind::File);
@@ -385,9 +365,6 @@ pub fn parse_green_from_tokens(
         pos: 0,
         namespaces: HashSet::new(),
         declared_fns: HashSet::new(),
-        comments,
-        cpos: 0,
-        prev_end_line: 0,
         sink: Some(sink),
     }
     .file()?;
@@ -396,9 +373,10 @@ pub fn parse_green_from_tokens(
         .into_tree(eof_pos))
 }
 
-/// One line of a [`crate::cst::FunctionCst::doc_run`], plus whether a
-/// blank line precedes it in source (same `blank_before` convention as
-/// every other CST item list).
+/// One line of a function's bound `?`/`!` run, plus whether a blank
+/// line precedes it in source. Built by [`reparse_doc_items`] over a
+/// retokenized `DOC_RUN` node, which is the one route a run reaches
+/// [`reduce_doc_run`] by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DocRunItem {
     pub blank_before: bool,
@@ -407,11 +385,7 @@ pub struct DocRunItem {
 
 /// A doc/attention run's own line shapes (docs/pmt/language.md (doc lines)):
 /// a `?` doc line, a `!` attention line, or an ordinary comment
-/// interleaved within/after the run (`crate::cst`'s module doc's "Comment
-/// placement" applies here too — position is still the attachment for a
-/// comment INSIDE a run; only the run's own binding to its
-/// `crate::cst::FunctionCst` is a real attachment pass, per
-/// [`crate::cst::FunctionCst::doc_run`]'s doc).
+/// interleaved within/after the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocRunKind {
     /// A `?` line. `text` is the lexer's payload verbatim (raw text
@@ -434,7 +408,10 @@ pub enum DocRunKind {
     },
     /// An ordinary `//`/`/* */` comment inside the run (between run
     /// lines, or between the run's last line and the bound
-    /// declaration).
+    /// declaration). Never produced by [`reparse_doc_items`], the one
+    /// route a run reaches [`reduce_doc_run`] by — a retokenized
+    /// `DOC_RUN` has already had its comments filtered out as trivia
+    /// (that shim's own doc explains why dropping them is harmless).
     Comment(Comment),
 }
 
@@ -515,20 +492,6 @@ pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
     })
 }
 
-/// A comment token lifted out of the stream during [`split_comments`],
-/// remembering where it sat relative to the significant tokens.
-struct CommentAt {
-    comment: Comment,
-    /// The comment's own start line (for `blank_before` gaps).
-    line: u32,
-    /// The comment's own start column (`docs/pmt/fmt.md`, comments) — the
-    /// trailing-comment alignment rule's source-column detection.
-    col: u32,
-    /// Number of significant tokens preceding this comment — the `pos`
-    /// the significant-token walk is at when the comment is "pending".
-    sig_index: usize,
-}
-
 /// What [`Parser::function`] still tells its callers: the name token's
 /// own identity. Both call sites key their duplicate-name checks on it,
 /// and the top-level one also needs the name to decide whether a leading
@@ -558,19 +521,14 @@ struct Parser<'a> {
     /// check; a set keyed on `(ns, name)` is the equivalent membership
     /// test and independent of the CST's block nesting.
     declared_fns: HashSet<(Vec<String>, String)>,
-    /// Comments split out of the stream, in source order.
-    comments: Vec<CommentAt>,
-    /// Cursor into `comments`: everything before it is already attached.
-    cpos: usize,
-    /// End line of the last emitted CST element, for `blank_before`.
-    prev_end_line: u32,
     /// Green-tree emission: `bump()` mirrors every consumed token into
     /// it, and the `g_*` helpers below bracket node boundaries. `Some`
     /// on [`parse_green_from_tokens`]'s walk — [`Parser::file`]'s only
     /// production caller; `None` on the isolated re-parses
-    /// ([`reparse_item`], `reparse_doc_items`), where the `g_*` helpers
-    /// are then no-ops, so the CST those productions still build
-    /// internally is unaffected by whether a sink is attached.
+    /// ([`reparse_item`], [`reparse_doc_items`]), which are handed a
+    /// bare token slice with no source string to lay out and so cannot
+    /// be given a sink at all; there the `g_*` helpers are all no-ops
+    /// and the production's own return value is the whole result.
     sink: Option<GreenSink>,
 }
 
@@ -578,8 +536,8 @@ struct Parser<'a> {
 /// counterpart to `TokenKind`, since `PmcKind`'s token variants mirror
 /// it 1:1 (`crate::syntax::kinds` doc). Called only from `bump()`,
 /// which never bumps `Eof`, and only over the sig stream, which never
-/// carries `Comment` (`split_comments` splits it out up front) — both
-/// are unreachable here.
+/// carries `Comment` ([`significant_tokens`] filters it out up front) —
+/// both are unreachable here.
 fn sig_kind(kind: &TokenKind) -> PmcKind {
     match kind {
         TokenKind::Ident(_) => PmcKind::Ident,
@@ -680,42 +638,6 @@ impl Parser<'_> {
         }
     }
 
-    /// Attach every pending comment at or before the current sig position,
-    /// returning `(comment, start_line)` in source order. Never drops.
-    fn drain_pending(&mut self) -> Vec<(Comment, u32)> {
-        let mut out = Vec::new();
-        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
-            let ca = &self.comments[self.cpos];
-            out.push((ca.comment.clone(), ca.line));
-            self.cpos += 1;
-        }
-        out
-    }
-
-    /// Like [`Self::drain_pending`] but dropping line info — for
-    /// mid-comma-group leading trivia, which carries no `blank_before`.
-    fn drain_pending_comments(&mut self) -> Vec<Comment> {
-        self.drain_pending().into_iter().map(|(c, _)| c).collect()
-    }
-
-    /// Take the one same-line trailing comment after a `;` (the pending
-    /// comment that follows code on `end_line`), if any. Carries the
-    /// comment's source column (brief §A) alongside it.
-    fn take_trailing(&mut self, end_line: u32) -> Option<TrailingComment> {
-        if self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index <= self.pos && !ca.comment.own_line && ca.line == end_line {
-                let out = TrailingComment {
-                    comment: ca.comment.clone(),
-                    col: ca.col,
-                };
-                self.cpos += 1;
-                return Some(out);
-            }
-        }
-        None
-    }
-
     /// The whole file is the `ns == []` namespace level. Hands back the
     /// (possibly `None`) green sink, which is the walk's whole product:
     /// `self` is consumed by value, so this is the only place it can
@@ -735,38 +657,27 @@ impl Parser<'_> {
     /// ANY `?` after the first `!` violates the fixed order). Blank
     /// lines and ordinary comments are tolerated within/after the run
     /// without affecting that order check (spec: "comments/blanks don't
-    /// participate") — `drain_pending` after each consumed line picks up
-    /// anything sitting between it and whatever comes next, including
-    /// comments between the run's last line and the bound declaration.
+    /// participate") — they are trivia the green sink attaches on its
+    /// own, and this walk simply steps over them.
     /// An attention line's `[ident]` attribute (if any) is validated
     /// against the v1 vocabulary here, since this is the only place the
-    /// run's lines are walked in order. Returns the run's items plus the
-    /// run's OWN first line's span, for the caller's `DanglingDocRun`
-    /// error if what follows isn't the declaration the run must bind to.
-    fn doc_run(&mut self) -> Result<(Vec<DocRunItem>, Span), CompileError> {
+    /// run's lines are walked in order. Returns the run's OWN first
+    /// line's span, for the caller's `DanglingDocRun` error if what
+    /// follows isn't the declaration the run must bind to. The run's
+    /// [`DocRunItem`]s are extraction's to rebuild off the emitted
+    /// `DOC_RUN` node, through [`reparse_doc_items`].
+    fn doc_run(&mut self) -> Result<Span, CompileError> {
         let first_span = self.peek().span();
-        let mut items: Vec<DocRunItem> = Vec::new();
         let mut seen_attention = false;
         let mut seen_deprecated: Option<Span> = None;
-        let mut prev_end_line = self.prev_end_line;
         loop {
             let t = self.peek().clone();
             match &t.kind {
-                TokenKind::DocLine(text) => {
+                TokenKind::DocLine(_) => {
                     if seen_attention {
                         return Err(Self::err_at(&t, CompileErrorKind::DocLineOrder));
                     }
-                    let text = text.clone();
                     self.bump();
-                    let blank_before = t.line > prev_end_line + 1;
-                    prev_end_line = t.line;
-                    items.push(DocRunItem {
-                        blank_before,
-                        kind: DocRunKind::Doc {
-                            text,
-                            span: t.span(),
-                        },
-                    });
                 }
                 TokenKind::AttentionLine(text) => {
                     let text = text.clone();
@@ -789,30 +700,11 @@ impl Parser<'_> {
                             });
                         }
                     }
-                    let blank_before = t.line > prev_end_line + 1;
-                    prev_end_line = t.line;
-                    items.push(DocRunItem {
-                        blank_before,
-                        kind: DocRunKind::Attention {
-                            attr,
-                            text,
-                            span: t.span(),
-                        },
-                    });
                 }
                 _ => break,
             }
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > prev_end_line + 1;
-                prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                items.push(DocRunItem {
-                    blank_before,
-                    kind: DocRunKind::Comment(comment),
-                });
-            }
         }
-        self.prev_end_line = prev_end_line;
-        Ok((items, first_span))
+        Ok(first_span)
     }
 
     /// Parses a leading `[ident]` attribute off an attention line's raw
@@ -965,12 +857,6 @@ impl Parser<'_> {
         terminator: Option<&TokenKind>,
     ) -> Result<(), CompileError> {
         loop {
-            // Own-line comments (leading/standalone/dangling) at this
-            // level are trivia the green sink attaches on its own; the
-            // walk only steps its own comment cursor past them.
-            for (comment, cline) in self.drain_pending() {
-                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-            }
             // Doc/attention run (docs/pmt/language.md (doc lines)): a `?`/`!`
             // line at item position starts a run that must bind to the
             // NEXT function declaration at this scope — anything else
@@ -994,7 +880,7 @@ impl Parser<'_> {
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
                 self.g_flush_start(PmcKind::DocRun);
-                let (_run, first_span) = self.doc_run()?;
+                let first_span = self.doc_run()?;
                 self.g_finish();
                 if !self.next_is_top_level_function_start(terminator) {
                     return Err(CompileError {
@@ -1010,24 +896,7 @@ impl Parser<'_> {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
                 (k, Some(term)) if k == term => {
-                    let close_line = t.line;
-                    self.prev_end_line = close_line;
                     self.bump();
-                    // A comment on the SAME line as `}` is claimed here so
-                    // the walk's comment cursor stays in step. The
-                    // top-of-loop `drain_pending()` above already caught
-                    // up `self.cpos` to the pre-`}` `self.pos`, so
-                    // nothing is pending here except a comment genuinely
-                    // following `}` (`sig_index == self.pos`, the
-                    // position `}` just advanced to).
-                    if self.cpos < self.comments.len() {
-                        let ca = &self.comments[self.cpos];
-                        if ca.sig_index == self.pos && ca.line == close_line {
-                            self.prev_end_line =
-                                close_line + ca.comment.text.matches('\n').count() as u32;
-                            self.cpos += 1;
-                        }
-                    }
                     return Ok(());
                 }
                 _ => {}
@@ -1073,7 +942,6 @@ impl Parser<'_> {
             {
                 self.g_flush_start(PmcKind::UseDecl);
                 self.bump();
-                let semi_line;
                 loop {
                     // path := IDENT (`::` IDENT)*  [ `as` IDENT ]
                     let t = self.peek().clone();
@@ -1084,9 +952,6 @@ impl Parser<'_> {
                         return Err(Self::expected(&t, "an imported function name"));
                     }
                     self.g_flush_start(PmcKind::UsePath);
-                    // The last path's own line is where this declaration
-                    // leaves the walk's `prev_end_line`.
-                    self.prev_end_line = t.line;
                     self.bump();
                     while matches!(self.peek().kind, TokenKind::ColonColon) {
                         self.bump();
@@ -1120,7 +985,6 @@ impl Parser<'_> {
                             self.bump();
                         }
                         TokenKind::Semi => {
-                            semi_line = sep.line;
                             self.bump();
                             break;
                         }
@@ -1131,9 +995,6 @@ impl Parser<'_> {
                     }
                 }
                 self.g_finish(); // UseDecl — closes right after the `;`
-                // Claim the list's own same-line trailing comment so the
-                // walk's comment cursor stays in step past it.
-                self.take_trailing(semi_line);
                 continue;
             }
             // Contextual keyword: `namespace NAME {` opens a (reopenable)
@@ -1176,28 +1037,10 @@ impl Parser<'_> {
                     ));
                 }
                 self.bump(); // the name
-                let brace = self.peek().clone();
                 self.bump(); // `{`
                 let mut child = ns.to_vec();
                 child.push(name.clone());
                 self.namespaces.insert(child.clone());
-                self.prev_end_line = brace.line;
-                // Comment(s) riding the SAME physical line as the
-                // namespace's `{`, before the first body item, are
-                // claimed here so the recursive call's own leading drain
-                // does not see them. `sig_index == self.pos` (not `<=`)
-                // excludes a comment that sits BEFORE `{` even when it
-                // shares `{`'s physical line.
-                while self.cpos < self.comments.len() {
-                    let ca = &self.comments[self.cpos];
-                    if ca.sig_index == self.pos && ca.line == brace.line {
-                        self.prev_end_line =
-                            brace.line + ca.comment.text.matches('\n').count() as u32;
-                        self.cpos += 1;
-                    } else {
-                        break;
-                    }
-                }
                 self.top_items(&child, Some(&TokenKind::RBrace))?;
                 // The recursive `top_items` call above already bumped the
                 // closing `}` into the still-open NAMESPACE node; close it
@@ -1310,37 +1153,11 @@ impl Parser<'_> {
         self.bump();
         self.expect(&TokenKind::LParen, "`(` after the function name")?;
         self.expect(&TokenKind::RParen, "`)` (functions take no parameters)")?;
-        let brace = self.peek().clone();
         self.expect(&TokenKind::LBrace, "`{`")?;
 
         let mut nested_names: HashSet<String> = HashSet::new();
         let mut seen_labels: HashSet<u32> = HashSet::new();
-        self.prev_end_line = brace.line;
-        // Comment(s) riding the SAME physical line as `{`, before the
-        // first body item, are claimed here so the ordinary
-        // leading-comment drain below does not see them. `sig_index ==
-        // self.pos` (not `<=`) is deliberate — it excludes a comment that
-        // sits BEFORE `{` (e.g. `f() /* x */ { ... }`, sig_index one
-        // token earlier) even when that comment happens to share `{`'s
-        // physical line; only a comment genuinely AFTER `{` has
-        // `sig_index` equal to the position `{` just advanced `self.pos`
-        // to.
-        while self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index == self.pos && ca.line == brace.line {
-                self.prev_end_line = brace.line + ca.comment.text.matches('\n').count() as u32;
-                self.cpos += 1;
-            } else {
-                break;
-            }
-        }
         loop {
-            // Own-line comments (leading/standalone/dangling) are trivia
-            // the green sink attaches on its own; the walk only steps its
-            // own comment cursor past them.
-            for (comment, cline) in self.drain_pending() {
-                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-            }
             if matches!(self.peek().kind, TokenKind::Eof) {
                 return Err(Self::expected(
                     self.peek(),
@@ -1364,7 +1181,7 @@ impl Parser<'_> {
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
                 self.g_flush_start(PmcKind::DocRun);
-                let (_run, first_span) = self.doc_run()?;
+                let first_span = self.doc_run()?;
                 self.g_finish();
                 if !self.next_is_nested_function_start() {
                     return Err(CompileError {
@@ -1451,24 +1268,7 @@ impl Parser<'_> {
                         CompileErrorKind::DanglingLabel(label.value),
                     ));
                 }
-                let close_line = self.peek().line;
-                self.prev_end_line = close_line;
                 self.bump();
-                // A comment on the SAME line as `}` is claimed here so
-                // the walk's comment cursor stays in step past it. The
-                // top-of-loop `drain_pending()` above already caught up
-                // `self.cpos` to the pre-`}` `self.pos`, so nothing is
-                // pending here except a comment genuinely following `}`
-                // (`sig_index == self.pos`, the position `}` just
-                // advanced to).
-                if self.cpos < self.comments.len() {
-                    let ca = &self.comments[self.cpos];
-                    if ca.sig_index == self.pos && ca.line == close_line {
-                        self.prev_end_line =
-                            close_line + ca.comment.text.matches('\n').count() as u32;
-                        self.cpos += 1;
-                    }
-                }
                 // FUNCTION was retro-opened by the caller (top level:
                 // `top_items`; nested: the `g_start_at` above) at a
                 // checkpoint taken before this call — closing it here,
@@ -1496,10 +1296,6 @@ impl Parser<'_> {
     /// precedes each `,` (docs/pmt/language.md (comma groups)); nothing
     /// else reads them.
     fn statement(&mut self) -> Result<(), CompileError> {
-        // A comment between the label and the first command (rare) is
-        // trivia the green sink attaches on its own; the walk only steps
-        // its comment cursor past it.
-        self.drain_pending_comments();
         self.g_flush_start(PmcKind::Item);
         let first_item = self.item(false)?;
         self.g_finish();
@@ -1543,9 +1339,6 @@ impl Parser<'_> {
                 _ => {}
             }
             self.bump();
-            // A mid-group comment is trivia; step the comment cursor
-            // past it the same way the first item's does.
-            self.drain_pending_comments();
             // The comma just bumped above stays outside both ITEM nodes,
             // at STATEMENT level — `g_flush_start` opens ITEM only now,
             // at this item's own first token.
@@ -1554,12 +1347,7 @@ impl Parser<'_> {
             self.g_finish();
             items.push(item);
         }
-        let semi = self.peek().clone();
         self.expect(&TokenKind::Semi, "`;`")?;
-        // Claim the statement's own same-line trailing comment so the
-        // walk's comment cursor stays in step past it.
-        self.take_trailing(semi.line);
-        self.prev_end_line = semi.line;
         Ok(())
     }
 
@@ -1827,9 +1615,6 @@ pub(crate) fn reparse_item(tokens: &[Token], in_group: bool) -> Item {
         pos: 0,
         namespaces: HashSet::new(),
         declared_fns: HashSet::new(),
-        comments: Vec::new(),
-        cpos: 0,
-        prev_end_line: 0,
         sink: None,
     }
     .item(in_group)
@@ -1837,31 +1622,33 @@ pub(crate) fn reparse_item(tokens: &[Token], in_group: bool) -> Item {
 }
 
 /// Retokenization reuse shim for a `DOC_RUN` node's own `DocLine`/
-/// `AttentionLine` tokens: converts each into the [`DocRunItem`] shape
-/// [`Parser::doc_run`] builds, WITHOUT that production's run-binding
-/// logic — the `DocLineOrder` ordering check, the duplicate-
-/// `[deprecated]` check, and the "what follows must be a declaration"
-/// rule the caller of `doc_run` enforces are all properties of the
-/// ORIGINAL parse, already validated once; an isolated retokenized
-/// `DOC_RUN` slice has nothing left to validate, only to convert.
-/// Attention attributes are still decoded through [`Parser::parse_attr`],
-/// the exact helper `doc_run` itself calls, so `[deprecated]` decodes
-/// identically either way. `blank_before` is recomputed the same way
-/// `doc_run` computes it, from a fresh `prev_end_line: 0` — matching the
-/// isolated slice's own start, not the original file position (nothing
-/// downstream reads `blank_before` off a reduced [`FnDoc`], so this is
-/// cosmetic fidelity, not load-bearing).
+/// `AttentionLine` tokens: converts each into a [`DocRunItem`]. This is
+/// the ONE route a run reaches [`reduce_doc_run`] by —
+/// [`Parser::doc_run`] walks the same lines during the parse but keeps
+/// none of them, so the items are rebuilt here off the emitted node.
+/// The run-binding logic stays where it was: the `DocLineOrder`
+/// ordering check, the duplicate-`[deprecated]` check, and the "what
+/// follows must be a declaration" rule are all properties of the
+/// ORIGINAL parse, validated once by `doc_run` and its caller; an
+/// isolated retokenized `DOC_RUN` slice has nothing left to validate,
+/// only to convert. Attention attributes are still decoded through
+/// [`Parser::parse_attr`], the exact helper `doc_run` itself calls, so
+/// `[deprecated]` decodes identically either way. `blank_before` counts
+/// from a fresh `prev_end_line` of 0 — the isolated slice's own start,
+/// not the original file position (nothing downstream reads
+/// `blank_before` off a reduced [`FnDoc`], so this is cosmetic
+/// fidelity, not load-bearing).
 ///
 /// **Interleaved comments are dropped, not reproduced.** `tokens` comes
 /// from `crate::syntax::extract::sig_tokens`, which filters comments as
 /// trivia before this ever runs — so a `DOC_RUN` with an interior
-/// `//`/`/* */` comment retokenizes to a strictly SHORTER sequence than
-/// the original CST's `doc_run` (no `DocRunKind::Comment` item ever
-/// appears here). This is behavior-preserving where it matters:
-/// [`reduce_doc_run`] treats every `DocRunKind::Comment` as fully inert
+/// `//`/`/* */` comment yields a sequence strictly SHORTER than the
+/// run as WRITTEN (no `DocRunKind::Comment` item ever appears here).
+/// This is behavior-preserving where it matters: [`reduce_doc_run`]
+/// treats every `DocRunKind::Comment` as fully inert
 /// (`DocRunKind::Comment(_) => {}` — no paragraph split, no join, no
 /// attention/`deprecated` effect, regardless of position), so a
-/// comment-dropped run and the original comment-ful run reduce to the
+/// comment-dropped run and a hand-built comment-ful one reduce to the
 /// IDENTICAL [`FnDoc`] even though the two raw `Vec<DocRunItem>`s
 /// differ. A caller wanting raw item-for-item parity (spans, `Comment`
 /// entries included) has no such guarantee — only [`reduce_doc_run`]
@@ -1872,20 +1659,19 @@ pub(crate) fn reparse_doc_items(tokens: &[Token]) -> Vec<DocRunItem> {
         pos: 0,
         namespaces: HashSet::new(),
         declared_fns: HashSet::new(),
-        comments: Vec::new(),
-        cpos: 0,
-        prev_end_line: 0,
         sink: None,
     };
     let mut items = Vec::new();
+    // The isolated slice's own start, not the original file position.
+    let mut prev_end_line = 0;
     loop {
         let t = p.peek().clone();
         match &t.kind {
             TokenKind::DocLine(text) => {
                 let text = text.clone();
                 p.bump();
-                let blank_before = t.line > p.prev_end_line + 1;
-                p.prev_end_line = t.line;
+                let blank_before = t.line > prev_end_line + 1;
+                prev_end_line = t.line;
                 items.push(DocRunItem {
                     blank_before,
                     kind: DocRunKind::Doc {
@@ -1898,8 +1684,8 @@ pub(crate) fn reparse_doc_items(tokens: &[Token]) -> Vec<DocRunItem> {
                 let text = text.clone();
                 p.bump();
                 let attr = Parser::parse_attr(&text, &t);
-                let blank_before = t.line > p.prev_end_line + 1;
-                p.prev_end_line = t.line;
+                let blank_before = t.line > prev_end_line + 1;
+                prev_end_line = t.line;
                 items.push(DocRunItem {
                     blank_before,
                     kind: DocRunKind::Attention {
