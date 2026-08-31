@@ -774,11 +774,18 @@ fn binding_arguments_split_around_an_interior_symbol_map() {
     );
 }
 
-/// Every one of the seven interior nodes has an extent byte-identical to
-/// the AST span of the value it carries. `syntax::kinds`'s module doc
-/// states that as a property of the kind space; this is the measurement
-/// behind it, and it is the reason `SYM_MAP` opens at `map` rather than
-/// at `with` and `WRITE_VEC` at `[` rather than at `write`.
+/// Every one of the seven interior nodes has an extent — its green-tree
+/// text range — pinned here against a literal source position measured
+/// by hand from this fixture. `syntax::kinds`'s module doc states a
+/// stronger property, that this extent equals the AST span of the value
+/// the node carries; this test pins only the GREEN side of that, by
+/// value, and does not build the extracted `Program` to check the
+/// other side (`write_and_move_vec_spans_are_pinned_by_value`, in
+/// `syntax/extract.rs`'s own tests, pins the AST side directly, for
+/// the two shapes — `WriteVec`/`MoveVec` — nothing else in the crate
+/// reads). The measured extents are still the reason `SYM_MAP` opens
+/// at `map` rather than at `with` and `WRITE_VEC` at `[` rather than
+/// at `write`.
 ///
 /// Worth a test rather than prose because extraction leans on it
 /// directly: a bracket placed one token off still round-trips (the
@@ -794,7 +801,7 @@ fn binding_arguments_split_around_an_interior_symbol_map() {
 /// `TRANSITION` is checked on three variants, since each carries its own
 /// span field.
 #[test]
-fn each_new_nodes_extent_equals_the_ast_span_it_carries() {
+fn each_new_nodes_extent_matches_its_measured_literal_span() {
     use mtc_core::diagnostics::Span;
     use mtc_core::syntax::TextLineIndex;
     use mtc_turing_machine::parser::parse_green;

@@ -1989,7 +1989,7 @@ mod tests {
     /// every header. It parses — that is all a fixture pinning position
     /// arithmetic needs.
     #[test]
-    fn extraction_agrees_when_a_declarations_header_spans_lines() {
+    fn declaration_position_fields_are_pinned_by_value_when_a_header_spans_lines() {
         let src = "alphabet\n\
                    \x20 ab { '0', '1' }\n\
                    \n\
@@ -2140,6 +2140,58 @@ mod tests {
         );
     }
 
+    /// `WriteVec::span`/`MoveVec::span` have no assertion anywhere else
+    /// in the crate: `expand_rule` reads them into `check_width`
+    /// (`expand.rs`) for a `row-width` diagnostic, but the test
+    /// covering that path asserts the error CODE only, never the span
+    /// it underlines. A change to
+    /// `Parser::write_vec`'s or `Parser::move_vec`'s span capture that
+    /// swallowed the opening `[` (or the `write`/`move` keyword ahead
+    /// of it) would move a real diagnostic's underline and nothing
+    /// here would go red.
+    ///
+    /// Proven to discriminate: shifting the span `join(lb.span(),
+    /// rb.span())` builds in `Parser::write_vec` one column earlier —
+    /// simulating the capture drifting off the `[` it is supposed to
+    /// open at — turns this test red by name (849 other `--lib` tests
+    /// stay green); reverting turns it back green. The same one-column
+    /// shift against `Parser::move_vec`'s join was proven the same
+    /// way, one change at a time, then reverted.
+    #[test]
+    fn write_and_move_vec_spans_are_pinned_by_value() {
+        let src = "alphabet ab { '0', '1' }\n\
+                   \n\
+                   machine {\n\
+                   \x20 tape main: ab;\n\
+                   \x20 entry state a {\n\
+                   \x20   ['0'] -> write ['1'] move [>] goto a;\n\
+                   \x20 }\n\
+                   }\n";
+        let program: Program = crate::parser::parse(src).expect("parses");
+        let states = &program
+            .machine
+            .as_ref()
+            .expect("fixture declares a machine")
+            .states;
+        let rule = &states[0].rules[0];
+        assert_eq!(
+            rule.write.as_ref().expect("the fixture writes").span,
+            Span {
+                start: Pos { line: 6, col: 20 },
+                end: Pos { line: 6, col: 25 },
+            },
+            "WRITE_VEC opens at `[`, not at the `write` keyword ahead of it"
+        );
+        assert_eq!(
+            rule.mov.as_ref().expect("the fixture moves").span,
+            Span {
+                start: Pos { line: 6, col: 31 },
+                end: Pos { line: 6, col: 34 },
+            },
+            "MOVE_VEC opens at `[`, not at the `move` keyword ahead of it"
+        );
+    }
+
     /// [`extract_items`] recurses into a namespace IN PLACE,
     /// depth-first, so a declaration written after a namespace block
     /// lands after that namespace's own contents in every vector of
@@ -2232,7 +2284,7 @@ mod tests {
     /// phantom item are both wrong, and only the count separates the
     /// correct answer from the second.
     #[test]
-    fn extraction_agrees_on_a_documented_namespace() {
+    fn a_namespaces_own_doc_run_is_excluded_from_its_items_but_still_binds() {
         let src = "? outer doc\n\
                    namespace outer {\n\
                    \x20 ? inner doc\n\
@@ -2385,8 +2437,14 @@ mod tests {
     /// an ABSENCE that a wrong extraction could reproduce by accident:
     /// `Transition::Stay` (no TRANSITION node) and `debugger: false` (no
     /// keyword token).
+    ///
+    /// The fixture's BREADTH is not this test's coverage: the positive
+    /// content of every other shape it exercises is pinned by the
+    /// `reparse_*` shim tests this module already carries, so widening
+    /// this fixture without adding an assertion widens what parses, not
+    /// what is checked.
     #[test]
-    fn extraction_agrees_across_every_rule_shape() {
+    fn every_rule_shapes_count_and_absence_flags_are_pinned_by_value() {
         let src = "alphabet ab { '0'..'9', '_' }\n\
                    \n\
                    alphabet nm { 0..9 }\n\
@@ -2438,7 +2496,7 @@ mod tests {
     /// reuse target on both a `graft` and a `bind`, and a `use` list
     /// with an alias.
     #[test]
-    fn extraction_agrees_on_prefixes_aliases_and_qualified_targets() {
+    fn prefixes_aliases_and_qualified_targets_are_pinned_by_value() {
         let src = "use lib::a, lib::b as c;\n\
                    \n\
                    alphabet ab { '0', '_' }\n\

@@ -694,7 +694,7 @@ pub struct AttrCst {
 /// blanks produce no empty paragraph); a `[deprecated]` attention line becomes
 /// `deprecated`; bare-prose `!` lines become `attention`; comments and empty
 /// lines contribute nothing. Mirrors PM-1's `reduce_doc_run`. `pub(crate)`
-/// rather than private: [`crate::syntax::extract::extract_doc`] is the
+/// rather than private: `crate::syntax::extract::extract_doc` is the
 /// production caller, folding the green tree's own retokenized run the
 /// same way; its own tests also reduce a green-side reparsed run
 /// directly, to check equality where a comment-interleaved run makes raw
