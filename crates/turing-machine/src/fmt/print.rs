@@ -1577,24 +1577,9 @@ fn render_use(view: &UseView, unit: &Unit, indent: usize, index: &TextLineIndex)
         format!("{pad}use {};", paths.join(", "))
     } else if !interior.forces_break {
         // Block-only interior comments stay inline, each before its entry —
-        // same treatment as `render_alphabet`'s inline branch.
-        let mut line = format!("{pad}use ");
-        for (i, entry) in paths.iter().enumerate() {
-            for c in interior.slots[i].iter() {
-                line.push_str(&normalize_comment_text(&c.text));
-                line.push(' ');
-            }
-            line.push_str(entry);
-            if i + 1 < paths.len() {
-                line.push_str(", ");
-            }
-        }
-        for c in interior.slots[paths.len()].iter() {
-            line.push(' ');
-            line.push_str(&normalize_comment_text(&c.text));
-        }
-        line.push(';');
-        line
+        // same treatment as `render_alphabet`'s inline branch, through the
+        // same [`join_cells_with_interior`] splice the vectors use.
+        format!("{pad}use {};", join_cells_with_interior(&paths, &interior))
     } else {
         // A LINE comment forces the path list onto multiple lines, each
         // continuation aligned 4 columns past the statement indent — the
@@ -1710,24 +1695,13 @@ fn render_alphabet(
         && !interior.forces_break
         && one_line.chars().count() <= LINE_WIDTH
     {
-        // Block-only interior comments stay inline, each before its entry.
-        let mut line = format!("{head} {{ ");
-        for (i, entry) in entries.iter().enumerate() {
-            for c in interior.slots[i].iter() {
-                line.push_str(&normalize_comment_text(&c.text));
-                line.push(' ');
-            }
-            line.push_str(entry);
-            if i + 1 < entries.len() {
-                line.push_str(", ");
-            }
-        }
-        for c in interior.slots[entries.len()].iter() {
-            line.push(' ');
-            line.push_str(&normalize_comment_text(&c.text));
-        }
-        line.push_str(" }");
-        code.push_str(&line);
+        // Block-only interior comments stay inline, each before its entry
+        // — the same [`join_cells_with_interior`] splice the vectors and
+        // `render_use` run.
+        code.push_str(&format!(
+            "{head} {{ {} }}",
+            join_cells_with_interior(&entries, &interior)
+        ));
     } else {
         code.push_str(&head);
         code.push_str(" {");
@@ -2003,11 +1977,6 @@ fn render_graft(
     index: &TextLineIndex,
 ) -> Rendered {
     let g = extract_graft(view, source, index);
-    let mut code = doc_run_text(
-        &doc_items(view.doc_run(), source, index),
-        indent,
-        trivia::blank_before_decl(view.syntax()),
-    );
     let head = format!(
         "{}graft {}",
         if g.entry { "entry " } else { "" },
@@ -2017,18 +1986,17 @@ fn render_graft(
         Some(name) => format!(" as {};", name.name),
         None => ";".to_string(),
     };
-    let list_interior = delimited_interior(view.syntax(), TmcKind::LParen, TmcKind::RParen, 0);
-    let map_pairs = nested_map_pairs(view.syntax());
-    let entries = binding_entries(&g.args, indent + INDENT_UNIT, &map_pairs);
-    code.push_str(&" ".repeat(indent));
-    code.push_str(&paren_list(
-        indent,
+    render_binding_decl(
+        view.syntax(),
+        view.doc_run(),
+        &g.args,
         &head,
-        &entries,
         &tail,
-        &bucket(&list_interior, entries.len()),
-    ));
-    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+        unit,
+        indent,
+        source,
+        index,
+    )
 }
 
 fn render_bind(
@@ -2039,22 +2007,51 @@ fn render_bind(
     index: &TextLineIndex,
 ) -> Rendered {
     let b = extract_bind(view, source, index);
-    let mut code = doc_run_text(
-        &doc_items(view.doc_run(), source, index),
-        indent,
-        trivia::blank_before_decl(view.syntax()),
-    );
     let head = format!("bind {}", b.target.joined());
     let tail = format!(" as {};", b.as_name.name);
-    let list_interior = delimited_interior(view.syntax(), TmcKind::LParen, TmcKind::RParen, 0);
-    let map_pairs = nested_map_pairs(view.syntax());
-    let entries = binding_entries(&b.args, indent + INDENT_UNIT, &map_pairs);
+    render_binding_decl(
+        view.syntax(),
+        view.doc_run(),
+        &b.args,
+        &head,
+        &tail,
+        unit,
+        indent,
+        source,
+        index,
+    )
+}
+
+/// The body [`render_graft`] and [`render_bind`] share — a binding
+/// declaration is one shape with two headlines: doc run, then
+/// `HEAD(args)TAIL` through the same [`paren_list`]/[`binding_entries`]
+/// route, interior comments bucketed off the node's own `( … )` window.
+#[allow(clippy::too_many_arguments)]
+fn render_binding_decl(
+    node: &SyntaxNode,
+    doc_run: Option<DocRunView>,
+    args: &[BindingArg],
+    head: &str,
+    tail: &str,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let mut code = doc_run_text(
+        &doc_items(doc_run, source, index),
+        indent,
+        trivia::blank_before_decl(node),
+    );
+    let list_interior = delimited_interior(node, TmcKind::LParen, TmcKind::RParen, 0);
+    let map_pairs = nested_map_pairs(node);
+    let entries = binding_entries(args, indent + INDENT_UNIT, &map_pairs);
     code.push_str(&" ".repeat(indent));
     code.push_str(&paren_list(
         indent,
-        &head,
+        head,
         &entries,
-        &tail,
+        tail,
         &bucket(&list_interior, entries.len()),
     ));
     Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
