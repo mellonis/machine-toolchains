@@ -596,37 +596,63 @@ fn delimited_interior(
     out
 }
 
-/// A declaration's header printed with its comments IN PLACE — the
-/// significant tokens from the header's first through the `open`
-/// delimiter, single-space separated, each comment printed between the
-/// same two tokens it was written between (docs/tmt/fmt.md (comments are
-/// never moved)). A BLOCK comment stays inline; a LINE comment ends its
-/// line and the remainder continues at one indent unit past `pad` — the
-/// `use` continuation shape, which is this rule's model.
-///
-/// Returns `None` for a comment-free header: the caller's extracted fast
-/// path prints those, so a header without comments is byte-identical to
-/// what it always printed.
-fn head_through_open(node: &SyntaxNode, open: TmcKind, pad: &str) -> Option<String> {
-    let elems: Vec<SyntaxElement> = node.children_with_tokens().collect();
-    let open_idx = elems.iter().position(|e| e.kind() == open.into())?;
-    let head_start = elems[..open_idx].iter().position(is_significant)?;
-    let has_comment = elems[head_start..open_idx]
+/// Canonical inter-token spacing for an in-place reprint: `true` when NO
+/// space separates `prev` from `next` — a `(` glues to the name before
+/// it, `,`/`;`/`:` glue backwards, and `::` glues on both sides. A
+/// comment is never glued: it always takes a space on each side (or a
+/// break, for the LINE flavour), whatever its neighbours.
+fn glued_pair(prev: SyntaxKind, next: SyntaxKind) -> bool {
+    next == TmcKind::LParen.into()
+        || next == TmcKind::Comma.into()
+        || next == TmcKind::Semi.into()
+        || next == TmcKind::Colon.into()
+        || next == TmcKind::ColonColon.into()
+        || prev == TmcKind::ColonColon.into()
+}
+
+/// Whether any element of the slice is a comment token — the switch
+/// between a renderer's extracted fast path (comment-free, byte-identical
+/// to what it always printed) and the in-place walk below.
+fn slice_has_comment(elems: &[SyntaxElement]) -> bool {
+    elems
         .iter()
-        .any(|e| matches!(e, SyntaxElement::Token(t) if is_comment_kind(t.kind())));
-    if !has_comment {
-        return None;
-    }
-    let cont_pad = format!("{pad}{}", " ".repeat(INDENT_UNIT));
-    let mut out = pad.to_string();
-    let mut first = true;
+        .any(|e| matches!(e, SyntaxElement::Token(t) if is_comment_kind(t.kind())))
+}
+
+/// A run of a declaration's own tokens reprinted with its comments IN
+/// PLACE — each comment printed between the same two significant tokens
+/// it was written between (docs/tmt/fmt.md (comments are never moved)).
+/// Spacing is canonical ([`glued_pair`]); a BLOCK comment stays inline; a
+/// LINE comment ends its line and the run continues at `cont_pad` — the
+/// `use` continuation shape, which is this rule's model. Child NODES are
+/// skipped: callers slice around them, and a run never re-prints one.
+///
+/// `prev0` seeds the spacing context for a run that continues existing
+/// text (a reuse tail continuing after its `)`); `None` starts fresh.
+/// Returns the text and whether it ended at the start of a continuation
+/// line (i.e. the last emitted token was a LINE comment).
+fn span_with_comments(
+    elems: &[SyntaxElement],
+    first_pad: &str,
+    cont_pad: &str,
+    prev0: Option<SyntaxKind>,
+) -> (String, bool) {
+    let mut out = first_pad.to_string();
+    let mut prev = prev0;
     let mut at_line_start = false;
-    for e in &elems[head_start..=open_idx] {
+    for e in elems {
         let SyntaxElement::Token(t) = e else { continue };
         if is_ws(t.kind()) {
             continue;
         }
-        if !first && !at_line_start {
+        let spaced = match prev {
+            None => false,
+            Some(p) => {
+                !at_line_start
+                    && (is_comment_kind(t.kind()) || is_comment_kind(p) || !glued_pair(p, t.kind()))
+            }
+        };
+        if spaced {
             out.push(' ');
         }
         if is_comment_kind(t.kind()) {
@@ -634,14 +660,44 @@ fn head_through_open(node: &SyntaxNode, open: TmcKind, pad: &str) -> Option<Stri
         } else {
             out.push_str(t.text());
         }
-        first = false;
+        prev = Some(t.kind());
         at_line_start = false;
         if t.kind() == TmcKind::LineComment.into() {
             out.push('\n');
-            out.push_str(&cont_pad);
+            out.push_str(cont_pad);
             at_line_start = true;
         }
     }
+    (out, at_line_start)
+}
+
+/// Whether `node`'s header — its first significant token up to its
+/// `open` delimiter — carries a comment. The inline-state run uses this
+/// to fall back to block form: a comment-bearing header prints through
+/// [`head_through_open`], which a single-line state has no room for.
+fn header_has_comment(node: &SyntaxNode, open: TmcKind) -> bool {
+    let elems: Vec<SyntaxElement> = node.children_with_tokens().collect();
+    let Some(open_idx) = elems.iter().position(|e| e.kind() == open.into()) else {
+        return false;
+    };
+    let Some(head_start) = elems[..open_idx].iter().position(is_significant) else {
+        return false;
+    };
+    slice_has_comment(&elems[head_start..open_idx])
+}
+
+/// A declaration's header printed with its comments in place, through
+/// the `open` delimiter inclusive ([`span_with_comments`]). `None` for a
+/// comment-free header — the caller's extracted fast path prints those.
+fn head_through_open(node: &SyntaxNode, open: TmcKind, pad: &str) -> Option<String> {
+    let elems: Vec<SyntaxElement> = node.children_with_tokens().collect();
+    let open_idx = elems.iter().position(|e| e.kind() == open.into())?;
+    let head_start = elems[..open_idx].iter().position(is_significant)?;
+    if !slice_has_comment(&elems[head_start..open_idx]) {
+        return None;
+    }
+    let cont_pad = format!("{pad}{}", " ".repeat(INDENT_UNIT));
+    let (out, _) = span_with_comments(&elems[head_start..=open_idx], pad, &cont_pad, None);
     Some(out)
 }
 
@@ -1823,7 +1879,13 @@ fn render_namespace(
         indent,
         trivia::blank_before_decl(view.syntax()),
     );
-    code.push_str(&format!("{pad}namespace {} {{", view.name()));
+    // A comment-bearing header prints its comments in place
+    // (docs/tmt/fmt.md (comments are never moved)); a comment-free one
+    // keeps the extracted fast path, byte-identical to before.
+    match head_through_open(view.syntax(), TmcKind::LBrace, &pad) {
+        Some(head) => code.push_str(&head),
+        None => code.push_str(&format!("{pad}namespace {} {{", view.name())),
+    }
     code.push_str(&open_trailing_text(&trivia::open_trailing(
         view.syntax(),
         index,
@@ -1857,11 +1919,34 @@ fn render_reuse(
         ReuseKind::Routine => "routine",
         ReuseKind::Graph => "graph",
     };
-    let head = format!(
-        "{}{carrier} {}",
-        if view.exported() { "export " } else { "" },
-        view.name_token().text()
-    );
+    let elems: Vec<SyntaxElement> = view.syntax().children_with_tokens().collect();
+    let cont_pad = format!("{pad}{}", " ".repeat(INDENT_UNIT));
+    let lparen_idx = elems
+        .iter()
+        .position(|e| e.kind() == TmcKind::LParen.into())
+        .expect("a REUSE signature opens with `(`");
+    let head_start = elems[..lparen_idx]
+        .iter()
+        .position(is_significant)
+        .unwrap_or(lparen_idx);
+    // A comment-bearing header prints its comments in place
+    // (docs/tmt/fmt.md (comments are never moved)); `paren_list` glues
+    // its `(` to whatever the head ends with, so a trailing BLOCK
+    // comment keeps a space (never `*/(`), and a trailing LINE comment
+    // already ended at the continuation indent, where the `(` lands.
+    let head = if slice_has_comment(&elems[head_start..lparen_idx]) {
+        let (mut h, _) = span_with_comments(&elems[head_start..lparen_idx], "", &cont_pad, None);
+        if h.ends_with("*/") {
+            h.push(' ');
+        }
+        h
+    } else {
+        format!(
+            "{}{carrier} {}",
+            if view.exported() { "export " } else { "" },
+            view.name_token().text()
+        )
+    };
     let params: Vec<SigParam> = view
         .params()
         .map(|p| reparse_sig_param(&sig_tokens(p.syntax(), index)))
@@ -1870,13 +1955,32 @@ fn render_reuse(
     let world = view
         .world()
         .expect("a parsed REUSE always carries its WORLD body");
-    let sig_interior = delimited_interior(view.syntax(), TmcKind::LParen, TmcKind::RParen, 0, true);
+    // A comment between the signature's `)` and the WORLD's `{` — a
+    // REUSE-level sibling of the WORLD node — prints in the tail, in
+    // place, instead of leading the body.
+    let world_idx = elems
+        .iter()
+        .position(|e| matches!(e, SyntaxElement::Node(n) if n.kind() == TmcKind::World.into()))
+        .expect("a parsed REUSE always carries its WORLD body");
+    let rparen_idx = elems[..world_idx]
+        .iter()
+        .rposition(|e| e.kind() == TmcKind::RParen.into())
+        .expect("a REUSE signature closes with `)`");
+    let tail = if slice_has_comment(&elems[rparen_idx + 1..world_idx]) {
+        let (t, at_line_start) =
+            span_with_comments(&elems[rparen_idx + 1..world_idx], " ", &cont_pad, None);
+        format!("{t}{}", if at_line_start { "{" } else { " {" })
+    } else {
+        " {".to_string()
+    };
+    let sig_interior =
+        delimited_interior(view.syntax(), TmcKind::LParen, TmcKind::RParen, 0, false);
     code.push_str(&pad);
     code.push_str(&paren_list(
         indent,
         &head,
         &entries,
-        " {",
+        &tail,
         &bucket(&sig_interior, entries.len()),
     ));
     code.push_str(&render_world_after_brace(&world, indent, source, index));
@@ -1899,7 +2003,29 @@ fn render_machine(
     let world = view
         .world()
         .expect("a parsed MACHINE always carries its WORLD body");
-    code.push_str(&format!("{pad}machine {{"));
+    // A comment between `machine` and its `{` is a MACHINE-level sibling
+    // of the WORLD node (the `{` is WORLD's); it prints in place
+    // (docs/tmt/fmt.md (comments are never moved)), with the `{`
+    // following inline — or at the continuation indent after a LINE
+    // comment. Comment-free headers keep the fast path.
+    let elems: Vec<SyntaxElement> = view.syntax().children_with_tokens().collect();
+    let world_idx = elems
+        .iter()
+        .position(|e| matches!(e, SyntaxElement::Node(n) if n.kind() == TmcKind::World.into()))
+        .expect("the WORLD body was found above");
+    let head_start = elems[..world_idx]
+        .iter()
+        .position(is_significant)
+        .unwrap_or(world_idx);
+    if slice_has_comment(&elems[head_start..world_idx]) {
+        let cont_pad = format!("{pad}{}", " ".repeat(INDENT_UNIT));
+        let (head, at_line_start) =
+            span_with_comments(&elems[head_start..world_idx], &pad, &cont_pad, None);
+        code.push_str(&head);
+        code.push_str(if at_line_start { "{" } else { " {" });
+    } else {
+        code.push_str(&format!("{pad}machine {{"));
+    }
     code.push_str(&render_world_after_brace(&world, indent, source, index));
     Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
 }
@@ -2029,6 +2155,19 @@ fn tape_name_widths(units: &[Unit]) -> Vec<usize> {
 }
 
 fn render_tape(view: &TapeView, unit: &Unit, name_width: usize, indent: usize) -> Rendered {
+    // A comment anywhere in the statement prints in place
+    // (docs/tmt/fmt.md (comments are never moved)); such a tape opts out
+    // of the run's name-column alignment — the comment already breaks
+    // the little table visually, and alignment is whitespace the rule
+    // does not protect. Comment-free tapes keep the aligned fast path.
+    let pad = " ".repeat(indent);
+    let elems: Vec<SyntaxElement> = view.syntax().children_with_tokens().collect();
+    if slice_has_comment(&elems) {
+        let head_start = elems.iter().position(is_significant).unwrap_or(0);
+        let cont_pad = format!("{pad}{}", " ".repeat(INDENT_UNIT));
+        let (code, _) = span_with_comments(&elems[head_start..], &pad, &cont_pad, None);
+        return Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref());
+    }
     // `name_width` is name-length-only (see `tape_name_widths`): the
     // `volatile ` prefix does not enter the run's column alignment, so a
     // mixed volatile/plain run aligns names but not the modifier.
@@ -2036,7 +2175,7 @@ fn render_tape(view: &TapeView, unit: &Unit, name_width: usize, indent: usize) -
     let name = name.text();
     let code = format!(
         "{}{}tape {}:{} {};",
-        " ".repeat(indent),
+        pad,
         if view.volatile() { "volatile " } else { "" },
         name,
         " ".repeat(name_width.saturating_sub(name.chars().count())),
@@ -2119,10 +2258,55 @@ fn render_binding_decl(
         indent,
         trivia::blank_before_decl(node),
     );
-    let list_interior = delimited_interior(node, TmcKind::LParen, TmcKind::RParen, 0, true);
+    let pad = " ".repeat(indent);
+    let cont_pad = format!("{pad}{}", " ".repeat(INDENT_UNIT));
+    let elems: Vec<SyntaxElement> = node.children_with_tokens().collect();
+    // A comment in the statement's HEAD (before the binding list's `(`)
+    // or in its TAIL (between the `)` and the `;` — around the `as`
+    // clause) prints in place (docs/tmt/fmt.md (comments are never
+    // moved)); comment-free spans keep the callers' extracted strings.
+    let lparen_idx = elems
+        .iter()
+        .position(|e| e.kind() == TmcKind::LParen.into())
+        .expect("a binding declaration opens its list with `(`");
+    let head_start = elems[..lparen_idx]
+        .iter()
+        .position(is_significant)
+        .unwrap_or(lparen_idx);
+    let head_owned;
+    let head = if slice_has_comment(&elems[head_start..lparen_idx]) {
+        let (mut h, _) = span_with_comments(&elems[head_start..lparen_idx], "", &cont_pad, None);
+        if h.ends_with("*/") {
+            h.push(' ');
+        }
+        head_owned = h;
+        &head_owned
+    } else {
+        head
+    };
+    let rparen_idx = elems
+        .iter()
+        .rposition(|e| e.kind() == TmcKind::RParen.into())
+        .expect("a binding declaration closes its list with `)`");
+    let tail_owned;
+    let tail = if slice_has_comment(&elems[rparen_idx + 1..]) {
+        // Seeded with the `)` the tail continues from, so `;` glues and
+        // `as` takes its space, exactly as in the comment-free string.
+        let (t, _) = span_with_comments(
+            &elems[rparen_idx + 1..],
+            "",
+            &cont_pad,
+            Some(TmcKind::RParen.into()),
+        );
+        tail_owned = t;
+        &tail_owned
+    } else {
+        tail
+    };
+    let list_interior = delimited_interior(node, TmcKind::LParen, TmcKind::RParen, 0, false);
     let map_pairs = nested_map_pairs(node);
     let entries = binding_entries(args, indent + INDENT_UNIT, &map_pairs);
-    code.push_str(&" ".repeat(indent));
+    code.push_str(&pad);
     code.push_str(&paren_list(
         indent,
         head,
@@ -2194,6 +2378,13 @@ fn rule_has_interior_comment(prepared: &PreparedRule) -> bool {
 ///   for the same rule read from a vector's interior list.
 fn inline_candidate(view: &StateView, index: &TextLineIndex) -> bool {
     if !trivia::open_trailing(view.syntax(), index).is_empty() {
+        return false;
+    }
+    // A comment in the header prints in place through the block path
+    // ([`render_block_state`]'s `head_through_open` arm); a single-line
+    // state has no room for that, so it disqualifies the state — same
+    // posture as an interior or trailing comment below.
+    if header_has_comment(view.syntax(), TmcKind::LBrace) {
         return false;
     }
     let state_line = index.line_col(view.name_token().text_range().start).0;
@@ -2350,7 +2541,14 @@ fn render_block_state(
         indent,
         trivia::blank_before_decl(view.syntax()),
     );
-    code.push_str(&format!("{pad}{} {{", state_header_text(view)));
+    // A comment-bearing header prints its comments in place
+    // (docs/tmt/fmt.md (comments are never moved)); comment-free headers
+    // keep the extracted fast path. The inline-state run never sees a
+    // comment-bearing header at all ([`inline_candidate`]).
+    match head_through_open(view.syntax(), TmcKind::LBrace, &pad) {
+        Some(head) => code.push_str(&head),
+        None => code.push_str(&format!("{pad}{} {{", state_header_text(view))),
+    }
     code.push_str(&open_trailing_text(&trivia::open_trailing(
         view.syntax(),
         index,
@@ -2523,9 +2721,13 @@ mod tests {
             "? doc\n/* a */\nnamespace n {\n  alphabet b { '0' }\n}\n",
             "? doc\n/* a */\nnamespace n {\n  alphabet b { '0' }\n}\n",
         );
+        // `/* b */` keeps its neighbours — between `namespace` and `n`
+        // (docs/tmt/fmt.md (comments are never moved)); a doc-run
+        // comment above the keyword is a separate claimant and stays
+        // untouched by the header walk.
         pins(
             "? doc\n/* a */\nnamespace /* b */ n {\n  alphabet b { '0' }\n}\n",
-            "? doc\n/* a */\nnamespace n {\n  /* b */\n  alphabet b { '0' }\n}\n",
+            "? doc\n/* a */\nnamespace /* b */ n {\n  alphabet b { '0' }\n}\n",
         );
     }
 
@@ -2580,9 +2782,16 @@ mod tests {
     /// shorter gap cannot separate the two candidate near edges at all.
     #[test]
     fn a_doc_runs_comment_does_not_move_the_body_walks_near_edge() {
+        // The first source's `/* b */` — own-line between `namespace`
+        // and `n` in the source — keeps those neighbours and collapses
+        // onto the header line (whitespace-only, which the never-move
+        // rule permits; docs/tmt/fmt.md (comments are never moved)).
+        // The doc-run duplicate-claim hazard this test guards is
+        // unchanged: `/* a */` still prints exactly once, above the
+        // keyword.
         pins(
             "? doc\n/* a */\n\n\nnamespace\n/* b */\nn {\n  alphabet b { '0' }\n}\n",
-            "? doc\n/* a */\n\nnamespace n {\n  /* b */\n\n  alphabet b { '0' }\n}\n",
+            "? doc\n/* a */\n\nnamespace /* b */ n {\n  alphabet b { '0' }\n}\n",
         );
         pins(
             "? doc\n/* a */\n\n\nnamespace n {\n  alphabet b { '0' }\n}\n",
@@ -2729,32 +2938,34 @@ mod tests {
     /// no source below.
     #[test]
     fn a_comment_between_a_world_header_and_its_brace_agrees() {
+        // Every comment keeps its neighbours (docs/tmt/fmt.md (comments
+        // are never moved)): between `machine` and its `{` — inline for
+        // a block comment (a fixed point), the `{` continuing at the
+        // continuation indent after a line comment — and between a
+        // REUSE's `)` and its `{` through the tail path.
         pins(
             "alphabet ab { '_' }\nmachine /* x */ {\n  tape main: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  /* x */\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine /* x */ {\n  tape main: ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine // why\n{\n  tape main: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  // why\n\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine // why\n  {\n  tape main: ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ {\n  }\n}\n",
-            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) {\n    /* c */\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ {\n  }\n}\n",
         );
-        // The pre-brace comment is a UNIT of the body, so it also shifts
-        // every later unit's index — which is what `tape_name_widths`
-        // keys off. A misaligned unit list moves the name column, and
-        // nothing else here would catch it.
+        // With the comment in the header, the body's unit list holds
+        // only the two tapes — their name-column alignment must hold
+        // exactly as in a comment-free machine.
         pins(
             "alphabet ab { '_' }\nmachine /* x */ {\n  tape m: ab;\n  tape longer: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  /* x */\n  tape m:      ab;\n  tape longer: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine /* x */ {\n  tape m:      ab;\n  tape longer: ab;\n}\n",
         );
-        // Two of them, so the backwards scan's order is asserted: it
-        // collects from the brace towards the keyword and reverses, and a
-        // missing reverse prints them swapped.
+        // Two of them, in source order, both in the header.
         pins(
             "alphabet ab { '_' }\nmachine /* a */ /* b */ {\n  tape main: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  /* a */\n  /* b */\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine /* a */ /* b */ {\n  tape main: ab;\n}\n",
         );
     }
 
@@ -2783,136 +2994,116 @@ mod tests {
     /// instead.
     #[test]
     fn a_pre_brace_comment_suppresses_the_open_run_and_agrees() {
+        // The pre-brace comment now prints in its HEADER, between its
+        // written neighbours (docs/tmt/fmt.md (comments are never
+        // moved)); the suppression this test is named for is what these
+        // sources still pin — the brace-riding comment is NOT retained
+        // on the header line, it leads the body instead, whose `{`
+        // neighbour it keeps.
         pins(
             "alphabet ab { '_' }\nmachine /* x */ { // open\n  tape main: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  /* x */\n  // open\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine /* x */ {\n  // open\n  tape main: ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine // why\n{ // open\n  tape main: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  // why\n  // open\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine // why\n  {\n  // open\n  tape main: ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine /* x */ { /* a */ /* b */\n  tape main: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  /* x */\n  /* a */\n  /* b */\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine /* x */ {\n  /* a */\n  /* b */\n  tape main: ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nnamespace n /* x */ { // open\n  alphabet b { '0' }\n}\n",
-            "alphabet ab { '_' }\nnamespace n {\n  /* x */\n  // open\n  alphabet b { '0' }\n}\n",
+            "alphabet ab { '_' }\nnamespace n /* x */ {\n  // open\n  alphabet b { '0' }\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nnamespace n /* x */ { // open\n\n  alphabet b { '0' }\n}\n",
-            "alphabet ab { '_' }\nnamespace n {\n  /* x */\n  // open\n\n  alphabet b { '0' }\n}\n",
+            "alphabet ab { '_' }\nnamespace n /* x */ {\n  // open\n\n  alphabet b { '0' }\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ { // open\n               }\n}\n",
-            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) {\n    /* c */\n    // open\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ {\n    // open\n  }\n}\n",
         );
-        // The STATE twin, on printed BYTES. Task 4 fixed the rule that
-        // governs it but had no state surface, so it could pin the shape
-        // only on `trivia`'s unit stream — these are the first sources
-        // that compare output. The second and third put the pre-brace
-        // comment on an EARLIER line than the `{`; only the THIRD, whose
-        // `{` carries no comment of its own, actually shows the near
-        // edge moving backwards — measured, C1 printed
-        //
-        //     entry state s {        entry state s {
-        //       // why                 // why
-        //       // open       vs
-        //       [*] -> stop;           [*] -> stop;
-        //     }                      }
-        //
-        // so the `// open` of the second source occupies the gap and
-        // suppresses the blank line the third one gains.
+        // The STATE twin, on printed BYTES: the header comment stays in
+        // the state's header (`s /* x */ {`, or `entry // why` with the
+        // rest of the header continuing at the continuation indent), and
+        // a brace-riding comment still leads the body.
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
              entry state s /* x */ { // open\n    [*] -> stop;\n  }\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry state s {\n    /* x */\n    // open\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry state s /* x */ {\n    // open\n    [*] -> stop;\n  }\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
              entry // why\n  state s { // open\n    [*] -> stop;\n  }\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry state s {\n    // why\n    // open\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry // why\n    state s {\n    // open\n    [*] -> stop;\n  }\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
              entry // why\n  state s {\n    [*] -> stop;\n  }\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry state s {\n    // why\n\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry // why\n    state s {\n    [*] -> stop;\n  }\n}\n",
         );
     }
 
-    /// **Hazard 2** — a comment written INSIDE a `;`-terminated
-    /// declaration. C1's `take_trailing` claimed whatever was still
-    /// PENDING at the `;`, and a comment inside the statement is pending
-    /// there, so it is RELOCATED to after the `;`. It lives inside the node, so
-    /// the container's sibling walk never sees it.
+    /// A comment written INSIDE a `;`-terminated declaration prints IN
+    /// PLACE, between the same two significant tokens it was written
+    /// between (docs/tmt/fmt.md (comments are never moved)) — what C1's
+    /// `take_trailing` used to RELOCATE past the `;`. A comment is never
+    /// glued, so `main /* c */ : ab` takes a space where a bare
+    /// `main: ab` glues its colon; author line breaks inside the
+    /// statement collapse — whitespace-only, which the rule permits. A
+    /// comment written AFTER the `;` is genuinely trailing and stays so.
     ///
-    /// The sources pin all four outcomes of that one rule, each of which
-    /// a narrower fix gets wrong:
-    ///
-    /// - inside, same line as the `;`, not own-line → the node's trailing.
-    /// - inside, NOT on the `;`'s line → an item BELOW the declaration
-    ///   (`take_trailing` compares lines).
-    /// - inside and own-line, even on the `;`'s line → an item
-    ///   (`take_trailing` refuses an own-line comment).
-    /// - two inside → the first is the trailing, the rest are items.
-    ///
-    /// The `/* a */: ab; /* b */` source is the one that pins "an inside
-    /// comment is ahead of the container's own stream": C1 inspected
-    /// only the FIRST pending comment, so `/* b */` is an item and not
-    /// a second trailing.
-    ///
-    /// For a graft or a bind only the region AFTER the binding list's
-    /// `)` is pending — everything at or before it was swept into that
-    /// list's interior — so the sources put the comment around the
-    /// `as NAME`, never inside the parentheses.
+    /// For a graft or a bind the same rule holds across the tail —
+    /// around the `as NAME`, between the list's `)` and the `;`.
     #[test]
     fn a_comment_inside_a_semicolon_declaration_agrees() {
         let graph = "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) \
                      {\n  }\n}\n";
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape main /* c */: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab; /* c */\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main /* c */ : ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape /* c */ main: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab; /* c */\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape /* c */ main: ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape main /* c */\n    : ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  /* c */\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main /* c */ : ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape main\n    /* c */: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  /* c */\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main /* c */ : ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape main /* c1 */ /* c2 */: ab;\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab; /* c1 */\n  /* c2 */\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main /* c1 */ /* c2 */ : ab;\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nmachine {\n  tape main /* a */: ab; /* b */\n}\n",
-            "alphabet ab { '_' }\nmachine {\n  tape main: ab; /* a */\n  /* b */\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main /* a */ : ab; /* b */\n}\n",
         );
         pins(
             &format!(
                 "{graph}machine {{\n  tape main: ab;\n  \
              entry graft n::g(t = main, d = fin) /* c */ as inst;\n}}\n"
             ),
-            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin) as inst; /* c */\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin) /* c */ as inst;\n}\n",
         );
         pins(
             &format!(
                 "{graph}machine {{\n  tape main: ab;\n  \
              bind n::g(t = main, d = fin) as one /* c */;\n}}\n"
             ),
-            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(t = main, d = fin) as one; /* c */\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(t = main, d = fin) as one /* c */ ;\n}\n",
         );
         pins(
             &format!(
                 "{graph}machine {{\n  tape main: ab;\n  \
              entry graft n::g(t = main, d = fin) /* c1 */ as inst /* c2 */;\n}}\n"
             ),
-            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin) as inst; /* c1 */\n  /* c2 */\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin) /* c1 */ as inst /* c2 */ ;\n}\n",
         );
     }
 
@@ -3667,9 +3858,9 @@ mod tests {
     /// `use` model. The first three sources are already canonical, so
     /// they pin fixed points.
     ///
-    /// The `routine` and `graft` header pins still relocate onto the
-    /// list's `(` — the header families beyond `alphabet` migrate to the
-    /// same rule next, and these two literals move with them.
+    /// The `routine` and `graft` header pins hold the same rule through
+    /// the signature/binding-list path: the comment stays between the
+    /// keyword and the name (a fixed point), never riding the list's `(`.
     #[test]
     fn a_headers_comment_belongs_to_the_declarations_list() {
         pins(
@@ -3690,13 +3881,13 @@ mod tests {
         );
         pins(
             "alphabet ab { '_' }\nnamespace n {\n  routine /* c */ r(tape t: ab) {\n  }\n}\n",
-            "alphabet ab { '_' }\nnamespace n {\n  routine r( /* c */\n    tape t: ab\n  ) {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine /* c */ r(tape t: ab) {\n  }\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  entry graft /* c */ n::g(t = main, d = fin) as i;\n  \
              state fin {\n    [*] -> stop;\n  }\n}\n",
-            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g( /* c */\n    t = main,\n    d = fin\n  ) as i;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft /* c */ n::g(t = main, d = fin) as i;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
         );
     }
 
@@ -3806,11 +3997,12 @@ mod tests {
     ///   wrong — it would leave the comment pending and print it after
     ///   the `;`. The `call /* c */ n::r(` twin is the same edge one
     ///   token later, inside the TRANSITION node.
-    /// - **`unclaimed_inside`'s `)` cut for GRAFT and BIND.** The source
-    ///   writes a comment on BOTH sides of the `)`: the one before it
-    ///   belongs to the binding list, the one after it is still pending
-    ///   at the `;` and becomes the declaration's trailing. A cut on
-    ///   either side alone prints one of them in the other's place.
+    /// - **The `)` cut for GRAFT and BIND.** The source writes a comment
+    ///   on BOTH sides of the `)`: the one before it belongs to the
+    ///   binding list, the one after it prints in the statement's tail,
+    ///   between the `)` and the `as` it was written between
+    ///   (docs/tmt/fmt.md (comments are never moved)). A cut on either
+    ///   side alone prints one of them in the other's place.
     #[test]
     fn the_binding_list_boundaries_agree() {
         let call_head = "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    \
@@ -3845,7 +4037,7 @@ mod tests {
              entry graft n::g(t = main /* in */, d = fin) /* out */ as i;\n  \
              state fin {{\n    [*] -> stop;\n  }}\n}}\n"
             ),
-            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(\n    t = main, /* in */\n    d = fin\n  ) as i; /* out */\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(\n    t = main, /* in */\n    d = fin\n  ) /* out */ as i;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
         );
         pins(
             &format!(
@@ -3853,7 +4045,7 @@ mod tests {
              bind n::g(t = main, d = fin /* in */) /* out */ as o;\n  \
              state fin {{\n    [*] -> stop;\n  }}\n}}\n"
             ),
-            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(\n    t = main,\n    d = fin /* in */\n  ) as o; /* out */\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(\n    t = main,\n    d = fin /* in */\n  ) /* out */ as o;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
         );
     }
 

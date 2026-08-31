@@ -302,7 +302,6 @@ const OTHER_HEADERS: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "moves per family (measured: namespace/machine/state into the body after {; routine/graft/bind onto the list's (; tape past its ;)"]
 fn header_comments_stay_in_their_headers() {
     run_group(OTHER_HEADERS);
 }

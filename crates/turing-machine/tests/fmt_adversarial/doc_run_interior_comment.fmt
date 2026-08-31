@@ -10,9 +10,8 @@ export alphabet cd { '0'..'9' }
 ? and the same on a namespace, where a pre-brace comment is
 /* a direct child token — the run's, not the body's */
 namespace n {
-  ? while one written after the KEYWORD does belong to the body
-  namespace m {
-    /* this one */
+  ? while one written after the KEYWORD stays in the header, in place
+  namespace /* this one */ m {
     alphabet ef { '_' }
   }
 }

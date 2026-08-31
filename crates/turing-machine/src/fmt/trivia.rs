@@ -333,12 +333,11 @@ pub(crate) fn rule_regions(node: &SyntaxNode) -> RuleRegions {
 /// deliberately accounted for in prose rather than left to a silent
 /// default:
 ///
-/// - **TAPE** — no doc run, no list, so every comment inside it is
-///   unclaimed. `tape /* c */ main: ab;` prints `tape main: ab; /* c */`.
-/// - **GRAFT / BIND** — the binding list reaches the `)` and claims
-///   everything at or before it, so only what is written AFTER the `)`
-///   (around an `as NAME`) is left; the scan below starts at the LAST
-///   `)` for exactly that reason.
+/// - **TAPE, GRAFT, BIND** — answer empty: their renderers print every
+///   statement-interior comment in place under the never-move rule
+///   (docs/tmt/fmt.md (comments are never moved)) — a tape's anywhere in
+///   the statement, a reuse's between its `)` and its `;` — so nothing
+///   is left for this walk to relocate past the `;`.
 /// - **USE** — its list reaches the `;`, so nothing inside it is ever
 ///   left over; the empty answer here is a fact about the shape of a
 ///   `use` declaration, not a gap.
@@ -359,25 +358,7 @@ pub(crate) fn rule_regions(node: &SyntaxNode) -> RuleRegions {
 ///   its body items, to its head scan ([`pre_brace_comments`]) or to
 ///   one of its lists.
 fn unclaimed_inside(node: &SyntaxNode) -> Vec<SyntaxToken> {
-    let comments = |elems: &[SyntaxElement]| -> Vec<SyntaxToken> {
-        elems
-            .iter()
-            .filter_map(|e| match e {
-                SyntaxElement::Token(t) if is_comment(t.kind()) => Some(t.clone()),
-                _ => None,
-            })
-            .collect()
-    };
-    let elems: Vec<SyntaxElement> = node.children_with_tokens().collect();
-    if node.kind() == TmcKind::Tape.into() {
-        comments(&elems)
-    } else if node.kind() == TmcKind::Graft.into() || node.kind() == TmcKind::Bind.into() {
-        let after = elems
-            .iter()
-            .rposition(|e| e.kind() == TmcKind::RParen.into())
-            .map_or(elems.len(), |i| i + 1);
-        comments(&elems[after..])
-    } else if node.kind() == TmcKind::Rule.into() {
+    if node.kind() == TmcKind::Rule.into() {
         // Not `elems`: a rule's pending region can begin INSIDE its
         // TRANSITION (`call r(…) /* c */ then stop`), one level down.
         let from = rule_regions(node).pending;
@@ -423,22 +404,17 @@ pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> 
         *near_edge = end_line(index, t);
     };
 
-    // Comments written before the brace. The slot this walk is FOR is
-    // the header — between the declaring keyword (or an `entry`/
-    // `export` prefix) and the `{`, one level up for a WORLD. No
-    // production holds a comment there, so the old parser's body drain
-    // took it and it printed as the body's first item
-    // ([`pre_brace_comments`] explains where each half lives, and why
-    // the scan starts at the keyword rather than at the node).
-    //
-    // These lead the body, and the near edge starts on the `{`, never
-    // past an open run: [`open_run`] returns an EMPTY run the moment
-    // `pre_brace_comments` is non-empty, before it looks at the brace
-    // line at all. The two are therefore never both non-empty by
-    // construction, and the order between them cannot be observed.
-    for t in pre_brace_comments(container, &elems, head_end) {
-        push_comment(&mut out, &mut near_edge, &t);
-    }
+    // Comments written before the brace — between the declaring keyword
+    // (or an `entry`/`export` prefix) and the `{`, one level up for a
+    // WORLD — are NOT claimed here: under the never-move rule
+    // (docs/tmt/fmt.md (comments are never moved)) each renderer prints
+    // its own header's comments in place, between the tokens they were
+    // written between, instead of this walk relocating them to lead the
+    // body. [`pre_brace_comments`] still exists for [`open_run`]'s
+    // suppression rule, which is unchanged. A renderer that forgets its
+    // header comments loses them — which the printers' debug-build
+    // conservation assert turns into a loud failure, not a silent drop.
+    let _ = head_end;
 
     let mut i = body_start;
     while i < elems.len() {
@@ -918,43 +894,27 @@ mod tests {
     }
 
     /// A comment written before a declaration's `{` — between its keyword
-    /// and its name, or after an `entry` prefix — belongs to no
-    /// production of the grammar, so [`pre_brace_comments`] leads the
-    /// body with it and it prints as the body's FIRST item
-    /// (docs/tmt/fmt.md (comments)). It also moves the
-    /// near edge to its own end line, which can sit ABOVE the brace: that
-    /// is where the printer's one unwritten blank line comes from, and
-    /// reproducing it is a plan constraint, not a bug to fix.
+    /// and its name, or after an `entry` prefix — is the RENDERER's to
+    /// print, in place in the header (docs/tmt/fmt.md (comments are
+    /// never moved)); it is NOT a unit of the body. This walk claiming
+    /// it was exactly the relocation the never-move rule removed.
     #[test]
-    fn a_comment_before_the_brace_is_the_bodys_first_unit() {
-        let src = "machine {\n  tape t: ab;\n  state /* mid */ s {\n    [*] -> stop;\n  }\n}\n";
-        let (root, index) = tree(src);
-        let state = descendants(&root)
-            .find(|n| n.kind() == TmcKind::State.into())
-            .expect("a STATE");
-        let mid = units(&state, &index);
-        assert!(
-            matches!(&mid[0].kind, UnitKind::Comment(c) if c.text == "/* mid */"),
-            "the pre-brace comment leads the body"
-        );
-        assert!(!mid[0].blank_before);
-        assert!(
-            !mid[1].blank_before,
-            "the rule sits one line below the comment's own line"
-        );
-
-        let src =
-            "machine {\n  tape t: ab;\n  entry // why\n  state s {\n    [*] -> stop;\n  }\n}\n";
-        let (root, index) = tree(src);
-        let state = descendants(&root)
-            .find(|n| n.kind() == TmcKind::State.into())
-            .expect("a STATE");
-        let prefixed = units(&state, &index);
-        assert!(matches!(&prefixed[0].kind, UnitKind::Comment(c) if c.text == "// why"));
-        assert!(
-            prefixed[1].blank_before,
-            "the comment's line is ABOVE the brace's, so the rule reads two lines away"
-        );
+    fn a_header_comment_is_not_a_body_unit() {
+        for src in [
+            "machine {\n  tape t: ab;\n  state /* mid */ s {\n    [*] -> stop;\n  }\n}\n",
+            "machine {\n  tape t: ab;\n  entry // why\n  state s {\n    [*] -> stop;\n  }\n}\n",
+        ] {
+            let (root, index) = tree(src);
+            let state = descendants(&root)
+                .find(|n| n.kind() == TmcKind::State.into())
+                .expect("a STATE");
+            let items = units(&state, &index);
+            assert_eq!(items.len(), 1, "only the rule is a unit, for:\n{src}");
+            assert!(
+                matches!(&items[0].kind, UnitKind::Node(_)),
+                "the header comment is the renderer's, not a body unit, for:\n{src}"
+            );
+        }
     }
 
     /// An ordinary comment written between a doc run's last line and the
@@ -981,40 +941,24 @@ mod tests {
 
     /// A comment written between a `machine`/`routine`/`graph` header and
     /// its `{` is a child of the DECLARATION — WORLD opens at the brace —
-    /// so the head scan that catches the NAMESPACE/STATE twin cannot see
-    /// it. It still leads the body, and it still moves the near edge onto
-    /// its own line, which for a comment written ABOVE the brace is where
-    /// the printer's unwritten blank line comes from.
-    ///
-    /// The REUSE case is the one that says why the scan runs BACKWARDS:
-    /// `routine /* c */ r(…)` — a comment earlier in the header — belongs
-    /// to the signature's interior list, and the scan must stop at the
-    /// `)` rather than sweep the whole header.
+    /// and it belongs to that declaration's RENDERER, which prints it in
+    /// place in the header or tail (docs/tmt/fmt.md (comments are never
+    /// moved)). The WORLD's unit walk claims none of it: neither the
+    /// pre-brace comment one level up nor a signature-interior one.
     #[test]
-    fn a_comment_before_a_worlds_brace_is_the_bodys_first_unit() {
-        let src = "machine /* x */ {\n  tape t: ab;\n}\n";
-        let (root, index) = tree(src);
-        let world = descendants(&root)
-            .find(|n| n.kind() == TmcKind::World.into())
-            .expect("a WORLD");
-        let items = units(&world, &index);
-        assert!(
-            matches!(&items[0].kind, UnitKind::Comment(c) if c.text == "/* x */"),
-            "the pre-brace comment leads the body"
-        );
-        assert!(!items[1].blank_before);
-
-        let src = "machine // why\n{\n  tape t: ab;\n}\n";
-        let (root, index) = tree(src);
-        let world = descendants(&root)
-            .find(|n| n.kind() == TmcKind::World.into())
-            .expect("a WORLD");
-        let above = units(&world, &index);
-        assert!(matches!(&above[0].kind, UnitKind::Comment(c) if c.text == "// why"));
-        assert!(
-            above[1].blank_before,
-            "the comment's line is ABOVE the brace's, so the tape reads two lines away"
-        );
+    fn a_comment_before_a_worlds_brace_is_not_a_body_unit() {
+        for src in [
+            "machine /* x */ {\n  tape t: ab;\n}\n",
+            "machine // why\n{\n  tape t: ab;\n}\n",
+        ] {
+            let (root, index) = tree(src);
+            let world = descendants(&root)
+                .find(|n| n.kind() == TmcKind::World.into())
+                .expect("a WORLD");
+            let items = units(&world, &index);
+            assert_eq!(items.len(), 1, "only the tape is a unit, for:\n{src}");
+            assert!(matches!(&items[0].kind, UnitKind::Node(_)), "for:\n{src}");
+        }
 
         let src = "routine r(tape /* sig */ t: ab) /* body */ {\n  state s {\n  }\n}\n";
         let (root, index) = tree(src);
@@ -1022,15 +966,10 @@ mod tests {
             .find(|n| n.kind() == TmcKind::World.into())
             .expect("a WORLD");
         let reuse = units(&world, &index);
+        assert_eq!(reuse.len(), 1, "only the state is a unit");
         assert!(
-            matches!(&reuse[0].kind, UnitKind::Comment(c) if c.text == "/* body */"),
-            "only what is written past the signature's `)` reaches the body"
-        );
-        assert!(
-            !reuse
-                .iter()
-                .any(|u| matches!(&u.kind, UnitKind::Comment(c) if c.text == "/* sig */")),
-            "a comment inside the signature belongs to the signature's own list"
+            matches!(&reuse[0].kind, UnitKind::Node(_)),
+            "neither the signature comment nor the pre-brace one is a body unit"
         );
     }
 
@@ -1061,12 +1000,13 @@ mod tests {
             "a pending pre-brace comment takes the whole run with it"
         );
         let items = units(&state, &index);
-        assert!(matches!(&items[0].kind, UnitKind::Comment(c) if c.text == "/* x */"));
+        // `/* x */` is the renderer's, printed in the header; only the
+        // suppressed brace-line comment falls to the body stream.
         assert!(
-            matches!(&items[1].kind, UnitKind::Comment(c) if c.text == "// open"),
+            matches!(&items[0].kind, UnitKind::Comment(c) if c.text == "// open"),
             "the brace-line comment is a body item, not part of the run"
         );
-        assert!(!items[1].blank_before);
+        assert!(!items[0].blank_before);
 
         let src = "alphabet ab /* x */ { // open\n  '_'\n}\n";
         let (root, index) = tree(src);
@@ -1087,43 +1027,15 @@ mod tests {
         );
     }
 
-    /// A comment written INSIDE a `;`-terminated declaration is still
-    /// PENDING when the old parser reaches the `;`, so `take_trailing`
-    /// relocates it to after the terminator — and what it declines
-    /// (another line, an own-line comment, a second comment) drains as an
-    /// item of the container instead, ahead of anything written after the
-    /// `;`.
+    /// A comment written INSIDE a `;`-terminated declaration belongs to
+    /// that declaration's RENDERER, which prints it in place
+    /// (docs/tmt/fmt.md (comments are never moved)) — this walk claims
+    /// none of it, neither as a trailing nor as an item. Only a comment
+    /// written AFTER the `;` is genuinely the statement's trailing.
     #[test]
-    fn a_comment_inside_a_semicolon_declaration_is_relocated_past_it() {
-        let (root, index) = tree("machine {\n  tape main /* c */: ab;\n}\n");
-        let world = descendants(&root)
-            .find(|n| n.kind() == TmcKind::World.into())
-            .expect("a WORLD");
-        let taken = units(&world, &index);
-        assert_eq!(taken.len(), 1, "the comment rides the declaration");
-        assert_eq!(
-            taken[0].trailing.as_ref().map(|c| c.text.as_str()),
-            Some("/* c */")
-        );
-
-        let (root, index) = tree("machine {\n  tape main /* a */: ab; /* b */\n}\n");
-        let world = descendants(&root)
-            .find(|n| n.kind() == TmcKind::World.into())
-            .expect("a WORLD");
-        let both = units(&world, &index);
-        assert_eq!(
-            both[0].trailing.as_ref().map(|c| c.text.as_str()),
-            Some("/* a */"),
-            "the INSIDE comment is ahead of the container's own stream"
-        );
-        assert!(
-            matches!(&both[1].kind, UnitKind::Comment(c) if c.text == "/* b */"),
-            "so the one after the `;` is an item, not a second trailing"
-        );
-
-        // Declined on the line test, and declined on `own_line` — both
-        // fall through to the container's drain.
+    fn a_comment_inside_a_semicolon_declaration_stays_with_its_renderer() {
         for src in [
+            "machine {\n  tape main /* c */: ab;\n}\n",
             "machine {\n  tape main /* c */\n    : ab;\n}\n",
             "machine {\n  tape main\n    /* c */: ab;\n}\n",
         ] {
@@ -1131,27 +1043,37 @@ mod tests {
             let world = descendants(&root)
                 .find(|n| n.kind() == TmcKind::World.into())
                 .expect("a WORLD");
-            let declined = units(&world, &index);
-            assert!(declined[0].trailing.is_none(), "for:\n{src}");
+            let taken = units(&world, &index);
+            assert_eq!(taken.len(), 1, "the tape is the only unit, for:\n{src}");
             assert!(
-                matches!(&declined[1].kind, UnitKind::Comment(c) if c.text == "/* c */"),
-                "for:\n{src}"
+                taken[0].trailing.is_none(),
+                "an inside comment is never the trailing, for:\n{src}"
             );
         }
 
-        // A GRAFT claims everything at or before its binding list's `)`
-        // into that list's interior, so only the tail region is pending.
+        let (root, index) = tree("machine {\n  tape main /* a */: ab; /* b */\n}\n");
+        let world = descendants(&root)
+            .find(|n| n.kind() == TmcKind::World.into())
+            .expect("a WORLD");
+        let both = units(&world, &index);
+        assert_eq!(both.len(), 1);
+        assert_eq!(
+            both[0].trailing.as_ref().map(|c| c.text.as_str()),
+            Some("/* b */"),
+            "only the comment written after the `;` is the trailing"
+        );
+
+        // A GRAFT's in-list comment belongs to the list, its tail
+        // comment to the renderer's tail walk; the comment after the `;`
+        // would be the trailing, and here there is none.
         let (root, index) =
             tree("machine {\n  entry graft n::g(/* in list */ t = main) /* after */ as inst;\n}\n");
         let world = descendants(&root)
             .find(|n| n.kind() == TmcKind::World.into())
             .expect("a WORLD");
         let graft = units(&world, &index);
-        assert_eq!(
-            graft[0].trailing.as_ref().map(|c| c.text.as_str()),
-            Some("/* after */")
-        );
-        assert_eq!(graft.len(), 1, "the in-list comment is not a unit here");
+        assert_eq!(graft.len(), 1, "neither comment is a unit or a trailing");
+        assert!(graft[0].trailing.is_none());
     }
 
     /// A rule's own drains partition its comments: what one of its

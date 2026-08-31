@@ -2,13 +2,11 @@ alphabet ab { '_', 'a' }
 
 machine {
   tape main: ab;
-  state s {
-    /* mid */
+  state /* mid */ s {
     [*] -> stop;
   }
-  entry state t {
-    // why
-
+  entry // why
+    state t {
     [*] -> stop;
   }
 }
