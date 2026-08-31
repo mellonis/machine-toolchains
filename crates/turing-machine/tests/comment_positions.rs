@@ -364,7 +364,6 @@ const RULE_ACTION_SLOT: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "moves to the rule's tail past the ; (measured; write-kw-bracket instead migrates into the vector, in-subst past the })"]
 fn rule_action_comments_stay_in_their_slot() {
     run_group(RULE_ACTION_SLOT);
 }

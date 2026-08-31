@@ -25,20 +25,22 @@
 //!
 //! # Two comments a plain sibling walk cannot see
 //!
-//! Both were measured against the printer this module has to stay
-//! byte-identical to, and each one is a DROPPED comment if unhandled.
+//! Both live where a sibling walk never looks, and each is a DROPPED
+//! comment if no claimant owns it. Under the never-move rule
+//! (docs/tmt/fmt.md (comments are never moved)) their claimant is the
+//! RENDERER, which prints each in place:
 //!
 //! - **Between a `machine`/`routine`/`graph` header and its `{`.** WORLD
 //!   opens AT the brace, so `machine /* x */ {` leaves that comment in
-//!   the DECLARATION's stream, one level up. The old parser body-drains
-//!   it and prints it as the body's first item; [`pre_world_comments`]
-//!   reaches back for it.
+//!   the DECLARATION's stream, one level up. [`pre_world_comments`]
+//!   reaches back for it — today only to power [`open_run`]'s
+//!   suppression; the declaration's renderer prints the comment in its
+//!   header.
 //! - **Inside a `;`-terminated declaration.** `tape main /* c */: ab;`
-//!   prints as `tape main: ab; /* c */`, because the old parser's
-//!   `take_trailing` looks at whatever is still PENDING when it reaches
-//!   the `;` — and a comment written inside the statement is pending
-//!   there. [`unclaimed_inside`] names, per node kind, which of a node's
-//!   own comments are still pending at its terminator.
+//!   keeps its comment between `main` and the `:`; the statement's
+//!   renderer walks it in place. [`unclaimed_inside`] names the one
+//!   region still relocated — a RULE transition's call tail, past the
+//!   binding list's `)`.
 //!
 //! # The near edge of a gap
 //!
@@ -51,13 +53,12 @@
 //!
 //! - A `;`'s trailing comment does NOT move the near edge (the `}` twin
 //!   does), so a multi-line one leaves the edge on the `;`.
-//! - A comment written before a declaration's `{` prints as the body's
-//!   first item and moves the near edge to its own line, which can sit
-//!   ABOVE the brace — the source of the one blank line the formatter
-//!   emits that nobody wrote.
+//! - A comment written before a declaration's `{` prints in the HEADER
+//!   now, so it neither joins the body stream nor moves the near edge;
+//!   the edge starts on the brace as if the comment were not there.
 //!
-//! Every rule here was measured against the printer this module has to
-//! stay byte-identical to; the tests below name each shape.
+//! Every rule here is held by the printers' pinned fixtures and the
+//! comment-positions audit; the tests below name each shape.
 
 use mtc_core::syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex};
 
@@ -278,9 +279,10 @@ fn pre_world_comments(world: &SyntaxNode) -> Vec<SyntaxToken> {
 /// doc). An absent vector collapses its region to nothing by taking the
 /// previous boundary as its own end.
 pub(crate) struct RuleRegions {
-    pub pattern_end: u32,
-    pub write_end: u32,
-    pub move_end: u32,
+    /// The boundary earlier regions read internally survives only as the
+    /// PENDING edge — the printer places every earlier comment in place
+    /// now (docs/tmt/fmt.md (comments are never moved)), so nothing else
+    /// reads the intermediate boundaries any more.
     pub pending: u32,
 }
 
@@ -315,12 +317,8 @@ pub(crate) fn rule_regions(node: &SyntaxNode) -> RuleRegions {
                 .last()
         })
         .unwrap_or(move_end);
-    RuleRegions {
-        pattern_end,
-        write_end,
-        move_end,
-        pending,
-    }
+    let _ = (pattern_end, write_end, move_end);
+    RuleRegions { pending }
 }
 
 /// The comment tokens inside `node` that no interior list has claimed
@@ -359,10 +357,21 @@ pub(crate) fn rule_regions(node: &SyntaxNode) -> RuleRegions {
 ///   one of its lists.
 fn unclaimed_inside(node: &SyntaxNode) -> Vec<SyntaxToken> {
     if node.kind() == TmcKind::Rule.into() {
-        // Not `elems`: a rule's pending region can begin INSIDE its
-        // TRANSITION (`call r(…) /* c */ then stop`), one level down.
+        // Only TRANSITION-INTERNAL comments past a call's last `)` are
+        // still pending (`call r(…) /* c */ then stop`,
+        // `then stop /* c */` — one level down, inside the TRANSITION
+        // node). The rule's own boundary comments — after the pattern,
+        // around the vectors, before the `;` — are the renderer's and
+        // print in place (docs/tmt/fmt.md (comments are never moved)).
         let from = rule_regions(node).pending;
-        node.descendant_tokens()
+        let Some(transition) = node
+            .children()
+            .find(|n| n.kind() == TmcKind::Transition.into())
+        else {
+            return Vec::new();
+        };
+        transition
+            .descendant_tokens()
             .filter(|t| is_comment(t.kind()) && t.text_range().start >= from)
             .collect()
     } else {
@@ -1095,16 +1104,16 @@ mod tests {
     ///
     /// Each row below still moves ONE comment across one boundary; the
     /// `vectors` column names, in prose, which side it lands on, and the
-    /// assertion checks the pending side answers accordingly:
+    /// assertion checks the pending side answers accordingly.
     ///
-    /// - inside the pattern's brackets vs. just past its `]`.
-    /// - inside a `write` vector vs. between it and the following
-    ///   `move` (still the move vector's, by the header rule) vs. past
-    ///   the last vector with no `move` written at all.
-    /// - inside a `call`'s parens, or inside a nested `with map`, vs.
-    ///   past the `)` — and, the case a `move_end`-only cut gets wrong,
-    ///   BETWEEN the last vector and the call's `(`, which the binding
-    ///   list's own drain sweeps up.
+    /// Under the never-move rule almost every comment is the printer's
+    /// to place — a rule's own boundary comments, its vector interiors,
+    /// its call list's and maps' — so PENDING is nearly always empty.
+    /// What remains pending is exactly the recorded residual: a comment
+    /// INSIDE the TRANSITION node past the binding list's `)` (after the
+    /// `)` or after `then`), which the transition's machinery still
+    /// relocates to the rule's tail. `then stop /* c */;` is a RULE-level
+    /// comment before the `;` and is the printer's, not pending.
     #[test]
     fn a_rules_comments_are_partitioned_by_its_own_drains() {
         let head = "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    \
@@ -1112,16 +1121,12 @@ mod tests {
                     tape main: ab;\n  entry state s {\n    ";
         // (rule text, comments the vectors claim, comments pending at `;`)
         for (rule, _claimed_by_a_list, pending) in [
-            ("[*] -> stop /* c */;", vec![], vec!["/* c */"]),
-            ("[*] /* c */ -> stop;", vec![], vec!["/* c */"]),
+            ("[*] -> stop /* c */;", vec![], vec![]),
+            ("[*] /* c */ -> stop;", vec![], vec![]),
             ("[/* c */ *] -> stop;", vec!["/* c */"], vec![]),
-            ("[*] -> write /* c */ ['a'] stop;", vec!["/* c */"], vec![]),
-            ("[*] -> write ['a'] /* c */ stop;", vec![], vec!["/* c */"]),
-            (
-                "[*] -> write ['a'] /* c */ move [>] stop;",
-                vec!["/* c */"],
-                vec![],
-            ),
+            ("[*] -> write /* c */ ['a'] stop;", vec![], vec![]),
+            ("[*] -> write ['a'] /* c */ stop;", vec![], vec![]),
+            ("[*] -> write ['a'] /* c */ move [>] stop;", vec![], vec![]),
             (
                 "[*] -> call n::r(/* c */ t = main) then stop;",
                 vec![],
@@ -1150,7 +1155,7 @@ mod tests {
             (
                 "[*] -> call n::r(t = main) then stop /* c */;",
                 vec![],
-                vec!["/* c */"],
+                vec![],
             ),
         ] {
             let src = format!("{head}{rule}\n  }}\n}}\n");
