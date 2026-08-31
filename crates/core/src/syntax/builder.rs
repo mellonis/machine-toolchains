@@ -28,7 +28,7 @@ impl TreeBuilder {
         TreeBuilder::default()
     }
 
-    pub fn token(&mut self, kind: SyntaxKind, text: &str) {
+    pub fn token(&mut self, kind: SyntaxKind, text: impl Into<String>) {
         self.children
             .push(GreenElement::Token(GreenToken::new(kind, text)));
     }

@@ -36,8 +36,8 @@ impl GreenSink {
             return;
         }
         debug_assert_eq!(self.flushed_upto, pos, "trivia flushed out of order");
-        for (kind, text) in &self.entries[pos].trivia_before {
-            self.builder.token((*kind).into(), text);
+        for (kind, text) in std::mem::take(&mut self.entries[pos].trivia_before) {
+            self.builder.token(kind.into(), text);
         }
         self.flushed_upto = pos + 1;
     }
@@ -47,7 +47,7 @@ impl GreenSink {
         self.flush(pos);
         let text = std::mem::take(&mut self.entries[pos].text);
         debug_assert!(!text.is_empty(), "significant token {pos} emitted twice");
-        self.builder.token(kind.into(), &text);
+        self.builder.token(kind.into(), text);
     }
 
     pub fn start(&mut self, kind: PmcKind) {
