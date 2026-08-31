@@ -24,7 +24,6 @@ use std::sync::OnceLock;
 
 use mtc_core::diagnostics::Span;
 use mtc_core::formats::object::ObjectFile;
-use mtc_core::syntax::SyntaxNode;
 
 use crate::compiler::{CompileOptions, VariantColumns, analyze_staged, compile};
 use crate::optimizer::OptLevel;
@@ -71,12 +70,12 @@ pub(crate) struct RosterEntry {
     pub decl_line: u32,
 }
 
-/// Parses `SOURCE` once (lex → green parse → extraction, no hand
-/// parsing) into the roster of exported routines in the `std` namespace
-/// block. Filters the extracted `Program` rather than walking the tree
-/// a second way: green parse + `extract_program` is the one front-end
-/// route `analyze` itself runs, so this cannot drift from what the
-/// compiler sees.
+/// Parses `SOURCE` once (via [`crate::parser::parse`] — lex → green
+/// parse → extraction, no hand parsing) into the roster of exported
+/// routines in the `std` namespace block. Filters the extracted
+/// `Program` rather than walking the tree a second way: `parse` is the
+/// one front-end route `analyze` itself runs, so this cannot drift
+/// from what the compiler sees.
 /// `ns == ["std"]` is an exact match, not a prefix — a namespace nested
 /// inside `std` was never part of the roster.
 ///
@@ -87,8 +86,7 @@ pub(crate) struct RosterEntry {
 pub(crate) fn roster() -> &'static [RosterEntry] {
     static ROSTER: OnceLock<Vec<RosterEntry>> = OnceLock::new();
     ROSTER.get_or_init(|| {
-        let green = crate::parser::parse_green(SOURCE).expect("the embedded stdlib parses");
-        let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), SOURCE);
+        let program = crate::parser::parse(SOURCE).expect("the embedded stdlib parses");
         program
             .functions
             .iter()

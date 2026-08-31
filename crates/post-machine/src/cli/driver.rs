@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::object::SymbolDef;
 use mtc_core::linker::{DEFAULT_ENTRY, LinkOptions};
-use mtc_core::syntax::SyntaxNode;
 use mtc_core::vm::InfiniteTape;
 
 use crate::compiler::{CompileOptions, CompileReport, VariantColumns, compile as compile_source};
@@ -788,10 +787,7 @@ struct SourceScan {
 }
 
 fn scan_source(text: &str) -> SourceScan {
-    let Some(program) = crate::parser::parse_green(text)
-        .ok()
-        .map(|green| crate::syntax::extract_program(&SyntaxNode::new_root(green), text))
-    else {
+    let Ok(program) = crate::parser::parse(text) else {
         return SourceScan::default();
     };
     SourceScan {
@@ -1242,14 +1238,12 @@ mod tests {
     }
 
     /// `scan_source`'s own reduction — the volatile flag and the
-    /// export names it derives from `parse_green` + `extract_program` —
-    /// agrees with reading those same two facts off a fully parsed
-    /// `Program` from `parser::parse`. A check on the REDUCTION, not on
-    /// the parse: both sides run the same `parse_green_from_tokens` +
-    /// `extract_program` chain underneath (`parser::parse` adds only its
-    /// own `lex_with`), so a parse bug would show up identically on
-    /// both, not just here. Also confirms `scan_source` still degrades
-    /// to an empty scan on a source that does not parse.
+    /// export names it derives from the `Program` — agrees with reading
+    /// those same two facts off `parser::parse` directly. A check on
+    /// the REDUCTION, not on the parse: `scan_source` calls
+    /// `parser::parse` itself, so a parse bug would show up identically
+    /// on both sides, not just here. Also confirms `scan_source` still
+    /// degrades to an empty scan on a source that does not parse.
     #[test]
     fn scan_source_agrees_with_the_parse_entry_point() {
         let src = "use std::goToEnd as end;\nnamespace ns { export inner() { right; } }\nvolatile main() {\n    helper() { left; }\n    @helper();\n}\n";
