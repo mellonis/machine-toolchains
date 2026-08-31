@@ -1,7 +1,8 @@
 //! `.tmc` property tests. A deterministic generator of GRAMMAR-VALID
 //! programs (docs/tmt/language.md (program structure)), asserting the
 //! lossless law the green tree (docs/core.md (syntax trees)) must hold
-//! over every one of them.
+//! over every one of them, and the formatter's own three laws — token
+//! equivalence, comment conservation, idempotence — over the same space.
 //! Hand-written fixtures test the shapes someone thought of; this tests
 //! the ones nobody did — the sibling `.pmc` migration ran six plans and
 //! eight mutation-armed reviews on hand-written fixtures alone and still
@@ -126,8 +127,11 @@
 //! position instead, as a narrow, deliberate exception rather than a fix
 //! to the four established generators.
 //!
-//! **What this file does NOT check.** The property below asserts exactly
-//! one law — `text() == src` — and nothing about tree SHAPE. Tagging
+//! **What this file does NOT check.** The parse property below asserts
+//! exactly one law — `text() == src` — and nothing about tree SHAPE
+//! (the formatter property beside it holds `fmt` to its own three laws —
+//! token equivalence, comment conservation, idempotence — over the same
+//! generated space, but says nothing about the tree either). Tagging
 //! every `LineComment` as `BlockComment` at emission (text byte-identical,
 //! kind wrong) leaves this property green across the full case count.
 //! Comment-kind and node-extent correctness are a separate law needing a
@@ -1630,6 +1634,65 @@ proptest! {
             .unwrap_or_else(|e| panic!("generator emitted an invalid program: {e:?}\n{src}"));
         let root = SyntaxNode::new_root(tree);
         prop_assert_eq!(root.text(), src);
+    }
+
+    /// The formatter over the same generated space (docs/tmt/fmt.md):
+    /// `fmt` changes no significant token, preserves every comment, and
+    /// is idempotent. The corpus guard (`fmt_tmc.rs`) proves this over
+    /// the sources the repository ships; this proves it over the shapes
+    /// nobody wrote — the printer's own debug-build conservation assert
+    /// fires inside `format` too, but the checks here are explicit so a
+    /// release-mode run loses nothing.
+    ///
+    /// Comment preservation compares a MULTISET of texts (normalized by
+    /// the per-line trailing-whitespace trim, the one edit the printer
+    /// may make to trivia), not a sequence: relocation legitimately
+    /// reorders a comment relative to tokens, never drops or duplicates
+    /// one. Token equivalence lexes `WithoutComments`, so the two checks
+    /// are independent — a printer that deletes every comment still
+    /// passes token equivalence, which is exactly how the sibling `.pmc`
+    /// printer once shipped deleting header-interior comments.
+    #[test]
+    fn generated_programs_format_losslessly(seed in prop::collection::vec(any::<u8>(), 1..512)) {
+        let (src, _) = generate_program(&seed);
+        let once = mtc_turing_machine::fmt::format(&src)
+            .unwrap_or_else(|e| panic!("fmt failed on a generated program: {e:?}\n{src}"));
+
+        let kinds = |s: &str| -> Vec<mtc_turing_machine::lexer::TokenKind> {
+            lex_with(s, LexMode::WithoutComments)
+                .expect("both sides lex: the source by construction, the output by fmt's contract")
+                .into_iter()
+                .map(|t| t.kind)
+                .collect()
+        };
+        prop_assert_eq!(kinds(&src), kinds(&once), "fmt changed a token\n--- input ---\n{}\n--- output ---\n{}", src, once);
+
+        let comments = |s: &str| -> std::collections::BTreeMap<String, usize> {
+            let mut m = std::collections::BTreeMap::new();
+            for t in lex_with(s, LexMode::WithComments).expect("lexed above") {
+                if let mtc_turing_machine::lexer::TokenKind::Comment(c) = t.kind {
+                    let normalized = c
+                        .text
+                        .split('\n')
+                        .map(str::trim_end)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    *m.entry(normalized).or_insert(0usize) += 1;
+                }
+            }
+            m
+        };
+        prop_assert_eq!(
+            comments(&src),
+            comments(&once),
+            "fmt dropped or duplicated a comment\n--- input ---\n{}\n--- output ---\n{}",
+            src,
+            once
+        );
+
+        let twice = mtc_turing_machine::fmt::format(&once)
+            .unwrap_or_else(|e| panic!("fmt failed on its own output: {e:?}\n{once}"));
+        prop_assert_eq!(&once, &twice, "fmt is not idempotent on\n--- input ---\n{}", src);
     }
 }
 
