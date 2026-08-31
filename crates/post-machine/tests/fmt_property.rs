@@ -1,6 +1,6 @@
 //! `pmt fmt` property tests. Complements `tests/fmt_programs.rs`'s
 //! hand-picked/corpus checks with a generator of GRAMMAR-VALID `.pmc`
-//! programs (docs/pmt/language.md), asserting three properties the printer
+//! programs (docs/pmt/language.md), asserting five properties the printer
 //! must hold over every one of them:
 //!
 //! 1. **Idempotence**: `format(format(x)?)? == format(x)?`.
@@ -16,16 +16,24 @@
 //!    them on separate lines format to the same text — only the break
 //!    before the COMMAND is the author's to keep
 //!    (docs/pmt/fmt.md (own-line labels)).
+//! 5. **Comment preservation**: lexing `x` and `format(x)?` `WithComments`
+//!    yields the same comments, in the same order, texts intact up to
+//!    per-line trailing-whitespace trim — fmt relocates, never drops
+//!    (docs/pmt/fmt.md (comments)).
 //!
-//! Neither of the last two is implied by the first two, and neither implies
-//! the other. A layout bug can be perfectly idempotent and touch no token:
+//! None of §3-§5 is implied by §1-§2, and none implies another. A layout
+//! bug can be perfectly idempotent and touch no token:
 //! a mis-measured own-line-label break moves a whole body to a narrower
 //! command column, which the body still agrees with itself about — that one
 //! is only visible as a difference between two spellings of the same
 //! program (§4). A continuation line indented to the wrong place is visible
 //! within one body but identical across spellings (§3). The unbounded
 //! double-print of an open-brace comment that the whole-plan review found
-//! is invisible to both and breaks idempotence (§1).
+//! is invisible to both and breaks idempotence (§1). And a printer that
+//! silently DELETES a comment passes §1-§4 outright — §2 lexes
+//! `WithoutComments`, so a dropped comment changes no token it compares —
+//! which is how the green printer shipped deleting every header-interior
+//! comment until §5 existed (see `comment_texts`).
 //!
 //! [`generate_program`] builds source text deterministically from a byte
 //! seed via a small [`Cursor`] (cycling index into the seed, never
@@ -43,7 +51,9 @@
 //! `debugger`, comma groups — plus the two spaces where layout bugs
 //! actually hide: comments in every position that has its own printer path
 //! (file-leading, own-line, trailing, after an opening `{`, dangling before
-//! a closing `}`, interleaved into a `use` list and into a `?`/`!` run) and
+//! a closing `}`, inside a function's or namespace's header — the
+//! relocated-into-the-body path — interleaved into a `use` list and into a
+//! `?`/`!` run) and
 //! label shapes (inline, stacked, stacked across lines, own-line, and
 //! widths wide enough to move the command column), wrapped in the
 //! declaration forms that nest them (`export`, `volatile`, `namespace`,
@@ -391,6 +401,15 @@ fn gen_function(
         out.push_str("export ");
     }
     out.push_str(name);
+    // A header-interior comment (between the name and its `()`): block
+    // form only, since a `//` here would consume the rest of the header.
+    // The shape whose deletion the comment-preservation property exists
+    // to catch — fmt relocates it into the body
+    // (docs/pmt/fmt.md (comments)).
+    if cur.chance(1, 5) {
+        let n = cur.pos;
+        out.push_str(&format!(" /* note {n} */"));
+    }
     out.push_str("() {");
     if cur.chance(1, 3) {
         out.push(' ');
@@ -491,7 +510,14 @@ fn generate_program_with(seed: &[u8], opts: Opts) -> String {
         match cur.choose(5) {
             0 => gen_use(&mut cur, &mut out),
             1 => {
-                out.push_str(&format!("namespace ns{u} {{"));
+                out.push_str(&format!("namespace ns{u}"));
+                // A header-interior comment (between the name and `{`)
+                // — the namespace half of the relocation surface.
+                if cur.chance(1, 5) {
+                    let n = cur.pos;
+                    out.push_str(&format!(" /* note {n} */"));
+                }
+                out.push_str(" {");
                 if cur.chance(1, 3) {
                     out.push(' ');
                     out.push_str(&gen_comment(&mut cur));
@@ -542,6 +568,30 @@ fn kinds(src: &str) -> Vec<TokenKind> {
         .expect("lexes")
         .into_iter()
         .map(|t| t.kind)
+        .collect()
+}
+
+/// Every comment's text, in source order, trailing whitespace trimmed
+/// per line (the one rewrite the printer's `normalize_comment_text` is
+/// allowed) — what the "comment preservation" property compares. Token
+/// equivalence cannot stand in for it: that property lexes
+/// `WithoutComments`, so a printer that silently DELETES a comment
+/// passes it, stays idempotent, and moves no command column — exactly
+/// the header-comment regression this property was added to catch.
+fn comment_texts(src: &str) -> Vec<String> {
+    lex_with(src, LexMode::WithComments)
+        .expect("lexes")
+        .into_iter()
+        .filter_map(|t| match t.kind {
+            TokenKind::Comment(c) => Some(
+                c.text
+                    .split('\n')
+                    .map(str::trim_end)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
         .collect()
 }
 
@@ -673,6 +723,19 @@ proptest! {
             kinds(&once),
             "token sequence changed for generated source:\n{}",
             src
+        );
+
+        // Property 5: every comment reprints, in order, text intact
+        // (docs/pmt/fmt.md (comments) — "trivia-preserving"). See
+        // [`comment_texts`] for why none of the other properties
+        // implies it.
+        prop_assert_eq!(
+            comment_texts(&src),
+            comment_texts(&once),
+            "a comment was dropped, reordered or rewritten for generated source:\n{}\nformatted \
+             to:\n{}",
+            src,
+            once
         );
 
         if let Err(why) = command_columns_agree(&once) {

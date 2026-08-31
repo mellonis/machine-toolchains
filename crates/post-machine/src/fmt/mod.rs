@@ -931,8 +931,8 @@ mod tests {
         assert_eq!(twice, once, "not idempotent for {src:?}");
     }
 
-    // -- Namespace c-brace fix (mirrors FunctionCst's open_trailing /
-    // close_trailing onto NamespaceCst) --------------------------------
+    // -- Namespace c-brace fix (the open/close-brace trailing rule
+    // functions get, applied to namespaces) ----------------------------
     //
     // Same gap `cbrace_a`/`cbrace_b` fixed for functions, applied to
     // `namespace NAME { … }`: a comment on the SAME line as the

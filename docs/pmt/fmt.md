@@ -181,6 +181,21 @@ stays above the comment, not between the comment and what it documents);
 a comment dangling before a body's closing brace prints at the body's
 indent; block-comment interiors are reprinted verbatim, untouched.
 
+One position is the exception. A comment written inside a function's or
+namespace's **header** — between the name and its `(`, inside the empty
+`()`, between `)` and `{`, after `volatile` or `export`, or between a
+namespace's keyword/name and its `{` — has no place on the canonical
+header line, so it relocates to its own line at body indent, ahead of
+the first body element. Nothing is dropped — the rewrite is still
+whitespace-only — and when any header comment is present the open-brace
+comment moves with it, in source order, instead of riding the brace.
+Blank lines around the relocated run reprint from the comments'
+original source lines: `main() // note` with the `{` on the next line
+puts `// note` at body indent with a blank line under it, because the
+first statement sat two lines below the comment in the source. The
+relocated shape is one the printer reprints unchanged, so this settles
+in a single pass.
+
 A trailing comment (same line as the statement it follows) gets one
 space before its `//` by default. When the author aligned a **run** of
 two or more trailing comments in a column — a maximal sequence of

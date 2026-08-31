@@ -875,8 +875,7 @@ impl Parser<'_> {
             // binds to, or — with no run — for the header token about to
             // be consumed (`volatile`/`export`/name): taken here, before
             // either, so `g_start_at` below retro-wraps whichever prefix
-            // was actually present (mirrors `FunctionCst::span`'s start
-            // rule). Unused whenever this token turns out to start a
+            // was actually present. Unused whenever this token turns out to start a
             // `use`/`namespace` item instead — harmless, a fresh
             // checkpoint is taken every loop iteration.
             let fn_cp = self.g_checkpoint();

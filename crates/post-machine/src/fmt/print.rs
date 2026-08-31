@@ -127,7 +127,14 @@ pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     // (comments)), which only a line index can answer.
     let line_index = TextLineIndex::new(source);
     let mut out = String::new();
-    print_items(&mut out, root.children_with_tokens(), 0, &[], &line_index);
+    print_items(
+        &mut out,
+        root.children_with_tokens(),
+        0,
+        &[],
+        &[],
+        &line_index,
+    );
     // Edge case (`docs/pmt/fmt.md` (indentation), mirrored from C1's
     // `print_cst`): an empty or whitespace-only file still reprints as
     // exactly one newline.
@@ -162,6 +169,7 @@ fn print_items(
     elements: impl Iterator<Item = SyntaxElement>,
     indent: usize,
     reserved: &[SyntaxToken],
+    relocated: &[SyntaxToken],
     line_index: &TextLineIndex,
 ) {
     let elements: Vec<SyntaxElement> = elements.filter(|e| !trivia::is_ws(e.kind())).collect();
@@ -195,7 +203,28 @@ fn print_items(
         }
     }
 
-    let mut first = true;
+    // The caller's relocated run (a namespace's header-interior comments
+    // plus, with them, its open-brace run — [`header_interior_comments`])
+    // prints first, at this level's indent, blanks measured between the
+    // comments' ORIGINAL source lines; `baseline` then hands the last
+    // one's line to the first thing printed below, whose real sibling
+    // gap (against the `{`, not against the comment that used to sit
+    // before it) would answer the blank question one line too late. A
+    // relocated open-brace comment is also reached below as its own raw
+    // token — skipped as `claimed`, which deliberately leaves `baseline`
+    // in place for whatever prints after the skip.
+    let mut baseline: Option<u32> = None;
+    for c in relocated {
+        if let Some(prev) = baseline
+            && line_index.line_col(c.text_range().start).0 > prev + 1
+        {
+            out.push('\n');
+        }
+        print_comment(out, c, indent);
+        baseline = Some(line_index.line_col(c.text_range().end).0);
+    }
+
+    let mut first = relocated.is_empty();
     for e in &elements {
         match e {
             SyntaxElement::Node(node) => {
@@ -205,7 +234,11 @@ fn print_items(
                 // The other brace edge, "immediately before `}`", cannot
                 // arise — no unit follows the last one to carry a
                 // blank.
-                if !first && trivia::blank_before_unit(node) {
+                let blank = match baseline.take() {
+                    Some(prev) => unit_start_line(node, line_index) > prev + 1,
+                    None => trivia::blank_before_unit(node),
+                };
+                if !first && blank {
                     out.push('\n');
                 }
                 first = false;
@@ -220,7 +253,11 @@ fn print_items(
                 if claimed.contains(tok) {
                     continue;
                 }
-                if !first && blank_immediately_before(tok) {
+                let blank = match baseline.take() {
+                    Some(prev) => line_index.line_col(tok.text_range().start).0 > prev + 1,
+                    None => blank_immediately_before(tok),
+                };
+                if !first && blank {
                     out.push('\n');
                 }
                 first = false;
@@ -268,6 +305,48 @@ fn unit_start_line(node: &SyntaxNode, line_index: &TextLineIndex) -> u32 {
     line_index.line_col(start).0
 }
 
+/// Comment tokens written between a declaration's header tokens — after
+/// its FIRST header token and before its opening `{` — in source order:
+/// between a function's name and its `(`, inside the `()`, between `)`
+/// and `{`, after `volatile`/`export`, or between a namespace's
+/// keyword/name and its `{`. The canonical header line has no place for
+/// them, so they relocate to their own lines at body indent, ahead of
+/// the first body element (docs/pmt/fmt.md (comments)) — and when any
+/// exist, the open-brace run relocates WITH them, in source order,
+/// instead of riding the brace (one pending queue, not two: the caller
+/// appends `open_trailing` to what this returns).
+///
+/// The after-the-first-header-token bound is the claim boundary against
+/// [`doc_run_trailing_comments`]: a comment between a bound `DOC_RUN`
+/// and the header sits BEFORE the first header token and is that walk's
+/// to print, never this one's. A comment before the declaration
+/// entirely is a sibling OUTSIDE the node (`FUNCTION` retro-wraps only
+/// its doc run; `NAMESPACE` opens at its keyword), so it cannot be
+/// collected here.
+fn header_interior_comments(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    let mut out = Vec::new();
+    let mut seen_header_token = false;
+    for e in node.children_with_tokens() {
+        match e {
+            // A bound DOC_RUN — before the header by construction.
+            SyntaxElement::Node(_) => {}
+            SyntaxElement::Token(t) => {
+                if t.kind() == PmcKind::LBrace.into() {
+                    break;
+                }
+                if trivia::is_comment(t.kind()) {
+                    if seen_header_token {
+                        out.push(t);
+                    }
+                } else if !trivia::is_ws(t.kind()) {
+                    seen_header_token = true;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Dispatch one top-level (or namespace-level) item node to its printer.
 /// Every kind this plan does not yet cover hits a loud, named panic
 /// instead of silently printing something wrong — the module doc's own
@@ -313,7 +392,14 @@ fn print_namespace(
     let brace =
         token(node, PmcKind::LBrace.into()).expect("NAMESPACE always carries an L_BRACE token");
     let open = trivia::open_trailing(&brace);
-    if open.is_empty() {
+    let mut relocated = header_interior_comments(node);
+    if !relocated.is_empty() {
+        // Same relocation as a function header's
+        // ([`header_interior_comments`]): the open-brace run joins the
+        // relocated comments instead of riding the brace.
+        relocated.extend(open.iter().cloned());
+        out.push('\n');
+    } else if open.is_empty() {
         out.push('\n');
     } else {
         out.push(' ');
@@ -329,6 +415,7 @@ fn print_namespace(
         brace_interior(node),
         indent + INDENT_UNIT,
         &open,
+        &relocated,
         line_index,
     );
     out.push_str(&pad);
@@ -603,7 +690,14 @@ fn print_function(
     let brace =
         token(node, PmcKind::LBrace.into()).expect("FUNCTION always carries an L_BRACE token");
     let open = trivia::open_trailing(&brace);
-    if open.is_empty() {
+    let mut relocated = header_interior_comments(node);
+    if !relocated.is_empty() {
+        // Header-interior comments relocate into the body, and the
+        // open-brace run relocates with them instead of riding the brace
+        // (`header_interior_comments`'s own doc — one pending queue).
+        relocated.extend(open.iter().cloned());
+        out.push('\n');
+    } else if open.is_empty() {
         out.push('\n');
     } else {
         out.push(' ');
@@ -614,7 +708,14 @@ fn print_function(
         out.push_str(&texts.join(" "));
         out.push('\n');
     }
-    print_body(out, node, indent + INDENT_UNIT, &open, line_index);
+    print_body(
+        out,
+        node,
+        indent + INDENT_UNIT,
+        &open,
+        &relocated,
+        line_index,
+    );
     out.push_str(&pad);
     out.push('}');
     if let Some(c) = trivia::trailing_comment(node) {
@@ -972,6 +1073,7 @@ fn print_body(
     func_node: &SyntaxNode,
     indent: usize,
     reserved: &[SyntaxToken],
+    relocated: &[SyntaxToken],
     line_index: &TextLineIndex,
 ) {
     let elements: Vec<SyntaxElement> = brace_interior(func_node)
@@ -994,6 +1096,22 @@ fn print_body(
     // correctly" (true whenever nothing was relocated).
     let mut override_prev_line: Vec<Option<u32>> = Vec::with_capacity(elements.len());
     let mut pending_prev_line: Option<u32> = None;
+    // The caller's relocated run (header-interior comments plus, with
+    // them, the open-brace run — [`header_interior_comments`]) prints
+    // FIRST, ahead of everything `brace_interior` yields. Entering each
+    // as a `BodyElem::TailComment` buys the exact blank-line semantics
+    // C1 gave relocation for free: the first one takes no blank (its
+    // override is `None` and that arm defaults to none), each later
+    // element measures against the PREVIOUS relocated comment's own
+    // source line, and — since an open-brace comment relocated here is
+    // ALSO reached below as its own raw `brace_interior` token, skipped
+    // as `consumed` — `carried_prev_line` hands the baseline past the
+    // skip to whatever prints next.
+    for c in relocated {
+        override_prev_line.push(pending_prev_line.take());
+        pending_prev_line = Some(line_index.line_col(c.text_range().end).0);
+        body.push(BodyElem::TailComment(c.clone()));
+    }
     for e in &elements {
         match e {
             SyntaxElement::Node(node) if node.kind() == PmcKind::Statement.into() => {
@@ -3454,6 +3572,162 @@ mod tests {
         formats_to(
             include_str!("../../tests/syntax/retok.pmc"),
             include_str!("../../tests/fmt_expected/retok.pmc.expected"),
+        );
+    }
+
+    // -- Header-interior comments relocate into the body ----------------
+    //
+    // A comment written between a declaration's header tokens — between
+    // the name and `(`, inside the parens, between `)` and `{`, after
+    // `volatile`/`export`, or between a namespace's keyword/name and its
+    // `{` — has no place on the canonical header line: it relocates to
+    // its own line at body indent, ahead of the first body element, and
+    // blank lines around it are measured from the ORIGINAL source lines
+    // (the same relocated-baseline rule `BodyElem::TailComment`
+    // documents). Every `expected` below was captured from the C1
+    // printer built from master `38ca36f`: the green printer's first cut
+    // DELETED these comments outright — a whitespace-only violation no
+    // fixture and no property could see, because token equivalence lexes
+    // `WithoutComments` — and these fixtures pin the restored behavior.
+
+    #[test]
+    fn header_comment_between_parens_and_brace_relocates() {
+        formats_to_fixed_point(
+            "main() /* keep me */ {\n  1: right;\n}\n",
+            "main() {\n    /* keep me */\n 1: right;\n}\n",
+        );
+    }
+
+    #[test]
+    fn header_comment_between_name_and_parens_relocates() {
+        formats_to_fixed_point(
+            "main /* x */ () {\n  1: right;\n}\n",
+            "main() {\n    /* x */\n 1: right;\n}\n",
+        );
+    }
+
+    #[test]
+    fn header_comment_inside_the_parens_relocates() {
+        formats_to_fixed_point(
+            "main( /* b */ ) {\n  1: right;\n}\n",
+            "main() {\n    /* b */\n 1: right;\n}\n",
+        );
+    }
+
+    #[test]
+    fn header_comments_after_volatile_and_export_relocate() {
+        formats_to_fixed_point(
+            "export /* c */ f() {\n  1: right;\n}\nmain() {\n  1: @f();\n}\n",
+            "export f() {\n    /* c */\n 1: right;\n}\nmain() {\n 1: @f();\n}\n",
+        );
+        formats_to_fixed_point(
+            "volatile /* v */ main() {\n  1: right;\n}\n",
+            "volatile main() {\n    /* v */\n 1: right;\n}\n",
+        );
+        formats_to_fixed_point(
+            "volatile /* v */ export /* e */ main() {\n  1: right;\n}\n",
+            "volatile export main() {\n    /* v */\n    /* e */\n 1: right;\n}\n",
+        );
+    }
+
+    /// A `//` header comment consumes the rest of its line, so the `{`
+    /// sits on the NEXT line and the first statement one further — a
+    /// two-line original gap, which the relocated-baseline rule turns
+    /// into a blank line under the relocated comment.
+    #[test]
+    fn header_line_comment_gap_reprints_as_a_blank() {
+        formats_to_fixed_point(
+            "main() // note\n{\n  1: right;\n}\n",
+            "main() {\n    // note\n\n 1: right;\n}\n",
+        );
+    }
+
+    /// Blank lines are measured from the comments' ORIGINAL lines, on
+    /// both sides: between two relocated comments (blank iff their
+    /// source lines were more than one apart) and between the last one
+    /// and the first statement.
+    #[test]
+    fn relocated_blanks_measure_original_lines() {
+        // Adjacent source lines: no blank between the pair.
+        formats_to_fixed_point(
+            "main() /* a */\n/* c */ {\n  1: right;\n}\n",
+            "main() {\n    /* a */\n    /* c */\n 1: right;\n}\n",
+        );
+        // A blank between the pair in the source: it survives.
+        formats_to_fixed_point(
+            "main() /* a */\n\n/* c */ {\n  1: right;\n}\n",
+            "main() {\n    /* a */\n\n    /* c */\n 1: right;\n}\n",
+        );
+        // A blank between `{` and the statement: measured against the
+        // comment's line, still a blank.
+        formats_to_fixed_point(
+            "main() /* a */ {\n\n  1: right;\n}\n",
+            "main() {\n    /* a */\n\n 1: right;\n}\n",
+        );
+        // The `{` two lines below the comment, statement right after it:
+        // the ORIGINAL gap to the comment is what reprints, so a blank.
+        formats_to_fixed_point(
+            "main() /* a */\n\n{\n  1: right;\n}\n",
+            "main() {\n    /* a */\n\n 1: right;\n}\n",
+        );
+    }
+
+    #[test]
+    fn two_header_comments_relocate_in_source_order() {
+        formats_to_fixed_point(
+            "main() /* a */ /* b */ {\n  1: right;\n}\n",
+            "main() {\n    /* a */\n    /* b */\n 1: right;\n}\n",
+        );
+    }
+
+    /// With a header comment present the open-brace comment cannot ride
+    /// the brace — C1 drained them through one pending queue, so the
+    /// open-trailing comment joins the relocated run in source order.
+    #[test]
+    fn header_comment_pulls_the_open_brace_comment_off_the_brace() {
+        formats_to_fixed_point(
+            "main() /* a */ { // t\n  1: right;\n}\n",
+            "main() {\n    /* a */\n    // t\n 1: right;\n}\n",
+        );
+    }
+
+    #[test]
+    fn header_comment_coexists_with_a_doc_run() {
+        formats_to_fixed_point(
+            "? doc\nmain() /* h */ {\n  1: right;\n}\n",
+            "? doc\nmain() {\n    /* h */\n 1: right;\n}\n",
+        );
+    }
+
+    #[test]
+    fn nested_function_header_comment_relocates_one_level_deeper() {
+        formats_to_fixed_point(
+            "main() {\n  step() /* n */ {\n    1: right;\n  }\n  1: @step();\n}\n",
+            "main() {\n    step() {\n        /* n */\n     1: right;\n    }\n 1: @step();\n}\n",
+        );
+    }
+
+    #[test]
+    fn namespace_header_comments_relocate() {
+        // Between the name and `{`.
+        formats_to_fixed_point(
+            "namespace n /* nk */ {\n  export f() {\n    1: right;\n  }\n}\nmain() {\n  1: @n::f();\n}\n",
+            "namespace n {\n    /* nk */\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
+        );
+        // Between the keyword and the name.
+        formats_to_fixed_point(
+            "namespace /* k */ n {\n  export f() {\n    1: right;\n  }\n}\nmain() {\n  1: @n::f();\n}\n",
+            "namespace n {\n    /* k */\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
+        );
+        // The original-lines blank rule holds here too.
+        formats_to_fixed_point(
+            "namespace n /* k */\n\n{\n  export f() {\n    1: right;\n  }\n}\nmain() {\n  1: @n::f();\n}\n",
+            "namespace n {\n    /* k */\n\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
+        );
+        // And the open-brace comment joins the relocation here too.
+        formats_to_fixed_point(
+            "namespace n /* k */ { // t\n  export f() {\n    1: right;\n  }\n}\nmain() {\n  1: @n::f();\n}\n",
+            "namespace n {\n    /* k */\n    // t\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
         );
     }
 }
