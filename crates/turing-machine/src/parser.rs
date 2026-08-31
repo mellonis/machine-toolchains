@@ -4,12 +4,14 @@
 //! [`parse`] is the convenience wrapper: source in, [`Program`] out,
 //! going through that same green tree and
 //! [`crate::syntax::extract_program`] (docs/core.md (syntax trees)).
-//! `Parser::file` and its per-production helpers also still build
-//! [`crate::cst`]'s own node types of their own as they walk (the same
-//! walk, with a green sink attached alongside it) — the outer
-//! [`crate::cst::Cst`] wrapper is no longer constructed anywhere, since
-//! its one constructor was the now-deleted `parse_cst`. Nothing in
-//! production reads that node tree any more.
+//! `Parser::file` builds the green tree and nothing else. The
+//! productions keep the values a caller still reads — the AST fragments
+//! the `reparse_*` shims hand back to extraction, and the pattern and
+//! write vector `check_char_arithmetic` inspects — and drop everything
+//! they used to assemble into [`crate::cst`]'s own node types. That
+//! module is now reachable from here for exactly one item,
+//! [`crate::cst::ReuseCarrier`], which `Parser::parse_reuse` takes to
+//! pick its "a routine name"/"a graph name" error wording.
 //!
 //! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
@@ -589,29 +591,6 @@ pub(crate) fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
         .collect()
 }
 
-/// Split a token stream into its significant tokens and its comment
-/// trivia — the shape both parse paths hand to `Parser`. `sig_index`
-/// records how many significant tokens precede each comment, which is
-/// the `pos` the significant-token walk sits at while that comment is
-/// pending. A comment-free stream yields an empty `comments` and clones
-/// straight through.
-fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
-    let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
-    let mut comments: Vec<CommentAt> = Vec::new();
-    for t in tokens {
-        if let TokenKind::Comment(c) = &t.kind {
-            comments.push(CommentAt {
-                comment: c.clone(),
-                line: t.line,
-                sig_index: sig.len(),
-            });
-        } else {
-            sig.push(t.clone());
-        }
-    }
-    (sig, comments)
-}
-
 /// source → green syntax tree (docs/core.md (syntax trees)). Lexes
 /// `WithComments` and hands both halves to [`parse_green_from_tokens`].
 pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
@@ -642,11 +621,12 @@ thread_local! {
 /// the `text() == source` law. An empty `tokens` slice panics — every
 /// real lex result is EOF-terminated.
 ///
-/// Runs `Parser::file`'s one grammar walk with a green sink attached: the
-/// sink only mirrors token consumption and node boundaries alongside the
-/// unchanged parser logic, so the same walk also builds
-/// [`crate::cst`]'s own node types of their own as a byproduct — nothing
-/// in production reads them any more (docs/core.md (syntax trees)).
+/// Runs `Parser::file`'s one grammar walk with a green sink attached:
+/// the sink mirrors token consumption and node boundaries alongside the
+/// parser logic, and the tree it builds is the walk's only product
+/// (docs/core.md (syntax trees)). The parser itself walks the
+/// significant tokens alone — [`significant_tokens`] strips the comment
+/// trivia the layout schedule already carries.
 pub fn parse_green_from_tokens(
     source: &str,
     tokens: &[Token],
@@ -654,16 +634,13 @@ pub fn parse_green_from_tokens(
     #[cfg(test)]
     PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.set(c.get() + 1));
     let entries = syntax::layout(source, tokens);
-    let (sig, comments) = split_comments(tokens);
+    let sig = significant_tokens(tokens);
     let eof_pos = sig.len() - 1;
     let mut sink = GreenSink::new(entries);
     sink.start(TmcKind::Root);
     let sink = Parser {
         tokens: &sig,
         pos: 0,
-        comments,
-        cpos: 0,
-        prev_end_line: 0,
         machine_seen: false,
         sink: Some(sink),
     }
@@ -763,16 +740,6 @@ pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
 // Parser
 // ---------------------------------------------------------------------------
 
-/// A comment lifted out of the stream during the split, remembering where it
-/// sat relative to the significant tokens.
-struct CommentAt {
-    comment: Comment,
-    /// The comment's own start line (for `blank_before` gaps).
-    line: u32,
-    /// Number of significant tokens preceding it.
-    sig_index: usize,
-}
-
 fn join(a: Span, b: Span) -> Span {
     Span {
         start: a.start,
@@ -819,12 +786,6 @@ struct Parser<'a> {
     /// Significant (comment-free) tokens only.
     tokens: &'a [Token],
     pos: usize,
-    /// Comments split out of the stream, in source order.
-    comments: Vec<CommentAt>,
-    /// Cursor into `comments`: everything before it is already attached.
-    cpos: usize,
-    /// End line of the last emitted CST element, for `blank_before`.
-    prev_end_line: u32,
     /// A `machine` block has already been seen (multiplicity guard).
     machine_seen: bool,
     /// Green-tree emission, when this walk is [`parse_green`]'s: `bump()`
@@ -942,53 +903,42 @@ impl Parser<'_> {
         matches!(&self.peek().kind, TokenKind::Ident(k) if k == w)
     }
 
-    // ---- comment trivia helpers -------------------------------------------
-
-    /// Attach every pending comment at or before the current position, as
-    /// `(comment, start_line)` in source order.
-    fn drain_pending(&mut self) -> Vec<(Comment, u32)> {
-        let mut out = Vec::new();
-        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
-            let ca = &self.comments[self.cpos];
-            out.push((ca.comment.clone(), ca.line));
-            self.cpos += 1;
-        }
-        out
-    }
-
-    /// Capture comment(s) on the same physical line as a just-consumed `{`,
-    /// before the first body item (`sig_index == pos`, so a comment BEFORE the
-    /// brace is excluded even on the same line). Sets `prev_end_line`.
-    fn capture_open_trailing(&mut self, brace_line: u32) -> Vec<Comment> {
-        self.prev_end_line = brace_line;
-        let mut out = Vec::new();
-        while self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index == self.pos && ca.line == brace_line {
-                out.push(ca.comment.clone());
-                self.cpos += 1;
-            } else {
-                break;
-            }
-        }
-        if let Some(last) = out.last() {
-            self.prev_end_line = brace_line + last.text.matches('\n').count() as u32;
-        }
-        out
-    }
-
     // ---- doc runs ---------------------------------------------------------
 
-    /// Collect a doc/attention run at the current position (the caller has
-    /// confirmed the leading token is a `?`/`!` line). Fixed order: a `?` after
-    /// the run's first `!` is `DocLineOrder`. Blanks and ordinary comments are
-    /// tolerated within/after. Returns the items plus the run's first line span.
-    fn doc_run(&mut self) -> Result<(Vec<DocRunItem>, Span), CompileError> {
+    /// Consume a doc/attention run at the current position (the caller
+    /// has confirmed the leading token is a `?`/`!` line), enforcing its
+    /// ordering and attribute rules, and answer the run's first-line
+    /// span — which is what a `DanglingDocRun` error is reported at.
+    ///
+    /// The items themselves go nowhere on this walk: extraction rebuilds
+    /// them from the green tree, retokenizing a DOC_RUN node's own
+    /// extent and re-running the same production through
+    /// [`reparse_doc_items`]. `0` is passed for `prev_end_line` because
+    /// the only thing it seeds — the first item's `blank_before` — is
+    /// discarded here along with the items; the reparse supplies the
+    /// real value.
+    fn doc_run(&mut self) -> Result<Span, CompileError> {
+        Ok(self.doc_run_items(0)?.1)
+    }
+
+    /// [`Self::doc_run`]'s item-collecting form. `prev_end_line` is the
+    /// end line of whatever precedes the run, seeding the first item's
+    /// `blank_before`; every later item measures its gap against the
+    /// item before it.
+    ///
+    /// The items are `DocLine`/`AttentionLine` shapes only. [`DocRunKind`]'s
+    /// `Comment` variant is not dead — a comment written inside a run is
+    /// green-tree trivia, and `crate::syntax::extract::extract_doc_items`
+    /// constructs the item for it there, interleaving it with what this
+    /// production returns.
+    fn doc_run_items(
+        &mut self,
+        mut prev_end_line: u32,
+    ) -> Result<(Vec<DocRunItem>, Span), CompileError> {
         let first_span = self.peek().span();
         let mut items: Vec<DocRunItem> = Vec::new();
         let mut seen_attention = false;
         let mut seen_deprecated = false;
-        let mut prev_end_line = self.prev_end_line;
         loop {
             let t = self.peek().clone();
             match &t.kind {
@@ -1055,16 +1005,7 @@ impl Parser<'_> {
                 }
                 _ => break,
             }
-            for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > prev_end_line + 1;
-                prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                items.push(DocRunItem {
-                    blank_before,
-                    kind: DocRunKind::Comment(comment),
-                });
-            }
         }
-        self.prev_end_line = prev_end_line;
         Ok((items, first_span))
     }
 
@@ -1141,7 +1082,7 @@ impl Parser<'_> {
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
                 self.g_flush_start(TmcKind::DocRun);
-                let (_, first_span) = self.doc_run()?;
+                let first_span = self.doc_run()?;
                 self.g_finish(); // DocRun
                 if !self.next_is_top_doc_accepting() {
                     return Err(CompileError {
@@ -1157,7 +1098,6 @@ impl Parser<'_> {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
                 (k, Some(term)) if k == term => {
-                    self.prev_end_line = t.line;
                     self.bump();
                     return Ok(());
                 }
@@ -1246,7 +1186,6 @@ impl Parser<'_> {
 
     fn parse_use(&mut self) -> Result<(), CompileError> {
         self.bump(); // `use`
-        let semi_line;
         loop {
             self.g_flush_start(TmcKind::UsePath);
             self.name("an imported name")?;
@@ -1263,25 +1202,21 @@ impl Parser<'_> {
             match sep.kind {
                 TokenKind::Comma => self.bump(),
                 TokenKind::Semi => {
-                    semi_line = sep.line;
                     self.bump();
                     break;
                 }
                 _ => return Err(Self::expected(&sep, "`,` or `;`")),
             }
         }
-        self.prev_end_line = semi_line;
         Ok(())
     }
 
     fn parse_alphabet(&mut self) -> Result<(), CompileError> {
         self.bump(); // `alphabet`
         self.name("an alphabet name")?;
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the alphabet body")?;
-        self.capture_open_trailing(brace.line);
+        self.expect(&TokenKind::LBrace, "`{` to open the alphabet body")?;
         self.alphabet_elems()?;
-        let close = self.expect(&TokenKind::RBrace, "`}` to close the alphabet body")?;
-        self.prev_end_line = close.line;
+        self.expect(&TokenKind::RBrace, "`}` to close the alphabet body")?;
         Ok(())
     }
 
@@ -1323,8 +1258,7 @@ impl Parser<'_> {
     fn parse_namespace(&mut self, ns: &[String]) -> Result<(), CompileError> {
         self.bump(); // `namespace`
         let (name, _) = self.name("a namespace name")?;
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the namespace body")?;
-        self.capture_open_trailing(brace.line);
+        self.expect(&TokenKind::LBrace, "`{` to open the namespace body")?;
         let mut child = ns.to_vec();
         child.push(name);
         self.top_items(&child, Some(&TokenKind::RBrace))
@@ -1344,8 +1278,7 @@ impl Parser<'_> {
         // than folding into REUSE/MACHINE directly. Opened before the
         // `{` so the brace itself is WORLD's first token.
         self.g_flush_start(TmcKind::World);
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the body")?;
-        self.capture_open_trailing(brace.line);
+        self.expect(&TokenKind::LBrace, "`{` to open the body")?;
         self.world_body(false)?;
         self.g_finish(); // World — closes right after the closing `}`
         Ok(())
@@ -1356,8 +1289,7 @@ impl Parser<'_> {
         // WORLD wraps the `{ … }` body — see `parse_reuse`'s matching
         // comment; the same shared shape, no signature to skip over here.
         self.g_flush_start(TmcKind::World);
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the machine body")?;
-        self.capture_open_trailing(brace.line);
+        self.expect(&TokenKind::LBrace, "`{` to open the machine body")?;
         self.world_body(true)?;
         self.g_finish(); // World — closes right after the closing `}`
         Ok(())
@@ -1534,7 +1466,7 @@ impl Parser<'_> {
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
                 self.g_flush_start(TmcKind::DocRun);
-                let (_, first_span) = self.doc_run()?;
+                let first_span = self.doc_run()?;
                 self.g_finish(); // DocRun
                 if !self.next_is_world_doc_accepting() {
                     return Err(CompileError {
@@ -1545,7 +1477,6 @@ impl Parser<'_> {
             }
             let t = self.peek().clone();
             if matches!(t.kind, TokenKind::RBrace) {
-                self.prev_end_line = t.line;
                 self.bump();
                 return Ok(());
             }
@@ -1614,8 +1545,7 @@ impl Parser<'_> {
         self.name("a tape name")?;
         self.expect(&TokenKind::Colon, "`:` after the tape name")?;
         self.name("an alphabet name")?;
-        let semi = self.expect(&TokenKind::Semi, "`;`")?;
-        self.prev_end_line = semi.line;
+        self.expect(&TokenKind::Semi, "`;`")?;
         Ok(())
     }
 
@@ -1626,8 +1556,7 @@ impl Parser<'_> {
         if matches!(self.peek().kind, TokenKind::Semi) {
             return Err(Self::err_at(self.peek(), CompileErrorKind::StateRedirect));
         }
-        let brace = self.expect(&TokenKind::LBrace, "`{` to open the state body")?;
-        self.capture_open_trailing(brace.line);
+        self.expect(&TokenKind::LBrace, "`{` to open the state body")?;
         self.state_rules()
     }
 
@@ -1637,7 +1566,6 @@ impl Parser<'_> {
         loop {
             let t = self.peek().clone();
             if matches!(t.kind, TokenKind::RBrace) {
-                self.prev_end_line = t.line;
                 self.bump();
                 return Ok(());
             }
@@ -1703,8 +1631,7 @@ impl Parser<'_> {
             self.transition()?;
             self.g_finish(); // Transition
         }
-        let semi = self.expect(&TokenKind::Semi, "`;` to end the rule")?;
-        self.prev_end_line = semi.line;
+        self.expect(&TokenKind::Semi, "`;` to end the rule")?;
         // Char arithmetic is deliberately absent: a `{c±k}` on a glyph-bound
         // pattern name is rejected here, where the rule's bindings are known.
         self.check_char_arithmetic(&pattern, &write)
@@ -2356,8 +2283,7 @@ impl Parser<'_> {
         if !entry && !named {
             return Err(Self::err_at(&graft_tok, CompileErrorKind::GraftNeedsName));
         }
-        let semi = self.expect(&TokenKind::Semi, "`;` to end the graft")?;
-        self.prev_end_line = semi.line;
+        self.expect(&TokenKind::Semi, "`;` to end the graft")?;
         Ok(())
     }
 
@@ -2367,8 +2293,7 @@ impl Parser<'_> {
         self.binding_args()?;
         self.expect_kw("as", "`as` (a bind needs an instance name)")?;
         self.name("a bind instance name")?;
-        let semi = self.expect(&TokenKind::Semi, "`;` to end the bind")?;
-        self.prev_end_line = semi.line;
+        self.expect(&TokenKind::Semi, "`;` to end the bind")?;
         Ok(())
     }
 }
@@ -2385,9 +2310,6 @@ fn bare_parser(tokens: &[Token]) -> Parser<'_> {
     Parser {
         tokens,
         pos: 0,
-        comments: Vec::new(),
-        cpos: 0,
-        prev_end_line: 0,
         machine_seen: false,
         sink: None,
     }
@@ -2537,17 +2459,22 @@ pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
 }
 
 /// Retokenization reuse shim for a bound DOC_RUN node: re-parses its
-/// `DocLine`/`AttentionLine` tokens through `Parser::doc_run` itself,
-/// rather than a hand-rolled reimplementation of its item loop. Sound
-/// even though `doc_run` also re-enforces the `DocLineOrder` ordering
-/// check and the duplicate-/unknown-attribute checks: those checks
-/// already passed once, over these exact tokens, during the original
-/// parse that produced the tree this run was retokenized from, so
-/// re-running them is redundant work, never a new failure mode.
-/// Comments interleaved in the original run do not survive: they are
-/// trivia `crate::syntax::extract::sig_tokens` filters out before this
-/// ever runs, so a comment-bearing run retokenizes to a strictly
-/// SHORTER item sequence than the original CST's.
+/// `DocLine`/`AttentionLine` tokens through `Parser::doc_run_items`
+/// itself, rather than a hand-rolled reimplementation of its item loop.
+/// Sound even though that production also re-enforces the
+/// `DocLineOrder` ordering check and the duplicate-/unknown-attribute
+/// checks: those checks already passed once, over these exact tokens,
+/// during the parse that produced the tree this run was retokenized
+/// from, so re-running them is redundant work, never a new failure
+/// mode. It is also the only place the items exist at all — the walk
+/// that built the tree discards its own.
+///
+/// The items are `?`/`!` lines only. A comment written inside a run is
+/// green-tree trivia, which `crate::syntax::extract::sig_tokens`
+/// filters out before this ever runs;
+/// `crate::syntax::extract::extract_doc_items` builds that comment's
+/// own `DocRunKind::Comment` item straight from the tree and
+/// interleaves it with what this shim returns.
 ///
 /// `prev_end_line` seeds the run's FIRST item's `blank_before` gap
 /// check — the end line of whatever preceded this run in the real
@@ -2559,16 +2486,16 @@ pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
 /// node's own tokens can never carry. Every item AFTER the first computes
 /// its own gap from the item before it, entirely inside `tokens`, so
 /// only the first item's `blank_before` is at stake here; passing the
-/// wrong value disagrees with the original, in-context parse's own run
-/// on exactly that one field of exactly that one item. Mirrors the
+/// wrong value claims a blank line the source does not have (or misses
+/// one it does), on exactly that one field of exactly that one item.
+/// Mirrors the
 /// sibling crate's own
 /// `reparse_item(tokens, in_group)`, whose `in_group` flag is the same
 /// shape of caller-supplied context an isolated retokenized node
 /// cannot recover on its own.
 pub(crate) fn reparse_doc_items(tokens: &[Token], prev_end_line: u32) -> Vec<DocRunItem> {
-    let mut p = bare_parser(tokens);
-    p.prev_end_line = prev_end_line;
-    p.doc_run()
+    bare_parser(tokens)
+        .doc_run_items(prev_end_line)
         .expect("reparse_doc_items: extraction only ever runs on an already-parsed tree")
         .0
 }
