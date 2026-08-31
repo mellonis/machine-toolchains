@@ -18,11 +18,11 @@
 
 use std::rc::Rc;
 
-use mtc_core::diagnostics::{Pos, Span};
+use mtc_core::diagnostics::Span;
 use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::cst::{AlphabetCst, BindCst, GraftCst, ReuseCarrier, TapeCst, UseCst, UsePath};
+use crate::cst::ReuseCarrier;
 use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
 use crate::syntax::{self, GreenSink, TmcKind};
 
@@ -1003,35 +1003,6 @@ impl Parser<'_> {
         out
     }
 
-    /// Capture a comment on the same physical line as a just-consumed closing
-    /// token (`}` or `;`) — `sig_index == pos` after the consume.
-    fn capture_close_trailing(&mut self, close_line: u32) -> Option<Comment> {
-        if self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index == self.pos && ca.line == close_line {
-                self.prev_end_line = close_line + ca.comment.text.matches('\n').count() as u32;
-                let c = ca.comment.clone();
-                self.cpos += 1;
-                return Some(c);
-            }
-        }
-        None
-    }
-
-    /// Take the one same-line trailing comment after a `;` (a non-own-line
-    /// pending comment on `end_line`).
-    fn take_trailing(&mut self, end_line: u32) -> Option<Comment> {
-        if self.cpos < self.comments.len() {
-            let ca = &self.comments[self.cpos];
-            if ca.sig_index <= self.pos && !ca.comment.own_line && ca.line == end_line {
-                let c = ca.comment.clone();
-                self.cpos += 1;
-                return Some(c);
-            }
-        }
-        None
-    }
-
     /// Drain every pending comment written before entry `index` of the list
     /// being parsed, tagging each with that index. Called at the top of each
     /// list-loop iteration and once more before the closer with
@@ -1203,12 +1174,12 @@ impl Parser<'_> {
             // harmless, a fresh checkpoint is taken every loop
             // iteration.
             let cp = self.g_checkpoint();
-            let doc_run = if matches!(
+            if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
                 self.g_flush_start(TmcKind::DocRun);
-                let (run, first_span) = self.doc_run()?;
+                let (_, first_span) = self.doc_run()?;
                 self.g_finish(); // DocRun
                 if !self.next_is_top_doc_accepting() {
                     return Err(CompileError {
@@ -1216,10 +1187,7 @@ impl Parser<'_> {
                         kind: CompileErrorKind::DanglingDocRun,
                     });
                 }
-                run
-            } else {
-                Vec::new()
-            };
+            }
             let t = self.peek().clone();
             match (&t.kind, terminator) {
                 (TokenKind::Eof, None) => return Ok(()),
@@ -1242,7 +1210,7 @@ impl Parser<'_> {
                     }
                     "alphabet" => {
                         self.g_start_at(cp, TmcKind::Alphabet);
-                        self.parse_alphabet(false, t.span().start, t.col, doc_run)?;
+                        self.parse_alphabet()?;
                         self.g_finish(); // Alphabet
                     }
                     "routine" => {
@@ -1279,14 +1247,12 @@ impl Parser<'_> {
                         self.g_finish(); // Machine — closes right after the `}`
                     }
                     "export" => {
-                        let export_start = t.span().start;
-                        let export_col = t.col;
                         self.bump();
                         let t2 = self.peek().clone();
                         match &t2.kind {
                             TokenKind::Ident(w2) if w2 == "alphabet" => {
                                 self.g_start_at(cp, TmcKind::Alphabet);
-                                self.parse_alphabet(true, export_start, export_col, doc_run)?;
+                                self.parse_alphabet()?;
                                 self.g_finish(); // Alphabet — `export` included
                             }
                             TokenKind::Ident(w2) if w2 == "routine" => {
@@ -1316,50 +1282,26 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_use(&mut self) -> Result<UseCst, CompileError> {
-        let use_tok = self.peek().clone();
+    fn parse_use(&mut self) -> Result<(), CompileError> {
         self.bump(); // `use`
-        let mut paths: Vec<UsePath> = Vec::new();
-        let mut interior: Vec<(usize, Comment)> = Vec::new();
         let semi_line;
         loop {
-            self.interior_comments(paths.len(), &mut interior);
             self.g_flush_start(TmcKind::UsePath);
-            let (first, first_span) = self.name("an imported name")?;
-            let mut path = vec![first];
-            let mut end = first_span;
+            self.name("an imported name")?;
             while matches!(self.peek().kind, TokenKind::ColonColon) {
                 self.bump();
-                let (seg, seg_span) = self.name("a path segment")?;
-                path.push(seg);
-                end = seg_span;
+                self.name("a path segment")?;
             }
-            let alias = if self.at_kw("as") {
+            if self.at_kw("as") {
                 self.bump();
-                let (a, _) = self.name("an alias")?;
-                Some(a)
-            } else {
-                None
-            };
+                self.name("an alias")?;
+            }
             self.g_finish(); // UsePath — the alias, if any, is its last token
-            paths.push(UsePath {
-                path,
-                alias,
-                line: first_span.start.line,
-                span: join(first_span, end),
-            });
             let sep = self.peek().clone();
             match sep.kind {
                 TokenKind::Comma => self.bump(),
                 TokenKind::Semi => {
                     semi_line = sep.line;
-                    // Drain interior comments HERE, before bumping past `;`:
-                    // `interior_comments` claims everything at or before
-                    // `self.pos`, so running it once the `;` has been
-                    // consumed would also claim a comment that follows the
-                    // statement — e.g. one documenting the *next* `use`
-                    // (docs/tmt/fmt.md (interior comments)).
-                    self.interior_comments(paths.len(), &mut interior);
                     self.bump();
                     break;
                 }
@@ -1367,51 +1309,18 @@ impl Parser<'_> {
             }
         }
         self.prev_end_line = semi_line;
-        let trailing = self.take_trailing(semi_line);
-        let span = join(
-            paths.first().expect("a use list has a path").span,
-            paths.last().expect("a use list has a path").span,
-        );
-        Ok(UseCst {
-            paths,
-            interior,
-            line: use_tok.line,
-            span: join(use_tok.span(), span),
-            trailing,
-        })
+        Ok(())
     }
 
-    fn parse_alphabet(
-        &mut self,
-        exported: bool,
-        header_start: Pos,
-        header_col: u32,
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<AlphabetCst, CompileError> {
+    fn parse_alphabet(&mut self) -> Result<(), CompileError> {
         self.bump(); // `alphabet`
-        let (name, name_span) = self.name("an alphabet name")?;
+        self.name("an alphabet name")?;
         let brace = self.expect(&TokenKind::LBrace, "`{` to open the alphabet body")?;
-        let open_trailing = self.capture_open_trailing(brace.line);
-        let (elems, interior) = self.alphabet_elems()?;
+        self.capture_open_trailing(brace.line);
+        self.alphabet_elems()?;
         let close = self.expect(&TokenKind::RBrace, "`}` to close the alphabet body")?;
         self.prev_end_line = close.line;
-        let close_trailing = self.capture_close_trailing(close.line);
-        Ok(AlphabetCst {
-            name,
-            name_span,
-            line: name_span.start.line,
-            col: header_col,
-            exported,
-            elems,
-            interior,
-            span: Span {
-                start: header_start,
-                end: close.span().end,
-            },
-            doc_run,
-            open_trailing,
-            close_trailing,
-        })
+        Ok(())
     }
 
     /// An alphabet body's element loop, from just past the opening `{`
@@ -1673,12 +1582,12 @@ impl Parser<'_> {
             // token whenever it fires there — no separate checkpoint
             // needed.
             let cp = self.g_checkpoint();
-            let doc_run = if matches!(
+            if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
                 self.g_flush_start(TmcKind::DocRun);
-                let (run, first_span) = self.doc_run()?;
+                let (_, first_span) = self.doc_run()?;
                 self.g_finish(); // DocRun
                 if !self.next_is_world_doc_accepting() {
                     return Err(CompileError {
@@ -1686,10 +1595,7 @@ impl Parser<'_> {
                         kind: CompileErrorKind::DanglingDocRun,
                     });
                 }
-                run
-            } else {
-                Vec::new()
-            };
+            }
             let t = self.peek().clone();
             if matches!(t.kind, TokenKind::RBrace) {
                 self.prev_end_line = t.line;
@@ -1700,16 +1606,14 @@ impl Parser<'_> {
                 return Err(Self::expected(&t, "`}` to close the body"));
             }
             if self.at_kw("entry") {
-                let entry_tok = self.peek().clone();
                 self.bump();
-                let prefix = Some((entry_tok.span().start, entry_tok.col));
                 if self.at_kw("state") {
                     self.g_start_at(cp, TmcKind::State);
                     self.parse_state()?;
                     self.g_finish(); // State — `entry` included
                 } else if self.at_kw("graft") {
                     self.g_start_at(cp, TmcKind::Graft);
-                    self.parse_graft(true, prefix, doc_run)?;
+                    self.parse_graft(true)?;
                     self.g_finish(); // Graft — `entry` included
                 } else {
                     return Err(Self::expected(
@@ -1723,30 +1627,28 @@ impl Parser<'_> {
                 self.g_finish(); // State
             } else if self.at_kw("graft") {
                 self.g_start_at(cp, TmcKind::Graft);
-                self.parse_graft(false, None, doc_run)?;
+                self.parse_graft(false)?;
                 self.g_finish(); // Graft
             } else if self.at_kw("bind") {
                 self.g_start_at(cp, TmcKind::Bind);
-                self.parse_bind(doc_run)?;
+                self.parse_bind()?;
                 self.g_finish(); // Bind
             } else if self.at_kw("volatile") {
-                let lead = self.peek().clone();
                 self.bump(); // `volatile`
                 if !self.at_kw("tape") {
                     return Err(Self::expected(self.peek(), "`tape` after `volatile`"));
                 }
                 if in_machine {
                     self.g_start_at(cp, TmcKind::Tape); // `volatile` included
-                    self.parse_tape(true, lead)?;
+                    self.parse_tape()?;
                     self.g_finish(); // Tape
                 } else {
                     return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
                 }
             } else if self.at_kw("tape") {
                 if in_machine {
-                    let lead = self.peek().clone();
                     self.g_start_at(cp, TmcKind::Tape);
-                    self.parse_tape(false, lead)?;
+                    self.parse_tape()?;
                     self.g_finish(); // Tape
                 } else {
                     return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
@@ -1760,24 +1662,14 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_tape(&mut self, volatile: bool, lead_tok: Token) -> Result<TapeCst, CompileError> {
+    fn parse_tape(&mut self) -> Result<(), CompileError> {
         self.bump(); // `tape`
-        let (name, name_span) = self.name("a tape name")?;
+        self.name("a tape name")?;
         self.expect(&TokenKind::Colon, "`:` after the tape name")?;
-        let (alphabet, alphabet_span) = self.name("an alphabet name")?;
+        self.name("an alphabet name")?;
         let semi = self.expect(&TokenKind::Semi, "`;`")?;
         self.prev_end_line = semi.line;
-        let trailing = self.take_trailing(semi.line);
-        Ok(TapeCst {
-            name,
-            name_span,
-            alphabet,
-            alphabet_span,
-            volatile,
-            line: lead_tok.line,
-            span: join(lead_tok.span(), semi.span()),
-            trailing,
-        })
+        Ok(())
     }
 
     fn parse_state(&mut self) -> Result<(), CompileError> {
@@ -2604,71 +2496,39 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_graft(
-        &mut self,
-        entry: bool,
-        prefix: Option<(Pos, u32)>,
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<GraftCst, CompileError> {
+    /// `entry` is not decoration here: it is what decides whether the
+    /// missing `as` clause below is legal — a non-entry graft must be
+    /// named (docs/tmt/language.md (grafts)).
+    fn parse_graft(&mut self, entry: bool) -> Result<(), CompileError> {
         let graft_tok = self.peek().clone();
         self.bump(); // `graft`
-        let target = self.qual_name("a graft target")?;
-        let (args, interior, map_pairs) = self.binding_args()?;
-        let as_name = if self.at_kw("as") {
+        self.qual_name("a graft target")?;
+        self.binding_args()?;
+        let named = if self.at_kw("as") {
             self.bump();
-            let (n, sp) = self.name("a graft instance name")?;
-            Some((n, sp))
+            self.name("a graft instance name")?;
+            true
         } else {
-            None
+            false
         };
         // A non-entry graft must be named.
-        if !entry && as_name.is_none() {
+        if !entry && !named {
             return Err(Self::err_at(&graft_tok, CompileErrorKind::GraftNeedsName));
         }
         let semi = self.expect(&TokenKind::Semi, "`;` to end the graft")?;
         self.prev_end_line = semi.line;
-        let trailing = self.take_trailing(semi.line);
-        let start = prefix
-            .map(|(p, _)| p)
-            .unwrap_or_else(|| graft_tok.span().start);
-        Ok(GraftCst {
-            entry,
-            target,
-            args,
-            interior,
-            map_pairs,
-            as_name,
-            line: graft_tok.line,
-            span: Span {
-                start,
-                end: semi.span().end,
-            },
-            doc_run,
-            trailing,
-        })
+        Ok(())
     }
 
-    fn parse_bind(&mut self, doc_run: Vec<DocRunItem>) -> Result<BindCst, CompileError> {
-        let bind_tok = self.peek().clone();
+    fn parse_bind(&mut self) -> Result<(), CompileError> {
         self.bump(); // `bind`
-        let target = self.qual_name("a bind target")?;
-        let (args, interior, map_pairs) = self.binding_args()?;
+        self.qual_name("a bind target")?;
+        self.binding_args()?;
         self.expect_kw("as", "`as` (a bind needs an instance name)")?;
-        let (n, sp) = self.name("a bind instance name")?;
+        self.name("a bind instance name")?;
         let semi = self.expect(&TokenKind::Semi, "`;` to end the bind")?;
         self.prev_end_line = semi.line;
-        let trailing = self.take_trailing(semi.line);
-        Ok(BindCst {
-            target,
-            args,
-            interior,
-            map_pairs,
-            as_name: (n, sp),
-            line: bind_tok.line,
-            span: join(bind_tok.span(), semi.span()),
-            doc_run,
-            trailing,
-        })
+        Ok(())
     }
 }
 
