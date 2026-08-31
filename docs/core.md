@@ -616,6 +616,14 @@ is what lets fatals that only surface at layout time (label resolution)
 reach the caller instead of being silently linted around. Findings are
 filtered against an allow-list of codes supplied by the caller.
 
+**Quickfix comment guard.** A fix whose edit span touches a comment
+token is withheld — the finding still reports, only the remedy goes —
+because applying it would silently delete the comment. The check runs
+once over every rule's output at the end of the lint entry points, so a
+rule that gains a fix later is covered by construction; each
+toolchain's source-language lint holds the same posture on its own
+side.
+
 ## The linker
 
 Objects in, one executable image out, in two phases.

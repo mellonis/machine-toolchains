@@ -221,3 +221,30 @@ machine {
         "unused-graft-name",
     );
 }
+
+#[test]
+fn the_tma_asm_surface_carries_the_same_guard() {
+    // `.tma` lint is core's arch-agnostic layer under the TM-1 dialect
+    // (caps all on); its whole-line "delete this instruction" edit on an
+    // unlabeled line swallows a trailing comment, so the same withhold
+    // posture applies there (docs/tmt/lint.md (quickfix availability)).
+    // The comment-free sibling proves the fixture triggers a fix at all.
+    use mtc_core::asm::lint::lint as asm_lint;
+    use mtc_turing_machine::asm::tm1_syntax;
+
+    let clean = ".func f\n        brk\n        stp\n";
+    let report = asm_lint(&tm1_syntax(), clean, &[]).unwrap();
+    let d = report
+        .iter()
+        .find(|d| d.code == "leftover-debugger")
+        .unwrap();
+    assert!(d.fix.is_some(), "the comment-free sibling must offer a fix");
+
+    let commented = ".func f\n        brk ; breadcrumb\n        stp\n";
+    let report = asm_lint(&tm1_syntax(), commented, &[]).unwrap();
+    let d = report
+        .iter()
+        .find(|d| d.code == "leftover-debugger")
+        .expect("the finding itself must survive the guard");
+    assert!(d.fix.is_none(), "fix over a comment must be withheld");
+}

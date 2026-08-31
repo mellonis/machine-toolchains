@@ -71,17 +71,24 @@ Some `.tmc` rules attach a machine-applicable fix to their finding — a
 text edit an editor offers as a code action. One rule governs every fix,
 whatever rule produced it: **a fix whose edit span contains a comment is
 withheld**. Applying such an edit would delete the comment silently —
-the same defect `tmt fmt` itself takes care to avoid (it relocates a
-comment rather than dropping it) — so the finding still reports,
-exactly as it would with the fix, and only the remedy is missing.
-Deleting the flagged code by hand, comment and all, remains the user's
-call to make.
+the same defect `tmt fmt` itself refuses by rule (a comment is never
+moved, and never dropped) — so the finding still reports, exactly as
+it would with the fix, and only the remedy is missing. Deleting the
+flagged code by hand, comment and all, remains the user's call to
+make.
 
 The check runs once over every rule's output rather than inside each
 rule, so it holds for any rule that gains a fix later, not just the
 ones listed on this page. A fix that merely REPLACES a single token
 (`dead-map-pair`'s arrow demotion) can never span a comment and is
 never withheld.
+
+The `.tma` surface carries the same guard: the assembly lint layer
+withholds any fix whose edit span touches a comment. In practice that
+is the "delete this instruction" edit of `leftover-debugger` and
+`redundant-jump-to-next` on an unlabeled line, whose span is the whole
+physical line, trailing comment included; the label-preserving variant
+of the same edit ends before the comment and keeps its fix.
 
 ## Project file: `tmt.json`
 

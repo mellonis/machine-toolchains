@@ -5,9 +5,11 @@
 pub(crate) mod rules;
 
 use super::cst::{AsmCst, parse_asm_cst_with};
+use super::lexer::{AsmTokenKind, lex_line};
 use super::lower::{SourceFunction, SourceTable, lower_source};
+use super::syntax::AsmCaps;
 use super::{ArchSyntax, AsmError, assemble_lowered};
-use crate::diagnostics::Diagnostic;
+use crate::diagnostics::{Diagnostic, Span};
 
 /// Everything a rule may read. Rules never mutate the program.
 pub struct AsmLintContext<'a> {
@@ -92,8 +94,51 @@ pub fn lint_cst(
         }
         rule(&ctx, &mut diagnostics);
     }
+    // The comment guard: a fix whose edit span touches a comment token is
+    // withheld — the finding stays, the remedy goes — because applying it
+    // would silently delete the comment; both toolchains' source-language
+    // lints hold the same posture (docs/pmt/lint.md and docs/tmt/lint.md
+    // (quickfix availability)). ONE chokepoint over every rule's output
+    // rather than a check inside each rule, so a fix-emitting rule added
+    // later is covered by construction. In practice today the exposure is
+    // the whole-line "delete this instruction" edit on an unlabeled line,
+    // whose span swallows a trailing comment; the labeled variant and the
+    // unused-label edit both end before the comment by CST construction.
+    let comments = comment_spans(source, syntax.caps);
+    for d in &mut diagnostics {
+        let withheld = d.fix.as_ref().is_some_and(|f| {
+            f.edits
+                .iter()
+                .any(|e| span_touches_a_comment(&comments, e.span))
+        });
+        if withheld {
+            d.fix = None;
+        }
+    }
     diagnostics.sort_by_key(|d| d.span.start); // stable; Pos is Ord
     Ok(diagnostics)
+}
+
+/// Every comment token's span in the source, by a caps-faithful lex —
+/// the same tokenization the CST was parsed under, so a character that
+/// is a comment there is a comment here.
+fn comment_spans(source: &str, caps: AsmCaps) -> Vec<Span> {
+    let mut out = Vec::new();
+    for (i, text) in source.lines().enumerate() {
+        for token in lex_line(text, i as u32 + 1, caps) {
+            if matches!(token.kind, AsmTokenKind::Comment(_)) {
+                out.push(token.span());
+            }
+        }
+    }
+    out
+}
+
+/// Half-open overlap between a fix edit's span and any comment span.
+fn span_touches_a_comment(comments: &[Span], span: Span) -> bool {
+    comments
+        .iter()
+        .any(|c| c.start < span.end && span.start < c.end)
 }
 
 #[cfg(test)]
@@ -260,5 +305,64 @@ mod tests {
         assert_eq!(starts, sorted);
         assert_eq!(report[0].code, "unused-label");
         assert_eq!(report[1].code, "unreachable-code");
+    }
+
+    #[test]
+    fn a_fix_deleting_a_line_with_a_trailing_comment_is_withheld() {
+        // Unlabeled redundant jump: the fix deletes the whole physical
+        // line, and the trailing comment sits inside that span — the
+        // finding must still report, the fix must go.
+        let syntax = test_syntax();
+        let src = ".func f\n        jmp L1 ; keep me\nL1:     stop\n";
+        let report = lint(&syntax, src, &[]).unwrap();
+        let d = report
+            .iter()
+            .find(|d| d.code == "redundant-jump-to-next")
+            .expect("the finding itself must survive the guard");
+        assert!(d.fix.is_none(), "fix over a comment must be withheld");
+    }
+
+    #[test]
+    fn a_labeled_deletion_stops_before_the_comment_and_keeps_its_fix() {
+        // "L0:     jmp L1 ; note" — the label-preserving edit runs from
+        // the instruction word to the line's trimmed end, which the CST
+        // computes EXCLUDING the trailing comment, so the fix touches no
+        // comment and stays offered.
+        let syntax = test_syntax();
+        let src = ".func f\nL0:     jmp L1 ; note\nL1:     stop\n";
+        let report = lint(&syntax, src, &[]).unwrap();
+        let d = report
+            .iter()
+            .find(|d| d.code == "redundant-jump-to-next")
+            .unwrap();
+        assert!(d.fix.is_some(), "an edit clear of comments keeps its fix");
+    }
+
+    #[test]
+    fn leftover_debugger_fix_is_withheld_over_a_trailing_comment() {
+        // Same whole-line deletion shape as the redundant jump, through
+        // the other deleting rule.
+        let syntax = debugger_syntax();
+        let src = ".func f\n        dbg ; breadcrumb\n        stop\n";
+        let report = lint(&syntax, src, &[]).unwrap();
+        let d = report
+            .iter()
+            .find(|d| d.code == "leftover-debugger")
+            .expect("the finding itself must survive the guard");
+        assert!(d.fix.is_none(), "fix over a comment must be withheld");
+    }
+
+    #[test]
+    fn a_comment_outside_the_edit_span_does_not_withhold() {
+        // An own-line comment above the jump is no reason to void its
+        // fix — the guard keys on the EDIT span, not the line vicinity.
+        let syntax = test_syntax();
+        let src = ".func f\n; setup\n        jmp L1\nL1:     stop\n";
+        let report = lint(&syntax, src, &[]).unwrap();
+        let d = report
+            .iter()
+            .find(|d| d.code == "redundant-jump-to-next")
+            .unwrap();
+        assert!(d.fix.is_some());
     }
 }

@@ -92,6 +92,13 @@ every rule's output rather than inside each rule, so it holds for any
 rule that gains a fix later. A fix that merely replaces a single token
 (`leading-zeros`) can never span a comment and is never withheld.
 
+The `.pma` surface carries the same guard: the assembly lint layer
+withholds any fix whose edit span touches a comment. In practice that
+is the "delete this instruction" edit of `leftover-debugger` and
+`redundant-jump-to-next` on an unlabeled line, whose span is the whole
+physical line, trailing comment included; the label-preserving variant
+of the same edit ends before the comment and keeps its fix.
+
 ## `.pmc` rules
 
 ### unused-label (`.pmc`)

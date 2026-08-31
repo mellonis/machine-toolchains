@@ -111,3 +111,30 @@ fn identical_check_arms_withholds_the_fix_when_the_span_holds_a_comment() {
         "identical-check-arms",
     );
 }
+
+#[test]
+fn the_pma_asm_surface_carries_the_same_guard() {
+    // `.pma` lint is core's arch-agnostic layer under the PM-1 dialect;
+    // its whole-line "delete this instruction" edit on an unlabeled line
+    // swallows a trailing comment, so the same withhold posture applies
+    // there (docs/pmt/lint.md (quickfix availability)). The comment-free
+    // sibling proves the fixture triggers a fix at all.
+    use mtc_core::asm::lint::lint as asm_lint;
+    use mtc_post_machine::asm::pm1_syntax;
+
+    let clean = ".func f\n        brk\n        stp\n";
+    let report = asm_lint(&pm1_syntax(), clean, &[]).unwrap();
+    let d = report
+        .iter()
+        .find(|d| d.code == "leftover-debugger")
+        .unwrap();
+    assert!(d.fix.is_some(), "the comment-free sibling must offer a fix");
+
+    let commented = ".func f\n        brk ; breadcrumb\n        stp\n";
+    let report = asm_lint(&pm1_syntax(), commented, &[]).unwrap();
+    let d = report
+        .iter()
+        .find(|d| d.code == "leftover-debugger")
+        .expect("the finding itself must survive the guard");
+    assert!(d.fix.is_none(), "fix over a comment must be withheld");
+}
