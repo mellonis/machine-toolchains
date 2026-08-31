@@ -399,9 +399,10 @@ fn unclaimed_inside(node: &SyntaxNode) -> Vec<SyntaxToken> {
 pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> {
     let elems: Vec<SyntaxElement> = container.children_with_tokens().collect();
     let (head_end, body_start, mut near_edge) = match open_run(container, &elems, index) {
-        // ROOT has no opener at all, and the parser seeds its own
-        // `prev_end_line` at zero — so a file whose first item sits on
-        // line 2 or later leads with a blank line.
+        // ROOT has no opener at all, so there is no `{` line to gap
+        // the first item against; the near edge starts at line zero,
+        // which is what makes a file whose first item sits on line 2 or
+        // later lead with a blank line.
         None => (0, 0, 0),
         Some((brace, body, run)) => {
             let edge = match run.last() {
@@ -431,11 +432,10 @@ pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> 
     // the scan starts at the keyword rather than at the node).
     //
     // These lead the body, and the near edge starts on the `{`, never
-    // past an open run: whenever anything is pending here,
-    // `capture_open_trailing` captures NOTHING at all, so the run is
-    // empty by construction (see [`open_run`]). The two are therefore
-    // never both non-empty, and the order between them cannot be
-    // observed.
+    // past an open run: [`open_run`] returns an EMPTY run the moment
+    // `pre_brace_comments` is non-empty, before it looks at the brace
+    // line at all. The two are therefore never both non-empty by
+    // construction, and the order between them cannot be observed.
     for t in pre_brace_comments(container, &elems, head_end) {
         push_comment(&mut out, &mut near_edge, &t);
     }

@@ -2236,7 +2236,7 @@ main() {
     /// start — and `FnHeader::has_volatile` records the token losslessly,
     /// the same way `has_export` does, for the formatter to read.
     #[test]
-    fn volatile_extent_and_has_volatile_are_recorded_on_the_cst() {
+    fn volatile_starts_the_function_extent_and_is_recorded_on_the_header() {
         use mtc_core::syntax::AstNode;
 
         let src = "volatile main() {\n    mark;\n}\n";

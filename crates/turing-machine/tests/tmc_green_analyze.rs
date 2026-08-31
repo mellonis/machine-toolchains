@@ -6,8 +6,8 @@
 //! 1. **Errors did not move when the front end changed under them.** Each
 //!    source in [`BROKEN`] fails with a fixed kind at a fixed span, both
 //!    written out in the table itself. The spans are literals captured from
-//!    the pre-green front — a comment-free lex then the C1 lowering — while
-//!    that path was still callable; the broken sources carry the weight
+//!    the pre-green front — a comment-free lex then the retired
+//!    hand-written-CST lowering — while that path was still callable; the broken sources carry the weight
 //!    because a front-end switch changes which function raises the error,
 //!    and only a source that errors exercises that at all.
 //!
@@ -39,9 +39,8 @@ use mtc_turing_machine::lexer::{LexMode, lex, lex_with};
 use mtc_turing_machine::parser::{Program, parse_green_from_tokens};
 use mtc_turing_machine::syntax::extract_program;
 
-/// Every directory in this repo that ships a `.tmc` file — the same three
-/// roots `syntax_parity.rs` walks, rooted at `CARGO_MANIFEST_DIR` rather than
-/// the process CWD.
+/// Every directory in this repo that ships a `.tmc` file, rooted at
+/// `CARGO_MANIFEST_DIR` rather than the process CWD.
 const CORPUS_ROOTS: [&str; 3] = ["tests/golden", "src/stdlib", "../../docs/examples"];
 
 /// `(path, source)` for every `.tmc` under [`CORPUS_ROOTS`], sorted so a
@@ -233,8 +232,8 @@ fn every_shipped_tmc_parses_and_extracts() {
 /// produces the error. Each source must fail with a FIXED kind at a
 /// FIXED span, both written out below rather than compared against a
 /// second computation of the same thing: the spans are literals captured
-/// from the pre-switch front (a comment-free lex then the C1 lowering)
-/// while that path was still callable, so this table is what says the
+/// from the pre-switch front (a comment-free lex then the retired
+/// hand-written-CST lowering) while that path was still callable, so this table is what says the
 /// error positions did not move when the front end changed under them.
 #[test]
 fn broken_sources_fail_with_a_fixed_kind_and_span() {
