@@ -1065,8 +1065,8 @@ impl Parser<'_> {
     ) -> Result<(), CompileError> {
         loop {
             // Green checkpoint for whichever node this item turns out to
-            // be: taken here, after the pending-comment drain and BEFORE
-            // the doc run (if any) — mirrors PM's `fn_cp` placement
+            // be: taken at the top of the iteration, BEFORE the doc run
+            // (if any) — mirrors PM's `fn_cp` placement
             // (crates/post-machine/src/parser.rs) so `g_start_at` below
             // retro-wraps the run, an `export` prefix when present, and
             // the header onward, all from one checkpoint. A declaration
@@ -1452,8 +1452,8 @@ impl Parser<'_> {
     fn world_body(&mut self, in_machine: bool) -> Result<(), CompileError> {
         loop {
             // Green checkpoint for whichever node this item turns out to
-            // be: same placement rule as `top_items`'s `cp` — after the
-            // pending-comment drain, before the doc run (if any) — so
+            // be: same placement rule as `top_items`'s `cp` — top of the
+            // iteration, before the doc run (if any) — so
             // `g_start_at` below retro-wraps the run and an `entry`
             // prefix, when present, alongside the header. TAPE never
             // accepts a doc run (`next_is_world_doc_accepting` excludes
@@ -1983,10 +1983,19 @@ impl Parser<'_> {
         })
     }
 
-    /// Parses one transition; also returns its interior comments — a
-    /// `call`'s own binding-list comments, and every `with map` pair-list
-    /// comment nested inside that binding list — both empty for every
-    /// non-`call` variant (docs/tmt/fmt.md (interior comments)).
+    /// Parses one written transition — `goto`, `call … then …`,
+    /// `return`, `stop`, `halt`, or a bare state name (goto sugar).
+    ///
+    /// The [`Transition`] outlives this walk only for
+    /// [`reparse_transition`]'s sake: extraction retokenizes a
+    /// TRANSITION node and re-runs this exact production, so a `call`'s
+    /// `args` have to be built faithfully here rather than left empty.
+    /// [`Self::rule`], the only other caller, drops the value.
+    ///
+    /// `Transition::Stay` is not among the variants this can answer. An
+    /// omitted transition is the ABSENCE of a TRANSITION node, which
+    /// [`Self::rule`] decides before it would call in here at all
+    /// (docs/tmt/language.md (transitions)).
     fn transition(&mut self) -> Result<Transition, CompileError> {
         let t = self.peek().clone();
         match &t.kind {
@@ -2100,10 +2109,6 @@ impl Parser<'_> {
         })
     }
 
-    /// Parses a `(args)` binding list; also returns the list's own interior
-    /// comments and every `with map` pair-list comment nested inside one of
-    /// its arguments, the latter re-keyed by the owning argument's index
-    /// (docs/tmt/fmt.md (interior comments)).
     /// A parenthesised binding list. The arguments themselves survive
     /// the walk: a `call`'s list becomes [`Transition::Call`]'s `args`,
     /// which [`reparse_transition`] must reproduce faithfully. A
