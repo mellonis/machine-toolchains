@@ -401,18 +401,29 @@ fn empty_and_whitespace_only_source_stay_lossless() {
 // ---------------------------------------------------------------------------
 
 /// Every `.tmc` file the crate ships — golden programs, the embedded
-/// stdlib, and the flagship worked example — the same set
+/// stdlib, and the worked doc examples — the same set
 /// [`the_whole_shipped_corpus_is_lossless`] round-trips. Walked
-/// explicitly, the same three directories, so a future fixture is
-/// picked up automatically.
+/// explicitly, the same three directories (`docs/examples/` one level
+/// deep, since each worked example is a directory of its own), so a
+/// future fixture is picked up automatically.
 fn corpus() -> Vec<(std::path::PathBuf, String)> {
     let mut files = Vec::new();
     for dir in ["tests/golden", "src/stdlib", "../../docs/examples"] {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
         for entry in entries {
             let path = entry.expect("entry").path();
+            if path.is_dir() {
+                for sub in std::fs::read_dir(&path).expect("readable example directory") {
+                    paths.push(sub.expect("entry").path());
+                }
+            } else {
+                paths.push(path);
+            }
+        }
+        for path in paths {
             if path.extension().and_then(|e| e.to_str()) != Some("tmc") {
                 continue;
             }
@@ -949,30 +960,21 @@ fn every_doc_run_accepting_site_retro_wraps() {
     }
 }
 
-/// The law over every `.tmc` the repo ships, including the flagship
-/// brainfuck universal machine and the embedded stdlib.
+/// The law over every `.tmc` the repo ships, including the worked doc
+/// examples and the embedded stdlib — through the same one-level-deep
+/// walk [`corpus`] runs.
 #[test]
 fn the_whole_shipped_corpus_is_lossless() {
-    let mut checked = 0;
-    for dir in ["tests/golden", "src/stdlib", "../../docs/examples"] {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for entry in entries {
-            let path = entry.expect("entry").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("tmc") {
-                continue;
-            }
-            let src = std::fs::read_to_string(&path).expect("readable");
-            let tree = parse_green(&src)
-                .unwrap_or_else(|e| panic!("{} failed to parse: {e:?}", path.display()));
-            let root = SyntaxNode::new_root(tree);
-            assert_eq!(root.text(), src, "{} is not lossless", path.display());
-            checked += 1;
-        }
+    let files = corpus();
+    for (path, src) in &files {
+        let tree = parse_green(src)
+            .unwrap_or_else(|e| panic!("{} failed to parse: {e:?}", path.display()));
+        let root = SyntaxNode::new_root(tree);
+        assert_eq!(&root.text(), src, "{} is not lossless", path.display());
     }
     assert!(
-        checked >= 9,
-        "expected the whole .tmc corpus, saw {checked}"
+        files.len() >= 9,
+        "expected the whole .tmc corpus, saw {}",
+        files.len()
     );
 }

@@ -53,8 +53,22 @@ fn corpus() -> Vec<(std::path::PathBuf, String)> {
         // A missing root is a broken test, not a reason to check less.
         let entries = std::fs::read_dir(&full)
             .unwrap_or_else(|e| panic!("corpus root {} is unreadable: {e}", full.display()));
+        // `docs/examples/` holds one directory per worked example, so
+        // the walk descends one level before filtering.
         let mut paths: Vec<std::path::PathBuf> = entries
             .map(|entry| entry.expect("readable entry").path())
+            .flat_map(|path| {
+                if path.is_dir() {
+                    std::fs::read_dir(&path)
+                        .unwrap_or_else(|e| {
+                            panic!("example directory {} is unreadable: {e}", path.display())
+                        })
+                        .map(|sub| sub.expect("readable entry").path())
+                        .collect()
+                } else {
+                    vec![path]
+                }
+            })
             .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("tmc"))
             .collect();
         paths.sort();
