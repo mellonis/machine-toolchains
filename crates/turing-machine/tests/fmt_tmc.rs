@@ -806,3 +806,32 @@ fn a_comment_between_a_keyword_and_its_name_is_a_fixed_point() {
     let pass2 = format(&pass1).expect("formats");
     assert_eq!(pass2, pass1, "and pass 1 is a fixed point");
 }
+
+/// A block comment whose TEXT spans source lines cannot sit in a grid
+/// row any more than a LINE comment can — it takes its rule off the
+/// grid, and the neighbours' columns stay unpolluted by its full text
+/// width (docs/tmt/fmt.md (comments are never moved), the grid ruling).
+#[test]
+fn a_multiline_block_comment_takes_its_rule_off_the_grid() {
+    let src = "alphabet ab { '_', 'a' }\n\n\
+               machine {\n\
+               \x20 tape main: ab;\n\
+               \x20 entry state go {\n\
+               \x20   ['_'] /* x\n\
+               long-tail */ -> write ['a'] stop;\n\
+               \x20   ['a'] -> write ['_'] stop;\n\
+               \x20 }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let clean = out
+        .lines()
+        .find(|l| l.contains("write ['_']"))
+        .expect("the second rule survives");
+    assert_eq!(
+        clean.trim_end(),
+        "    ['a'] -> write ['_'] stop;",
+        "the clean neighbour must not pad against the comment's full text, got:\n{out}"
+    );
+    let pass2 = format(&out).expect("formats");
+    assert_eq!(pass2, out, "and pass 1 is a fixed point");
+}

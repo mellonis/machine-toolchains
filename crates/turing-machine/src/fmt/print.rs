@@ -1484,7 +1484,13 @@ fn breaks_the_grid(
     mov: &Option<VecParts>,
     interior: &RuleInterior,
 ) -> bool {
-    let breaking = |c: &Comment| matches!(c.kind, CommentKind::Line) || c.own_line;
+    // A block comment whose TEXT spans source lines shares a LINE
+    // comment's defining property — nothing can line up after it on one
+    // physical row — so either shape sends the rule off the grid; kept
+    // on it, the width pre-pass would count the comment's full text and
+    // pad every neighbour against it.
+    let breaking =
+        |c: &Comment| matches!(c.kind, CommentKind::Line) || c.own_line || c.text.contains('\n');
     let vec_breaks = |p: &VecParts| {
         // A walked cell whose text spans lines (a LINE comment inside it
         // broke the walk) cannot sit in a grid row either.
@@ -1492,15 +1498,15 @@ fn breaks_the_grid(
     };
     // A BOUNDARY comment renders inline whatever its written flavour —
     // its `own_line` flag is layout the renderer may collapse, like a
-    // header's — so only the LINE kind, which cannot share a line at
-    // all, sends the rule off the grid.
+    // header's — so only the two kinds that cannot share one line at
+    // all, LINE and a multi-line block, send the rule off the grid.
     vec_breaks(pattern)
         || write.as_ref().is_some_and(&vec_breaks)
         || mov.as_ref().is_some_and(&vec_breaks)
         || interior
             .boundaries
             .iter()
-            .any(|(_, c)| matches!(c.kind, CommentKind::Line))
+            .any(|(_, c)| matches!(c.kind, CommentKind::Line) || c.text.contains('\n'))
 }
 
 /// A rule's pattern column text: the vector from its parts, plus any
