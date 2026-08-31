@@ -254,7 +254,7 @@ fn pre_world_comments(world: &SyntaxNode) -> Vec<SyntaxToken> {
     out
 }
 
-/// Where a rule's own interior drains fall, as source offsets — the
+/// Where a rule's own interior lists end, as source offsets — the
 /// partition that decides which of a RULE's comments belongs to which
 /// claimant.
 ///
@@ -323,35 +323,41 @@ pub(crate) fn rule_regions(node: &SyntaxNode) -> RuleRegions {
     }
 }
 
-/// The comment tokens inside `node` that are still unclaimed at the
-/// node's terminator — the ones the trailing-comment slot and then the
-/// container's own item stream get to claim, in that order.
+/// The comment tokens inside `node` that no interior list has claimed
+/// by the time its terminator is reached — the ones the trailing-comment
+/// slot and then the container's own item stream get to claim, in that
+/// order.
 ///
-/// A comment is unclaimed exactly while nothing else has taken it, and
-/// what takes one is a list's interior slot (or a doc run). So this is
-/// a per-KIND question, and the chain below is deliberately accounted
-/// for in prose rather than left to a silent default:
+/// A comment is unclaimed exactly while no list (or doc run) has taken
+/// it. So this is a per-KIND question, and the chain below is
+/// deliberately accounted for in prose rather than left to a silent
+/// default:
 ///
 /// - **TAPE** — no doc run, no list, so every comment inside it is
-///   pending. `tape /* c */ main: ab;` prints `tape main: ab; /* c */`.
-/// - **GRAFT / BIND** — the binding list's last drain runs immediately
-///   before the `)`, claiming everything at or before it; only what is
-///   written AFTER the `)` (around an `as NAME`) is still pending.
-/// - **USE** — its own drain runs at the `;`, so nothing inside it is
-///   ever pending; the empty answer here is a fact about `parse_use`,
-///   not a gap.
-/// - **RULE** — `;`-terminated like the three above, and it runs
-///   several drains of its own: the pattern's, each glyph vector's,
-///   and — for a `call` — its binding list's and every nested map's.
-///   [`RuleRegions`] names where the last of them falls, and everything
-///   past it is pending: `[*] -> stop /* c */;` prints as
-///   `[*] -> stop; /* c */`, and so does the same comment written
-///   anywhere in a `call`'s tail (`) /* c */ then`, `then stop /* c */`).
-/// - **Everything else** is `}`-terminated. `capture_close_trailing`
-///   requires the comment to sit AFTER the `}`, so a node's own
-///   comments never reach it — and they are not lost either: they were
-///   claimed by that node's body drain (its head scan here) or by one
-///   of its lists.
+///   unclaimed. `tape /* c */ main: ab;` prints `tape main: ab; /* c */`.
+/// - **GRAFT / BIND** — the binding list reaches the `)` and claims
+///   everything at or before it, so only what is written AFTER the `)`
+///   (around an `as NAME`) is left; the scan below starts at the LAST
+///   `)` for exactly that reason.
+/// - **USE** — its list reaches the `;`, so nothing inside it is ever
+///   left over; the empty answer here is a fact about the shape of a
+///   `use` declaration, not a gap.
+/// - **RULE** — `;`-terminated like the three above, and it carries
+///   several interior lists of its own: the pattern's, each glyph
+///   vector's, and — for a `call` — its binding list's and every nested
+///   map's. [`RuleRegions`] names where the last of them ends, and
+///   everything past that offset is left over: `[*] -> stop /* c */;`
+///   prints as `[*] -> stop; /* c */`, and so does the same comment
+///   written anywhere in a `call`'s tail (`) /* c */ then`,
+///   `then stop /* c */`). That region can open one level down, inside
+///   the TRANSITION node, which is why this arm alone walks DESCENDANT
+///   tokens rather than direct children.
+/// - **Everything else** is `}`-terminated, and answers empty by
+///   design: a trailing comment on such a declaration has to sit AFTER
+///   the `}`, where the container's own sibling walk already sees it.
+///   Comments written INSIDE one are not lost either — they belong to
+///   its body items, to its head scan ([`pre_brace_comments`]) or to
+///   one of its lists.
 fn unclaimed_inside(node: &SyntaxNode) -> Vec<SyntaxToken> {
     let comments = |elems: &[SyntaxElement]| -> Vec<SyntaxToken> {
         elems

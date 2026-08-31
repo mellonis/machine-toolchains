@@ -349,9 +349,8 @@ fn tokens_from(toks: &[SyntaxToken], index: &TextLineIndex) -> Vec<Token> {
 /// rule), where `capture_close_trailing`, the `}` twin, DID advance.
 /// So when a `;`'s trailing comment is the last thing before the run,
 /// the in-context parse kept the `;`'s line where the scan-back would
-/// report the comment's end line — a difference only a
-/// MULTI-LINE comment can show, since a single-line one ends where it
-/// starts.
+/// report the comment's end line — a difference only a MULTI-LINE
+/// comment can show, since a single-line one ends where it starts.
 ///
 /// The arm is narrow in both directions, and both edges are pinned by
 /// `the_semicolon_arm_is_narrow_in_both_directions`:
@@ -360,10 +359,10 @@ fn tokens_from(toks: &[SyntaxToken], index: &TextLineIndex) -> Vec<Token> {
 ///   other predecessor (a `{` through `capture_open_trailing`, an
 ///   own-line comment through `drain_pending`) advanced the field too.
 /// - `take_trailing` claimed AT MOST ONE comment, so the arm requires
-///   the comment run to be exactly one long. Write a second comment
-///   after the `;` and the first was the trailing while the rest were
+///   the comment run to be exactly one long. With a second comment
+///   written after the `;`, the first was the trailing and the rest
 ///   drained as ordinary pending comments, each advancing the field —
-///   which lands it back on the scan-back's own answer.
+///   which lands the value back on the scan-back's own answer.
 ///
 /// (A list's own interior drain left the field alone too, but was never
 /// the last word: a list's closing delimiter always follows it, and the
