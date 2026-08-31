@@ -394,8 +394,8 @@ pub enum DocRunKind {
     Doc { text: String, span: Span },
     /// A `!` line. `attr` is `Some` when the payload opens with a valid
     /// `[ident]` attribute (v1: only `[deprecated]` is accepted —
-    /// anything else is a parse-time `UnknownAttribute` error, so by
-    /// the time a `FunctionCst` exists, every `Some` here already named
+    /// anything else is a parse-time `UnknownAttribute` error, so every
+    /// `Some` that survives the parse already named
     /// `"deprecated"`). `text` is the FULL raw payload verbatim,
     /// attribute prefix included when present — mirrors `Doc::text`'s
     /// unprocessed-token convention; a consumer that only wants the
@@ -424,7 +424,9 @@ pub struct AttrCst {
     pub span: Span,
 }
 
-/// Reduce a [`FunctionCst::doc_run`] into an [`FnDoc`]. `pub(crate)` for
+/// Reduce a function's bound `?`/`!` run into an [`FnDoc`]. The run
+/// arrives as the [`DocRunItem`]s [`reparse_doc_items`] rebuilds off an
+/// emitted `DOC_RUN` node — the one route in. `pub(crate)` for
 /// cross-module use by `crate::syntax::extract::extract_function`, the
 /// green-tree extraction's own production caller, and by that module's
 /// fidelity tests, which lean on the `DocRunKind::Comment` inertness
@@ -439,8 +441,8 @@ pub struct AttrCst {
 /// (the lexer's bare-sigil payload) closes the current paragraph without
 /// emitting an empty one, so leading/trailing/repeated blanks are all
 /// absorbed. An attention line with `attr.name == "deprecated"` (at most
-/// one — a second is rejected at parse time, before any `FunctionCst`
-/// exists) is excluded from `attention`; its message is the FULL raw
+/// one — a second is rejected at parse time) is excluded from
+/// `attention`; its message is the FULL raw
 /// payload's text after the attribute's closing `]`, trimmed — finding
 /// `]` in `text` directly is equivalent to (and simpler than) mapping
 /// `attr.span.end` back into the string, since `parse_attr` only
