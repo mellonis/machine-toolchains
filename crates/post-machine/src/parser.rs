@@ -3,11 +3,11 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use mtc_core::diagnostics::{Pos, Span};
+use mtc_core::diagnostics::Span;
 use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::cst::{BodyItem, BodyKind, CommaItem, FunctionCst, StatementCst, TrailingComment};
+use crate::cst::{CommaItem, StatementCst, TrailingComment};
 use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
 use crate::syntax::{self, GreenSink, PmcKind};
 
@@ -529,6 +529,17 @@ struct CommentAt {
     sig_index: usize,
 }
 
+/// What [`Parser::function`] still tells its callers: the name token's
+/// own identity. Both call sites key their duplicate-name checks on it,
+/// and the top-level one also needs the name to decide whether a leading
+/// `volatile` is on `main` (`VolatileNotOnMain`) — everything else about
+/// a function declaration is read back off the green tree.
+struct FnName {
+    name: String,
+    line: u32,
+    col: u32,
+}
+
 struct Parser<'a> {
     /// Significant (comment-free) tokens only — identical to the
     /// `WithoutComments` stream, so the grammar walk matches the pre-C1
@@ -978,12 +989,12 @@ impl Parser<'_> {
             // `use`/`namespace` item instead — harmless, a fresh
             // checkpoint is taken every loop iteration.
             let fn_cp = self.g_checkpoint();
-            let doc_run = if matches!(
+            if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
                 self.g_flush_start(PmcKind::DocRun);
-                let (run, first_span) = self.doc_run()?;
+                let (_run, first_span) = self.doc_run()?;
                 self.g_finish();
                 if !self.next_is_top_level_function_start(terminator) {
                     return Err(CompileError {
@@ -991,10 +1002,7 @@ impl Parser<'_> {
                         kind: CompileErrorKind::DanglingDocRun,
                     });
                 }
-                run
-            } else {
-                Vec::new()
-            };
+            }
             let t = self.peek().clone();
             match (&t.kind, terminator) {
                 (TokenKind::Eof, None) => return Ok(()),
@@ -1211,32 +1219,23 @@ impl Parser<'_> {
                 None
             };
             // Contextual keyword: `export` + identifier = exported def;
-            // `export` + `(` is a function NAMED export.
-            let export_start = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
+            // `export` + `(` is a function NAMED export. Whether a
+            // function is exported is extraction's own reading of the
+            // green tree; this walk only consumes the keyword.
+            if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
                 && matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
                     Some(TokenKind::Ident(_))
-                ) {
-                let export_tok = self.peek().clone();
+                )
+            {
                 self.bump();
-                Some(export_tok.span().start)
-            } else {
-                None
-            };
-            // Threaded through as the declaration's own extent start —
-            // the earliest header token written (`volatile` if present,
-            // else `export`) rather than the name. `doc_run` is empty
-            // unless the loop above just collected and validated one.
-            let header_start = volatile_tok
-                .as_ref()
-                .map(|t| t.span().start)
-                .or(export_start);
+            }
             // The header is confirmed now (a function IS what follows):
             // retro-open FUNCTION at `fn_cp`, so it wraps the doc run
             // (if any) and/or the `volatile`/`export` tokens already
             // emitted above. `function` closes it after the `}`.
             self.g_start_at(fn_cp, PmcKind::Function);
-            let f = self.function(header_start, doc_run)?;
+            let f = self.function()?;
             // `volatile` is legal ONLY on the un-namespaced top-level
             // `main` — checked before the duplicate-name checks below so
             // the more specific rule is the one that surfaces.
@@ -1274,19 +1273,14 @@ impl Parser<'_> {
         }
     }
 
-    // `header_start`: the earliest header modifier's span start when the
-    // caller already consumed one for this function — `volatile`'s start
-    // if a leading `volatile` was consumed (top level or nested — both
-    // paths thread it; `VolatileNotOnMain` is decided by the CALLER once
-    // this returns), else `export`'s start when a leading `export` was
-    // consumed (top level only — a nested definition passes `None` for
-    // this half, `NestedExport` bars a nested `export` before this is
-    // ever called). Threaded in rather than re-detected here because the
-    // caller already consumed the token(s); `FunctionCst::span` starts
-    // here when present, at the name token otherwise (cst.rs's
-    // `FunctionCst::span` doc). `doc_run`: the run the caller already
-    // collected and validated as bound to THIS declaration (empty when
-    // undocumented) — this function only stores it, it never collects one
+    // Walks one function definition — its name, its empty parameter
+    // parens, and its brace-delimited body — and hands back the name
+    // token's own identity, which is all either call site still needs:
+    // the duplicate-name and shared-name-pool checks in `top_items`, the
+    // sibling-name check in this method's own nested-definition branch,
+    // and `VolatileNotOnMain`'s message all key on it. A leading doc run
+    // and a leading `volatile`/`export` are the CALLER's to consume and
+    // to judge — this method never sees them, and never collects a run
     // itself (the caller owns the "what comes next" dispatch a run's
     // dangling check depends on).
     //
@@ -1298,11 +1292,7 @@ impl Parser<'_> {
     // open/close pair always balances; a future third call site (or a
     // second `Ok` exit added here) must preserve both halves of that
     // contract or the green builder mis-nests.
-    fn function(
-        &mut self,
-        header_start: Option<Pos>,
-        doc_run: Vec<DocRunItem>,
-    ) -> Result<FunctionCst, CompileError> {
+    fn function(&mut self) -> Result<FnName, CompileError> {
         let name_tok = self.peek().clone();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(Self::expected(&name_tok, "a function name"));
@@ -1323,50 +1313,33 @@ impl Parser<'_> {
         let brace = self.peek().clone();
         self.expect(&TokenKind::LBrace, "`{`")?;
 
-        let mut body: Vec<BodyItem> = Vec::new();
         let mut nested_names: HashSet<String> = HashSet::new();
         let mut seen_labels: HashSet<u32> = HashSet::new();
         self.prev_end_line = brace.line;
-        // c-brace fix (`cst.rs`'s "Comment placement" doc): comment(s)
-        // riding the SAME physical line as `{`, before the first body
-        // item, are captured here instead of falling into the ordinary
-        // leading-comment drain below (which would print them as their
-        // own body item, moving them off the header line). `sig_index ==
+        // Comment(s) riding the SAME physical line as `{`, before the
+        // first body item, are claimed here so the ordinary
+        // leading-comment drain below does not see them. `sig_index ==
         // self.pos` (not `<=`) is deliberate — it excludes a comment that
         // sits BEFORE `{` (e.g. `f() /* x */ { ... }`, sig_index one
         // token earlier) even when that comment happens to share `{`'s
         // physical line; only a comment genuinely AFTER `{` has
         // `sig_index` equal to the position `{` just advanced `self.pos`
         // to.
-        let mut open_trailing: Vec<Comment> = Vec::new();
         while self.cpos < self.comments.len() {
             let ca = &self.comments[self.cpos];
             if ca.sig_index == self.pos && ca.line == brace.line {
-                open_trailing.push(ca.comment.clone());
+                self.prev_end_line = brace.line + ca.comment.text.matches('\n').count() as u32;
                 self.cpos += 1;
             } else {
                 break;
             }
         }
-        if let Some(last) = open_trailing.last() {
-            self.prev_end_line = brace.line + last.text.matches('\n').count() as u32;
-        }
-        let mut close_trailing: Option<Comment> = None;
-        // Assigned exactly once, in the `RBrace`-closing branch below,
-        // right before the `break` that is this loop's only non-error
-        // exit — the closing `}` token's own span, for
-        // `FunctionCst::span`'s extent end.
-        let close_span: Span;
         loop {
-            // Own-line comments (leading/standalone/dangling) become body
-            // items in source position.
+            // Own-line comments (leading/standalone/dangling) are trivia
+            // the green sink attaches on its own; the walk only steps its
+            // own comment cursor past them.
             for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > self.prev_end_line + 1;
                 self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                body.push(BodyItem {
-                    blank_before,
-                    kind: BodyKind::Comment(comment),
-                });
             }
             if matches!(self.peek().kind, TokenKind::Eof) {
                 return Err(Self::expected(
@@ -1386,12 +1359,12 @@ impl Parser<'_> {
             // the NEXT nested function definition — anything else next
             // (a statement, the closing `}`, `export` before a nested
             // def) is `DanglingDocRun` at the run's own first line.
-            let doc_run = if matches!(
+            if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
                 self.g_flush_start(PmcKind::DocRun);
-                let (run, first_span) = self.doc_run()?;
+                let (_run, first_span) = self.doc_run()?;
                 self.g_finish();
                 if !self.next_is_nested_function_start() {
                     return Err(CompileError {
@@ -1399,10 +1372,7 @@ impl Parser<'_> {
                         kind: CompileErrorKind::DanglingDocRun,
                     });
                 }
-                run
-            } else {
-                Vec::new()
-            };
+            }
             // Nested definition: `[volatile] IDENT ( ) {` — visibility-only
             // nesting. A leading `volatile` is syntactically part of the
             // same shape but always illegal here — nesting can never be
@@ -1424,13 +1394,8 @@ impl Parser<'_> {
                         CompileErrorKind::VolatileNotOnMain(name.clone()),
                     ));
                 }
-                let nested_saved = self.prev_end_line;
-                let nested_line = self.peek().line;
-                // Nested definitions can never carry a leading `export`
-                // (`NestedExport` bars it above), so the extent always
-                // starts at the name token.
                 self.g_start_at(cp, PmcKind::Function);
-                let child = self.function(None, doc_run)?;
+                let child = self.function()?;
                 if nested_names.contains(&child.name) {
                     return Err(CompileError {
                         span: mtc_core::diagnostics::Span::point(child.line, child.col),
@@ -1440,13 +1405,7 @@ impl Parser<'_> {
                         },
                     });
                 }
-                nested_names.insert(child.name.clone());
-                // `function` set `prev_end_line` to the nested `}` line.
-                let blank_before = nested_line > nested_saved + 1;
-                body.push(BodyItem {
-                    blank_before,
-                    kind: BodyKind::Nested(child),
-                });
+                nested_names.insert(child.name);
                 continue;
             }
             // `export` before a nested definition is an error.
@@ -1460,8 +1419,6 @@ impl Parser<'_> {
                 return Err(Self::err_at(&t, CompileErrorKind::NestedExport));
             }
             // Labels announced before the next statement (possibly stacked).
-            let stmt_saved = self.prev_end_line;
-            let stmt_line = self.peek().line;
             let mut labels = Vec::new();
             let mut last_colon_line: u32 = 0;
             loop {
@@ -1496,25 +1453,21 @@ impl Parser<'_> {
                         CompileErrorKind::DanglingLabel(label.value),
                     ));
                 }
-                let close_tok = self.peek().clone();
-                let close_line = close_tok.line;
-                close_span = close_tok.span();
+                let close_line = self.peek().line;
                 self.prev_end_line = close_line;
                 self.bump();
-                // c-brace fix, symmetric to `open_trailing` above: a
-                // comment on the SAME line as `}` rides the closing
-                // brace instead of becoming the next sibling's leading
-                // own-line comment. The top-of-loop `drain_pending()`
-                // above already caught up `self.cpos` to the pre-`}`
-                // `self.pos`, so nothing is pending here except a
-                // comment genuinely following `}` (`sig_index ==
-                // self.pos`, the position `}` just advanced to).
+                // A comment on the SAME line as `}` is claimed here so
+                // the walk's comment cursor stays in step past it. The
+                // top-of-loop `drain_pending()` above already caught up
+                // `self.cpos` to the pre-`}` `self.pos`, so nothing is
+                // pending here except a comment genuinely following `}`
+                // (`sig_index == self.pos`, the position `}` just
+                // advanced to).
                 if self.cpos < self.comments.len() {
                     let ca = &self.comments[self.cpos];
                     if ca.sig_index == self.pos && ca.line == close_line {
                         self.prev_end_line =
                             close_line + ca.comment.text.matches('\n').count() as u32;
-                        close_trailing = Some(ca.comment.clone());
                         self.cpos += 1;
                     }
                 }
@@ -1527,31 +1480,13 @@ impl Parser<'_> {
                 break;
             }
             self.g_start_at(cp, PmcKind::Statement);
-            let stmt = self.statement(labels, last_colon_line)?;
+            self.statement(labels, last_colon_line)?;
             self.g_finish();
-            // `statement` set `prev_end_line` to the `;` line.
-            let blank_before = stmt_line > stmt_saved + 1;
-            body.push(BodyItem {
-                blank_before,
-                kind: BodyKind::Statement(stmt),
-            });
         }
-        Ok(FunctionCst {
+        Ok(FnName {
             name,
-            name_span: name_tok.span(),
             line: name_tok.line,
             col: name_tok.col,
-            span: Span {
-                start: header_start.unwrap_or_else(|| name_tok.span().start),
-                end: close_span.end,
-            },
-            has_volatile: false,
-            exported: false,
-            has_export: false,
-            body,
-            open_trailing,
-            close_trailing,
-            doc_run,
         })
     }
 
