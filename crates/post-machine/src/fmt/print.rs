@@ -141,7 +141,44 @@ pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     if out.is_empty() {
         out.push('\n');
     }
+    #[cfg(debug_assertions)]
+    assert_comment_conservation(source, &out);
     Ok(out)
+}
+
+/// The conservation gate behind every debug-build render: each comment
+/// in the source reprints in the output exactly once, text intact up to
+/// the per-line trailing-whitespace trim [`normalize_comment_text`] is
+/// allowed (docs/pmt/fmt.md (comments) — relocate, never drop). The
+/// printer coordinates independent claimants — leading runs, trailing
+/// slots, brace rides, `use`-list splices, relocations — by per-surface
+/// boundaries with no structural guarantee that every comment is
+/// claimed exactly once, and a missed surface loses a comment SILENTLY:
+/// `pmt fmt` rewrites in place, and no other property can see the loss
+/// (token equivalence lexes `WithoutComments`; idempotence holds on the
+/// lossy output). This printer shipped exactly that failure on
+/// header-interior comments. A MULTISET is compared, not a sequence:
+/// relocation legitimately reorders a comment relative to tokens, never
+/// drops or duplicates one — the two defects this catches loudly.
+#[cfg(debug_assertions)]
+fn assert_comment_conservation(source: &str, formatted: &str) {
+    fn multiset(text: &str) -> std::collections::BTreeMap<String, usize> {
+        let mut m = std::collections::BTreeMap::new();
+        for t in lex_with(text, LexMode::WithComments)
+            .expect("both sides lexed already: the source above, the output by idempotence tests")
+        {
+            if let crate::lexer::TokenKind::Comment(c) = t.kind {
+                *m.entry(normalize_comment_text(&c.text)).or_insert(0usize) += 1;
+            }
+        }
+        m
+    }
+    let before = multiset(source);
+    let after = multiset(formatted);
+    assert_eq!(
+        before, after,
+        "fmt dropped or duplicated a comment\n--- input ---\n{source}\n--- output ---\n{formatted}"
+    );
 }
 
 /// The elements strictly between a brace-delimited node's `{` and `}` —

@@ -220,11 +220,51 @@ pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     let out = flush(&render_top_items(root.syntax(), 0, source, &index));
     // An empty file still reprints as exactly one newline; a non-empty one
     // already ends in the last item's newline.
-    Ok(if out.is_empty() {
+    let out = if out.is_empty() {
         "\n".to_string()
     } else {
         out
-    })
+    };
+    #[cfg(debug_assertions)]
+    assert_comment_conservation(source, &out);
+    Ok(out)
+}
+
+/// The conservation gate behind every debug-build render: each comment
+/// in the source reprints in the output exactly once, text intact up to
+/// the per-line trailing-whitespace trim [`normalize_comment_text`] is
+/// allowed (docs/tmt/fmt.md (comments) — trivia-preserving; relocate,
+/// never drop). The printer coordinates independent claimants — leading
+/// runs, trailing slots, brace rides, interior-list splices, relocations
+/// — by per-surface slice boundaries with no structural guarantee that
+/// every comment is claimed exactly once, and a missed surface loses a
+/// comment SILENTLY: `tmt fmt` rewrites in place, and no other property
+/// can see the loss (token equivalence lexes `WithoutComments`;
+/// idempotence holds on the lossy output). The `.pmc` printer shipped
+/// exactly that failure on header-interior comments. A MULTISET is
+/// compared, not a sequence: relocation legitimately reorders a comment
+/// relative to tokens (and hoisting may reorder two comments relative
+/// to each other), but never drops or duplicates one — the two defects
+/// this exists to catch loudly.
+#[cfg(debug_assertions)]
+fn assert_comment_conservation(source: &str, formatted: &str) {
+    fn multiset(text: &str) -> std::collections::BTreeMap<String, usize> {
+        let mut m = std::collections::BTreeMap::new();
+        for t in lex_with(text, LexMode::WithComments)
+            .expect("both sides lexed already: the source above, the output by idempotence tests")
+        {
+            if let TokenKind::Comment(c) = t.kind {
+                *m.entry(normalize_comment_text(&c.text)).or_insert(0usize) += 1;
+            }
+        }
+        m
+    }
+    let before = multiset(source);
+    let after = multiset(formatted);
+    assert_eq!(
+        before, after,
+        "fmt dropped or duplicated a comment\n--- input ---\n{source}\n--- output ---\n{formatted}"
+    );
 }
 
 // ---------------------------------------------------------------------------
