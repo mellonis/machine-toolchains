@@ -507,8 +507,9 @@ struct FnName {
 
 struct Parser<'a> {
     /// Significant (comment-free) tokens only — identical to the
-    /// `WithoutComments` stream, so the grammar walk matches the pre-C1
-    /// parser exactly.
+    /// `WithoutComments` stream, so a `WithComments` lex changes what
+    /// the green sink records as trivia and nothing about the grammar
+    /// walk itself.
     tokens: &'a [Token],
     pos: usize,
     /// Every namespace path declared so far (reopened blocks insert the
@@ -518,10 +519,11 @@ struct Parser<'a> {
     /// and `a.x` cannot collide; the pool rule just stops both spellings
     /// coexisting confusingly in one file.
     namespaces: HashSet<Vec<String>>,
-    /// Every `(ns, name)` function declared so far — the pre-C1 parser
-    /// scanned its flat `functions` vec for the same-scope duplicate
-    /// check; a set keyed on `(ns, name)` is the equivalent membership
-    /// test and independent of the CST's block nesting.
+    /// Every `(ns, name)` function declared so far — the same-scope
+    /// duplicate check is a membership test on this set, so it stays
+    /// independent of how the walk happens to nest its blocks and of
+    /// the order [`crate::syntax::extract_program`] later flattens
+    /// them in.
     declared_fns: HashSet<(Vec<String>, String)>,
     /// Green-tree emission: `bump()` mirrors every consumed token into
     /// it, and the `g_*` helpers below bracket node boundaries. `Some`
@@ -852,7 +854,8 @@ impl Parser<'_> {
     /// `namespace NAME { … }` (contextual; recurse with the extended
     /// path), `export`, and function definitions. `terminator` is
     /// `Some(RBrace)` inside a block, `None` at file level (ends at Eof).
-    /// Duplicate-name checks run here, exactly as the pre-C1 parser did.
+    /// Duplicate-name checks run here, during the walk — never over the
+    /// extracted `Program` afterwards.
     fn top_items(
         &mut self,
         ns: &[String],
@@ -2180,12 +2183,13 @@ main() {
         );
     }
 
-    /// A green FUNCTION/NAMESPACE node's own `text_range()` — measured via
-    /// `TextLineIndex` against the C1 extent's `line`/`col` convention.
-    /// With no bound doc run, this matches the retired `FunctionCst::span`
-    /// exactly: `top_items`'s green checkpoint (`fn_cp`) is taken before
-    /// `volatile`/`export`/the name token, the same prefix the C1 extent
-    /// anchored to (docs/core.md (syntax trees)).
+    /// A green FUNCTION/NAMESPACE node's own `text_range()`, converted
+    /// to a `line`/`col` `Span` via `TextLineIndex`. With no bound doc
+    /// run this opens at the declaration's first significant token:
+    /// `top_items`'s green checkpoint (`fn_cp`) is taken before
+    /// `volatile`/`export`/the name token (docs/core.md (syntax
+    /// trees)). A bound doc run retro-wraps in front of that, which is
+    /// why the LSP trims the extent back down (`lsp::function_extent`).
     fn extent(src: &str) -> Span {
         use mtc_core::syntax::{AstNode, TextLineIndex};
 

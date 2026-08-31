@@ -229,12 +229,13 @@ fn open_run(
 /// significant token**, which is what keeps it disjoint from the
 /// declaration's own lists. A forward scan from the declaring keyword
 /// would look right and be wrong: a comment written anywhere in a
-/// REUSE's HEADER — `routine /* c */ r(tape t: ab)` — is swept into
-/// slot 0 of the SIGNATURE's interior list by the old parser's
-/// `interior_comments`, which drains on a global cursor, and printing it
-/// here as well would print it twice. Backwards-to-the-first-significant
-/// token is exactly "after the last list drain": the `)` for a REUSE,
-/// the `machine` keyword for a MACHINE.
+/// REUSE's HEADER — `routine /* c */ r(tape t: ab)` — is already slot
+/// 0 of the SIGNATURE's interior list, because the printer's
+/// `delimited_interior` folds everything from a list's first
+/// significant token up to its `(` into that slot, and printing it here
+/// as well would print it twice. Backwards-to-the-first-significant
+/// token is exactly "past the last list": the `)` for a REUSE, the
+/// `machine` keyword for a MACHINE.
 fn pre_world_comments(world: &SyntaxNode) -> Vec<SyntaxToken> {
     if world.kind() != TmcKind::World.into() {
         return Vec::new();
@@ -257,10 +258,10 @@ fn pre_world_comments(world: &SyntaxNode) -> Vec<SyntaxToken> {
 /// partition that decides which of a RULE's comments belongs to which
 /// claimant.
 ///
-/// Every drain the old parser runs inside a rule claims everything
-/// still pending at or before its own position (`interior_comments`
-/// walks a GLOBAL cursor), so the claimants tile the rule's text with
-/// no gaps. A comment starting in:
+/// The claimants tile the rule's text with no gaps: each list claims
+/// every comment at or before its own end, so a comment's region is
+/// decided by which boundary it falls short of. A comment starting
+/// in:
 ///
 /// | region | is claimed by |
 /// |---|---|
@@ -272,10 +273,10 @@ fn pre_world_comments(world: &SyntaxNode) -> Vec<SyntaxToken> {
 ///
 /// A vector's region therefore holds not only what was written between
 /// its brackets but also the HEADER ahead of it — `write /* c */ [` and
-/// `-> /* c */ write [` both land in the write vector's list, which is
-/// where the old parser puts them (docs/tmt/fmt.md (interior comments);
-/// this crate's `fmt` module doc). An absent vector collapses its
-/// region to nothing by taking the previous boundary as its own end.
+/// `-> /* c */ write [` both land in the write vector's list
+/// (docs/tmt/fmt.md (comments inside a list); this crate's `fmt` module
+/// doc). An absent vector collapses its region to nothing by taking the
+/// previous boundary as its own end.
 pub(crate) struct RuleRegions {
     pub pattern_end: u32,
     pub write_end: u32,
@@ -322,14 +323,14 @@ pub(crate) fn rule_regions(node: &SyntaxNode) -> RuleRegions {
     }
 }
 
-/// The comment tokens inside `node` that the old parser leaves PENDING
-/// when it reaches the node's terminator — the ones `take_trailing` and
-/// then the container's own drain get to claim, in that order.
+/// The comment tokens inside `node` that are still unclaimed at the
+/// node's terminator — the ones the trailing-comment slot and then the
+/// container's own item stream get to claim, in that order.
 ///
-/// A comment is pending exactly while nothing else has taken it, and
-/// what takes one is a list's `interior_comments` drain (or a doc run).
-/// So this is a per-KIND question, and the chain below is deliberately
-/// accounted for in prose rather than left to a silent default:
+/// A comment is unclaimed exactly while nothing else has taken it, and
+/// what takes one is a list's interior slot (or a doc run). So this is
+/// a per-KIND question, and the chain below is deliberately accounted
+/// for in prose rather than left to a silent default:
 ///
 /// - **TAPE** — no doc run, no list, so every comment inside it is
 ///   pending. `tape /* c */ main: ab;` prints `tape main: ab; /* c */`.
@@ -670,7 +671,8 @@ mod tests {
     }
 
     /// A documented declaration's unit starts at its retro-wrapped DOC_RUN,
-    /// so ONE rule answers what C1 needed `leads_with_blank` to branch for.
+    /// so ONE rule answers what the retired parser needed a separate
+    /// `leads_with_blank` branch for.
     /// All seven doc-run kinds retro-wrap on this language — including
     /// `namespace`, which is where the PM sibling's rule does NOT apply.
     #[test]
@@ -784,12 +786,12 @@ mod tests {
     // byte-identical, before it was written down here.
     // -----------------------------------------------------------------
 
-    /// A trailing comment is claimed exactly once, and only by a NODE.
-    /// C1's `take_trailing`/`capture_close_trailing` fire once each right
-    /// after a declaration's terminator; every later comment falls to the
-    /// pending drain and becomes an item of its own — even one written on
-    /// the same physical line. So "no newline before it ⇒ trailing" is
-    /// wrong twice over, and both halves print differently.
+    /// A trailing comment is claimed exactly once, and only by a NODE:
+    /// [`claim_trailing`] fires once, right after a declaration's
+    /// terminator, and every later comment becomes an item of the
+    /// container's own stream — even one written on the same physical
+    /// line. So "no newline before it ⇒ trailing" is wrong twice over,
+    /// and both halves print differently.
     #[test]
     fn a_trailing_comment_is_claimed_once_and_only_by_a_node() {
         let (root, index) = tree("use a::b; /* one */ /* two */\n");
@@ -832,10 +834,10 @@ mod tests {
     }
 
     /// The gap after a `;`-terminated declaration is measured from the `;`,
-    /// not from the comment riding it — `take_trailing` is the one capture
-    /// helper that does not advance C1's `prev_end_line`, while the `}`
-    /// twin `capture_close_trailing` does. The two fixtures differ only in
-    /// the terminator, and only a MULTI-LINE trailing comment can show it.
+    /// not from the comment riding it: [`units`] advances the near edge
+    /// past a trailing comment only when the declaration's last token is
+    /// a `}`. The two fixtures differ only in the terminator, and only a
+    /// MULTI-LINE trailing comment can show it.
     #[test]
     fn the_gap_after_a_trailing_comment_is_measured_from_the_terminator() {
         let (root, index) = tree("use a::b; /* one\ntwo */\n/* three */\n");
@@ -882,8 +884,8 @@ mod tests {
     /// A container's FIRST unit still has a gap to measure, and the near
     /// edge differs by container. A braced body measures against the `{`'s
     /// own line, so one newline is no blank; ROOT has no opener at all and
-    /// C1 seeds it at line zero, so a file whose first item sits on line 2
-    /// or later leads with a blank. (`flush` ignores the first item's flag,
+    /// [`units`] seeds its near edge at line zero, so a file whose first
+    /// item sits on line 2 or later leads with a blank. (`flush` ignores the first item's flag,
     /// so this is fidelity rather than visible output — which is exactly
     /// why it would rot unwatched.)
     #[test]
@@ -910,9 +912,10 @@ mod tests {
     }
 
     /// A comment written before a declaration's `{` — between its keyword
-    /// and its name, or after an `entry` prefix — belongs to no production
-    /// in C1, so it falls to the body's pending drain and prints as the
-    /// body's FIRST item (docs/tmt/fmt.md (comments)). It also moves the
+    /// and its name, or after an `entry` prefix — belongs to no
+    /// production of the grammar, so [`pre_brace_comments`] leads the
+    /// body with it and it prints as the body's FIRST item
+    /// (docs/tmt/fmt.md (comments)). It also moves the
     /// near edge to its own end line, which can sit ABOVE the brace: that
     /// is where the printer's one unwritten blank line comes from, and
     /// reproducing it is a plan constraint, not a bug to fix.

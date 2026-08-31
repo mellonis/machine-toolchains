@@ -627,8 +627,9 @@ mod tests {
 
     /// Go-to-definition on a label reference still finds the label's own
     /// declaration in the same function — the walk that moved from the
-    /// C1 CST to views. `007` also pins that the label VALUE survives
-    /// extraction: a token-text re-derivation would either hand back
+    /// hand-written CST to green-tree views. `007` also pins that the
+    /// label VALUE survives extraction: a token-text re-derivation
+    /// would either hand back
     /// `007` (unparseable as a value) or lose the written form.
     #[test]
     fn label_reference_resolves_to_its_declaration_after_the_view_migration() {

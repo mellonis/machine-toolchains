@@ -1,17 +1,17 @@
-//! Extraction: rebuilding the C1 `parser::Function`/`Statement`/`Label`
+//! Extraction: rebuilding the `parser::Function`/`Statement`/`Label`
 //! AST straight from typed views over the green tree, function by
 //! function (docs/core.md (syntax tree)). Two halves:
 //!
 //! - **Retokenization** (`sig_tokens`/`token_from_syntax`): rebuilding a
 //!   real [`Token`] slice from a green subtree's own descendant tokens,
-//!   so extraction can reuse the C1 parser's existing productions
+//!   so extraction can reuse the parser's existing productions
 //!   (`crate::parser::reparse_item`/`reparse_doc_items`) instead of
 //!   re-deriving their grammar decisions.
 //! - **Assembly** ([`extract_function`]): walking the views themselves
 //!   (headers, statements, labels, nesting) to build the same
-//!   container shape the C1 parser's own (now-retired) lowering used
-//!   to — never re-deriving a rule the parser already encodes, only
-//!   naming the shape the green tree already carries.
+//!   container shape the parser's own retired CST lowering used to —
+//!   never re-deriving a rule the parser already encodes, only naming
+//!   the shape the green tree already carries.
 
 use mtc_core::syntax::{AstNode, SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex, TextRange};
 
@@ -50,7 +50,7 @@ fn sigil_len(text: &str) -> usize {
 /// Every non-trivia descendant token of `node`, rebuilt as a real
 /// [`Token`] — the retokenization half of extraction. `node` is a green
 /// subtree already known to have parsed once (the tree only exists
-/// because it did); this turns it back into the same token shape the C1
+/// because it did); this turns it back into the same token shape the
 /// parser's productions accept. Ends with a synthetic `Eof` at `node`'s
 /// own end position, matching every real token stream's own convention.
 fn sig_tokens(node: &SyntaxNode, index: &TextLineIndex) -> Vec<Token> {
@@ -128,9 +128,9 @@ fn is_nested(node: &SyntaxNode) -> bool {
 /// (necessarily top-level, per `is_nested`) FUNCTION was parsed with a
 /// non-empty enclosing `ns` path. Namespaces never nest inside a
 /// function, so — unlike a general "any NAMESPACE ancestor" walk — the
-/// direct parent alone settles it: `Parser::top_items`'s own recursion
-/// (parser.rs:1300) only ever calls itself with an EXTENDED (non-empty)
-/// `ns`, so a FUNCTION whose immediate container is a NAMESPACE always
+/// direct parent alone settles it: `Parser::top_items` recurses into a
+/// `namespace` block only with an EXTENDED (non-empty) `ns`, so a
+/// FUNCTION whose immediate container is a NAMESPACE always
 /// has `ns.is_empty() == false`, regardless of how deeply that
 /// namespace itself is nested.
 fn is_namespaced(node: &SyntaxNode) -> bool {
@@ -159,19 +159,17 @@ fn extract_label(view: &LabelView, index: &TextLineIndex) -> Label {
 }
 
 /// One `;`-terminated statement. `span` is the STATEMENT node's own
-/// extent taken directly from the tree: `Parser::statement`'s green
-/// checkpoint (`cp`, parser.rs:1531) is captured before the label loop
-/// and before the first item — the same point `StatementCst::span`
-/// (cst.rs) starts from (the first label if any, else the first item) —
-/// and the node closes right after the trailing `;` is bumped
-/// (parser.rs:1679, after `self.statement(...)` returns), so the node's
-/// start/end already equal `StatementCst::span`'s "first token through
-/// `;` end" exactly; no separate first/last-token lookup is needed.
-/// `line`, however, is NOT the node's own start line — `Statement::line`
-/// is always the first ITEM's line (`Parser::statement` reads
-/// `self.peek().line` right after the label loop, parser.rs:1715),
-/// which differs from a label's own line whenever the author put the
-/// first command on its own line after the label (`label_break`).
+/// extent taken directly from the tree: the body loop takes its green
+/// checkpoint before the label loop and retro-opens STATEMENT there, so
+/// the node starts at the first label if there is one and at the first
+/// item otherwise, and it closes right after `Parser::statement` bumps
+/// the trailing `;` — "first token through `;` end" already, with no
+/// separate first/last-token lookup needed.
+///
+/// `line`, however, is NOT the node's own start line: it is always the
+/// first ITEM's line, read below off the first `ItemView`'s own start.
+/// The two differ whenever the author put the first command on its own
+/// line after the labels (`label_break`).
 ///
 /// `pub(crate)` because the `.pmc` language service needs one
 /// statement's item internals — label references, a call's name — and
@@ -184,13 +182,13 @@ pub(crate) fn extract_statement(view: &StatementView, index: &TextLineIndex) -> 
     let item_views: Vec<ItemView> = view.items().collect();
     // `Parser::statement` parses a statement's first entry with
     // `item(false)` and every following comma-separated entry with
-    // `item(true)` (parser.rs:1723, 1787) — but `in_group` only ever
-    // changes what `Parser::item` accepts for ONE shape, `goto`
-    // (parser.rs:1881: `in_group` rejects it outright), and `goto` can
-    // never be anything but a multi-item statement's SOLE item — the
-    // comma loop rejects a `,` after any `Goto` unconditionally
-    // (parser.rs:1756-1761, "goto cannot appear in a comma group", no
-    // last-position exception). So on any tree that already parsed once,
+    // `item(true)` — but `in_group` only ever changes what
+    // `Parser::item` accepts for ONE shape, `goto`, which it rejects
+    // outright inside a group, and `goto` can never be anything but a
+    // multi-item statement's SOLE item: `Parser::statement`'s comma
+    // loop rejects a `,` after any `Goto` unconditionally ("goto cannot
+    // appear in a comma group", with no last-position exception). So on
+    // any tree that already parsed once,
     // a multi-item statement's first entry can never be `goto` either,
     // and passing `in_group: true` to every entry of such a statement —
     // first included — reproduces the exact same `Item` the original
@@ -220,10 +218,9 @@ pub(crate) fn extract_statement(view: &StatementView, index: &TextLineIndex) -> 
     }
 }
 
-/// Rebuild one C1 `parser::Function` from its green-tree view — the
-/// sole implementation of this container-building logic now (the C1
-/// parser's own `lower_function`, which this used to mirror, is
-/// retired).
+/// Rebuild one `parser::Function` from its green-tree view — the sole
+/// implementation of this container-building logic now (the parser's
+/// own `lower_function`, which this used to mirror, is retired).
 ///
 /// `name`/`name_span`/`line`/`col` come from the header's name token
 /// (`FunctionView::header`'s own contextual-keyword decode already
@@ -292,8 +289,9 @@ fn extract_function(view: &FunctionView, index: &TextLineIndex) -> Function {
 /// construction (parser.rs's `use` production): `path` is the segment
 /// texts in order, `alias` the trailing `as`-bound name if any, `line`
 /// the FIRST segment's line, `span` FIRST segment start → LAST segment
-/// end — alias-exclusive, matching [`Import`]'s own doc and
-/// `UsePath`'s C1 span convention. `ns` is the caller's accumulated
+/// end — alias-exclusive, matching [`Import`]'s own doc and the
+/// parser's own `UsePath` span convention. `ns` is the caller's
+/// accumulated
 /// namespace path, copied straight through (an import's own path never
 /// contributes to it — only `NAMESPACE` blocks do).
 fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> Import {
@@ -328,9 +326,8 @@ fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> I
 /// hoists it out, and `extract_function`'s own recursion already leaves
 /// a nested `Function`'s `ns` empty). Top-level comments carry no green
 /// node at all (trivia, dropped before `FileView`/`NamespaceView::items`
-/// ever sees them), so there is no comment arm to skip here — unlike
-/// the C1 CST's own `TopKind`, `TopView` has no `Comment` variant at
-/// all.
+/// ever sees them), so there is no comment arm to skip here: `TopView`
+/// has no `Comment` variant at all.
 fn extract_items(
     items: impl Iterator<Item = TopView>,
     ns: &[String],
@@ -359,8 +356,8 @@ fn extract_items(
     }
 }
 
-/// Rebuild the whole C1 `parser::Program` from the green tree's root —
-/// the parser's own `Program`-building `lower_cst` is retired, so this
+/// Rebuild the whole `parser::Program` from the green tree's root —
+/// the parser's own `Program`-building CST lowering is retired, so this
 /// is the sole builder now: one [`TextLineIndex`] built once and
 /// threaded through the whole walk, then [`extract_items`] over the
 /// file's own top-level items with an empty starting `ns`.
@@ -384,7 +381,8 @@ mod tests {
     use mtc_core::diagnostics::Span;
     use mtc_core::syntax::AstNode;
 
-    /// Retokenized items re-parse to the EXACT C1 Item — spans included.
+    /// Retokenized items re-parse to the EXACT expected `Item`s — spans
+    /// included.
     ///
     /// The brief's originally proposed snippet (`right(2), goto 1` as
     /// ONE comma group) does not parse: a comma-group entry that carries
@@ -405,11 +403,11 @@ mod tests {
     /// comma).
 
     #[test]
-    fn reparsed_item_equals_the_c1_item() {
+    fn reparsed_item_equals_the_expected_item() {
         let src = "main() {\n1: right(2);\ngoto 1;\n2: right, mark;\n}\n";
 
-        // Every field below is a literal captured from the C1 lowering
-        // of this fixture while that path was still callable.
+        // Every field below is a literal captured from the retired CST
+        // lowering of this fixture while that path was still callable.
         let expected_items: Vec<Item> = vec![
             Item::Builtin {
                 which: Builtin::Right,
@@ -502,8 +500,8 @@ mod tests {
         assert_eq!(green_items, expected_items);
     }
 
-    /// Retokenized `DOC_RUN` tokens re-parse to the EXACT C1 doc-run
-    /// items, `blank_before` included — for THIS comment-free snippet;
+    /// Retokenized `DOC_RUN` tokens re-parse to the EXACT expected
+    /// doc-run items, `blank_before` included — for THIS comment-free snippet;
     /// see `reparse_doc_items`'s own doc comment for why a
     /// comment-interleaved run can't hold to raw item-for-item equality
     /// (`reparsed_doc_items_reduce_to_the_same_fndoc_when_comments_interleave`
@@ -524,11 +522,11 @@ mod tests {
     /// `Some` arm actually exercises that arithmetic against the
     /// green-tree-derived `len`.
     #[test]
-    fn reparsed_doc_items_equal_the_c1_doc_run() {
+    fn reparsed_doc_items_equal_the_expected_doc_run() {
         let src = "? doc line\n! caution\n! [deprecated] use goToEnd\nmain() { right; }\n";
 
-        // A literal captured from the C1 lowering of this fixture while
-        // that path was still callable.
+        // A literal captured from the retired CST lowering of this
+        // fixture while that path was still callable.
         let expected_doc_run = vec![
             DocRunItem {
                 blank_before: false,
@@ -572,11 +570,12 @@ mod tests {
         assert_eq!(green_doc_run, expected_doc_run);
     }
 
-    /// A comment interleaved inside a `DOC_RUN` (`(Doc, Comment, Doc)`
-    /// on the C1 side) cannot survive retokenization — `sig_tokens`
-    /// drops it as trivia, so the green side's raw `Vec<DocRunItem>` is
-    /// `(Doc, Doc)`, strictly shorter than C1's. What Task 4/6 actually
-    /// rely on is `reduce_doc_run` equality, not raw item equality —
+    /// A comment interleaved inside a `DOC_RUN` — `(Doc, Comment, Doc)`
+    /// as written — cannot survive retokenization: `sig_tokens` drops
+    /// the comment as trivia, so the raw `Vec<DocRunItem>` comes back
+    /// `(Doc, Doc)`, strictly shorter than the run in source. What the
+    /// consumers rely on is `reduce_doc_run` equality, not raw item
+    /// equality —
     /// this proves that equality holds anyway, because
     /// `DocRunKind::Comment` is fully inert in `reduce_doc_run`
     /// regardless of position (see that function's own doc comment):
@@ -587,8 +586,8 @@ mod tests {
 
         // Three items as WRITTEN — two `?` lines and the comment between
         // them — folding to one paragraph. Both literals were captured
-        // from the C1 lowering of this fixture while that path was still
-        // callable.
+        // from the retired CST lowering of this fixture while that path
+        // was still callable.
         let written_items = 3;
         let expected_doc = Some(crate::parser::FnDoc {
             paragraphs: vec!["doc line more doc".to_string()],
@@ -688,8 +687,9 @@ mod tests {
     /// agree rather than double-applying), a labeled statement, and a
     /// nested function definition.
     ///
-    /// Asserted field by field against literals captured from the C1
-    /// lowering of this fixture while that path was still callable.
+    /// Asserted field by field against literals captured from the
+    /// retired CST lowering of this fixture while that path was still
+    /// callable.
     #[test]
     fn extracted_function_carries_every_declaration_feature() {
         let src = "? doc line\n! caution\nexport main() {\n1: right;\nh() { right; }\n}\n";
@@ -754,7 +754,8 @@ mod tests {
     }
 
     /// A namespaced, aliased snippet, asserted against literals captured
-    /// from the C1 lowering while that path was still callable: the
+    /// from the retired CST lowering while that path was still
+    /// callable: the
     /// import's path, alias and (file-level) `ns`, the namespaced
     /// function's own `ns`, and `main`'s auto-export.
     #[test]
@@ -805,8 +806,8 @@ mod tests {
     /// `[]`, since `extract_function` gives a nested definition an empty
     /// namespace of its own).
     ///
-    /// Asserted against literals captured from the C1 lowering while that
-    /// path was still callable.
+    /// Asserted against literals captured from the retired CST lowering
+    /// while that path was still callable.
     #[test]
     fn extracted_program_pins_namespace_scoped_import_and_nested_function_ns() {
         let src = "use std::goToEnd as ge;\nnamespace n {\nuse std::goToStart as gs;\nf() {\nright;\ng() { left; }\n}\n}\nmain() { right; }\n";

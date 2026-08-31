@@ -1,4 +1,4 @@
-//! Extraction: rebuilding the C1 [`crate::parser::Program`] straight
+//! Extraction: rebuilding [`crate::parser::Program`] straight
 //! from typed views over the `.tmc` green tree (docs/core.md (syntax
 //! trees)). Two halves:
 //!
@@ -45,8 +45,8 @@
 //!
 //! A declaration retro-wraps its bound doc run (this crate's `syntax`
 //! module doc), so a documented declaration's node STARTS at the doc
-//! run, not at its header. Every `line`/`col`/`span.start` the C1
-//! lowering produces is anchored on a token instead — the name token,
+//! run, not at its header. Every `line`/`col`/`span.start` a `Program`
+//! carries is anchored on a token instead — the name token,
 //! the `entry`/`export`/`volatile` prefix, or the declaring keyword —
 //! so extraction reads [`header_token`] and the views' own name
 //! accessors rather than `SyntaxNode::text_range().start`. A node's
@@ -267,8 +267,8 @@ fn direct_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> + '_ {
 }
 
 /// The declaration's own first significant token — the anchor every
-/// `line`/`col`/`span.start` in the C1 lowering is taken from, and the
-/// reason the module doc says never to read a node's own start.
+/// `line`/`col`/`span.start` in an extracted `Program` is taken from,
+/// and the reason the module doc says never to read a node's own start.
 ///
 /// The shape this walk relies on, for `"? doc\nalphabet ab { '0' }\n"`:
 ///
@@ -324,49 +324,50 @@ fn tokens_from(toks: &[SyntaxToken], index: &TextLineIndex) -> Vec<Token> {
 /// item's `blank_before`, and information a doc run's own tokens can
 /// never carry.
 ///
-/// Read off the source rather than the tree: the parser's own
-/// `prev_end_line` at the moment it starts a doc run is the end line of
-/// the last non-whitespace SOURCE CONTENT before it, comments included.
-/// Three things set it there — `capture_open_trailing` and
-/// `capture_close_trailing` each advance it past a captured comment's
-/// own last line; all four of `drain_pending`'s CALLERS do the same for
-/// a drained own-line comment, from the count it hands back —
-/// `top_items`, `world_body` and `state_rules` write the field
-/// directly, `doc_run` through a local it copies back on the way out,
-/// while `drain_pending` itself never touches it; and the preceding
-/// declaration's own production sets it to its `;` or `}` line.
+/// Read off the source rather than the tree. The value to reproduce is
+/// where the retired parser's own `prev_end_line` stood at the moment
+/// it started a doc run: the end line of the last non-whitespace SOURCE
+/// CONTENT before it, comments included. Three things set it there —
+/// `capture_open_trailing` and `capture_close_trailing` each advanced
+/// it past a captured comment's own last line; all four of
+/// `drain_pending`'s CALLERS did the same for a drained own-line
+/// comment, from the count it handed back — `top_items`, `world_body`
+/// and `state_rules` wrote the field directly, `doc_run` through a
+/// local it copied back on the way out, while `drain_pending` itself
+/// never touched it; and the preceding declaration's own production set
+/// it to its `;` or `}` line.
 /// Scanning back to the last non-whitespace character answers all of
 /// them with one rule, where the tree would need the preceding sibling
 /// AND its trailing trivia treated separately — so that scan stays the
 /// default answer here.
 ///
 /// It answers all of them but ONE, and that one is why the `;` arm
-/// below exists. `Parser::take_trailing` is the single
-/// comment-capturing helper that does NOT advance `prev_end_line` past
-/// the comment it claims — it fires only right after a `;` (the five
+/// below exists. `Parser::take_trailing` was the single
+/// comment-capturing helper that did NOT advance `prev_end_line` past
+/// the comment it claimed — it fired only right after a `;` (the five
 /// `;`-terminated productions: `use`, `tape`, `graft`, `bind`, and a
-/// rule), where `capture_close_trailing`, the `}` twin, DOES advance.
+/// rule), where `capture_close_trailing`, the `}` twin, DID advance.
 /// So when a `;`'s trailing comment is the last thing before the run,
-/// the original, in-context parse keeps the `;`'s line where the
-/// scan-back would report the comment's end line — a difference only a
+/// the in-context parse kept the `;`'s line where the scan-back would
+/// report the comment's end line — a difference only a
 /// MULTI-LINE comment can show, since a single-line one ends where it
 /// starts.
 ///
 /// The arm is narrow in both directions, and both edges are pinned by
 /// `the_semicolon_arm_is_narrow_in_both_directions`:
 ///
-/// - It is keyed on `;` because `}` behaves the other way, and every
+/// - It is keyed on `;` because `}` behaved the other way, and every
 ///   other predecessor (a `{` through `capture_open_trailing`, an
-///   own-line comment through `drain_pending`) advances the field too.
-/// - `take_trailing` claims AT MOST ONE comment, so the arm requires
+///   own-line comment through `drain_pending`) advanced the field too.
+/// - `take_trailing` claimed AT MOST ONE comment, so the arm requires
 ///   the comment run to be exactly one long. Write a second comment
-///   after the `;` and the first is the trailing while the rest are
+///   after the `;` and the first was the trailing while the rest were
 ///   drained as ordinary pending comments, each advancing the field —
 ///   which lands it back on the scan-back's own answer.
 ///
-/// (`interior_comments` leaves the field alone too, but is never the
-/// last word: a list's closing delimiter always follows it, and the
-/// declaration's own production then sets the field.)
+/// (A list's own interior drain left the field alone too, but was never
+/// the last word: a list's closing delimiter always follows it, and the
+/// declaration's own production then set the field.)
 fn prev_end_line(source: &str, index: &TextLineIndex, node: &SyntaxNode) -> u32 {
     let scan_back = |start: usize| match source[..start].rfind(|c: char| !c.is_whitespace()) {
         Some(i) => index.line_col(i as u32).0,
@@ -1003,17 +1004,15 @@ fn extract_machine(view: &MachineView, source: &str, index: &TextLineIndex) -> M
     }
 }
 
-/// Walk one level of `RootView`/`NamespaceView::items` — mirrors
-/// `crate::parser::lower_items` exactly, including its ORDER: a
-/// namespace recurses IN PLACE, depth-first, so a declaration written
-/// after a namespace block lands after that namespace's own contents in
-/// every vector of the [`Program`]. `ns` is a path stamped on each
-/// declaration, never a prefix folded into its name.
+/// Walk one level of `RootView`/`NamespaceView::items`, in source
+/// ORDER: a namespace recurses IN PLACE, depth-first, so a declaration
+/// written after a namespace block lands after that namespace's own
+/// contents in every vector of the [`Program`]. `ns` is a path stamped
+/// on each declaration, never a prefix folded into its name.
 ///
 /// Top-level comments carry no green node at all — they are trivia,
-/// dropped before `items()` ever sees them — so unlike `lower_items`'s
-/// explicit `TopKind::Comment(_) => {}` arm there is no comment case to
-/// skip here.
+/// dropped before `items()` ever sees them — so there is no comment
+/// case to skip here.
 fn extract_items(
     items: impl Iterator<Item = TopView>,
     ns: &[String],
@@ -1345,15 +1344,15 @@ mod tests {
     /// why no fixture could ever exercise it (it is the absence of a
     /// TRANSITION node, never a shape this shim is called for).
     ///
-    /// Every expected value below is a literal, captured from the C1
-    /// lowering of this same fixture while that path was still callable
-    /// and written down before it went away. The literals are what makes
+    /// Every expected value below is a literal, captured from the
+    /// retired hand-written-CST lowering of this same fixture while that
+    /// path was still callable and written down before it went away. The literals are what makes
     /// this a fidelity pin rather than a comparison of two sides that
     /// could drift together: a `goto` that stopped being
     /// `explicit: true`, or a span that moved by a column, fails here
     /// against a fixed value.
     #[test]
-    fn reparsed_transition_equals_the_c1_transition_across_every_reachable_shape() {
+    fn reparsed_transition_equals_the_expected_transition_across_every_reachable_shape() {
         let src = "routine r() {\n  entry state a {\n    \
                    ['0'] -> goto a;\n    ['1'] -> a;\n    ['2'] -> return;\n    \
                    ['3'] -> stop;\n    ['4'] -> halt;\n    \
@@ -1431,10 +1430,11 @@ mod tests {
     /// written below, `with map { … }` included — the unit
     /// `crate::syntax::kinds`'s own module doc names as what a caller
     /// "retokenizes and hands back to `Parser::binding_arg`". The
-    /// expected value is a literal captured from the C1 lowering of this
-    /// fixture while that path was still callable.
+    /// expected value is a literal captured from the retired
+    /// hand-written-CST lowering of this fixture while that path was
+    /// still callable.
     #[test]
-    fn reparsed_binding_arg_equals_the_c1_binding_arg() {
+    fn reparsed_binding_arg_equals_the_expected_binding_arg() {
         let src = "routine r() {\n  entry state a {\n    [*] -> stop;\n  }\n  \
                    graft a(x = y with map { '0'->'1' }) as inst;\n}\n";
 
@@ -1484,8 +1484,8 @@ mod tests {
     /// Retokenizing a BINDING_ARG's own SYM_MAP node and reparsing it
     /// through `Parser::sym_map` reproduces the exact `SymMap` written
     /// below, both arrow flavors included. The expected value is a
-    /// literal captured from the C1 lowering of this fixture while that
-    /// path was still callable.
+    /// literal captured from the retired hand-written-CST lowering of
+    /// this fixture while that path was still callable.
     ///
     /// This is also `reparse_sym_map`'s ONLY caller anywhere in the
     /// crate — the shim exists for a language-server use case nothing
@@ -1493,7 +1493,7 @@ mod tests {
     /// this test is what keeps `Parser::sym_map` reachable from a green
     /// node at all. Deleting it silently retires the shim.
     #[test]
-    fn reparsed_sym_map_equals_the_c1_sym_map() {
+    fn reparsed_sym_map_equals_the_expected_sym_map() {
         let src = "routine r() {\n  entry state a {\n    [*] -> stop;\n  }\n  \
                    graft a(x = y with map { '0'->'1', '2'=>'3' }) as inst;\n}\n";
 
@@ -1552,10 +1552,11 @@ mod tests {
     /// on: `Tape` (`writes`/`preserves` clauses included) and the plain
     /// `State` parameter — a fixture with only the `Tape` shape would
     /// leave the `State` arm of `Parser::sig_param` entirely unpinned.
-    /// The expected values are literals captured from the C1 lowering of
-    /// this fixture while that path was still callable.
+    /// The expected values are literals captured from the retired
+    /// hand-written-CST lowering of this fixture while that path was
+    /// still callable.
     #[test]
-    fn reparsed_sig_param_equals_the_c1_sig_param_for_both_shapes() {
+    fn reparsed_sig_param_equals_the_expected_sig_param_for_both_shapes() {
         let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \
                    entry state a {\n    [*] -> stop;\n  }\n}\n";
 
@@ -1680,10 +1681,11 @@ mod tests {
     /// written out in the expected value below, which compares every
     /// field, span included.
     ///
-    /// The expected run is a literal captured from the C1 lowering of
-    /// this fixture while that path was still callable.
+    /// The expected run is a literal captured from the retired
+    /// hand-written-CST lowering of this fixture while that path was
+    /// still callable.
     #[test]
-    fn reparsed_doc_items_equal_the_c1_doc_run() {
+    fn reparsed_doc_items_equal_the_expected_doc_run() {
         let src = "? doc line\n! [deprecated] gone\nalphabet ab { '0' }\n";
 
         let expected_doc_run = vec![
@@ -1713,10 +1715,11 @@ mod tests {
         assert_eq!(green_doc_run, expected_doc_run);
     }
 
-    /// A comment interleaved inside a `DOC_RUN` (`(Doc, Comment,
-    /// Attention)` on the C1 side) cannot survive one pass of
-    /// retokenization — `sig_tokens` drops it as trivia, so the SHIM's
-    /// raw `Vec<DocRunItem>` is strictly SHORTER than C1's. This is a
+    /// A comment interleaved inside a `DOC_RUN` (a three-item
+    /// `(Doc, Comment, Attention)` run as written) cannot survive one
+    /// pass of retokenization — `sig_tokens` drops it as trivia, so the
+    /// SHIM's raw `Vec<DocRunItem>` is strictly SHORTER than the run in
+    /// source. This is a
     /// test of the shim alone, called directly and deliberately:
     /// [`extract_doc_items`] no longer hands it a whole comment-bearing
     /// run, precisely because `fmt` needs those comments back, and
@@ -1734,8 +1737,9 @@ mod tests {
     /// `reparsed_doc_items_reduce_to_the_same_fndoc_when_comments_interleave`.
     ///
     /// The three-item run this fixture writes, and the reduced [`Doc`]
-    /// it folds to, are literals captured from the C1 lowering of this
-    /// fixture while that path was still callable.
+    /// it folds to, are literals captured from the retired
+    /// hand-written-CST lowering of this fixture while that path was
+    /// still callable.
     #[test]
     fn reparsed_doc_items_reduce_to_the_same_doc_when_comments_interleave() {
         let src = "? doc line\n// interleaved comment\n? more doc\nalphabet ab { '0' }\n";
@@ -1781,8 +1785,9 @@ mod tests {
     ///
     /// `blank_before: false` on that first item is the load-bearing
     /// literal: it is what a hardcoded `0` for `prev_end_line` gets
-    /// wrong on this fixture, and it was captured from the C1 lowering
-    /// of this source while that path was still callable.
+    /// wrong on this fixture, and it was captured from the retired
+    /// hand-written-CST lowering of this source while that path was
+    /// still callable.
     #[test]
     fn reparsed_doc_items_pin_blank_before_when_the_run_abuts_a_preceding_declaration() {
         let src = "alphabet a { '0' }\n? doc line\n! [deprecated] gone\nalphabet b { '0' }\n";
@@ -2056,7 +2061,8 @@ mod tests {
     /// declaration's or a pattern's span, never at a bare transition's,
     /// so the position half of `reparse_transition`
     /// (`crate::parser::reparse_transition`) had no pin at all once the
-    /// C1 differential oracle stopped running — only its CONTENT (the
+    /// differential oracle against the hand-written CST stopped running
+    /// — only its CONTENT (the
     /// `explicit` flag, `Call.args`, `Continuation`, …) is read anywhere
     /// downstream.
     ///
@@ -2073,9 +2079,9 @@ mod tests {
     /// since the mutation is uniform across all six and a single
     /// variant already closes the hole — the extra assertions are
     /// cheap insurance, not required breadth. Every literal below was
-    /// validated against the C1 lowering while it is still callable;
-    /// once C1 is deleted this literal is unfalsifiable except by
-    /// re-deriving the grammar by hand.
+    /// validated against the retired hand-written-CST lowering while
+    /// that path was still callable; with it gone, these literals are
+    /// falsifiable only by re-deriving the grammar by hand.
     #[test]
     fn transition_spans_are_pinned_by_value() {
         let src = "alphabet ab { '0', '1' }\n\
@@ -2135,9 +2141,10 @@ mod tests {
         );
     }
 
-    /// `lower_items` recurses into a namespace IN PLACE, depth-first,
-    /// so a declaration written after a namespace block lands after
-    /// that namespace's own contents in every vector of the `Program`
+    /// [`extract_items`] recurses into a namespace IN PLACE,
+    /// depth-first, so a declaration written after a namespace block
+    /// lands after that namespace's own contents in every vector of
+    /// the `Program`
     /// — and `ns` is a PATH stamped on each declaration, never a prefix
     /// folded into its name. A per-item append that hoisted namespaces
     /// to the end, or one that joined the path into the name, still
@@ -2534,8 +2541,8 @@ mod tests {
     /// `0` is byte-identical to a correct one. This test therefore
     /// asserts extraction's own [`extract_doc_items`] output directly,
     /// which is the only place the value surfaces. Each expected run is
-    /// a literal captured from the C1 lowering of its fixture while that
-    /// path was still callable.
+    /// a literal captured from the retired hand-written-CST lowering of
+    /// its fixture while that path was still callable.
     ///
     /// Three cases, because one alone under-determines the rule:
     /// abutting a preceding declaration (`0` fails), abutting a
@@ -2587,8 +2594,9 @@ mod tests {
     /// handles the first and silently drops the second, so both are
     /// here, on ALPHABET and on NAMESPACE alike.
     ///
-    /// Each expected run below is a literal captured from the C1
-    /// lowering of its fixture while that path was still callable. The
+    /// Each expected run below is a literal captured from the retired
+    /// hand-written-CST lowering of its fixture while that path was
+    /// still callable. The
     /// COMPILER path is unaffected by these items either way:
     /// `reduce_doc_run` folds over `kind` and treats a comment item as
     /// inert, so a `Program` cannot discriminate them at all — this
@@ -2690,8 +2698,9 @@ mod tests {
         );
     }
 
-    /// A MULTI-LINE block comment riding a `;` is claimed by C1's
-    /// `Parser::take_trailing`, which leaves `prev_end_line` at the `;`.
+    /// A MULTI-LINE block comment riding a `;` was claimed by the
+    /// retired parser's `take_trailing`, which left `prev_end_line` at
+    /// the `;`.
     /// The green walk must do the same, because the field it feeds — the
     /// FIRST doc item's `blank_before` — is what `fmt` turns into a blank
     /// line before a doc run.
@@ -2704,7 +2713,7 @@ mod tests {
     ///
     /// The seed is no longer the only thing pinned. A divergence INSIDE
     /// the run — [`sig_tokens`] drops an interleaved comment as trivia, so
-    /// the run came back SHORTER than C1's and the item after the comment
+    /// the run came back SHORTER than the source's and the item after it
     /// measured its gap against the previous DOC LINE, inventing a blank
     /// line nobody wrote — was closed by segmenting the reparse around the
     /// run's own comments (see [`extract_doc_items`]). It was invisible to
@@ -2750,8 +2759,9 @@ mod tests {
     /// Measured, both directions: dropping the one-comment condition
     /// makes the second fixture report `true` where the literal below
     /// says `false`; dropping the `;` key does the same to the third.
-    /// Every literal was captured from the C1 lowering of its fixture
-    /// while that path was still callable. A `Program` cannot
+    /// Every literal was captured from the retired hand-written-CST
+    /// lowering of its fixture while that path was still callable. A
+    /// `Program` cannot
     /// discriminate any of them — `reduce_doc_run` folds over `kind`
     /// alone — so this level is the only one that can.
     #[test]

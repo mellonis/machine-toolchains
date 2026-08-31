@@ -1,16 +1,20 @@
 //! The `.pmc` printer (`docs/pmt/fmt.md`, `docs/core.md` (syntax
 //! trees)) — the whole implementation behind [`super::format`], built
 //! directly on the lossless green tree. It replaced a printer that
-//! walked a hand-typed CST ("C1"), and was grown surface by surface
-//! against that printer as a differential oracle before being cut over
-//! wholesale; C1's CST-walking printer is gone.
+//! walked a hand-typed CST, and was grown surface by surface against
+//! that printer as a differential oracle before being cut over
+//! wholesale.
 //!
-//! Notes below that say a rule is *ported* from `render_items`,
-//! `command_column`, `print_use` and the like name C1's own functions.
-//! They record where a rule came from and that it crossed over
-//! unchanged — history, not code to open. This module's `tests` are the
-//! surviving trace of that oracle: every expected literal in them was
-//! captured from the C1 printer while it still existed.
+//! **"C1" throughout this file names that retired pair — the hand-typed
+//! CST and the printer that walked it. Both are deleted, so every
+//! mention of C1 below records how that implementation behaved, never
+//! anything still in the tree or code to go and open.** Notes saying a
+//! rule is *ported* from `render_items`, `command_column`, `print_use`
+//! and the like name C1's own functions, and record that the rule
+//! crossed over unchanged. This module's `tests` are the surviving
+//! trace of that oracle: every expected literal in them was captured
+//! from the C1 printer while it still existed, and those literals are
+//! what pin the behaviour now.
 //!
 //! **Scope of this module today**: the whole `.pmc` language — the file
 //! itself, `use` declarations (paths, aliases, and every interior
@@ -24,7 +28,7 @@
 //! internal blank line, a block comment spanning lines, a comment
 //! interleaved inside or immediately after a bound doc run, a
 //! statement's own same-line trailing comment (relocated forward from a
-//! comment written before the terminating `;`, when C1 does the same —
+//! comment written before the terminating `;`, when C1 did the same —
 //! [`statement_trailing_and_leftovers`]'s own doc), the column-alignment
 //! runs several such comments form together
 //! ([`compute_trailing_spacing`]), a function's own open- and
@@ -342,18 +346,18 @@ fn print_namespace(
 /// (`docs/pmt/fmt.md` (comments inside a use list)). `USE_PATH` is the
 /// only node kind `USE_DECL` carries, so a forward walk of
 /// `children_with_tokens` tracking how many have been seen so far IS
-/// the same index C1 threads: a comment that is a direct sibling gets
+/// the same index C1 threaded: a comment that is a direct sibling gets
 /// the CURRENT count; one nested a level down, inside a `USE_PATH`
 /// itself (`std::/* c */goToEnd`), drains at the exact same point as
-/// one written just after that path (`Parser::interior_comments` is
-/// only ever called between paths, never mid-path — a nested comment
+/// one written just after that path (C1's `Parser::interior_comments`
+/// was only ever called between paths, never mid-path — a nested comment
 /// simply stays pending until the drain that follows), so it takes the
 /// index the path's OWN closing bumps the count to, one step ahead of
 /// scanning past the path node — never a reason to guard the shape
 /// away as somebody else's surface, unlike the C1-CST-field precedent
 /// this reproduces (`UseCst::interior`, drained by C1's `print_use`):
 /// there `Parser::interior_comments` and the mid-path drain already
-/// collapse onto that same index for the same reason, just recorded as
+/// collapsed onto that same index for the same reason, just recorded as
 /// one flat `Vec<(usize, Comment)>` instead of walked live off tokens.
 fn use_decl_interior_comments(node: &SyntaxNode) -> Vec<(usize, SyntaxToken)> {
     let mut out = Vec::new();
@@ -621,15 +625,15 @@ fn print_function(
 }
 
 /// Comments sitting between a bound `DOC_RUN` and its declaration's own
-/// header token — real, but with no C1 CST field to port from.
-/// `Parser::doc_run`'s own comment-draining loop only runs on an
-/// iteration that ALSO consumes one more `?`/`!` line first (the `for
-/// (comment, cline) in self.drain_pending()` call sits at the BOTTOM of
-/// the `loop`, after a `DocLine`/`AttentionLine` match arm, never
-/// reached once the match falls to `_ => break`), so a comment after the
-/// run's LAST line is captured there too — landing in the SAME
-/// `Vec<DocRunItem>` as `DocRunKind::Comment` — but green emission is a
-/// separate mechanism entirely (`GreenSink::flush` is lazy: a token's
+/// header token — real, but with no C1 CST field to port from. C1's
+/// `Parser::doc_run` drained pending comments only on an iteration that
+/// ALSO consumed one more `?`/`!` line first (its `for (comment, cline)
+/// in self.drain_pending()` call sat at the BOTTOM of the `loop`, after
+/// the `DocLine`/`AttentionLine` match arm, and was never reached once
+/// the match fell to `_ => break`), so a comment after the run's LAST
+/// line was captured there too, landing in the SAME `Vec<DocRunItem>`
+/// as a `DocRunKind::Comment`. Green emission is a separate mechanism
+/// entirely (`GreenSink::flush` is lazy: a token's
 /// leading trivia is only emitted once THAT token itself is bumped, into
 /// whichever node happens to be open at that moment). By the time the
 /// declaration's own header token is finally bumped, `g_finish()` has
@@ -822,7 +826,7 @@ fn body_elem_node(elem: &BodyElem) -> Option<&SyntaxNode> {
 /// diverge from what [`print_statement`]/a nested [`print_function`]'s
 /// own close-brace print actually emits (the DOUBLE-PRINT trap this
 /// plan has hit before, applied here to a NEW source of divergence: a
-/// pre-`;` comment C1 relocates to `trailing`, per
+/// pre-`;` comment C1 relocated to `trailing`, per
 /// [`statement_trailing_and_leftovers`]'s own doc). `BodyElem::Statement`
 /// reads the field that function already resolved; `BodyElem::Nested`
 /// reads [`trivia::trailing_comment`] directly — a nested function's own
@@ -887,8 +891,8 @@ fn item_leading_comments(stmt: &SyntaxNode) -> Vec<Vec<SyntaxToken>> {
 /// ([`item_leading_comments`]'s popped last entry) that instead becomes
 /// an ordinary standalone [`BodyElem::TailComment`] — the green
 /// re-derivation of C1's `Parser::take_trailing`
-/// (`docs/pmt/fmt.md` (comments)). C1 checks only the SINGLE comment
-/// pending at the moment `;` is reached, wherever it physically sits —
+/// (`docs/pmt/fmt.md` (comments)). C1 checked only the SINGLE comment
+/// pending at the moment `;` was reached, wherever it physically sits —
 /// nested inside the last item, directly between it and `;` (both
 /// `tail`, tried first since they precede `;` in source), or
 /// immediately after `;` on the same line ([`trivia::trailing_comment`],
@@ -979,9 +983,9 @@ fn print_body(
     // `prev_end_line` cursor, ONLY where it disagrees with a plain
     // real-sibling-gap query — i.e. only right after a
     // `BodyElem::TailComment` leftover (`statement_trailing_and_leftovers`'s
-    // own doc). C1 drains every pending comment through ONE loop that
-    // updates `prev_end_line` to each comment's OWN line as it goes, so a
-    // leftover tail comment becomes the new baseline for whatever's
+    // own doc). C1 drained every pending comment through ONE loop that
+    // updated `prev_end_line` to each comment's OWN line as it went, so a
+    // leftover tail comment became the new baseline for whatever was
     // printed right after it — but that comment is nested INSIDE the
     // statement it trails, not a real body-level sibling of what follows,
     // so the ordinary `blank_before_unit`/`blank_immediately_before`
@@ -1482,7 +1486,7 @@ fn code_line_width_incl_semi(code: &str) -> usize {
 /// `align_col`); when not, every member (overflowing or not) gets one
 /// space.
 ///
-/// **A note on `blank_before`**: C1 reads `BodyItem::blank_before` — the
+/// **A note on `blank_before`**: C1 read a `blank_before` field — the
 /// gap immediately before that ITEM. Extension here reads
 /// [`trivia::blank_before_unit`] instead, which looks PAST an item's own
 /// leading comment run to the gap before the whole unit — a different
@@ -1592,7 +1596,7 @@ fn compute_trailing_spacing(
 /// Comma-group layout (`docs/pmt/fmt.md` (comma groups)): respect the
 /// author's own line breaks (`newline_before`), with a greedy-fill width
 /// fallback, PLUS `leading`'s mid-comma-group comments
-/// ([`crate::cst::CommaItem::leading`]'s green re-derivation,
+/// (the green re-derivation of C1's own per-entry `leading` field,
 /// [`item_leading_comments`]) — ported from C1's `render_items` in
 /// full. `items`, `newline_before` and `leading` are parallel, index 0's
 /// `newline_before` always `false`.
@@ -2497,8 +2501,8 @@ mod tests {
     /// ([`trivia::leading_comments`]) AND a raw comment token
     /// `print_body`'s own element walk reaches directly — mutating
     /// `claimed.contains(tok)` to always `false` (skipping the check)
-    /// makes this exact fixture the one that turns red, since C1 prints
-    /// `// between` once but an un-filtered green walk would print it
+    /// makes this exact fixture the one that turns red: C1 printed
+    /// `// between` once, and an un-filtered green walk prints it
     /// twice.
     #[test]
     fn own_line_comments_inside_a_body() {
@@ -2679,7 +2683,7 @@ mod tests {
 
     /// A `?`/`!` line with an empty payload prints as the bare sigil — a
     /// real lexed shape (a doc paragraph break), not merely a `text`
-    /// value this printer happens never to receive. C1 pins the same
+    /// value this printer happens never to receive. C1 pinned the same
     /// shape in `fmt/mod.rs`'s `empty_doc_line_prints_bare_sigil_as_a_paragraph_break`.
     #[test]
     fn a_bare_doc_line_is_a_paragraph_break() {
@@ -3022,7 +3026,7 @@ mod tests {
     /// construction can never share `;`'s physical line, so
     /// `first_line == semi_line` is ALREADY false there regardless of
     /// `comment_own_line` — deleting the conjunct is invisible to those.
-    /// Here it is the whole story: C1 prints
+    /// Here it is the whole story: C1 printed
     /// `"main() {\n 1: left;\n    /* c */\n}\n"` (leftover, own line,
     /// AFTER `;`), never `"main() {\n 1: left; /* c */\n}\n"` (which a
     /// conjunct-deleted mutant would produce instead).
@@ -3082,7 +3086,7 @@ mod tests {
     /// doc; `print_body`'s `override_prev_line`). The naive
     /// `blank_immediately_before(tok)` query (the real sibling gap, which
     /// sees only the ONE newline between `;` and `// b`) would say
-    /// "not blank" here; C1 says blank, since the leftover `// own line`
+    /// "not blank" here; C1 said blank, since the leftover `// own line`
     /// sits three lines earlier and nothing resets the baseline in
     /// between.
     #[test]

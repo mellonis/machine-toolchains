@@ -1,7 +1,8 @@
 //! Comment and blank-line classification, re-derived from green trivia.
 //!
-//! The C1 CST stored these as fields the parser filled in — `blank_before`,
-//! `trailing`, `leading`, `open_trailing`, `close_trailing`, `label_break`.
+//! The hand-written CST this file replaced stored these as fields the
+//! parser filled in — `blank_before`, `trailing`, `leading`,
+//! `open_trailing`, `close_trailing`, `label_break`.
 //! The green tree stores nothing derived:
 //! trivia are ordinary tokens sitting between a node's children, so every
 //! one of those classifications is a local query over `children_with_tokens`
@@ -171,9 +172,10 @@ mod tests {
             .collect()
     }
 
-    /// The gap C1 recorded as `blank_before` sits before the item's
-    /// leading comment run, not before the item node — the run is a
-    /// sequence of sibling tokens in green, not part of the item.
+    /// The gap the retired CST recorded in a `blank_before` field sits
+    /// before the item's leading comment run, not before the item node —
+    /// the run is a sequence of sibling tokens in green, not part of the
+    /// item.
     #[test]
     fn blank_before_unit_looks_past_the_leading_run() {
         let r = f("main() {\n 1: left;\n}\n\n// lead\nother() {\n 1: left;\n}\n");
@@ -226,8 +228,9 @@ mod tests {
         assert_eq!(open[0].text(), "// open");
     }
 
-    /// What C1 called `close_trailing` is `trailing_comment` applied to
-    /// the closed node: the comment lives in the PARENT's child stream.
+    /// What the retired CST called `close_trailing` is
+    /// `trailing_comment` applied to the closed node: the comment lives
+    /// in the PARENT's child stream.
     #[test]
     fn close_trailing_is_trailing_comment_on_the_node() {
         let r = f("main() {\n 1: left;\n} // bye\n");

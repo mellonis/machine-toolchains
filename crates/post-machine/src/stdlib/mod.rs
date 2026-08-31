@@ -74,8 +74,9 @@ pub(crate) struct RosterEntry {
 /// Parses `SOURCE` once (lex → green parse → extraction, no hand
 /// parsing) into the roster of exported routines in the `std` namespace
 /// block. Filters the extracted `Program` rather than walking the tree
-/// a second way: extraction is held struct-equal to the C1 lowering by
-/// the corpus oracle, so this cannot drift from what the compiler sees.
+/// a second way: green parse + `extract_program` is the one front-end
+/// route `analyze` itself runs, so this cannot drift from what the
+/// compiler sees.
 /// `ns == ["std"]` is an exact match, not a prefix — a namespace nested
 /// inside `std` was never part of the roster.
 ///
@@ -332,8 +333,8 @@ mod tests {
     /// `name_span` slices its own name out of `SOURCE`, that its line is
     /// ASCII) and the compiled-object test compares an unordered set, so
     /// a walk that visited the namespace body backwards would pass all
-    /// three. This table was captured from the C1 CST walk while that
-    /// path was still callable.
+    /// three. This table was captured from the hand-written-CST walk
+    /// this roster replaced, while that path was still callable.
     #[test]
     fn the_roster_is_the_eleven_std_routines_in_source_order() {
         let actual: Vec<(String, u32)> = roster()

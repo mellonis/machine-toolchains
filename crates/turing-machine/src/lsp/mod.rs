@@ -510,8 +510,9 @@ pub(crate) fn render_doc(doc: &Doc) -> Option<String> {
 
 /// The first child of `node` — token or node — that is neither its own
 /// bound doc run nor trivia (docs/core.md (syntax trees)): the keyword a
-/// documented declaration's C1 extent used to open at, before the green
-/// tree started retro-wrapping the doc run in front of it. Shared by
+/// documented declaration's symbol extent opens at — the green tree
+/// retro-wraps a bound doc run in front of the keyword, so the node's
+/// own start is a line or more earlier than that. Shared by
 /// `symbol_extent`, which reads only this element's start, and
 /// `machine_symbol`, which reads the whole element because it IS the
 /// answer to "where is this machine's name".

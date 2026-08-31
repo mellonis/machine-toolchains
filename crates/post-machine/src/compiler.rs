@@ -2238,9 +2238,9 @@ main() { mark; }
     }
 
     /// `analyze`'s own contract, pinned by value rather than against a
-    /// second implementation of it. The C1 front end it used to be
-    /// compared against is gone; what survives is the part that was
-    /// never a tautology — token provenance, which is a claim about
+    /// second implementation of it. The hand-written-CST front end it
+    /// used to be compared against is gone; what survives is the part
+    /// that was never a tautology — token provenance, a claim about
     /// `analyze`'s lex MODE, not about its parse: it lexes `WithComments`
     /// internally (feeding the green parse) yet publishes the
     /// `WithoutComments` stream on `AnalysisOutput.tokens`

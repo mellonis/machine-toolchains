@@ -34,11 +34,11 @@
 //! than `.pmc`'s (namespaces included — a `.pmc` namespace rejects a
 //! doc run outright as `DanglingDocRun`, `.tmc`'s does not), so there
 //! is no exempt container that could stay unwrapped without becoming
-//! an inconsistency; and the C1 CST already treats `doc_run` as a
-//! FIELD of the declaration's own struct (`AlphabetCst`, `MachineCst`,
-//! `NamespaceCst`, `ReuseCst`, `StateCst`, `GraftCst`, `BindCst`),
-//! never a free-standing item, so the green shape now matches the
-//! CST's own model of "whose run is this" instead of contradicting it.
+//! an inconsistency; and the hand-written CST this tree replaced
+//! already made `doc_run` a FIELD of each doc-accepting declaration's
+//! own struct rather than a free-standing item, so retro-wrapping
+//! keeps that answer to "whose run is this" instead of contradicting
+//! it.
 //!
 //! WORLD sits between MACHINE/REUSE and their body items (`docs/tmt/language.md
 //! (worlds)`), never the tape/state/graft/bind items directly: a later

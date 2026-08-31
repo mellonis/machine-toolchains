@@ -1,5 +1,11 @@
 //! The `.tmc` printer — the walk behind [`super::format`].
 //!
+//! It replaced a printer that walked a hand-typed CST. **"C1" below
+//! names that retired pair — the CST and the printer over it. Both are
+//! deleted, so every mention of C1 records how that implementation
+//! behaved, never anything still in the tree; the fixtures in this
+//! module's own tests are what pin the behaviour now.**
+//!
 //! # The contract
 //!
 //! The printer walks the lossless green syntax tree ([`crate::syntax`],
@@ -472,7 +478,9 @@ fn entry_hoists_comments(n: &SyntaxNode) -> bool {
 
 /// A list's entry elements with each hoisting entry's own comments
 /// lifted out BEHIND it, so [`trivia::interior`]'s entries-started
-/// counter keys them to the slot the old parser's next drain uses.
+/// counter keys them to the entry count INCLUDING that entry — the
+/// same slot a comment written just after it, outside the entry, would
+/// take.
 fn entry_stream(elems: &[SyntaxElement]) -> Vec<SyntaxElement> {
     let mut out: Vec<SyntaxElement> = Vec::new();
     for e in elems {
@@ -587,9 +595,10 @@ fn nested_map_pairs(list_owner: &SyntaxNode) -> Vec<(usize, usize, Comment)> {
     out
 }
 
-/// One rule's five interior lists — the C1 side-cars, re-derived
-/// (`crate::cst`'s `RuleCst`). A rule runs several drains of its own,
-/// and [`trivia::rule_regions`] names where each one falls; a vector's
+/// One rule's five interior lists, re-derived from trivia — C1 kept
+/// them as side-car fields on its own rule node instead. A rule has
+/// several interior lists, and [`trivia::rule_regions`] names where
+/// each one falls; a vector's
 /// region holds its HEADER as well as its brackets, which is why
 /// `write /* c */ [` is the write vector's comment and not the rule's.
 struct RuleInterior {
@@ -1109,8 +1118,8 @@ fn paren_list(
 
 /// One `use` path's text. Takes the [`Import`] extraction builds rather
 /// than re-reading the view's own tokens, so the segment order and the
-/// alias rule stay owned by the one walk the C1 lowering is pinned
-/// against.
+/// alias rule stay owned by extraction, the crate's one builder of an
+/// [`Import`], rather than re-derived here.
 fn use_path_text(path: &Import) -> String {
     let mut out = path.path.join("::");
     if let Some(alias) = &path.alias {
@@ -1138,8 +1147,8 @@ struct Grid {
 /// (what a `{expr}` substitution reprints from), its five interior
 /// comment lists, and whether it is off the grid.
 ///
-/// The value comes from `syntax::extract`'s own `extract_rule`, which is
-/// oracle-tested against the C1 lowering; the interior lists are trivia,
+/// The value comes from `syntax::extract`'s own `extract_rule`, the
+/// crate's one builder of a [`Rule`]; the interior lists are trivia,
 /// re-derived by [`rule_interior`].
 struct PreparedRule {
     rule: Rule,
@@ -2451,8 +2460,8 @@ mod tests {
     ///   either way, so this source says nothing about it.
     /// - **Without one** (the second): there is no body comment to
     ///   absorb the moved edge, so the first real declaration gains the
-    ///   invented blank instead — C1 prints `alphabet` tight against the
-    ///   `{`.
+    ///   invented blank instead — C1 printed `alphabet` tight against
+    ///   the `{`.
     ///
     /// Both are written with three newlines after `/* a */`, because a
     /// shorter gap cannot separate the two candidate near edges at all.
@@ -2580,8 +2589,8 @@ mod tests {
     /// **Hazard 1** — a comment between a `machine`/`routine`/`graph`
     /// header and its `{`. WORLD opens AT the brace, so the comment is
     /// the DECLARATION's child, one level up, and the head scan that
-    /// solves this for NAMESPACE and STATE cannot see it; C1 body-drains
-    /// it and prints it as the body's FIRST item.
+    /// solves this for NAMESPACE and STATE cannot see it; C1
+    /// body-drained it and printed it as the body's FIRST item.
     ///
     /// Three sources, because one cannot carry the claim:
     ///
@@ -2637,9 +2646,10 @@ mod tests {
     }
 
     /// **A pre-brace comment SUPPRESSES the whole open run.** C1's
-    /// `capture_open_trailing` pops from a global cursor and keeps only
-    /// comments whose next significant token is past the `{`; a pre-brace
-    /// comment is still pending, sits at the head of that cursor, and
+    /// `capture_open_trailing` popped from a global cursor and kept only
+    /// comments whose next significant token was past the `{`; a
+    /// pre-brace comment is still pending, sat at the head of that
+    /// cursor, and
     /// fails that test — so the loop breaks on its first iteration and
     /// takes NOTHING, however many comments ride the brace's own line.
     /// Both then print as body items in source order, and the near edge
@@ -2650,7 +2660,7 @@ mod tests {
     /// ORDER, the brace-line one is wrongly RETAINED on the header line,
     /// and — when the pre-brace comment sits on an earlier line than the
     /// brace — the near edge moves backwards past a run that already
-    /// advanced it, inventing a blank line C1 does not emit.
+    /// advanced it, inventing a blank line C1 did not emit.
     ///
     /// The rule belongs to `open_run`, not to any one surface: the
     /// NAMESPACE twin is the same shape, and so are `routine`/`graph` and
@@ -2690,7 +2700,7 @@ mod tests {
         // that compare output. The second and third put the pre-brace
         // comment on an EARLIER line than the `{`; only the THIRD, whose
         // `{` carries no comment of its own, actually shows the near
-        // edge moving backwards — measured, C1 prints
+        // edge moving backwards — measured, C1 printed
         //
         //     entry state s {        entry state s {
         //       // why                 // why
@@ -2718,9 +2728,9 @@ mod tests {
     }
 
     /// **Hazard 2** — a comment written INSIDE a `;`-terminated
-    /// declaration. C1's `take_trailing` claims whatever is still PENDING
-    /// at the `;`, and a comment inside the statement is pending there,
-    /// so it is RELOCATED to after the `;`. It lives inside the node, so
+    /// declaration. C1's `take_trailing` claimed whatever was still
+    /// PENDING at the `;`, and a comment inside the statement is pending
+    /// there, so it is RELOCATED to after the `;`. It lives inside the node, so
     /// the container's sibling walk never sees it.
     ///
     /// The sources pin all four outcomes of that one rule, each of which
@@ -2734,9 +2744,9 @@ mod tests {
     /// - two inside → the first is the trailing, the rest are items.
     ///
     /// The `/* a */: ab; /* b */` source is the one that pins "an inside
-    /// comment is ahead of the container's own stream": C1 inspects only
-    /// the FIRST pending comment, so `/* b */` is an item and not a
-    /// second trailing.
+    /// comment is ahead of the container's own stream": C1 inspected
+    /// only the FIRST pending comment, so `/* b */` is an item and not
+    /// a second trailing.
     ///
     /// For a graft or a bind only the region AFTER the binding list's
     /// `)` is pending — everything at or before it was swept into that
@@ -2923,8 +2933,8 @@ mod tests {
     /// column, a `{expr}` substitution and `halt`; a documented state;
     /// and a ZERO-ROW state, which is valid, traps on entry, and must
     /// render as an empty body. The zero-row state is given a doc run
-    /// precisely to keep it out of the single-line path, where C1 would
-    /// print `state z { }`.
+    /// precisely to keep it out of the single-line path, where C1
+    /// would have printed `state z { }`.
     #[test]
     fn block_states_and_the_grid_agree() {
         let head = "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n";
@@ -3037,7 +3047,7 @@ mod tests {
     ///   keep the second inline and split the table.
     ///
     /// `entry` alone on the line above its `state` keyword is the
-    /// boundary of the line test itself: C1 records a state's line off
+    /// boundary of the line test itself: C1 recorded a state's line off
     /// its NAME span, so that state is still a candidate. Under the
     /// obvious alternative — the node's first token — it would not be,
     /// and every other source here would stay green.
@@ -3134,7 +3144,7 @@ mod tests {
     ///
     /// - **A BARE zero-row state is always a single-line candidate** —
     ///   `inline_candidate` is vacuously true over an empty rule list,
-    ///   so C1 prints `state z { }`. Task 5's own zero-row source had to
+    ///   so C1 printed `state z { }`. Task 5's own zero-row source had to
     ///   carry a doc run to force block form, which is exactly what
     ///   keeps it out of this path. The THIRD source is the one that
     ///   pins the run's header max over such a member: a zero-row state
@@ -3146,7 +3156,7 @@ mod tests {
     ///   scan that skips rule-less members (the obvious "skip empty
     ///   states when sizing" optimization) passes.
     /// - **A rule whose pending comment was RELOCATED gains a trailing
-    ///   comment, and C1 prints its state in block form.** The comment
+    ///   comment, and C1 printed its state in block form.** The comment
     ///   sits inside the rule as written, so a predicate asking "does
     ///   the RULE node carry a comment?" answers a different question
     ///   and inlines the state — dropping the comment outright, since
@@ -3195,7 +3205,7 @@ mod tests {
     /// The clause is not implied by the line test: a rule may START on
     /// the header's own line and still run off the grid, because its
     /// broken vector spans the lines BELOW. Measured against C1, which
-    /// prints the first source's state in block form and the second's —
+    /// printed the first source's state in block form and the second's —
     /// a same-line block comment, the one interior comment a vector
     /// keeps inline — on one line.
     #[test]
@@ -3231,7 +3241,7 @@ mod tests {
     /// or a `bind`, and it runs several interior drains of its own — the
     /// pattern's, each glyph vector's, and, for a `call`, its binding
     /// list's. Everything written past the LAST of them is still pending
-    /// when C1 reaches the `;`, so `take_trailing` relocates it:
+    /// when C1 reached the `;`, so `take_trailing` relocated it:
     ///
     /// ```text
     /// [*] -> stop /* c */;   prints   [*] -> stop; /* c */
@@ -3307,7 +3317,7 @@ mod tests {
             "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> call n::r(t = main) then stop; /* c */\n  }\n}\n",
         );
         // Two of them: the first is the trailing, the rest drain as
-        // items — C1 inspects only the FIRST pending comment.
+        // items — C1 inspected only the FIRST pending comment.
         pins(
             &format!("{head}  entry state s {{\n    [*] -> stop /* a */ /* b */;\n  }}\n}}\n"),
             "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> stop; /* a */\n    /* b */\n  }\n}\n",

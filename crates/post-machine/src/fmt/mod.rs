@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn edge_comments_only_file_reprints_verbatim() {
-        // No declarations at all — every item is `TopKind::Comment`;
+        // No declarations at all — every top-level item is a comment;
         // reprints the comments with one final newline.
         let src = "// a\n// b\n";
         assert_eq!(format(src).unwrap(), src);

@@ -449,12 +449,12 @@ fn render_doc(doc: &FnDoc) -> Option<String> {
     Some(sections.join("\n\n"))
 }
 
-/// A function's C1 extent — its header start through `}`, EXCLUDING a
-/// bound doc run. The green FUNCTION node retro-wraps its doc run, so
-/// `syntax().text_range()` starts a line or more earlier than the CST's
-/// own `span` did; document-symbol ranges are one of the two things that
-/// span was for (docs/lsp.md (document symbols)), so taking the node's
-/// range whole would widen every doc-commented function's outline entry.
+/// A function's declaration extent — its header start through `}`,
+/// EXCLUDING a bound doc run. The green FUNCTION node retro-wraps its
+/// doc run, so `syntax().text_range()` starts a line or more earlier
+/// than the header does; document-symbol ranges are reported from the
+/// header (docs/lsp.md (document symbols)), so taking the node's range
+/// whole would widen every doc-commented function's outline entry.
 fn function_extent(f: &FunctionView) -> TextRange {
     let full = f.syntax().text_range();
     let start = f
@@ -1905,9 +1905,9 @@ export main() {
 
     /// A doc-commented function's symbol range starts at its HEADER, not
     /// at its doc run. The green FUNCTION node retro-wraps the doc run,
-    /// so the node's own range begins a line earlier; the C1 extent this
-    /// feature has always reported does not, and an editor's outline
-    /// shows the difference.
+    /// so the node's own range begins a line earlier; the extent
+    /// [`function_extent`] trims back to does not, and an editor's
+    /// outline shows the difference.
     #[test]
     fn doc_commented_function_symbol_range_excludes_its_doc_run() {
         // "? doc\n"      -> line 1
