@@ -7,11 +7,8 @@
 //! `Parser::file` builds the green tree and nothing else. The
 //! productions keep the values a caller still reads — the AST fragments
 //! the `reparse_*` shims hand back to extraction, and the pattern and
-//! write vector `check_char_arithmetic` inspects — and drop everything
-//! they used to assemble into [`crate::cst`]'s own node types. That
-//! module is now reachable from here for exactly one item,
-//! [`crate::cst::ReuseCarrier`], which `Parser::parse_reuse` takes to
-//! pick its "a routine name"/"a graph name" error wording.
+//! write vector `check_char_arithmetic` inspects — and build no second
+//! node tree of their own alongside it.
 //!
 //! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
@@ -24,7 +21,6 @@ use mtc_core::diagnostics::Span;
 use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::cst::ReuseCarrier;
 use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
 use crate::syntax::{self, GreenSink, TmcKind};
 
@@ -648,6 +644,17 @@ pub fn parse_green_from_tokens(
     Ok(sink
         .expect("parse_green_from_tokens always seeds a sink before calling file()")
         .finish_tree(eof_pos))
+}
+
+/// Which keyword introduced the `routine`/`graph` declaration
+/// `Parser::parse_reuse` is walking. Both keywords take that one
+/// production and open one green node kind ([`TmcKind::Reuse`]), so the
+/// carrier survives only to pick the error wording when the name after
+/// the keyword is missing or is a reserved word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReuseCarrier {
+    Routine,
+    Graph,
 }
 
 /// One line of a doc/attention run, plus whether a blank line precedes it.
