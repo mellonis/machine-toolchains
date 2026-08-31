@@ -1035,12 +1035,12 @@ mod tests {
     }
 
     /// A comment written BEFORE the `{` suppresses the open run
-    /// ENTIRELY: `capture_open_trailing` pops from a global cursor and
-    /// keeps only comments past the brace, so the still-pending
-    /// pre-brace one sits at the head of that cursor, fails the test on
-    /// the loop's first iteration, and takes nothing with it. Every
-    /// brace-line comment then falls to the body's drain instead, and
-    /// the near edge stays on the `{`.
+    /// ENTIRELY: [`open_run`] consults [`pre_brace_comments`] first and
+    /// returns an empty run the moment that comes back non-empty,
+    /// without ever reading the brace's own line — so however many
+    /// comments ride the `{`, none of them is an open-run comment. They
+    /// fall to the container's own item stream instead, and the near
+    /// edge stays on the `{`.
     ///
     /// The rule lives in `open_run`, so it holds for every brace owner.
     /// The two named here are the ones the green printer cannot yet put
