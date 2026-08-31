@@ -428,6 +428,23 @@ fn interior_use_slot0_same_line() {
     );
 }
 
+/// TWO same-line block comments in slot 0 keep a separating space —
+/// `use /* a */ /* b */ x;` must not glue them into `/* a *//* b */`
+/// the way slots past the first never do.
+#[test]
+fn interior_use_slot0_two_block_comments_stay_separated() {
+    let src = "use /* a */ /* b */ a::b;\n";
+    let out = format(src).expect("formats");
+    assert!(
+        !out.contains("*//*"),
+        "slot-0 comments glued together, got:\n{out}"
+    );
+    assert!(
+        out.contains("/* a */ /* b */"),
+        "slot-0 comments keep a separating space, got:\n{out}"
+    );
+}
+
 /// A same-line comment trailing the first path, before the second — between
 /// entries.
 #[test]

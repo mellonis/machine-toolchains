@@ -564,8 +564,11 @@ fn print_use(out: &mut String, u: &UseDeclView, indent: usize, _line_index: &Tex
         // when this slot is non-empty.
         let use_line_trailing = slot(0, false);
         if !use_line_trailing.is_empty() {
-            out.push(' ');
+            // One space before EACH comment, mirroring the slot(i + 1)
+            // loop below — a single space before the whole run would glue
+            // adjacent block comments into `/* a *//* b */`.
             for c in &use_line_trailing {
+                out.push(' ');
                 out.push_str(&normalize_comment_text(c.text()));
             }
         } else if slot(0, true).is_empty() {
