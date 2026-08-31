@@ -65,6 +65,24 @@ Two codes appear in both catalogs — `leftover-debugger` and, on the
 code implemented twice (a `debugger` marker in `.tmc`, a `brk`
 instruction in `.tma`), so allowing it suppresses both.
 
+## Quickfix availability
+
+Some `.tmc` rules attach a machine-applicable fix to their finding — a
+text edit an editor offers as a code action. One rule governs every fix,
+whatever rule produced it: **a fix whose edit span contains a comment is
+withheld**. Applying such an edit would delete the comment silently —
+the same defect `tmt fmt` itself takes care to avoid (it relocates a
+comment rather than dropping it) — so the finding still reports,
+exactly as it would with the fix, and only the remedy is missing.
+Deleting the flagged code by hand, comment and all, remains the user's
+call to make.
+
+The check runs once over every rule's output rather than inside each
+rule, so it holds for any rule that gains a fix later, not just the
+ones listed on this page. A fix that merely REPLACES a single token
+(`dead-map-pair`'s arrow demotion) can never span a comment and is
+never withheld.
+
 ## Project file: `tmt.json`
 
 A repository can carry its allow-list in a `tmt.json` file, so the
@@ -573,13 +591,12 @@ where, before the fix, it would have errored.
 
 Two further cases withhold the fix outright rather than choose a wrong
 tier. The partial-range case above already ships no fix for its own
-reason (an unsplittable range); separately, a fix is withheld whenever
-its own deletion span would take a comment with it — a
-`writes {'0', /* keep me */ '1'}` can carry one between two elements, and
-silently deleting it would be the same defect `tmt fmt` itself takes
-care to avoid (it relocates a clause-interior comment rather than
-dropping it). The finding still reports in that case, same posture as
-the partial-range overlap — only the fix is missing:
+reason (an unsplittable range); separately, the general comment rule
+(quickfix availability, above) applies here as everywhere — a
+`writes {'0', /* keep me */ '1'}` can carry a comment between two
+elements, putting it inside the deletion span. The finding still
+reports in that case, same posture as the partial-range overlap — only
+the fix is missing:
 
 ```
 h.tmc:3:54: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert

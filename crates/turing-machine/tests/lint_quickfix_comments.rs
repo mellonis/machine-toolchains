@@ -17,7 +17,8 @@
 //! guess: it finds its arrow by RANGE CONTAINMENT, so extra tokens in the
 //! stream cannot move its answer. The last test in this file is the witness
 //! for that exclusion, and it was measured — it passes with the filter
-//! removed, while the other eight comment-bearing tests fail.
+//! removed, while four comment-bearing tests fail (the re-measured count
+//! below).
 //!
 //! The compiler front end lexes `LexMode::WithComments` — the green tree it
 //! parses through is built from the source text and its trivia together — so
@@ -31,28 +32,38 @@
 //!
 //! 1. **The fix disappears.** A comment between a declaration's keyword and
 //!    its name becomes the token immediately before the name, the adjacency
-//!    check fails, the helper returns `None`, and no fix ships at all. The
-//!    `*_is_unchanged_by_a_comment_before_the_name` fixtures cover this; they
-//!    panic at their `.expect(...)` when it happens.
+//!    check fails, the helper returns `None`, and no fix ships at all.
 //! 2. **The fix ships BROKEN source.** A comment between a leading
 //!    doc/attention run and the keyword leaves adjacency intact, so a fix is
 //!    still produced — but the doc-run walk-back stops at the comment, and
 //!    the deleted declaration leaves its `?`/`!` run behind. An orphaned run
 //!    is a parse error, so this outcome is strictly worse than shipping
-//!    nothing. The `*_takes_a_doc_run_a_comment_interrupts` fixtures cover
-//!    it, and only an applied-text assertion can see it — the fix exists and
-//!    the diagnostic count is right in both the correct and the broken case.
+//!    nothing.
 //!
-//! Each fixture's expected text is the same one its comment-free sibling
-//! asserts: a comment interior to the deleted span rides along with it (the
-//! span is a pair of source offsets taken from token boundaries, so raw
-//! untokenized text between them goes too), exactly as it did before the
-//! front end moved. These are preservation claims — every one of them was
-//! verified green against the pre-green front end first, so a failure here
-//! means a REGRESSION, never a new expectation that needs deriving. That
-//! provenance stays checkable rather than becoming folklore: the pre-green
-//! front end (`lex` + `parse`) is still callable and is held to the current
-//! one, source for source, by `tests/tmc_green_analyze.rs`.
+//! `run_rules`' comment guard (docs/tmt/lint.md (quickfix availability))
+//! reshaped what these fixtures can observe. A span the helpers compute
+//! CORRECTLY over a comment-bearing shape now holds that comment, so the
+//! guard withholds the fix rather than letting it ride along — the
+//! `*_withheld_*` fixtures assert exactly that `None`. For failure mode 1
+//! that makes the filter's absence observationally identical (helper-voided
+//! and guard-withheld are the same `None`), so those pins no longer
+//! discriminate the filter. Failure mode 2 still does, in the direction that
+//! matters: an unfiltered walk-back stops AT the comment, the TRUNCATED span
+//! holds no comment, and a run-orphaning fix ships as `Some` right past the
+//! guard — which the `*_withheld_not_truncated` fixtures reject. Measured:
+//! removing the filter turns four of these sixteen tests red (the three
+//! doc-run orphaning shapes and the debugger marker void), and the
+//! `arrow_span` witness stays green.
+//!
+//! The comment-free fixtures' expected texts were verified green against the
+//! pre-green front end first, so a failure there means a REGRESSION, never a
+//! new expectation that needs deriving. That provenance stays checkable
+//! rather than becoming folklore: the pre-green front end (`lex` + `parse`)
+//! is still callable and is held to the current one, source for source, by
+//! `tests/tmc_green_analyze.rs`. The comment-bearing fixtures' expectations
+//! changed deliberately with the guard and are NOT pre-green-verifiable —
+//! their authority is the guard's own posture: finding reported, fix
+//! withheld, never a silent comment deletion.
 
 use mtc_core::diagnostics::{Diagnostic, Edit, Pos};
 use mtc_turing_machine::lint::{LintOptions, lint};
@@ -140,9 +151,10 @@ machine {
 /// Identical to `ALPHABET_CLEAN` but for a bound `?` doc line with a comment
 /// sitting BETWEEN the doc line and the `alphabet` keyword — the orphaning
 /// shape. Adjacency holds here (`alphabet` is still the token right before
-/// `ab`), so the fix is produced either way; what the comment threatens is
-/// the doc-run walk-back, and a span that stopped at the comment would leave
-/// the `?` line behind as an orphaned run — a parse error.
+/// `ab`), so the helper computes a span either way; what the comment
+/// threatens is the doc-run walk-back, and a span that stopped at the
+/// comment would leave the `?` line behind as an orphaned run — a parse
+/// error — while holding no comment, slipping past the guard as `Some`.
 const ALPHABET_DOC_RUN_COMMENT: &str = "\
 ? an unused alphabet
 /* c */
@@ -176,38 +188,34 @@ fn unused_alphabet_fix_deletes_the_declaration() {
 }
 
 #[test]
-fn unused_alphabet_fix_is_unchanged_by_a_comment_before_the_name() {
+fn unused_alphabet_fix_is_withheld_when_a_comment_rides_the_span() {
     let ds = findings_for(ALPHABET_COMMENT, "unused-alphabet");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    let fix = ds
-        .into_iter()
-        .next()
-        .unwrap()
-        .fix
-        .expect("decl_span found the declaration");
     // Comment-free tokens make `alphabet` still the token immediately
-    // before `ab`, so the deleted span is the whole first line either way
-    // — the comment rides inside it and this must equal ALPHABET_FIXED.
-    assert_eq!(apply_fix(ALPHABET_COMMENT, &fix.edits), ALPHABET_FIXED);
+    // before `ab`, so `decl_span` computes the whole first line — with the
+    // `/* c */` interior to it. `run_rules`' comment guard withholds a fix
+    // whose span holds a comment (deleting it silently is data loss), so
+    // the finding ships without a remedy.
+    assert!(
+        ds[0].fix.is_none(),
+        "a fix spanning a comment must be withheld"
+    );
 }
 
 #[test]
-fn unused_alphabet_fix_takes_a_doc_run_a_comment_interrupts() {
+fn unused_alphabet_doc_run_fix_is_withheld_not_truncated() {
     let ds = findings_for(ALPHABET_DOC_RUN_COMMENT, "unused-alphabet");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    let fix = ds
-        .into_iter()
-        .next()
-        .unwrap()
-        .fix
-        .expect("decl_span found the declaration");
-    // The span must start at the `?` line, not at `alphabet`: the doc run
-    // belongs to `ab` and an orphaned run is a parse error. The `/* c */`
-    // between them is interior to that span and goes with it — the same
-    // way a comment inside the deleted body already does.
-    assert_eq!(
-        apply_fix(ALPHABET_DOC_RUN_COMMENT, &fix.edits),
-        ALPHABET_FIXED
+    // The span walks back to the `?` line ACROSS the `/* c */` (the doc run
+    // belongs to `ab`, and an orphaned run is a parse error), which puts the
+    // comment interior to the span, and the guard withholds the fix. The
+    // `None` here still discriminates the significant-token filter: without
+    // it the walk-back stops AT the comment, the truncated span holds no
+    // comment, and a fix ships that orphans the `?` line — as `Some`, which
+    // this assertion rejects.
+    assert!(
+        ds[0].fix.is_none(),
+        "a fix spanning a comment must be withheld"
     );
 }
 
@@ -316,16 +324,16 @@ fn unused_routine_fix_deletes_the_declaration() {
 }
 
 #[test]
-fn unused_routine_fix_is_unchanged_by_a_comment_before_the_name() {
+fn unused_routine_fix_is_withheld_when_a_comment_rides_the_span() {
     let ds = findings_for(ROUTINE_COMMENT, "unused-routine");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    let fix = ds
-        .into_iter()
-        .next()
-        .unwrap()
-        .fix
-        .expect("braced_world_decl_span found the declaration");
-    assert_eq!(apply_fix(ROUTINE_COMMENT, &fix.edits), ROUTINE_FIXED);
+    // `braced_world_decl_span` computes the whole declaration with the
+    // `/* c */` interior to it; the comment guard withholds the fix (see
+    // the alphabet sibling above).
+    assert!(
+        ds[0].fix.is_none(),
+        "a fix spanning a comment must be withheld"
+    );
 }
 
 #[test]
@@ -344,21 +352,18 @@ fn unused_routine_fix_deletes_the_declaration_with_its_doc_run() {
 }
 
 #[test]
-fn unused_routine_fix_takes_a_doc_run_a_comment_interrupts() {
+fn unused_routine_doc_run_fix_is_withheld_not_truncated() {
     let ds = findings_for(ROUTINE_DOC_RUN_COMMENT, "unused-routine");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    let fix = ds
-        .into_iter()
-        .next()
-        .unwrap()
-        .fix
-        .expect("braced_world_decl_span found the declaration");
-    // `back_over_doc_run` must reach the `?` line across the `/* c */`, not
-    // stop at it: a span starting at `routine` would leave the doc line
-    // orphaned, turning a valid file into a parse error.
-    assert_eq!(
-        apply_fix(ROUTINE_DOC_RUN_COMMENT, &fix.edits),
-        ROUTINE_FIXED
+    // `back_over_doc_run` reaches the `?` line across the `/* c */` (a span
+    // starting at `routine` would orphan the doc line — a parse error), so
+    // the comment is interior and the guard withholds the fix. Without the
+    // significant-token filter the walk-back stops at the comment and a
+    // truncated, run-orphaning fix ships as `Some` — which this rejects
+    // (see the alphabet sibling above).
+    assert!(
+        ds[0].fix.is_none(),
+        "a fix spanning a comment must be withheld"
     );
 }
 
@@ -452,16 +457,16 @@ fn unused_binding_fix_deletes_the_statement() {
 }
 
 #[test]
-fn unused_binding_fix_is_unchanged_by_a_comment_before_the_name() {
+fn unused_binding_fix_is_withheld_when_a_comment_rides_the_span() {
     let ds = findings_for(BIND_COMMENT, "unused-binding");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    let fix = ds
-        .into_iter()
-        .next()
-        .unwrap()
-        .fix
-        .expect("reuse_statement_span found the statement");
-    assert_eq!(apply_fix(BIND_COMMENT, &fix.edits), BIND_FIXED);
+    // `reuse_statement_span` computes the whole statement with the `/* c */`
+    // interior to it; the comment guard withholds the fix (see the alphabet
+    // sibling above).
+    assert!(
+        ds[0].fix.is_none(),
+        "a fix spanning a comment must be withheld"
+    );
 }
 
 #[test]
@@ -480,19 +485,17 @@ fn unused_binding_fix_deletes_the_statement_with_its_doc_run() {
 }
 
 #[test]
-fn unused_binding_fix_takes_a_doc_run_a_comment_interrupts() {
+fn unused_binding_doc_run_fix_is_withheld_not_truncated() {
     let ds = findings_for(BIND_DOC_RUN_COMMENT, "unused-binding");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    let fix = ds
-        .into_iter()
-        .next()
-        .unwrap()
-        .fix
-        .expect("reuse_statement_span found the statement");
-    // Same orphaning risk as the routine shape: the span must reach the `?`
-    // line across the `/* c */`, or the deleted statement leaves its doc run
-    // behind and the file no longer parses.
-    assert_eq!(apply_fix(BIND_DOC_RUN_COMMENT, &fix.edits), BIND_FIXED);
+    // Same orphaning risk as the routine shape: the span reaches the `?`
+    // line across the `/* c */`, so the comment is interior and the guard
+    // withholds the fix; a truncated, run-orphaning fix would ship as
+    // `Some` — which this rejects (see the alphabet sibling above).
+    assert!(
+        ds[0].fix.is_none(),
+        "a fix spanning a comment must be withheld"
+    );
 }
 
 // -- unused-graft-name / as_clause_span ------------------------------------
@@ -532,7 +535,8 @@ machine {
 
 /// Only ` as seek` goes — the span runs from the `)`'s own end to the name's
 /// end, so the graft survives as a valid unnamed entry graft. In the comment
-/// variant the `/* c */` is interior to that span and goes with it.
+/// variant the `/* c */` is interior to that span, so the guard withholds
+/// the fix instead.
 const GRAFT_NAME_FIXED: &str = "\
 alphabet marks { '_', 'x' }
 graph findX(tape t: marks, state found, state missing) {
@@ -564,16 +568,16 @@ fn unused_graft_name_fix_removes_the_as_clause() {
 }
 
 #[test]
-fn unused_graft_name_fix_is_unchanged_by_a_comment_before_as() {
+fn unused_graft_name_fix_is_withheld_when_a_comment_rides_the_span() {
     let ds = findings_for(GRAFT_NAME_COMMENT, "unused-graft-name");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    let fix = ds
-        .into_iter()
-        .next()
-        .unwrap()
-        .fix
-        .expect("as_clause_span found the clause");
-    assert_eq!(apply_fix(GRAFT_NAME_COMMENT, &fix.edits), GRAFT_NAME_FIXED);
+    // `as_clause_span` runs from the `)`'s end through the name's end, with
+    // the `/* c */` interior to it; the comment guard withholds the fix
+    // (see the alphabet sibling above).
+    assert!(
+        ds[0].fix.is_none(),
+        "a fix spanning a comment must be withheld"
+    );
 }
 
 // -- leftover-debugger / marker_span ---------------------------------------

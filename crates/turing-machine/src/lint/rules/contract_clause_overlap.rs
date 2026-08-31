@@ -47,17 +47,16 @@
 //! The analysis this rule reads is comment-free, but the SOURCE is not: a
 //! `writes {'0', /* … */ '1'}` can carry a comment between two elements.
 //! Silently deleting it would be the same defect fmt takes care to avoid (it
-//! relocates a clause-interior comment rather than dropping it), so before
-//! offering either fix this rule checks the comment-INCLUSIVE token stream
-//! for one landing inside the edit's own span and withholds the fix if it
-//! finds one — the finding still reports, same posture as a partial-range
-//! overlap.
+//! relocates a clause-interior comment rather than dropping it), so a fix
+//! whose edit span holds a comment is withheld — the finding still reports,
+//! same posture as a partial-range overlap. This rule carried the first
+//! instance of that check; it now lives in `run_rules`' shared guard, which
+//! covers every fix-emitting rule at one chokepoint.
 
 use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
 
 use crate::compiler::full_name;
 use crate::footprint::SymSet;
-use crate::lexer::{Token, TokenKind};
 use crate::lint::LintContext;
 use crate::lint::patterns::{glyph_label, range_labels};
 use crate::parser::{AlphabetElem, ContractClause, Program, SigParam, SigParamKind};
@@ -180,22 +179,6 @@ fn removal_fix(clause: &ContractClause, i: usize, named: &str) -> Fix {
     }
 }
 
-/// Whether `a` and `b` share any source position — the half-open-range
-/// overlap test, over [`Span`]'s derived `Ord`.
-fn spans_overlap(a: Span, b: Span) -> bool {
-    a.start < b.end && b.start < a.end
-}
-
-/// Whether any comment token (from the comment-INCLUSIVE stream — the
-/// ordinary `ctx.tokens` never carries one) lands inside `span`. A candidate
-/// fix whose deletion span answers yes here must not be offered — deleting it
-/// would silently take the comment with it (module head).
-fn span_touches_a_comment(comment_tokens: &[Token], span: Span) -> bool {
-    comment_tokens
-        .iter()
-        .any(|t| matches!(t.kind, TokenKind::Comment(_)) && spans_overlap(t.span(), span))
-}
-
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for world in &ctx.resolved.worlds {
         let Some(params) = world_sig(ctx.program, &world.name) else {
@@ -231,13 +214,10 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 }
                 let fully_covered = overlapping.len() == indices.len();
                 let named = quoted_list(&ascending_glyphs(glyphs, &overlapping));
-                let fix = fully_covered
-                    .then(|| removal_fix(clause, i, &named))
-                    .filter(|f| {
-                        !f.edits
-                            .iter()
-                            .any(|e| span_touches_a_comment(ctx.comment_tokens, e.span))
-                    });
+                // A fix whose span holds a comment is withheld by the shared
+                // guard in `run_rules`, not here — this rule carried the first
+                // instance of that check before it was hoisted.
+                let fix = fully_covered.then(|| removal_fix(clause, i, &named));
                 out.push(Diagnostic {
                     code: "contract-clause-overlap",
                     span: elem_span(elem),

@@ -118,6 +118,44 @@ pub(crate) fn run_rules(ctx: &LintContext, allow: &[String]) -> Vec<Diagnostic> 
         }
         rule(ctx, &mut diagnostics);
     }
+    // The comment guard: a fix whose edit span contains a comment token is
+    // withheld — the finding stays, the remedy goes — because applying it
+    // would silently delete the comment, and `pmt lint --fix` writes the
+    // result to disk (docs/pmt/lint.md (quickfix availability)). ONE
+    // chokepoint over every rule's output rather than a check inside each
+    // rule, so a fix-emitting rule added later is covered by construction —
+    // the same mechanism the sibling `.tmc` crate carries; posture pinned
+    // per rule by `tests/lint_fix_comment_guard.rs` in both crates.
+    //
+    // `ctx.tokens` is comment-free (`analyze` filters through
+    // `significant_tokens`), so the comment positions come from a fresh
+    // `WithComments` lex of the source — paid only when some finding
+    // actually carries a fix, which keeps the common clean-run path free.
+    // A multi-line block comment's `span().end` degrades past its first
+    // line (`lexer::Token::len`'s own doc), but its START is exact, and a
+    // comment starting inside a deletion span is exactly the case being
+    // guarded; the overlap test keeps the single-line cases symmetric.
+    if diagnostics.iter().any(|d| d.fix.is_some()) {
+        let comment_spans: Vec<Span> =
+            crate::lexer::lex_with(ctx.source, crate::lexer::LexMode::WithComments)
+                .expect("the source lexed once already to reach lint")
+                .iter()
+                .filter(|t| matches!(t.kind, crate::lexer::TokenKind::Comment(_)))
+                .map(|t| t.span())
+                .collect();
+        for d in &mut diagnostics {
+            let withheld = d.fix.as_ref().is_some_and(|f| {
+                f.edits.iter().any(|e| {
+                    comment_spans
+                        .iter()
+                        .any(|c| c.start < e.span.end && e.span.start < c.end)
+                })
+            });
+            if withheld {
+                d.fix = None;
+            }
+        }
+    }
     diagnostics.sort_by_key(|d| d.span.start); // stable; Pos is Ord
     diagnostics
 }

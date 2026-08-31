@@ -33,7 +33,7 @@ pub(crate) mod patterns;
 pub mod rules;
 pub mod tma;
 
-use mtc_core::diagnostics::Diagnostic;
+use mtc_core::diagnostics::{Diagnostic, Span};
 
 use crate::compiler::{self, CompileError, Resolved};
 use crate::lexer::Token;
@@ -106,9 +106,9 @@ pub(crate) struct LintContext<'a> {
     /// filter is what keeps a comment from voiding or truncating such a span.
     pub tokens: &'a [Token],
     /// The COMMENT-INCLUSIVE token stream — `TokenKind::Comment` trivia the
-    /// `tokens` field above never carries. Read only by a fix that deletes a
-    /// source span and must first prove no comment sits inside it (deleting
-    /// one silently would be a defect fmt itself avoids by relocating rather
+    /// `tokens` field above never carries. Read by `run_rules`' shared guard,
+    /// which withholds any fix whose edit span holds a comment (deleting one
+    /// silently would be a defect fmt itself avoids by relocating rather
     /// than dropping). Filling it costs neither entry path an extra lex:
     /// both are REQUIRED to lex `WithComments` for reasons of their own, and
     /// already hold the stream when they build this context.
@@ -213,8 +213,36 @@ pub(crate) fn run_rules(ctx: &LintContext, allow: &[String], warn: &[String]) ->
         }
         rule(ctx, &mut diagnostics);
     }
+    // The comment guard: a fix whose edit span contains a comment token is
+    // withheld — the finding stays, the remedy goes — because applying it
+    // would silently delete the comment (docs/tmt/lint.md (quickfix
+    // availability)). ONE chokepoint over every rule's output rather than a
+    // check inside each rule, so a fix-emitting rule added later is covered
+    // by construction; `tests/lint_fix_comment_guard.rs` pins the posture per
+    // current rule anyway.
+    for d in &mut diagnostics {
+        let withheld = d.fix.as_ref().is_some_and(|f| {
+            f.edits
+                .iter()
+                .any(|e| span_touches_a_comment(ctx.comment_tokens, e.span))
+        });
+        if withheld {
+            d.fix = None;
+        }
+    }
     diagnostics.sort_by_key(|d| d.span.start); // stable; Pos is Ord
     diagnostics
+}
+
+/// Whether any comment token (from the comment-INCLUSIVE stream — the
+/// ordinary `LintContext.tokens` never carries one) lands inside `span`,
+/// under the half-open-range overlap test over [`Span`]'s derived `Ord`.
+fn span_touches_a_comment(comment_tokens: &[Token], span: Span) -> bool {
+    comment_tokens.iter().any(|t| {
+        matches!(t.kind, crate::lexer::TokenKind::Comment(_))
+            && t.span().start < span.end
+            && span.start < t.span().end
+    })
 }
 
 /// The glyph labels of a resolved alphabet by mangled name, in position order.
@@ -253,8 +281,16 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
     // ships broken source, which is worse than shipping none.
     //
     // All of it is pinned by `tests/lint_quickfix_comments.rs`: removing this
-    // filter turns eight of its sixteen tests red, at least one per helper
-    // above, while the `arrow_span` witness stays green.
+    // filter turns four of its sixteen tests red — the three doc-run
+    // orphaning shapes and the debugger marker void — while the `arrow_span`
+    // witness stays green. Four, not the eight it once was: `run_rules`'
+    // comment guard withholds a fix whose span holds a comment, and for the
+    // keyword-to-name shapes "helper voided by a comment neighbour" and
+    // "guard withheld the computed fix" are the same observable `None`, so
+    // those pins no longer discriminate the filter. The orphaning shapes
+    // still do, in the direction that matters: an unfiltered walk-back stops
+    // AT the comment, the truncated span holds no comment, and a
+    // run-orphaning fix ships as `Some` right past the guard.
     let significant = crate::parser::significant_tokens(&analysis.tokens);
     let ctx = LintContext {
         resolved: &analysis.resolved,

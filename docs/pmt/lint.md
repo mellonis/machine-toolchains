@@ -78,6 +78,20 @@ fix can expose a new finding (deleting a redundant goto can leave its
 target label unused); the re-run reports it, and repeating `--fix
 --force` converges.
 
+### Quickfix availability
+
+One rule governs every fix, whatever rule produced it: **a fix whose
+edit span contains a comment is withheld**. Applying such an edit would
+delete the comment silently — and `--fix` rewrites the file in place,
+so that is data loss on the user's own source, the same defect
+`pmt fmt` takes care to avoid (it relocates a comment rather than
+dropping it). The finding still reports, exactly as it would with the
+fix; only the remedy is missing, and deleting the flagged code by hand,
+comment and all, remains the user's call. The check runs once over
+every rule's output rather than inside each rule, so it holds for any
+rule that gains a fix later. A fix that merely replaces a single token
+(`leading-zeros`) can never span a comment and is never withheld.
+
 ## `.pmc` rules
 
 ### unused-label (`.pmc`)
