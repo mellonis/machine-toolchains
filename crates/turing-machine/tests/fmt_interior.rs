@@ -115,18 +115,25 @@ fn alphabet_slot0_same_line_rides_the_brace_via_open_trailing() {
 }
 
 /// A comment on the header's own line, with the opening `{` WRAPPED to the
-/// next line, is an interior slot-0 same-line comment — `capture_open_trailing`
-/// does not see it (it only claims a comment sharing `{`'s own line). This
-/// used to be destroyed outright; `render_alphabet`'s multi-line branch now
-/// prints it riding the (now-inlined) opening `{`.
+/// next line. Under the never-move rule the comment keeps its neighbours —
+/// it was written between the name and the `{`, so it prints there
+/// (docs/tmt/fmt.md (comments are never moved)): the line comment ends the
+/// header line and the `{` continues on the next line at the continuation
+/// indent, the `use` model. (Before that rule this comment was first
+/// destroyed outright, then relocated across the `{` to ride it.)
 #[test]
 fn alphabet_header_line_comment_before_a_wrapped_brace_survives() {
     let src = format!("alphabet bits // note\n{{ '_', '0', '1' }}\n\n{MACHINE}");
     let out = format_checked(&src);
     let header = line_with(&out, "// note");
+    assert_eq!(
+        header, "alphabet bits // note",
+        "the comment stays between the name and the `{{`"
+    );
+    let idx = index_of(&out, "// note");
     assert!(
-        header.starts_with("alphabet bits {"),
-        "the comment rides the header line alongside `{{`, got: {header:?}"
+        out.lines().nth(idx + 1).unwrap().starts_with("  {"),
+        "the `{{` continues on the next line at the continuation indent, got:\n{out}"
     );
 }
 

@@ -791,19 +791,18 @@ fn the_corpus_names_every_tmc_source_outside_the_golden_directory() {
     );
 }
 
-/// `.tmc` fmt is idempotent with one exception, and this is it: a comment
-/// written between a declaration's keyword and its name relocates into the
-/// brace-delimited body (pass 1), where it re-parses as a comment on the
-/// opening brace — which forces the body multi-line (pass 2). Stable from
-/// pass 2 on. Pinned by value rather than by "settles eventually", so a
-/// printer that changed either intermediate form fails here
-/// (docs/tmt/fmt.md (idempotency)).
+/// The shape that was `.tmc` fmt's ONE idempotency exception: a comment
+/// between a declaration's keyword and its name used to relocate into the
+/// body on pass 1 and settle multi-line on pass 2. Under the never-move
+/// rule (docs/tmt/fmt.md (comments are never moved)) the comment prints
+/// between the same two tokens it was written between — `alphabet` and
+/// `ab` — so the source is ALREADY canonical and pass 1 is a fixed point.
+/// Pinned by value so a printer that starts moving it again fails here.
 #[test]
-fn a_comment_between_a_keyword_and_its_name_settles_on_the_second_pass() {
-    let pass1 = format("alphabet /* a */ ab { '_' }\n").expect("formats");
-    assert_eq!(pass1, "alphabet ab { /* a */ '_' }\n");
+fn a_comment_between_a_keyword_and_its_name_is_a_fixed_point() {
+    let src = "alphabet /* a */ ab { '_' }\n";
+    let pass1 = format(src).expect("formats");
+    assert_eq!(pass1, src, "the header comment stays in the header");
     let pass2 = format(&pass1).expect("formats");
-    assert_eq!(pass2, "alphabet ab { /* a */\n  '_'\n}\n");
-    let pass3 = format(&pass2).expect("formats");
-    assert_eq!(pass3, pass2, "the settle must be stable from pass 2");
+    assert_eq!(pass2, pass1, "and pass 1 is a fixed point");
 }

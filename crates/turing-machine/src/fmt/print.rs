@@ -552,6 +552,7 @@ fn delimited_interior(
     open: TmcKind,
     close: TmcKind,
     open_run: usize,
+    include_header: bool,
 ) -> Vec<(usize, Comment)> {
     let elems: Vec<SyntaxElement> = node.children_with_tokens().collect();
     let close_idx = elems
@@ -566,10 +567,19 @@ fn delimited_interior(
         .iter()
         .position(is_significant)
         .unwrap_or(open_idx);
-    let mut out: Vec<(usize, Comment)> = comments_in(&elems[head_start..open_idx])
-        .into_iter()
-        .map(|c| (0, c))
-        .collect();
+    // TRANSITIONAL, per the never-move migration: a renderer that prints
+    // its header's comments in place ([`head_through_open`]) passes
+    // `false`, keeping them out of slot 0; the remaining `true` callers
+    // still relocate a header comment into the list. Once every renderer
+    // is migrated the flag and the head scan below go away.
+    let mut out: Vec<(usize, Comment)> = if include_header {
+        comments_in(&elems[head_start..open_idx])
+            .into_iter()
+            .map(|c| (0, c))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut body = (open_idx + 1).min(close_idx);
     let mut claimed = 0;
     while claimed < open_run && body < close_idx {
@@ -584,6 +594,55 @@ fn delimited_interior(
         entry_stream(&elems[body..close_idx]).into_iter(),
     ));
     out
+}
+
+/// A declaration's header printed with its comments IN PLACE — the
+/// significant tokens from the header's first through the `open`
+/// delimiter, single-space separated, each comment printed between the
+/// same two tokens it was written between (docs/tmt/fmt.md (comments are
+/// never moved)). A BLOCK comment stays inline; a LINE comment ends its
+/// line and the remainder continues at one indent unit past `pad` — the
+/// `use` continuation shape, which is this rule's model.
+///
+/// Returns `None` for a comment-free header: the caller's extracted fast
+/// path prints those, so a header without comments is byte-identical to
+/// what it always printed.
+fn head_through_open(node: &SyntaxNode, open: TmcKind, pad: &str) -> Option<String> {
+    let elems: Vec<SyntaxElement> = node.children_with_tokens().collect();
+    let open_idx = elems.iter().position(|e| e.kind() == open.into())?;
+    let head_start = elems[..open_idx].iter().position(is_significant)?;
+    let has_comment = elems[head_start..open_idx]
+        .iter()
+        .any(|e| matches!(e, SyntaxElement::Token(t) if is_comment_kind(t.kind())));
+    if !has_comment {
+        return None;
+    }
+    let cont_pad = format!("{pad}{}", " ".repeat(INDENT_UNIT));
+    let mut out = pad.to_string();
+    let mut first = true;
+    let mut at_line_start = false;
+    for e in &elems[head_start..=open_idx] {
+        let SyntaxElement::Token(t) = e else { continue };
+        if is_ws(t.kind()) {
+            continue;
+        }
+        if !first && !at_line_start {
+            out.push(' ');
+        }
+        if is_comment_kind(t.kind()) {
+            out.push_str(&normalize_comment_text(t.text()));
+        } else {
+            out.push_str(t.text());
+        }
+        first = false;
+        at_line_start = false;
+        if t.kind() == TmcKind::LineComment.into() {
+            out.push('\n');
+            out.push_str(&cont_pad);
+            at_line_start = true;
+        }
+    }
+    Some(out)
 }
 
 /// A `use` list's interior comments. The one list with no delimiters at
@@ -627,7 +686,7 @@ fn nested_map_pairs(list_owner: &SyntaxNode) -> Vec<(usize, usize, Comment)> {
             .collect();
         out.extend(comments_in(&ahead).into_iter().map(|c| (arg_index, 0, c)));
         out.extend(
-            delimited_interior(&map, TmcKind::LBrace, TmcKind::RBrace, 0)
+            delimited_interior(&map, TmcKind::LBrace, TmcKind::RBrace, 0, true)
                 .into_iter()
                 .map(|(pair, c)| (arg_index, pair, c)),
         );
@@ -687,7 +746,13 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
             .any(|e| e.kind() == TmcKind::LParen.into())
         {
             call_args = header(regions.move_end, t.text_range().start);
-            call_args.extend(delimited_interior(&t, TmcKind::LParen, TmcKind::RParen, 0));
+            call_args.extend(delimited_interior(
+                &t,
+                TmcKind::LParen,
+                TmcKind::RParen,
+                0,
+                true,
+            ));
             map_pairs = nested_map_pairs(&t);
         }
     }
@@ -1667,44 +1732,55 @@ fn render_alphabet(
         indent,
         trivia::blank_before_decl(view.syntax()),
     );
-    let head = format!(
-        "{pad}{}alphabet {}",
-        if a.exported { "export " } else { "" },
-        a.name
-    );
+    // A header carrying comments prints them IN PLACE between its own
+    // tokens (docs/tmt/fmt.md (comments are never moved)); the extracted
+    // fast path below is byte-identical to what a comment-free header
+    // always printed. Either way `head` ends with the `{`.
+    let head = head_through_open(view.syntax(), TmcKind::LBrace, &pad).unwrap_or_else(|| {
+        format!(
+            "{pad}{}alphabet {} {{",
+            if a.exported { "export " } else { "" },
+            a.name
+        )
+    });
     let entries: Vec<String> = a.elems.iter().map(alphabet_elem_text).collect();
-    // The element stream starts at the DECLARATION's header, so
-    // `alphabet /* a */ ab { … }` and `alphabet ab /* a */ { … }` both
-    // put that comment in slot 0 — and the open run, which claims
-    // nothing at all whenever a pre-brace comment is pending, is
-    // subtracted so the two claimants cannot both print it.
+    // Header comments print in the header, so the body's interior starts
+    // AFTER the `{` — slot 0 holds only comments genuinely inside the
+    // body. The open run, which claims nothing whenever a pre-brace
+    // comment is pending, is subtracted so two claimants cannot both
+    // print a brace-riding comment.
     let body_interior = delimited_interior(
         view.syntax(),
         TmcKind::LBrace,
         TmcKind::RBrace,
         open_trailing.len(),
+        false,
     );
     let interior = bucket(&body_interior, a.elems.len());
-    let one_line = format!("{head} {{ {} }}", entries.join(", "));
+    let one_line = format!("{head} {} }}", entries.join(", "));
+    // The width check measures the LAST line: a line comment in the
+    // header breaks `head` across lines, and only the line the body
+    // lands on competes with the limit.
+    let fits = |s: &str| {
+        s.split('\n')
+            .next_back()
+            .is_some_and(|l| l.chars().count() <= LINE_WIDTH)
+    };
     // A comment on the `{`, any LINE comment inside the body, or any
     // own-line comment inside the body forces the body onto its own lines
     // whatever the width says (`bucket`'s `forces_break`).
-    if open_trailing.is_empty() && interior.is_empty() && one_line.chars().count() <= LINE_WIDTH {
+    if open_trailing.is_empty() && interior.is_empty() && fits(&one_line) {
         code.push_str(&one_line);
-    } else if open_trailing.is_empty()
-        && !interior.forces_break
-        && one_line.chars().count() <= LINE_WIDTH
-    {
+    } else if open_trailing.is_empty() && !interior.forces_break && fits(&one_line) {
         // Block-only interior comments stay inline, each before its entry
         // — the same [`join_cells_with_interior`] splice the vectors and
         // `render_use` run.
         code.push_str(&format!(
-            "{head} {{ {} }}",
+            "{head} {} }}",
             join_cells_with_interior(&entries, &interior)
         ));
     } else {
         code.push_str(&head);
-        code.push_str(" {");
         code.push_str(&open_trailing_text(&open_trailing));
         // Slot 0's same-line comments precede every entry, so there is no
         // preceding entry's line for them to trail — they ride the opening
@@ -1794,7 +1870,7 @@ fn render_reuse(
     let world = view
         .world()
         .expect("a parsed REUSE always carries its WORLD body");
-    let sig_interior = delimited_interior(view.syntax(), TmcKind::LParen, TmcKind::RParen, 0);
+    let sig_interior = delimited_interior(view.syntax(), TmcKind::LParen, TmcKind::RParen, 0, true);
     code.push_str(&pad);
     code.push_str(&paren_list(
         indent,
@@ -2043,7 +2119,7 @@ fn render_binding_decl(
         indent,
         trivia::blank_before_decl(node),
     );
-    let list_interior = delimited_interior(node, TmcKind::LParen, TmcKind::RParen, 0);
+    let list_interior = delimited_interior(node, TmcKind::LParen, TmcKind::RParen, 0, true);
     let map_pairs = nested_map_pairs(node);
     let entries = binding_entries(args, indent + INDENT_UNIT, &map_pairs);
     code.push_str(&" ".repeat(indent));
@@ -3580,39 +3656,37 @@ mod tests {
         );
     }
 
-    /// **The element stream starts at the DECLARATION's HEADER**, not at
-    /// the opening delimiter — the old parser's interior drain runs on a
-    /// global cursor, so a list's first drain sweeps up everything still
-    /// unclaimed since the previous one. A delimiter-only slice drops
-    /// every comment below; a header-through-closer slice prints the
-    /// brace-line ones twice, once from the open run and once from slot
-    /// 0.
+    /// An `alphabet` header's comments print IN PLACE — between the same
+    /// two significant tokens they were written between
+    /// (docs/tmt/fmt.md (comments are never moved), [`head_through_open`]).
+    /// Each pin's justification names the preserved neighbour pair:
+    /// between `alphabet` and `ab`; between `ab` and `{` (with a
+    /// brace-riding comment keeping ITS `{`→`'_'` pair alongside); and,
+    /// for a LINE comment, between `alphabet` and `ab` with the forced
+    /// break — the remainder continues at the continuation indent, the
+    /// `use` model. The first three sources are already canonical, so
+    /// they pin fixed points.
     ///
-    /// One source per header shape, because they sit in different places
-    /// in the tree: between an `alphabet`'s keyword and its name, between
-    /// its name and its `{` (which additionally SUPPRESSES the open run,
-    /// so both comments fall to slot 0 in source order), between a
-    /// `routine`'s keyword and its name, and between a `graft`'s keyword
-    /// and its target path. The LINE-comment source is the one no
-    /// delimiter-only implementation can imitate at all: it forces the
-    /// whole body multi-line from slot 0.
+    /// The `routine` and `graft` header pins still relocate onto the
+    /// list's `(` — the header families beyond `alphabet` migrate to the
+    /// same rule next, and these two literals move with them.
     #[test]
     fn a_headers_comment_belongs_to_the_declarations_list() {
         pins(
             "alphabet /* a */ ab { '_' }\n",
-            "alphabet ab { /* a */ '_' }\n",
+            "alphabet /* a */ ab { '_' }\n",
         );
         pins(
             "alphabet ab /* a */ { '_' }\n",
-            "alphabet ab { /* a */ '_' }\n",
+            "alphabet ab /* a */ { '_' }\n",
         );
         pins(
             "alphabet ab /* a */ { // open\n  '_'\n}\n",
-            "alphabet ab { /* a */ // open\n  '_'\n}\n",
+            "alphabet ab /* a */ { // open\n  '_'\n}\n",
         );
         pins(
             "alphabet\n// why\nab { '_' }\n",
-            "alphabet ab {\n  // why\n  '_'\n}\n",
+            "alphabet // why\n  ab { '_' }\n",
         );
         pins(
             "alphabet ab { '_' }\nnamespace n {\n  routine /* c */ r(tape t: ab) {\n  }\n}\n",
@@ -3626,26 +3700,20 @@ mod tests {
         );
     }
 
-    /// **Mandated quirk (3)**: `alphabet /* a */ ab { '_' }` settles only
-    /// on the SECOND pass. It cannot reproduce at all unless the header
-    /// half above works — the comment it settles is exactly the one a
-    /// delimiter-only stream drops — and its `agrees` twin above pins
-    /// only the FIRST pass, where the printers could agree on a shape
-    /// that never converges.
-    ///
-    /// Pass 1 relocates the comment onto the brace's line; pass 2 then
-    /// sees a brace-line comment with nothing pending ahead of it, so the
-    /// open run claims it and the body breaks. Pass 3 is a fixed point.
+    /// What was mandated quirk (3) — the alphabet header comment settling
+    /// only on the SECOND pass — is deliberately gone: under the
+    /// never-move rule the comment prints between `alphabet` and `ab`,
+    /// where it was written, so the source is already canonical and
+    /// pass 1 is a fixed point (docs/tmt/fmt.md (comments are never
+    /// moved)). Pinned by value so the two-pass settle cannot quietly
+    /// come back.
     #[test]
-    fn the_alphabet_header_quirk_settles_on_the_second_pass() {
+    fn the_alphabet_header_comment_is_a_fixed_point() {
         let src = "alphabet /* a */ ab { '_' }\n";
-        pins(src, "alphabet ab { /* a */ '_' }\n");
         let once = format(src).expect("the green printer formats");
-        pins(&once, "alphabet ab { /* a */\n  '_'\n}\n");
+        assert_eq!(once, src, "the header comment stays in the header");
         let twice = format(&once).expect("the green printer formats");
-        assert_ne!(once, twice, "quirk (3) settles on the SECOND pass");
-        let thrice = format(&twice).expect("the green printer formats");
-        assert_eq!(twice, thrice, "and is a fixed point from there");
+        assert_eq!(once, twice, "and pass 1 is a fixed point");
     }
 
     /// The grid's widths are measured with the interior the row renderer
@@ -3918,7 +3986,7 @@ mod tests {
         let src = src.as_str();
         let bind = bind_of(src);
 
-        let list = delimited_interior(&bind, TmcKind::LParen, TmcKind::RParen, 0);
+        let list = delimited_interior(&bind, TmcKind::LParen, TmcKind::RParen, 0, true);
         let keys: Vec<(usize, &str)> = list.iter().map(|(i, c)| (*i, c.text.as_str())).collect();
         assert_eq!(
             keys,

@@ -226,7 +226,6 @@ const ALPHABET_HEADER: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "moves inside the { (measured: lands between LBrace and the first glyph; block flavour settles at pass 2)"]
 fn alphabet_header_comments_stay_in_the_header() {
     run_group(ALPHABET_HEADER);
 }
