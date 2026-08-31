@@ -21,45 +21,42 @@
 //!   layout choices the author's own line breaks record (blank-line
 //!   presence, whether a state was written on one line), never on the
 //!   author's spacing.
-//! - **Idempotent, with one exception** — `format(format(s)) == format(s)`
-//!   for every shape but one: a comment written between a declaration
-//!   keyword and its name settles on the second pass when the declaration
-//!   is an `alphabet` (`docs/tmt/fmt.md (comments the printer moves)`);
-//!   every other layout decision is derived from the token content
-//!   (widths, the line limit) or from a property the printer's own
-//!   output preserves.
+//! - **Idempotent** — `format(format(s)) == format(s)`: every layout
+//!   decision is derived from the token content (widths, the line limit)
+//!   or from a property the printer's own output preserves. The
+//!   historical alphabet-header second-pass settle disappeared with the
+//!   never-move rule (docs/tmt/fmt.md (comments are never moved)).
 //! - **Whitespace-only** — no token is added, dropped, or rewritten. A
 //!   number reprints from its WRITTEN spelling (leading zeros survive), a
 //!   glyph reprints with only the two escapes the lexer accepts, and the
 //!   bare-name `goto` sugar stays bare (`Transition::Goto::explicit` is
 //!   read, never normalized either way).
-//! - **Trivia-preserving** — every comment reprints somewhere: own-line
-//!   comments at their block's indent, same-line trailing comments riding
-//!   their line, brace-line comments riding the `{`/`}` they were written
-//!   on. Doc (`?`) and attention (`!`) runs — `[deprecated]` included —
-//!   stay directly above the declaration they document, in source order. A
-//!   comment written INSIDE a comma-separated list — an `alphabet` body, a
-//!   `routine`/`graph` signature parameter list, a `call`/`graft`/`bind`
-//!   binding list, a `with map` pair list, a `use` path list, or a rule's
-//!   pattern/`write`/`move` vector — prints where its author wrote it, keyed
-//!   to the entry it precedes: a same-line comment rides the preceding
-//!   entry's line, an own-line comment keeps its own line, and a comment
-//!   after the last entry prints before the closer. A `//` comment forces
-//!   such a list onto multiple lines (nothing can follow it on its physical
-//!   line), and so does any OWN-LINE comment, block or line (inlining an
-//!   own-line comment onto an entry's line would silently flip that flag on
-//!   the next parse); a SAME-LINE `/* … */` comment is the one case that can
-//!   stay inline instead, EXCEPT in the bracketed `routine`/`graph`
-//!   signature, `call`/`graft`/`bind`, and `with map` lists, which have no
-//!   inline-with-comments form at all. A pattern/`write`/`move` vector's
-//!   SAME-LINE block comment stays inline like an `alphabet` body's or a
-//!   `use` path list's does; its `//` comment, and any OWN-LINE comment
-//!   (block or line), differ from every other list, because these three
-//!   vectors double as the state-block grid's columns (below) — either kind
-//!   does not just force its own vector onto several lines, it takes the
-//!   WHOLE enclosing rule off the grid, so the rule renders across several
-//!   lines without widening the columns its neighbours share
-//!   (docs/tmt/fmt.md (comments inside a list)).
+//! - **Trivia-preserving, comments never moved** — every comment reprints
+//!   between the same two significant tokens it was written between
+//!   (docs/tmt/fmt.md (comments are never moved)): own-line comments at
+//!   their block's indent, same-line trailing comments riding their line,
+//!   brace-line comments riding the `{`/`}` they were written on, header
+//!   and statement comments in place through the in-place walks. Doc (`?`)
+//!   and attention (`!`) runs — `[deprecated]` included — stay directly
+//!   above the declaration they document, in source order. A comment at a
+//!   list's BOUNDARY — leading an entry, or after the last one — keeps
+//!   the slot the bucket gives it: a same-line comment rides the
+//!   preceding entry's line, an own-line comment keeps its own line, and
+//!   a tail comment prints before the closer; one INSIDE an entry's own
+//!   tokens prints in that entry's text. A `//` boundary comment forces
+//!   the list onto multiple lines (nothing can follow it on its physical
+//!   line), and so does any OWN-LINE boundary comment, block or line
+//!   (inlining one onto an entry's line would silently flip that flag on
+//!   the next parse); a SAME-LINE `/* … */` boundary comment can stay
+//!   inline in the list kinds with an inline form, while the bracketed
+//!   `routine`/`graph` signature, `call`/`graft`/`bind`, and `with map`
+//!   lists break on any boundary comment. A pattern/`write`/`move`
+//!   vector's `//` or own-line boundary comment additionally takes the
+//!   WHOLE enclosing rule off the grid, since these three vectors double
+//!   as the state-block grid's columns (below); a rule-level boundary
+//!   comment follows the grid ruling instead — a block comment keeps the
+//!   rule on the grid, occupying its column, a line comment takes it off
+//!   (docs/tmt/fmt.md (comments are never moved)).
 //!
 //! # Two inputs, two owners
 //!
@@ -739,26 +736,25 @@ fn nested_map_pairs(list_owner: &SyntaxNode) -> Vec<(usize, usize, Comment)> {
     out
 }
 
-/// The landmark a rule-level boundary comment PRECEDES, in the rule's
-/// own token order — the position the never-move rule holds it to
-/// (docs/tmt/fmt.md (comments are never moved)).
+/// Where a rule-level boundary comment prints — the position the
+/// never-move rule holds it to (docs/tmt/fmt.md (comments are never
+/// moved)).
 #[derive(Clone, Copy, PartialEq)]
 enum ActionSlot {
-    /// Between the pattern's `]` and the `->`.
+    /// Between the pattern's `]` and the `->` — joins the pattern column.
     Arrow,
-    /// Between the `->` and the `debugger` marker.
-    Debugger,
-    /// Ahead of the `write` keyword.
-    Write,
+    /// In the action region, starting at column `n` of the grid order
+    /// (0 = debugger, 1 = write, 2 = move, 3 = ahead of the transition):
+    /// the comment sits after every landmark before `n` and prints in
+    /// the first column the GRID has at or after `n` — which is how a
+    /// comment right after the `->` occupies an empty write column while
+    /// one after a write's `]` never slides back into it.
+    Col(usize),
     /// Between the `write` keyword and its `[` — the vector's brackets
     /// are their own node, the keyword is the rule's.
     WriteBracket,
-    /// Ahead of the `move` keyword.
-    Move,
     /// Between the `move` keyword and its `[`.
     MoveBracket,
-    /// Ahead of the transition's first token.
-    Transition,
     /// Between the transition (or last action) and the `;`.
     Semi,
 }
@@ -785,17 +781,17 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
             .map(|e| e.text_range().start)
     };
     let arrow = start_of(TmcKind::Arrow);
-    let kw_start = |kw: &str| {
+    let kw_range = |kw: &str| {
         node.children_with_tokens()
             .find(|e| matches!(e, SyntaxElement::Token(t) if t.text() == kw))
-            .map(|e| e.text_range().start)
+            .map(|e| e.text_range())
     };
-    let debugger_kw = kw_start("debugger");
-    let write_kw = kw_start("write");
-    let move_kw = kw_start("move");
-    let write_vec = child(TmcKind::WriteVec).map(|n| n.text_range().start);
-    let move_vec = child(TmcKind::MoveVec).map(|n| n.text_range().start);
-    let transition = child(TmcKind::Transition).map(|n| n.text_range().start);
+    let debugger_kw = kw_range("debugger");
+    let write_kw = kw_range("write");
+    let move_kw = kw_range("move");
+    let write_vec = child(TmcKind::WriteVec).map(|n| n.text_range());
+    let move_vec = child(TmcKind::MoveVec).map(|n| n.text_range());
+    let transition = child(TmcKind::Transition).map(|n| n.text_range());
     // The pattern's brackets are the rule's own direct children, so a
     // comment INSIDE them is a direct child too — it belongs to the
     // pattern's cell split, never to a boundary slot.
@@ -812,23 +808,36 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
         .filter(|t| pattern_close.is_none_or(|end| t.text_range().start >= end))
         .map(|t| {
             let p = t.text_range().start;
-            let before = |mark: Option<u32>| mark.is_some_and(|m| p < m);
-            let slot = if before(arrow) {
+            let past = |mark: &Option<mtc_core::syntax::TextRange>| {
+                mark.as_ref().is_some_and(|m| p >= m.end)
+            };
+            let within = |a: &Option<mtc_core::syntax::TextRange>,
+                          b: &Option<mtc_core::syntax::TextRange>| {
+                past(a) && b.as_ref().is_some_and(|m| p < m.start)
+            };
+            // The first grid-order column the comment can still start at
+            // — after a landmark's END it can no longer occupy that
+            // landmark's column.
+            let mut from = 0usize;
+            if past(&debugger_kw) {
+                from = 1;
+            }
+            if past(&write_vec) {
+                from = 2;
+            }
+            if past(&move_vec) {
+                from = 3;
+            }
+            let slot = if arrow.is_some_and(|a| p < a) {
                 ActionSlot::Arrow
-            } else if before(debugger_kw) {
-                ActionSlot::Debugger
-            } else if before(write_kw) {
-                ActionSlot::Write
-            } else if before(write_vec) {
+            } else if within(&write_kw, &write_vec) {
                 ActionSlot::WriteBracket
-            } else if before(move_kw) {
-                ActionSlot::Move
-            } else if before(move_vec) {
+            } else if within(&move_kw, &move_vec) {
                 ActionSlot::MoveBracket
-            } else if before(transition) {
-                ActionSlot::Transition
-            } else {
+            } else if past(&transition) || (transition.is_none() && from == 3) {
                 ActionSlot::Semi
+            } else {
+                ActionSlot::Col(from)
             };
             (slot, comment_from(&t))
         })
@@ -1554,10 +1563,7 @@ fn action_texts(prepared: &PreparedRule, has: [bool; 3]) -> ([String; 3], String
                 brackets[1].push(text);
                 continue;
             }
-            ActionSlot::Debugger => 0,
-            ActionSlot::Write => 1,
-            ActionSlot::Move => 2,
-            ActionSlot::Transition => 3,
+            ActionSlot::Col(from) => *from,
             ActionSlot::Semi => 4,
         };
         if from <= 2
@@ -1699,9 +1705,10 @@ fn render_rule(prepared: &PreparedRule, grid: &Grid, indent: usize) -> String {
         &prepared.interior.map_pairs,
     );
     if transition.is_empty() {
-        // Omitted transition: no token to print. Trim the trailing space the
-        // action segments left so the `;` abuts the last action.
-        while line.ends_with(' ') {
+        // Omitted transition: no token to print. Trim the trailing space
+        // the action segments left so the `;` abuts the last action — a
+        // trailing block comment keeps one (never glued).
+        while line.ends_with(' ') && !line.ends_with("*/ ") {
             line.pop();
         }
     } else {
@@ -1716,12 +1723,13 @@ fn render_rule(prepared: &PreparedRule, grid: &Grid, indent: usize) -> String {
     line
 }
 
-/// A rule off the grid (module doc, "The state-block grid"): a
-/// LINE comment in one of its glyph vectors forces it there, and the
-/// whole rule renders across several lines instead of padding to the
-/// group's shared columns — every vector it carries breaks, not only the
-/// one with the comment, so the rule reads as one consistent shape
-/// rather than a mix of broken and padded segments.
+/// A rule off the grid (module doc, "The state-block grid"): a LINE or
+/// own-line comment in one of its glyph vectors — or a LINE comment at
+/// one of its boundaries — forces it there, and the rule renders
+/// without padding to the group's shared columns. Each vector breaks
+/// only on ITS OWN comments: a clean vector prints inline even in an
+/// off-grid rule, so the comment-free parts stay readable
+/// (docs/tmt/fmt.md (comments are never moved)).
 fn render_rule_off_grid(prepared: &PreparedRule, indent: usize) -> String {
     let rule = &prepared.rule;
     let mut line = " ".repeat(indent);
@@ -1747,43 +1755,60 @@ fn render_rule_off_grid(prepared: &PreparedRule, indent: usize) -> String {
         }
     };
 
-    let pattern_interior = bucket(
-        &prepared.pattern_parts.interior,
-        prepared.pattern_parts.cells.len(),
-    );
-    line.push_str(&glyph_vec_multiline(
-        &prepared.pattern_parts.head,
-        &prepared.pattern_parts.cells,
-        &pattern_interior,
-        indent,
-    ));
+    // A vector breaks across lines only when its OWN comments force it;
+    // an unbroken one prints inline even in an off-grid rule, so a rule
+    // sent off-grid by a boundary line comment keeps its vectors whole.
+    let vec_text = |parts: &VecParts, indent: usize| {
+        let broken = parts
+            .interior
+            .iter()
+            .any(|(_, c)| matches!(c.kind, CommentKind::Line) || c.own_line)
+            || parts.cells.iter().any(|t| t.contains('\n'));
+        if broken {
+            glyph_vec_multiline(
+                &parts.head,
+                &parts.cells,
+                &bucket(&parts.interior, parts.cells.len()),
+                indent,
+            )
+        } else {
+            vec_full_text(parts)
+        }
+    };
+
+    line.push_str(&vec_text(&prepared.pattern_parts, indent));
     boundary(&mut line, ActionSlot::Arrow);
     if !line.ends_with(' ') && !line.ends_with(&cont_pad) {
         line.push(' ');
     }
     line.push_str("-> ");
 
-    boundary(&mut line, ActionSlot::Debugger);
+    boundary(&mut line, ActionSlot::Col(0));
     if rule.debugger {
         line.push_str("debugger ");
     }
-    boundary(&mut line, ActionSlot::Write);
+    // The keyword prints separately so a bracket-slot comment can sit
+    // between it and the `[`; the vector reprints headless.
+    let headless = |v: &VecParts| VecParts {
+        head: "[".to_string(),
+        cells: v.cells.clone(),
+        interior: v.interior.clone(),
+    };
+    boundary(&mut line, ActionSlot::Col(1));
     if let Some(w) = &prepared.write_parts {
         line.push_str("write ");
         boundary(&mut line, ActionSlot::WriteBracket);
-        let interior = bucket(&w.interior, w.cells.len());
-        line.push_str(&glyph_vec_multiline("[", &w.cells, &interior, indent));
+        line.push_str(&vec_text(&headless(w), indent));
         line.push(' ');
     }
-    boundary(&mut line, ActionSlot::Move);
+    boundary(&mut line, ActionSlot::Col(2));
     if let Some(m) = &prepared.move_parts {
         line.push_str("move ");
         boundary(&mut line, ActionSlot::MoveBracket);
-        let interior = bucket(&m.interior, m.cells.len());
-        line.push_str(&glyph_vec_multiline("[", &m.cells, &interior, indent));
+        line.push_str(&vec_text(&headless(m), indent));
         line.push(' ');
     }
-    boundary(&mut line, ActionSlot::Transition);
+    boundary(&mut line, ActionSlot::Col(3));
 
     let col = col_after(&line);
     let transition = transition_text(
@@ -4161,7 +4186,7 @@ mod tests {
              // own-line takes the rule off the grid\n      'a'\n    ] stop;\n    \
              ['a'] -> stop;\n  }}\n}}\n"
             ),
-            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [\n      *\n    ] -> write [\n      // own-line takes the rule off the grid\n      'a'\n    ] stop;\n    ['a'] -> stop;\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write [\n      // own-line takes the rule off the grid\n      'a'\n    ] stop;\n    ['a'] -> stop;\n  }\n}\n",
         );
         // The off-grid path's own column arithmetic: a `call` is the one
         // transition that breaks against a column, and an off-grid rule
@@ -4176,7 +4201,7 @@ mod tests {
              entry state s {{\n    [*] -> write [\n      // off the grid\n      'a'\n    ] \
              call n::r(t = main) then stop;\n  }}\n}}\n"
             ),
-            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [\n      *\n    ] -> write [\n      // off the grid\n      'a'\n    ] call n::r(t = main) then stop;\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write [\n      // off the grid\n      'a'\n    ] call n::r(t = main) then stop;\n  }\n}\n",
         );
     }
 

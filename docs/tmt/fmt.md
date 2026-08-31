@@ -50,15 +50,12 @@ The recorded choices are the exception, and they are vertical, not
 horizontal: a state the author wrote across several lines stays in block
 form even when it would fit on one.
 
-**Idempotent, with one exception.** Almost every layout decision is
-derived from token content — widths, the line limit — or from a property
-the printer's own output preserves, and for those `format(format(s)) ==
-format(s)`. The exception comes from a comment the printer cannot
-reprint where it was written: moving it can leave it where the next
-parse reads it as a layout signal the author never wrote, and that pass
-lays the file out differently before settling. The one shape this
-happens to, and the second pass that settles it, are
-[Comments the printer moves](#comments-the-printer-moves), below.
+**Idempotent.** Every layout decision is derived from token content —
+widths, the line limit — or from a property the printer's own output
+preserves, so `format(format(s)) == format(s)` holds unconditionally.
+The historical exception — an `alphabet` header comment settling only on
+the second pass — disappeared with the rule below: the comment now
+prints where it was written, so there is nothing left to settle.
 
 **Whitespace-only.** No token is added, dropped, or rewritten. A number
 reprints from its written spelling, a glyph reprints with only the two
@@ -69,12 +66,13 @@ stays omitted rather than gaining a `goto`. Renaming, reordering imports,
 and normalizing spellings are lint's business or the author's, never
 fmt's.
 
-**Trivia-preserving.** Every comment reprints somewhere — see
-[Comments](#comments) below for the placement rules, including the one
-list kind (a rule's pattern/`write`/`move` vector) whose layout depends
-on the comment's kind rather than only on its position, and
-[Comments the printer moves](#comments-the-printer-moves) for the
-positions where "somewhere" is not where the author wrote it.
+**Trivia-preserving, and comments are never moved.** Every comment
+reprints between the same two significant tokens it was written
+between: the printer may change the whitespace around a comment, never
+which tokens it sits between. See [Comments](#comments) below for the
+layout each position takes, and
+[Comments are never moved](#comments-are-never-moved) for the rule's
+consequences and its two recorded residuals.
 
 ## Indentation
 
@@ -239,8 +237,21 @@ the first.
 A comment written inside a comma-separated list — an `alphabet` body, a
 `routine`/`graph` signature, a `call`/`graft`/`bind` argument list, a
 `with map` pair list, a `use` path list, or a rule's pattern / `write` /
-`move` vector — prints where it was written, attached to the entry it
-sits against.
+`move` vector — prints where it was written.
+
+A comment INSIDE one entry's own tokens — mid-range (`'a' /* c */
+..'z'`), mid-path (`a:: /* c */ b`), inside a signature parameter or a
+binding argument's value — prints in that entry's text, between the same
+two tokens, and a lone block comment there does not force the list to
+break:
+
+```
+routine r(tape /* c */ t: ab, state d) {
+```
+
+The paragraphs below are about the BOUNDARY positions — a comment
+leading an entry, trailing one before the separator's own placement
+rules, or after the last entry.
 
 Placement follows what the author did. A comment that trails an entry
 stays on that entry's line; a `//` comment always forces the list onto
@@ -282,7 +293,8 @@ have an inline form for their entries: an `alphabet` body, a `use` path
 list, and a rule's pattern / `write` / `move` vector (whose own grid
 consequences are described below). The bracketed lists — a signature, a
 `call`/`graft`/`bind` argument list, a `with map` pair list — have no
-inline-with-comments form, so any interior comment breaks them:
+inline form for a BOUNDARY comment, so one written between two entries
+breaks them:
 
 ```
 alphabet bit { '_', /* the blank */ '0', '1' }
@@ -293,10 +305,9 @@ kinds — inlining it would lose the distinction between "trails this
 entry" and "precedes the next one".
 
 The bracketed lists — a `routine`/`graph` signature, a
-`call`/`graft`/`bind` argument list, and a `with map` pair list — have no
-inline-with-comments form: any interior comment there, block or line,
-breaks the list across lines, still riding the entry it was written
-against:
+`call`/`graft`/`bind` argument list, and a `with map` pair list — break
+across lines on any BOUNDARY comment, block or line, the comment still
+riding the entry it was written against:
 
 ```
 alphabet bits { '_', '0', '1' }
@@ -345,129 +356,64 @@ third and fourth rules both left the grid — one for its `//` comment,
 the other for an own-line block comment with no `//` in sight — and
 neither one moved the first two rules' shared column.
 
-### Comments the printer moves
+### Comments are never moved
 
-Two comment positions have no place in the canonical layout, and a
-comment written in one of them generally comes out somewhere else.
-Nothing is ever dropped — the printer is still whitespace-only — but the
-comment does not reprint where it was written. One of the destinations
-below is the source of the idempotency exception above; none of the
-others is.
+One rule governs every position, whatever the construct:
 
-**Between a declaration's keyword and its name.** Where the comment goes
-depends on which declaration it is. Every declaration keyword the
-language has was measured, and there are five outcomes — one of which is
-that nothing moves at all:
+> A comment is printed between the same two significant tokens it was
+> written between. The formatter may change the whitespace around it; it
+> may not change which tokens it sits between.
 
-- a block body whose items each take a line — a `state`, a `namespace`,
-  or a `machine`, which has no name and takes the comment between its
-  keyword and its `{` — puts it on its own line ahead of the body's
-  first item;
-- a parenthesized list — a `routine`/`graph` signature, a `graft`'s or
-  `bind`'s binding list — takes it riding the `(`, which breaks that
-  list one entry per line;
-- an `alphabet`'s brace body, whose elements are comma-separated and can
-  share a line, takes it riding the `{` — the one destination that costs
-  a second pass, below;
-- a `tape`, which has neither a block body nor a list, takes it as a
-  trailing comment after the `;`;
-- a `use` does not move it at all — `use /* u */ a::b;` reprints exactly
-  as written. It is the one declaration where the comment stays put, so
-  do not read the four above as a rule that covers it.
-
-The `entry` and `export` modifiers add no case of their own: a comment
-written after either behaves as the declaration it prefixes does.
-
-The block-body case:
+Two consequences are part of the rule, not exceptions to it. A LINE
+comment forces a break — `alphabet // c` cannot be followed by the name
+on its physical line, so the declaration continues on the next line at
+the continuation indent:
 
 ```
-state /* mid */ s {
-  [*] -> stop;
-}
+alphabet // c
+  ab { '_' }
 ```
 
-prints as
+And layout may still change: a list may go multi-line to accommodate a
+boundary comment, an author's own line break around a comment may
+collapse. What never changes is the comment's position in the token
+stream. A block comment stays inline wherever it was written —
+`state /* mid */ s {`, `machine /* x */ {`, `tape main /* c */ : ab;`,
+`routine r(tape t: ab) /* c */ {` are all fixed points. A comment is
+never glued to a neighbouring token, so a `:` or `;` that normally
+abuts its predecessor takes a space when a comment intervenes.
+
+**On the state-block grid**, a BLOCK comment keeps its rule on the grid,
+occupying its column: it joins the first column the grid has at or after
+the position it was written in, ahead of that column's own content, and
+a long one widens that column for every rule in the group — the accepted
+cost of keeping the table a table. A LINE comment takes the rule off the
+grid, since a broken row cannot be a table row:
 
 ```
-state s {
-  /* mid */
-  [*] -> stop;
-}
+['b'] -> write ['a'] move [>] goto s;      ['b'] -> write ['a'] move [>] goto s;
+['a'] -> /* c */     move [>] goto s;      ['a'] -> // c
+['_'] -> stop;                                      move [>] goto s;
 ```
 
-and the signature case:
+A comment inside a `{ … }` write-cell substitution prints inside it,
+between its own tokens — the one place a substitution reprints spaced
+rather than tight, since a comment cannot be concatenated into the tight
+form.
 
-```
-routine /* r */ r(tape t: ab) {
-```
+**Two recorded residuals** still relocate, both stable on the first
+pass, both inside a construct whose own list machinery claims every
+pending comment wholesale:
 
-prints as
+- inside a `call` transition, past the target: a comment between the
+  `call`'s target and its `(`, after the binding list's `)`, or after
+  `then`, moves — into the list or to the rule's tail. A comment before
+  the `call` keyword, or between the transition and the `;`, stays.
+- in a `with map`-bearing binding argument, a comment between `with` and
+  `map` moves onto the map's `{`.
 
-```
-routine r( /* r */
-  tape t: ab
-) {
-```
-
-If the author broke the line between the comment and the name, that
-break comes back as a blank line under the relocated comment — `entry
-// why` on its own line, with `state t {` beneath it, prints the `// why`
-inside the body followed by a blank.
-
-**Why the `alphabet` destination is the exception to
-[Idempotent](#the-four-properties).** It is the shape pass 1 leaves
-behind, not anything about the source. Pass 1 puts the comment on the
-brace line and leaves the elements on that line with it, so
-
-```
-alphabet /* a */ ab { '_' }
-```
-
-becomes
-
-```
-alphabet ab { /* a */ '_' }
-```
-
-— and that is not a shape this printer produces from a source already
-written that way: a comment riding the `{` breaks the body one element
-per line ([Comments inside a list](#comments-inside-a-list), above, where
-a same-line `/* … */` trailing an *entry* stays inline and one riding the
-brace does not). So pass 2 breaks it, and every pass after it agrees:
-
-```
-alphabet ab { /* a */
-  '_'
-}
-```
-
-Every other destination is already a shape the printer reprints
-unchanged, so those settle on the first pass. Nor do the author's
-own line breaks decide anything here: writing that same `alphabet` across
-three lines produces the identical one-line pass 1 and takes the same two
-passes.
-
-So `tmt fmt --check` reports one change on a file carrying an `alphabet`
-of that shape, and running `tmt fmt` twice settles it.
-
-**Inside a `{ … }` write-cell substitution.** The comment is lifted out
-of the substitution and re-attached to the vector's own interior comment
-stream at that point, following the ordinary rules above from there. In
-a single-cell vector that puts it after the last entry, before the
-closer:
-
-```
-[00 as v] -> write [{ v /* c */ + 1 }] move [<] return;
-```
-
-prints as
-
-```
-[00 as v] -> write [{v+1} /* c */] move [<] return;
-```
-
-That output is a fixed point: the comment's new position is one the
-printer reprints unchanged.
+Lifting either means teaching that machinery the in-place rule; nothing
+else moves a comment.
 
 ## `.tma` formatting
 
