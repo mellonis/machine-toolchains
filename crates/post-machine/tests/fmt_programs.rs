@@ -428,6 +428,27 @@ fn interior_use_slot0_same_line() {
     );
 }
 
+/// An aligned trailing-comment run measures a multi-line member by its
+/// LAST physical line, never the sum across its lines — the alignment
+/// column here is 12 (off `1: right;`), which a summed measure of the
+/// broken statement (~26) would blow far right.
+#[test]
+fn trailing_alignment_measures_a_multiline_member_by_its_last_line() {
+    let src = "main() {\n\
+               \x201: right;   // a\n\
+               \x202: right, left,\n\
+               \x20   right;   // b\n\
+               \x203: halt;    // c\n\
+               }\n";
+    let out = format(src).expect("formats");
+    for (needle, line) in [("// a", " 1: right; // a"), ("// c", " 3: halt;  // c")] {
+        let got = out.lines().find(|l| l.contains(needle)).expect("survives");
+        assert_eq!(got, line, "full output:\n{out}");
+    }
+    let b = out.lines().find(|l| l.contains("// b")).expect("survives");
+    assert_eq!(b, "    right; // b", "full output:\n{out}");
+}
+
 /// TWO same-line block comments in slot 0 keep a separating space —
 /// `use /* a */ /* b */ x;` must not glue them into `/* a *//* b */`
 /// the way slots past the first never do.
