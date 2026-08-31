@@ -7,10 +7,7 @@ use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::cst::{
-    BodyItem, BodyKind, CommaItem, FunctionCst, NamespaceCst, StatementCst, TopItem, TopKind,
-    TrailingComment, UseCst, UsePath,
-};
+use crate::cst::{BodyItem, BodyKind, CommaItem, FunctionCst, StatementCst, TrailingComment};
 use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
 use crate::syntax::{self, GreenSink, PmcKind};
 
@@ -383,7 +380,7 @@ pub fn parse_green_from_tokens(
     let eof_pos = sig.len() - 1;
     let mut sink = GreenSink::new(entries);
     sink.start(PmcKind::File);
-    let (_items, sink) = Parser {
+    let sink = Parser {
         tokens: &sig,
         pos: 0,
         namespaces: HashSet::new(),
@@ -531,10 +528,6 @@ struct CommentAt {
     /// the significant-token walk is at when the comment is "pending".
     sig_index: usize,
 }
-
-/// [`Parser::top_items`]'s return shape: the items, the block's
-/// `close_trailing` comment, and the closing `}` token's own span.
-type TopItemsResult = Result<(Vec<TopItem>, Option<Comment>, Option<Span>), CompileError>;
 
 struct Parser<'a> {
     /// Significant (comment-free) tokens only — identical to the
@@ -694,18 +687,6 @@ impl Parser<'_> {
         self.drain_pending().into_iter().map(|(c, _)| c).collect()
     }
 
-    /// Drain every pending comment written before entry `index` of the list
-    /// being parsed, tagging each with that index. Called at the top of each
-    /// list-loop iteration and once more before the closer with
-    /// `index = entries.len()`, which is how a comment after the last entry
-    /// gets a home (docs/pmt/fmt.md (comments inside a use list)).
-    fn interior_comments(&mut self, index: usize, out: &mut Vec<(usize, Comment)>) {
-        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
-            out.push((index, self.comments[self.cpos].comment.clone()));
-            self.cpos += 1;
-        }
-    }
-
     /// Take the one same-line trailing comment after a `;` (the pending
     /// comment that follows code on `end_line`), if any. Carries the
     /// comment's source column (brief §A) alongside it.
@@ -725,11 +706,12 @@ impl Parser<'_> {
     }
 
     /// The whole file is the `ns == []` namespace level. Hands back the
-    /// (possibly `None`) green sink alongside the items: `self` is
-    /// consumed by value, so this is the only place it can escape.
-    fn file(mut self) -> Result<(Vec<TopItem>, Option<GreenSink>), CompileError> {
-        let (items, _, _) = self.top_items(&[], None)?;
-        Ok((items, self.sink))
+    /// (possibly `None`) green sink, which is the walk's whole product:
+    /// `self` is consumed by value, so this is the only place it can
+    /// escape.
+    fn file(mut self) -> Result<Option<GreenSink>, CompileError> {
+        self.top_items(&[], None)?;
+        Ok(self.sink)
     }
 
     /// Collects a doc/attention run (docs/pmt/language.md (doc lines))
@@ -959,30 +941,24 @@ impl Parser<'_> {
         )
     }
 
-    /// One namespace level's item loop, building `TopItem`s in source
-    /// order. Handles `use` (legal at any namespace depth, never in
-    /// function bodies), `namespace NAME { … }` (contextual; recurse with
-    /// the extended path), `export`, and function definitions, and
-    /// interleaves own-line comments as [`TopKind::Comment`] items.
-    /// `terminator` is `Some(RBrace)` inside a block, `None` at file level
-    /// (ends at Eof). Duplicate-name checks run here, exactly as the pre-C1
-    /// parser did. Returns the items, the block's `close_trailing` comment
-    /// (c-brace fix, mirrors `function`'s close_trailing), and the closing
-    /// `}` token's own span (for the caller's `NamespaceCst::span` extent)
-    /// — both always `None` when `terminator` is `None` (a file has no
-    /// closing brace).
-    fn top_items(&mut self, ns: &[String], terminator: Option<&TokenKind>) -> TopItemsResult {
-        let mut items: Vec<TopItem> = Vec::new();
+    /// One namespace level's item loop, walking the level's items in
+    /// source order and bracketing a green node around each. Handles
+    /// `use` (legal at any namespace depth, never in function bodies),
+    /// `namespace NAME { … }` (contextual; recurse with the extended
+    /// path), `export`, and function definitions. `terminator` is
+    /// `Some(RBrace)` inside a block, `None` at file level (ends at Eof).
+    /// Duplicate-name checks run here, exactly as the pre-C1 parser did.
+    fn top_items(
+        &mut self,
+        ns: &[String],
+        terminator: Option<&TokenKind>,
+    ) -> Result<(), CompileError> {
         loop {
-            // Own-line comments (leading/standalone/dangling) become their
-            // own items at this level, in source position.
+            // Own-line comments (leading/standalone/dangling) at this
+            // level are trivia the green sink attaches on its own; the
+            // walk only steps its own comment cursor past them.
             for (comment, cline) in self.drain_pending() {
-                let blank_before = cline > self.prev_end_line + 1;
                 self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
-                items.push(TopItem {
-                    blank_before,
-                    kind: TopKind::Comment(comment),
-                });
             }
             // Doc/attention run (docs/pmt/language.md (doc lines)): a `?`/`!`
             // line at item position starts a run that must bind to the
@@ -1021,7 +997,7 @@ impl Parser<'_> {
             };
             let t = self.peek().clone();
             match (&t.kind, terminator) {
-                (TokenKind::Eof, None) => return Ok((items, None, None)),
+                (TokenKind::Eof, None) => return Ok(()),
                 (TokenKind::Eof, Some(_)) => {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
@@ -1029,27 +1005,22 @@ impl Parser<'_> {
                     let close_line = t.line;
                     self.prev_end_line = close_line;
                     self.bump();
-                    // c-brace fix, symmetric to the namespace's own
-                    // `open_trailing` capture below `top_items`'s caller:
-                    // a comment on the SAME line as `}` rides the closing
-                    // brace instead of becoming the next sibling's
-                    // leading own-line comment. The top-of-loop
-                    // `drain_pending()` above already caught up
-                    // `self.cpos` to the pre-`}` `self.pos`, so nothing
-                    // is pending here except a comment genuinely
+                    // A comment on the SAME line as `}` is claimed here so
+                    // the walk's comment cursor stays in step. The
+                    // top-of-loop `drain_pending()` above already caught
+                    // up `self.cpos` to the pre-`}` `self.pos`, so
+                    // nothing is pending here except a comment genuinely
                     // following `}` (`sig_index == self.pos`, the
                     // position `}` just advanced to).
-                    let mut close_trailing: Option<Comment> = None;
                     if self.cpos < self.comments.len() {
                         let ca = &self.comments[self.cpos];
                         if ca.sig_index == self.pos && ca.line == close_line {
                             self.prev_end_line =
                                 close_line + ca.comment.text.matches('\n').count() as u32;
-                            close_trailing = Some(ca.comment.clone());
                             self.cpos += 1;
                         }
                     }
-                    return Ok((items, close_trailing, Some(t.span())));
+                    return Ok(());
                 }
                 _ => {}
             }
@@ -1092,14 +1063,10 @@ impl Parser<'_> {
                     Some(TokenKind::Ident(_))
                 )
             {
-                let use_line = t.line;
                 self.g_flush_start(PmcKind::UseDecl);
                 self.bump();
-                let mut paths: Vec<UsePath> = Vec::new();
-                let mut interior: Vec<(usize, Comment)> = Vec::new();
                 let semi_line;
                 loop {
-                    self.interior_comments(paths.len(), &mut interior);
                     // path := IDENT (`::` IDENT)*  [ `as` IDENT ]
                     let t = self.peek().clone();
                     let TokenKind::Ident(name) = &t.kind else {
@@ -1109,10 +1076,9 @@ impl Parser<'_> {
                         return Err(Self::expected(&t, "an imported function name"));
                     }
                     self.g_flush_start(PmcKind::UsePath);
-                    let mut path = vec![name.clone()];
-                    let path_start = t.span().start;
-                    let mut path_end = t.span().end;
-                    let path_line = t.line;
+                    // The last path's own line is where this declaration
+                    // leaves the walk's `prev_end_line`.
+                    self.prev_end_line = t.line;
                     self.bump();
                     while matches!(self.peek().kind, TokenKind::ColonColon) {
                         self.bump();
@@ -1129,31 +1095,17 @@ impl Parser<'_> {
                                 },
                             ));
                         }
-                        path.push(seg.clone());
-                        path_end = t.span().end;
                         self.bump();
                     }
-                    let alias = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "as") {
+                    if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "as") {
                         self.bump();
                         let t = self.peek().clone();
-                        let TokenKind::Ident(a) = &t.kind else {
+                        let TokenKind::Ident(_) = &t.kind else {
                             return Err(Self::expected(&t, "an alias after `as`"));
                         };
                         self.bump();
-                        Some(a.clone())
-                    } else {
-                        None
-                    };
+                    }
                     self.g_finish(); // UsePath — the alias, if any, is its last token
-                    paths.push(UsePath {
-                        path,
-                        alias,
-                        line: path_line,
-                        span: Span {
-                            start: path_start,
-                            end: path_end,
-                        },
-                    });
                     let sep = self.peek().clone();
                     match sep.kind {
                         TokenKind::Comma => {
@@ -1161,14 +1113,6 @@ impl Parser<'_> {
                         }
                         TokenKind::Semi => {
                             semi_line = sep.line;
-                            // Drain interior comments HERE, before bumping
-                            // past `;`: `interior_comments` claims
-                            // everything at or before `self.pos`, so running
-                            // it once the `;` has been consumed would also
-                            // claim a comment that follows the statement —
-                            // e.g. one documenting the *next* `use`
-                            // (docs/pmt/fmt.md (comments inside a use list)).
-                            self.interior_comments(paths.len(), &mut interior);
                             self.bump();
                             break;
                         }
@@ -1179,36 +1123,9 @@ impl Parser<'_> {
                     }
                 }
                 self.g_finish(); // UseDecl — closes right after the `;`
-                // The whole `use` list's trailing comment rides the node.
-                let trailing = self.take_trailing(semi_line);
-                let use_span = Span {
-                    start: paths
-                        .first()
-                        .expect("a use list has at least one path")
-                        .span
-                        .start,
-                    end: paths
-                        .last()
-                        .expect("a use list has at least one path")
-                        .span
-                        .end,
-                };
-                // One TopItem for the whole grouped `use` list — `blank_before`
-                // reads the `use`
-                // keyword's own line, matching what the FIRST path would
-                // have reported under the old per-path scheme.
-                let blank_before = use_line > self.prev_end_line + 1;
-                self.prev_end_line = paths.last().expect("a use list has at least one path").line;
-                items.push(TopItem {
-                    blank_before,
-                    kind: TopKind::Import(UseCst {
-                        paths,
-                        line: use_line,
-                        span: use_span,
-                        trailing,
-                        interior,
-                    }),
-                });
+                // Claim the list's own same-line trailing comment so the
+                // walk's comment cursor stays in step past it.
+                self.take_trailing(semi_line);
                 continue;
             }
             // Contextual keyword: `namespace NAME {` opens a (reopenable)
@@ -1223,8 +1140,6 @@ impl Parser<'_> {
                     Some(TokenKind::LBrace)
                 )
             {
-                let ns_saved = self.prev_end_line;
-                let ns_line = t.line;
                 self.g_flush_start(PmcKind::Namespace);
                 self.bump(); // `namespace`
                 let name_tok = self.peek().clone();
@@ -1252,7 +1167,6 @@ impl Parser<'_> {
                         },
                     ));
                 }
-                let name_span = name_tok.span();
                 self.bump(); // the name
                 let brace = self.peek().clone();
                 self.bump(); // `{`
@@ -1260,56 +1174,27 @@ impl Parser<'_> {
                 child.push(name.clone());
                 self.namespaces.insert(child.clone());
                 self.prev_end_line = brace.line;
-                // c-brace fix (`cst.rs`'s "Comment placement" doc,
-                // mirrors `function`'s `open_trailing` capture): comment(s)
-                // riding the SAME physical line as the namespace's `{`,
-                // before the first body item, are captured here instead
-                // of falling into `top_items`'s ordinary leading-comment
-                // drain (which would print them as their own body item,
-                // moving them off the header line). `sig_index ==
-                // self.pos` (not `<=`) excludes a comment that sits
-                // BEFORE `{` even when it shares `{`'s physical line.
-                let mut open_trailing: Vec<Comment> = Vec::new();
+                // Comment(s) riding the SAME physical line as the
+                // namespace's `{`, before the first body item, are
+                // claimed here so the recursive call's own leading drain
+                // does not see them. `sig_index == self.pos` (not `<=`)
+                // excludes a comment that sits BEFORE `{` even when it
+                // shares `{`'s physical line.
                 while self.cpos < self.comments.len() {
                     let ca = &self.comments[self.cpos];
                     if ca.sig_index == self.pos && ca.line == brace.line {
-                        open_trailing.push(ca.comment.clone());
+                        self.prev_end_line =
+                            brace.line + ca.comment.text.matches('\n').count() as u32;
                         self.cpos += 1;
                     } else {
                         break;
                     }
                 }
-                if let Some(last) = open_trailing.last() {
-                    self.prev_end_line = brace.line + last.text.matches('\n').count() as u32;
-                }
-                let (child_items, close_trailing, close_span) =
-                    self.top_items(&child, Some(&TokenKind::RBrace))?;
+                self.top_items(&child, Some(&TokenKind::RBrace))?;
                 // The recursive `top_items` call above already bumped the
                 // closing `}` into the still-open NAMESPACE node; close it
                 // now that its full span — including that `}` — is emitted.
                 self.g_finish(); // Namespace
-                // `top_items` set `prev_end_line` to the closing `}` line
-                // (or its close_trailing comment's last line).
-                let blank_before = ns_line > ns_saved + 1;
-                items.push(TopItem {
-                    blank_before,
-                    kind: TopKind::Namespace(NamespaceCst {
-                        name,
-                        name_span,
-                        line: ns_line,
-                        span: Span {
-                            start: t.span().start,
-                            end: close_span
-                                .expect(
-                                    "top_items with Some(terminator) always returns a close span",
-                                )
-                                .end,
-                        },
-                        items: child_items,
-                        open_trailing,
-                        close_trailing,
-                    }),
-                });
                 continue;
             }
             // Contextual keyword: `volatile` + identifier = the volatile
@@ -1318,8 +1203,6 @@ impl Parser<'_> {
             // reserved name, so it is never treated as the modifier
             // here. Fixed order: `volatile` precedes `export` when both
             // are written.
-            let fn_saved = self.prev_end_line;
-            let fn_line = self.peek().line;
             let volatile_tok = if self.peek_is_volatile_modifier() {
                 let tok = self.peek().clone();
                 self.bump();
@@ -1340,12 +1223,10 @@ impl Parser<'_> {
             } else {
                 None
             };
-            let exported = export_start.is_some();
-            // Threaded through so `FunctionCst::span` starts at the
-            // earliest header token written (`volatile` if present, else
-            // `export`) rather than the name — see `cst.rs`'s
-            // `FunctionCst::span` doc. `doc_run` is empty unless the loop
-            // above just collected and validated one.
+            // Threaded through as the declaration's own extent start —
+            // the earliest header token written (`volatile` if present,
+            // else `export`) rather than the name. `doc_run` is empty
+            // unless the loop above just collected and validated one.
             let header_start = volatile_tok
                 .as_ref()
                 .map(|t| t.span().start)
@@ -1355,15 +1236,7 @@ impl Parser<'_> {
             // (if any) and/or the `volatile`/`export` tokens already
             // emitted above. `function` closes it after the `}`.
             self.g_start_at(fn_cp, PmcKind::Function);
-            let mut f = self.function(header_start, doc_run)?;
-            // The literal keyword presence — unlike `exported` below, this
-            // does NOT
-            // fold in `main`'s auto-export.
-            f.has_export = exported;
-            // Only the un-namespaced top-level `main` auto-exports (and is
-            // the entry); a namespaced `main` is an ordinary function.
-            f.exported = exported || (ns.is_empty() && f.name == "main");
-            f.has_volatile = volatile_tok.is_some();
+            let f = self.function(header_start, doc_run)?;
             // `volatile` is legal ONLY on the un-namespaced top-level
             // `main` — checked before the duplicate-name checks below so
             // the more specific rule is the one that surfaces.
@@ -1398,12 +1271,6 @@ impl Parser<'_> {
                 });
             }
             self.declared_fns.insert((ns.to_vec(), f.name.clone()));
-            // `function` set `prev_end_line` to the closing `}` line.
-            let blank_before = fn_line > fn_saved + 1;
-            items.push(TopItem {
-                blank_before,
-                kind: TopKind::Function(f),
-            });
         }
     }
 
