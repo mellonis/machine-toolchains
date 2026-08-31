@@ -501,41 +501,28 @@ fn comments_in(elems: &[SyntaxElement]) -> Vec<Comment> {
         .collect()
 }
 
-/// Whether a list entry NODE runs no interior drain of its own, so that
-/// its own comments are still pending at the list's NEXT drain and key
-/// to the FOLLOWING slot.
-///
-/// A `USE_PATH`, a `SIG_PARAM` (its `writes`/`preserves` clauses
-/// included) and a mapless `BINDING_ARG` all run none: measured,
-/// `graft n::g(t = /* c */ main, d = fin)` prints `/* c */` against
-/// entry 1, not entry 0. A `BINDING_ARG` carrying a `with map` is the
-/// one exception — the map's own list drains next and claims everything
-/// pending anywhere in the argument, so those comments belong to
-/// [`nested_map_pairs`] instead.
-fn entry_hoists_comments(n: &SyntaxNode) -> bool {
-    !n.children().any(|c| c.kind() == TmcKind::SymMap.into())
+/// Whether an entry NODE carries a `with map` — such an argument's
+/// comments belong to the map's own machinery ([`nested_map_pairs`] and
+/// the map's `delimited_interior`), never to an entry walk.
+fn entry_carries_a_map(n: &SyntaxNode) -> bool {
+    n.children().any(|c| c.kind() == TmcKind::SymMap.into())
 }
 
-/// A list's entry elements with each hoisting entry's own comments
-/// lifted out BEHIND it, so [`trivia::interior`]'s entries-started
-/// counter keys them to the entry count INCLUDING that entry — the
-/// same slot a comment written just after it, outside the entry, would
-/// take.
-fn entry_stream(elems: &[SyntaxElement]) -> Vec<SyntaxElement> {
-    let mut out: Vec<SyntaxElement> = Vec::new();
-    for e in elems {
-        out.push(e.clone());
-        if let SyntaxElement::Node(n) = e
-            && entry_hoists_comments(n)
-        {
-            out.extend(
-                n.descendant_tokens()
-                    .filter(|t| is_comment_kind(t.kind()))
-                    .map(SyntaxElement::Token),
-            );
-        }
+/// One list ENTRY reprinted with its comments in place — a descendant-
+/// token walk (an entry node nests its clauses one level down) through
+/// [`span_with_comments`]'s canonical spacing, so a `USE_PATH`'s, a
+/// `SIG_PARAM`'s or a mapless `BINDING_ARG`'s comment prints between the
+/// same two tokens it was written between (docs/tmt/fmt.md (comments are
+/// never moved)) instead of hoisting to the entry's end. `None` for a
+/// comment-free entry: the extracted text builders print those,
+/// byte-identically to before.
+fn entry_with_comments(node: &SyntaxNode, cont_pad: &str) -> Option<String> {
+    let elems: Vec<SyntaxElement> = node.descendant_tokens().map(SyntaxElement::Token).collect();
+    if !slice_has_comment(&elems) {
+        return None;
     }
-    out
+    let (out, _) = span_with_comments(&elems, "", cont_pad, None);
+    Some(out)
 }
 
 /// One delimited list's interior comments, keyed by entries started —
@@ -590,9 +577,10 @@ fn delimited_interior(
         }
         body += 1;
     }
-    out.extend(trivia::interior(
-        entry_stream(&elems[body..close_idx]).into_iter(),
-    ));
+    // Entry nodes keep their own comments now — entry text is
+    // comment-aware ([`entry_with_comments`]) — so this stream carries
+    // only what genuinely sits BETWEEN entries at list level.
+    out.extend(trivia::interior(elems[body..close_idx].iter().cloned()));
     out
 }
 
@@ -607,7 +595,9 @@ fn glued_pair(prev: SyntaxKind, next: SyntaxKind) -> bool {
         || next == TmcKind::Semi.into()
         || next == TmcKind::Colon.into()
         || next == TmcKind::ColonColon.into()
+        || next == TmcKind::DotDot.into()
         || prev == TmcKind::ColonColon.into()
+        || prev == TmcKind::DotDot.into()
 }
 
 /// Whether any element of the slice is a comment token — the switch
@@ -714,7 +704,7 @@ fn use_interior(node: &SyntaxNode) -> Vec<(usize, Comment)> {
         .unwrap_or(elems.len());
     let keyword = elems.iter().position(is_significant).unwrap_or(semi);
     let from = (keyword + 1).min(semi);
-    trivia::interior(entry_stream(&elems[from..semi]).into_iter())
+    trivia::interior(elems[from..semi].iter().cloned())
 }
 
 /// Every `with map` interior comment nested inside one binding list,
@@ -1687,9 +1677,15 @@ fn render_top_item(unit: &Unit, indent: usize, source: &str, index: &TextLineInd
 }
 
 fn render_use(view: &UseView, unit: &Unit, indent: usize, index: &TextLineIndex) -> Rendered {
+    // A comment INSIDE a path (`a:: /* c */ b`) prints in place through
+    // the entry walk; comment-free paths keep the extracted builder.
+    let entry_cont = " ".repeat(indent + 4);
     let paths: Vec<String> = view
         .paths()
-        .map(|p| use_path_text(&extract_import(&p, &[], index)))
+        .map(|p| {
+            entry_with_comments(p.syntax(), &entry_cont)
+                .unwrap_or_else(|| use_path_text(&extract_import(&p, &[], index)))
+        })
         .collect();
     let use_interior = use_interior(view.syntax());
     let interior = bucket(&use_interior, paths.len());
@@ -1799,20 +1795,82 @@ fn render_alphabet(
             a.name
         )
     });
-    let entries: Vec<String> = a.elems.iter().map(alphabet_elem_text).collect();
-    // Header comments print in the header, so the body's interior starts
-    // AFTER the `{` — slot 0 holds only comments genuinely inside the
-    // body. The open run, which claims nothing whenever a pre-brace
-    // comment is pending, is subtracted so two claimants cannot both
-    // print a brace-riding comment.
-    let body_interior = delimited_interior(
-        view.syntax(),
-        TmcKind::LBrace,
-        TmcKind::RBrace,
-        open_trailing.len(),
-        false,
-    );
-    let interior = bucket(&body_interior, a.elems.len());
+    // Entries and boundary comments are derived TOGETHER: the alphabet
+    // body is the one list whose entries are FLAT tokens rather than
+    // nodes, so the split happens at this level's commas, and a comment
+    // WITHIN an entry's tokens (a mid-range `'a' /* c */ ..'z'`, or one
+    // trailing the entry before its comma) prints inside that entry's
+    // own text (docs/tmt/fmt.md (comments are never moved)). A comment
+    // leading an entry, or after the last entry before the `}`, keeps
+    // the boundary slot the bucket always gave it. Header comments print
+    // in the header; the open run, which claims nothing whenever a
+    // pre-brace comment is pending, is subtracted so two claimants
+    // cannot both print a brace-riding comment.
+    let (entries, body_interior) = {
+        let all: Vec<SyntaxElement> = view.syntax().children_with_tokens().collect();
+        let close_idx = all
+            .iter()
+            .rposition(|e| e.kind() == TmcKind::RBrace.into())
+            .unwrap_or(all.len());
+        let open_idx = all
+            .iter()
+            .position(|e| e.kind() == TmcKind::LBrace.into())
+            .unwrap_or(close_idx);
+        let mut body_from = (open_idx + 1).min(close_idx);
+        let mut open_claimed = 0usize;
+        while open_claimed < open_trailing.len() && body_from < close_idx {
+            if let SyntaxElement::Token(t) = &all[body_from]
+                && is_comment_kind(t.kind())
+            {
+                open_claimed += 1;
+            }
+            body_from += 1;
+        }
+        let mut slices: Vec<Vec<SyntaxElement>> = vec![Vec::new()];
+        for e in &all[body_from..close_idx] {
+            if e.kind() == TmcKind::Comma.into() {
+                slices.push(Vec::new());
+            } else if !is_ws(e.kind()) {
+                slices.last_mut().expect("seeded above").push(e.clone());
+            }
+        }
+        let entry_cont = " ".repeat(indent + INDENT_UNIT);
+        let is_c =
+            |e: &SyntaxElement| matches!(e, SyntaxElement::Token(t) if is_comment_kind(t.kind()));
+        let last_slice = slices.len() - 1;
+        let mut entries: Vec<String> = Vec::new();
+        let mut pairs: Vec<(usize, Comment)> = Vec::new();
+        for (si, mut slice) in slices.into_iter().enumerate() {
+            while slice.first().is_some_and(&is_c) {
+                let SyntaxElement::Token(t) = slice.remove(0) else {
+                    unreachable!("is_c matched a token")
+                };
+                pairs.push((entries.len(), comment_from(&t)));
+            }
+            let mut tail: Vec<Comment> = Vec::new();
+            if si == last_slice {
+                while slice.last().is_some_and(&is_c) {
+                    let Some(SyntaxElement::Token(t)) = slice.pop() else {
+                        unreachable!("is_c matched a token")
+                    };
+                    tail.push(comment_from(&t));
+                }
+            }
+            if !slice.is_empty() {
+                let text = if slice_has_comment(&slice) {
+                    span_with_comments(&slice, "", &entry_cont, None).0
+                } else {
+                    alphabet_elem_text(&a.elems[entries.len()])
+                };
+                entries.push(text);
+            }
+            for c in tail.into_iter().rev() {
+                pairs.push((entries.len(), c));
+            }
+        }
+        (entries, pairs)
+    };
+    let interior = bucket(&body_interior, entries.len());
     let one_line = format!("{head} {} }}", entries.join(", "));
     // The width check measures the LAST line: a line comment in the
     // header breaks `head` across lines, and only the line the body
@@ -1951,7 +2009,15 @@ fn render_reuse(
         .params()
         .map(|p| reparse_sig_param(&sig_tokens(p.syntax(), index)))
         .collect();
-    let entries = signature_params(&params);
+    // A comment inside a signature parameter prints in place through
+    // the entry walk; comment-free parameters keep the extracted
+    // builder.
+    let mut entries = signature_params(&params);
+    for (i, p) in view.params().enumerate() {
+        if let Some(t) = entry_with_comments(p.syntax(), &cont_pad) {
+            entries[i] = t;
+        }
+    }
     let world = view
         .world()
         .expect("a parsed REUSE always carries its WORLD body");
@@ -2305,7 +2371,23 @@ fn render_binding_decl(
     };
     let list_interior = delimited_interior(node, TmcKind::LParen, TmcKind::RParen, 0, false);
     let map_pairs = nested_map_pairs(node);
-    let entries = binding_entries(args, indent + INDENT_UNIT, &map_pairs);
+    let mut entries = binding_entries(args, indent + INDENT_UNIT, &map_pairs);
+    // A comment inside a mapless argument (`t = /* c */ main`) prints in
+    // place through the entry walk; a map-bearing argument's comments
+    // belong to the map's own machinery, and comment-free arguments keep
+    // the extracted builder.
+    for (i, n) in node
+        .children()
+        .filter(|c| c.kind() == TmcKind::BindingArg.into())
+        .enumerate()
+    {
+        if entry_carries_a_map(&n) {
+            continue;
+        }
+        if let Some(t) = entry_with_comments(&n, &cont_pad) {
+            entries[i] = t;
+        }
+    }
     code.push_str(&pad);
     code.push_str(&paren_list(
         indent,
@@ -4087,28 +4169,36 @@ mod tests {
         );
     }
 
-    /// A comment written inside a list ENTRY, where the entry runs no
-    /// drain of its own — so the comment is still pending at the list's
-    /// NEXT drain and keys to the FOLLOWING slot, not to the entry it was
-    /// written in. Measured on all three entry-node kinds: a `USE_PATH`,
-    /// a `SIG_PARAM` (its contract clause included, which is a node of
-    /// its own inside the parameter) and a mapless `BINDING_ARG`. The
-    /// one exception is an argument carrying a `with map`, whose comments
-    /// the map's own list claims — that is the source below it.
+    /// A comment written inside a list ENTRY prints inside that entry's
+    /// own text, between its written neighbours
+    /// ([`entry_with_comments`]; docs/tmt/fmt.md (comments are never
+    /// moved)) — and the entry stays INLINE, since a lone block comment
+    /// forces no break. Measured on all three entry-node kinds: a
+    /// `USE_PATH`, a `SIG_PARAM` (its contract clause included, which is
+    /// a node of its own inside the parameter) and a mapless
+    /// `BINDING_ARG`. All four sources are fixed points.
+    ///
+    /// The LAST source is the recorded residual: a comment between
+    /// `with` and `map` in a map-BEARING argument still relocates onto
+    /// the map's `{`, because such an argument's comments belong to the
+    /// map's own machinery wholesale ([`entry_carries_a_map`]) and the
+    /// map's list claims everything pending. Pinned deliberately so the
+    /// limit is visible; lifting it means teaching the map path the
+    /// in-place rule, not re-hoisting the argument.
     #[test]
-    fn a_comment_inside_an_entry_keys_to_the_next_slot() {
+    fn a_comment_inside_an_entry_stays_in_its_entry() {
         let graph = "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) \
                      {\n  }\n}\n";
-        pins("use a:: /* c */ b, c::d;\n", "use a::b, /* c */ c::d;\n");
+        pins("use a:: /* c */ b, c::d;\n", "use a:: /* c */ b, c::d;\n");
         pins(
             "alphabet ab { '_' }\nnamespace n {\n  routine r(tape /* c */ t: ab, state d) \
                 {\n  }\n}\n",
-            "alphabet ab { '_' }\nnamespace n {\n  routine r(\n    tape t: ab, /* c */\n    state d\n  ) {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape /* c */ t: ab, state d) {\n  }\n}\n",
         );
         pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  \
              routine r(tape t: ab writes { /* c */ '_' }, state d) {\n  }\n}\n",
-            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(\n    tape t: ab writes { '_' }, /* c */\n    state d\n  ) {\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab writes { /* c */ '_' }, state d) {\n  }\n}\n",
         );
         pins(
             &format!(
@@ -4116,7 +4206,7 @@ mod tests {
              entry graft n::g(t = /* c */ main, d = fin) as i;\n  \
              state fin {{\n    [*] -> stop;\n  }}\n}}\n"
             ),
-            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(\n    t = main, /* c */\n    d = fin\n  ) as i;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = /* c */ main, d = fin) as i;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
         );
         pins(
             &format!(

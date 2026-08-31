@@ -329,7 +329,6 @@ const LIST_INTERIORS: &[(&str, &str)] = &[
 ];
 
 #[test]
-#[ignore = "moves to the entry's end (measured: use past its path segment, a range past ..'z', a param past its alphabet, an arg past its value)"]
 fn list_interior_comments_stay_in_their_entries() {
     run_group(LIST_INTERIORS);
 }
