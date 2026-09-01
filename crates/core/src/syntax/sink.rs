@@ -173,6 +173,8 @@ pub struct GreenSink<K> {
     entries: Vec<SigLayout<K>>,
     /// First significant-token index whose trivia is not yet emitted.
     flushed_upto: usize,
+    /// Currently open nodes — see [`open_depth`](Self::open_depth).
+    open: usize,
 }
 
 impl<K: Copy + Into<SyntaxKind>> GreenSink<K> {
@@ -181,6 +183,7 @@ impl<K: Copy + Into<SyntaxKind>> GreenSink<K> {
             builder: TreeBuilder::new(),
             entries,
             flushed_upto: 0,
+            open: 0,
         }
     }
 
@@ -209,10 +212,13 @@ impl<K: Copy + Into<SyntaxKind>> GreenSink<K> {
 
     pub fn start(&mut self, kind: K) {
         self.builder.start_node(kind.into());
+        self.open += 1;
     }
 
     pub fn finish(&mut self) {
+        debug_assert!(self.open > 0, "finish without a matching start");
         self.builder.finish_node();
+        self.open -= 1;
     }
 
     pub fn checkpoint(&self) -> Checkpoint {
@@ -221,6 +227,26 @@ impl<K: Copy + Into<SyntaxKind>> GreenSink<K> {
 
     pub fn start_at(&mut self, cp: Checkpoint, kind: K) {
         self.builder.start_node_at(cp, kind.into());
+        self.open += 1;
+    }
+
+    /// How many nodes are currently open — the recovery wrapper records
+    /// this at a loop seam and unwinds back to it with
+    /// [`finish_to`](Self::finish_to) when an item parse fails midway.
+    pub fn open_depth(&self) -> usize {
+        self.open
+    }
+
+    /// Close open nodes until exactly `depth` remain. The partially
+    /// built nodes close as-is — their children stay in the tree (the
+    /// lossless law is untouched); the caller then retro-wraps the
+    /// whole region into its error node via a checkpoint taken at the
+    /// seam.
+    pub fn finish_to(&mut self, depth: usize) {
+        debug_assert!(depth <= self.open, "finish_to past the open depth");
+        while self.open > depth {
+            self.finish();
+        }
     }
 
     /// Emit the trailing trivia (the Eof entry's schedule) and close.
@@ -299,6 +325,49 @@ mod tests {
             dump,
             "ROOT@0..2\n  WRAP@0..2\n    WHITESPACE@0..1 \" \"\n    IDENT@1..2 \"a\"\n"
         );
+    }
+
+    /// Depth tracking for error recovery: a failed parse may leave
+    /// nodes open; `finish_to` closes back to a recorded depth so the
+    /// recovery wrapper can retro-wrap the region into an error node.
+    #[test]
+    fn finish_to_unwinds_to_a_recorded_depth() {
+        let entries = vec![
+            SigLayout {
+                text: "a".to_string(),
+                trivia_before: vec![],
+            },
+            SigLayout {
+                text: "b".to_string(),
+                trivia_before: vec![],
+            },
+            SigLayout {
+                text: String::new(),
+                trivia_before: vec![],
+            },
+        ];
+        let mut sink = GreenSink::new(entries);
+        sink.start(FakeKind::Root);
+        let depth = sink.open_depth();
+        assert_eq!(depth, 1);
+        let cp = sink.checkpoint();
+        // A "failed parse": two nodes left open with a token inside.
+        sink.start(FakeKind::Wrap);
+        sink.token(0, FakeKind::Ident);
+        sink.start(FakeKind::Wrap);
+        assert_eq!(sink.open_depth(), 3);
+        // Recovery: close back to the loop's depth, wrap the region.
+        sink.finish_to(depth);
+        assert_eq!(sink.open_depth(), depth);
+        sink.start_at(cp, FakeKind::Wrap);
+        sink.token(1, FakeKind::Ident);
+        sink.finish();
+        let root = SyntaxNode::new_root(sink.finish_tree(2));
+        assert_eq!(root.text(), "ab");
+        // One wrapping node under ROOT holding the partial region.
+        assert_eq!(root.children().count(), 1);
+        let wrap = root.children().next().expect("the recovery wrap");
+        assert_eq!(wrap.text(), "ab");
     }
 
     /// `token` refuses to re-emit an already-taken significant position
