@@ -82,12 +82,16 @@ The sync sets are conservative supersets of each loop's own dispatch
 tokens — a wrong guess costs one more error region, never a lost
 token.
 
-**Nested recovery (deferred).** v1 recovers at TOP-LEVEL item
-boundaries only, in both crates. Statement-level (PM function bodies)
-and rule-level (TM state bodies) recovery are the natural second round
-— the same wrapper at the inner loops — deliberately deferred so v1
-stays reviewable; the tracker issue stays open until they land or are
-declined with measurements.
+**Nested recovery (round 2 — LANDED).** v1 recovered at TOP-LEVEL
+item boundaries; round 2 added the same wrapper at the inner loops —
+`.pmc` function-body statements (`fn_body_item`/`skip_to_stmt_sync`)
+and `.tmc` world items (`world_item`/`skip_to_world_sync`). The skips
+are brace-depth-aware — an interior `;`/`}` belongs to the region —
+with STRONG sync shapes (item keywords, doc lines, a name followed by
+`(`) ending the region at any depth, so an unbalanced `{` in the
+broken region cannot swallow the rest of the file. Rule-level recovery
+INSIDE a `.tmc` state stays out of scope (finer than the issue's
+statement grain; revisit only with incremental-reparse measurements).
 
 **Entry.** Per crate:
 ```rust

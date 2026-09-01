@@ -1181,16 +1181,25 @@ impl Parser<'_> {
     /// itself be a sync token.
     fn skip_to_sync(&mut self, terminator: Option<&TokenKind>) {
         let mut first = true;
+        // Brace depth WITHIN the region — a broken declaration may carry
+        // its own `{ … }`; only depth-0 tokens end the region or match
+        // the terminator (see `skip_to_world_sync`'s twin comment).
+        let mut depth = 0usize;
         loop {
             let t = self.peek().clone();
             if matches!(t.kind, TokenKind::Eof) {
                 return;
             }
-            if let Some(term) = terminator
+            if depth == 0
+                && let Some(term) = terminator
                 && &t.kind == term
             {
                 return;
             }
+            // STRONG sync — a shape that can only start a new item —
+            // ends the region at ANY depth: an UNBALANCED `{` in the
+            // broken region must not swallow the rest of the file (the
+            // exact mid-edit shape resilience exists for).
             let sync = match &t.kind {
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => true,
                 TokenKind::Ident(w) => matches!(
@@ -1202,7 +1211,12 @@ impl Parser<'_> {
             if sync && !first {
                 return;
             }
-            let semi = matches!(t.kind, TokenKind::Semi);
+            match t.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            let semi = matches!(t.kind, TokenKind::Semi) && depth == 0;
             self.bump();
             first = false;
             if semi {
@@ -1606,18 +1620,99 @@ impl Parser<'_> {
     /// A world body (machine / routine / graph), after its opening `{`.
     /// `in_machine` allows tape declarations (routines/graphs take tapes from
     /// the signature — a tape decl there is a `TapeNotInMachine` error).
+    /// A world's item loop — the INNER recovery seam (docs/core.md
+    /// (syntax trees), error recovery), same wrapper as `top_items`':
+    /// in resilient mode a broken state/graft/bind/tape is recorded,
+    /// wrapped into an ERROR node, and the loop resyncs at the next
+    /// item boundary — one broken item never takes its world (or the
+    /// file) with it.
     fn world_body(&mut self, in_machine: bool) -> Result<(), CompileError> {
         loop {
-            // Green checkpoint for whichever node this item turns out to
-            // be: same placement rule as `top_items`'s `cp` — top of the
-            // iteration, before the doc run (if any) — so
-            // `g_start_at` below retro-wraps the run and an `entry`
-            // prefix, when present, alongside the header. TAPE never
-            // accepts a doc run (`next_is_world_doc_accepting` excludes
-            // it), so this same checkpoint sits at TAPE's own header
-            // token whenever it fires there — no separate checkpoint
-            // needed.
             let cp = self.g_checkpoint();
+            let depth = self.sink.as_ref().map(GreenSink::open_depth);
+            match self.world_item(in_machine, cp) {
+                Ok(Step::Done) => return Ok(()),
+                Ok(Step::Continue) => {}
+                Err(e) => {
+                    if self.recovered.is_none() {
+                        return Err(e);
+                    }
+                    self.recovered.as_mut().expect("checked above").push(e);
+                    if let (Some(sink), Some(d)) = (&mut self.sink, depth) {
+                        sink.finish_to(d);
+                    }
+                    self.g_start_at(cp, TmcKind::Error);
+                    self.skip_to_world_sync();
+                    self.g_finish(); // Error
+                    if matches!(self.peek().kind, TokenKind::Eof) {
+                        // An unclosed body ends at Eof with its error
+                        // recorded; the caller closes WORLD.
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// World-item resynchronization for [`Self::world_body`]'s
+    /// recovery: consumes tokens into the open ERROR node until a
+    /// token that can start the next item (`entry`/`state`/`graft`/
+    /// `bind`/`tape`/`volatile`, or a doc/attention line), the body's
+    /// `}` or Eof (left for the loop). A `;` is consumed INTO the
+    /// region and ends it; the sync check skips the first token so
+    /// recovery always makes progress.
+    fn skip_to_world_sync(&mut self) {
+        let mut first = true;
+        // Brace depth WITHIN the region: a broken item may carry its own
+        // `{ … }` (a half-written state); its interior `;`s and `}`s
+        // belong to the region, not to the world — only a depth-0 `;`
+        // ends the region and only a depth-0 `}` is the world's closer.
+        let mut depth = 0usize;
+        loop {
+            let t = self.peek().clone();
+            if matches!(t.kind, TokenKind::Eof) {
+                return;
+            }
+            if matches!(t.kind, TokenKind::RBrace) && depth == 0 {
+                return;
+            }
+            // STRONG sync (item keywords, doc lines) ends the region at
+            // ANY depth — an unbalanced `{` in a half-written state must
+            // not swallow the rest of the world; a state body's own
+            // interior (rules) contains none of these shapes.
+            let sync = match &t.kind {
+                TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => true,
+                TokenKind::Ident(w) => matches!(
+                    w.as_str(),
+                    "entry" | "state" | "graft" | "bind" | "tape" | "volatile"
+                ),
+                _ => false,
+            };
+            if sync && !first {
+                return;
+            }
+            match t.kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            let semi = matches!(t.kind, TokenKind::Semi) && depth == 0;
+            self.bump();
+            first = false;
+            if semi {
+                return;
+            }
+        }
+    }
+
+    /// One iteration of [`Self::world_body`]'s loop — the former loop
+    /// body, factored out so the recovery wrapper owns the seam.
+    fn world_item(
+        &mut self,
+        in_machine: bool,
+        cp: Option<Checkpoint>,
+    ) -> Result<Step, CompileError> {
+        {
             if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
@@ -1635,7 +1730,7 @@ impl Parser<'_> {
             let t = self.peek().clone();
             if matches!(t.kind, TokenKind::RBrace) {
                 self.bump();
-                return Ok(());
+                return Ok(Step::Done);
             }
             if matches!(t.kind, TokenKind::Eof) {
                 return Err(Self::expected(&t, "`}` to close the body"));
@@ -1695,6 +1790,7 @@ impl Parser<'_> {
                 ));
             }
         }
+        Ok(Step::Continue)
     }
 
     fn parse_tape(&mut self) -> Result<(), CompileError> {

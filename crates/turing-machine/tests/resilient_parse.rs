@@ -46,6 +46,37 @@ fn a_broken_declaration_leaves_its_neighbours_parsed() {
     );
 }
 
+/// INNER recovery: a broken world item does not take its machine with
+/// it — the MACHINE node survives at top level with the error region
+/// wrapped inside its world, and the sibling state is untouched.
+#[test]
+fn a_broken_world_item_leaves_its_machine_parsed() {
+    let src = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  state { [*] -> stop; }\n  entry state go { [*] -> stop; }\n}\n";
+    let (root, errors) = resilient(src);
+    assert_eq!(root.text(), src, "the tree lost source text");
+    assert_eq!(errors.len(), 1, "one recovery region, one error");
+    assert!(
+        root.children().all(|c| c.kind() != TmcKind::Error.into()),
+        "no top-level error region — recovery happened inside the world"
+    );
+    let machine = root
+        .children()
+        .find(|c| c.kind() == TmcKind::Machine.into())
+        .expect("the MACHINE node survives");
+    let world = machine
+        .children()
+        .find(|c| c.kind() == TmcKind::World.into())
+        .expect("its WORLD is intact");
+    assert!(
+        world.children().any(|c| c.kind() == TmcKind::Error.into()),
+        "the broken item is wrapped inside the world"
+    );
+    assert!(
+        world.children().any(|c| c.kind() == TmcKind::State.into()),
+        "the sibling state still parses"
+    );
+}
+
 /// Total junk (that still lexes) becomes one lossless ERROR region.
 #[test]
 fn junk_input_yields_one_lossless_error_region() {

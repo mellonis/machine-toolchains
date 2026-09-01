@@ -46,6 +46,36 @@ fn a_broken_declaration_leaves_its_neighbours_parsed() {
     );
 }
 
+/// INNER recovery: a broken STATEMENT does not take its function with
+/// it — the FUNCTION node survives at top level with the error region
+/// wrapped inside its body, and the sibling function is untouched.
+#[test]
+fn a_broken_statement_leaves_its_function_parsed() {
+    let src = "main() {\n 1: right;\n 2: wat wat;\n 3: left;\n}\nhelper() {\n 1: right;\n}\n";
+    let (root, errors) = resilient(src);
+    assert_eq!(root.text(), src, "the tree lost source text");
+    assert_eq!(errors.len(), 1, "one recovery region, one error");
+    let functions: Vec<_> = root
+        .children()
+        .filter(|c| c.kind() == PmcKind::Function.into())
+        .collect();
+    assert_eq!(
+        functions.len(),
+        2,
+        "BOTH functions survive at top level — the error region is inner"
+    );
+    assert!(
+        root.children().all(|c| c.kind() != PmcKind::Error.into()),
+        "no top-level error region — recovery happened inside the body"
+    );
+    assert!(
+        functions[0]
+            .children()
+            .any(|c| c.kind() == PmcKind::Error.into()),
+        "the broken statement is wrapped inside its own function"
+    );
+}
+
 /// Total junk (that still lexes) becomes one lossless ERROR region.
 #[test]
 fn junk_input_yields_one_lossless_error_region() {
