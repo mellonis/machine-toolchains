@@ -14,6 +14,8 @@ pub mod lint;
 mod lower;
 mod subst;
 pub(crate) mod syntax;
+#[cfg(feature = "std")]
+pub mod views;
 
 pub use assembler::assemble;
 pub(crate) use assembler::{MatchRowClass, assemble_lowered, classify_match_row};

@@ -898,13 +898,27 @@ positions.
 parse — total, line-oriented — emits a green tree through the same
 sink from its one shaping walk: `parse_asm_green` returns the familiar
 assembly CST paired with a lossless tree over the assembly kind space
-(one node per item, the item's significant tokens flat inside it,
-comments and blank lines as trivia between nodes). `text()` equals the
-source byte-for-byte for any input, CRLF included — the tree carries
-the actual bytes where the CST's own text fields deliberately rejoin
-with LF. The plain `parse_asm_cst` entries are unchanged and the CST
-remains what every assembler-side consumer reads; typed views over the
-tree are follow-up territory.
+(one node per item with the item's significant tokens inside it; a
+`.rept` block's node holds its header tokens, one child node per body
+item, and the closing `.endr`; comments and blank lines are trivia
+between nodes, a trailing comment landing after its item's node at the
+same level). `text()` equals the source byte-for-byte for any input,
+CRLF included — the tree carries the actual bytes where the CST's own
+text fields deliberately rejoin with LF. The plain `parse_asm_cst`
+entries are unchanged and the CST remains what every assembler-side
+consumer reads. Typed views (`asm/views.rs` — a root view's items and
+a block view's body, yielding one enum over the nine item node kinds)
+are the tree's typed entry, and `locate_items` is the bridge the two
+assembly language services read positions from: it pairs every CST
+item, comments included, with its tree element — a node, or an
+own-line comment's own token — in the flattened order that splices a
+block's body after its header. The pairing holds two pinned laws over
+the shipped corpus and multi-line noise sweeps: every flattened item is
+located, in order, and the tree's start offsets agree line-and-column
+with the CST's own lexer-built spans. The services take their item
+lines from it instead of reconstructing them — the framework's
+lossless law is what locates a comment now, not a count of non-blank
+lines.
 
 **Error recovery.** The sink also tracks its open-node depth
 (`open_depth`/`finish_to`), which is what a parser's resilient entry

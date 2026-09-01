@@ -7,9 +7,11 @@
 //! line grammar, which is arch-agnostic; mnemonics stay plain WORD
 //! tokens exactly as they are plain `Word`s in the lexer.
 //!
-//! Phase-1 granularity: one node per CST item, tokens flat inside it.
-//! Labels, instructions, and operands are typed-view territory for a
-//! later round, not tree structure here.
+//! Granularity: one node per CST item with its tokens inside it — a
+//! `.rept` block's node nests one child node per body item between its
+//! header tokens and its `.endr`. Labels, instructions, and operands
+//! are not tree structure; the CST carries them, and the typed views
+//! (`super::views`) name only the item shapes.
 
 use super::lexer::AsmTokenKind;
 use crate::syntax::SyntaxKind;

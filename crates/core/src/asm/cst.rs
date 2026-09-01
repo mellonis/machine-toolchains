@@ -459,10 +459,14 @@ pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
 /// trees)): the SAME shaping walk builds both — the CST the consumers
 /// eat and a lossless green tree over the framework's kind space
 /// ([`super::kinds::AsmKind`]), one node per item with the item's
-/// significant tokens flat inside it, comments and whitespace as
-/// trivia between nodes. `text()` equals the source byte-for-byte for
-/// ANY input, CRLF and all (the CST's own text fields rejoin with LF;
-/// the tree carries the actual bytes).
+/// significant tokens inside it (a `.rept` block's node nests one
+/// child node per body item between its header tokens and its
+/// `.endr`), comments and whitespace as trivia between nodes. `text()`
+/// equals the source byte-for-byte for ANY input, CRLF and all (the
+/// CST's own text fields rejoin with LF; the tree carries the actual
+/// bytes). `super::views::locate_items` pairs the CST's items with
+/// their tree elements — the position source the language services
+/// read.
 #[cfg(feature = "std")]
 pub fn parse_asm_green(
     source: &str,
@@ -515,7 +519,7 @@ struct Emit {
 #[cfg(feature = "std")]
 impl GreenEmit for Emit {
     fn item(&mut self, kind: &AsmItemKind, records: &[LineRecord<'_>]) {
-        use super::kinds::{AsmKind, token_green_kind};
+        use super::kinds::AsmKind;
         // A comment-only item is pure trivia in the tree: no node, and
         // its token was classified trivia by the schedule, so there is
         // nothing to advance either.
@@ -538,16 +542,41 @@ impl GreenEmit for Emit {
         // the parent (the source-language convention), so flush first.
         self.sink.flush(self.next_sig);
         self.sink.start(node);
-        for r in records {
-            for t in &r.tokens {
-                if matches!(t.kind, AsmTokenKind::Comment(_)) {
-                    continue;
-                }
-                self.sink.token(self.next_sig, token_green_kind(&t.kind));
-                self.next_sig += 1;
+        if let AsmItemKind::Rept(r) = kind {
+            // A block nests: its header tokens, then one node per body
+            // item — `shape_body` maps records to items one-to-one, so
+            // the zip is exact — then the closing `.endr`. The header's
+            // and each body item's trailing comment land as trivia
+            // inside the block, the `.endr`'s at the parent level.
+            let (header, rest) = records.split_first().expect("a block has a header record");
+            let (endr, body) = rest.split_last().expect("a block has an `.endr` record");
+            debug_assert_eq!(body.len(), r.body.len(), "one body item per body record");
+            self.tokens(header);
+            for (item, rec) in r.body.iter().zip(body) {
+                self.item(&item.kind, core::slice::from_ref(rec));
+            }
+            self.tokens(endr);
+        } else {
+            for r in records {
+                self.tokens(r);
             }
         }
         self.sink.finish();
+    }
+}
+
+#[cfg(feature = "std")]
+impl Emit {
+    /// Emit one record's significant tokens into the open node.
+    fn tokens(&mut self, rec: &LineRecord<'_>) {
+        for t in &rec.tokens {
+            if matches!(t.kind, AsmTokenKind::Comment(_)) {
+                continue;
+            }
+            self.sink
+                .token(self.next_sig, super::kinds::token_green_kind(&t.kind));
+            self.next_sig += 1;
+        }
     }
 }
 
