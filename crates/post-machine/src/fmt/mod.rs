@@ -26,6 +26,19 @@ pub fn format(source: &str) -> Result<String, CompileError> {
     print::format(source)
 }
 
+/// [`format`] from an already-parsed green tree and a caller-held line
+/// index — the language service's re-parse-free entry (docs/lsp.md
+/// (formatting)): its document state holds both for the exact text
+/// being formatted. Infallible; every error [`format`] can return
+/// precedes the print.
+pub fn format_tree(
+    source: &str,
+    green: &std::rc::Rc<mtc_core::syntax::GreenNode>,
+    line_index: &mtc_core::syntax::TextLineIndex,
+) -> String {
+    print::format_tree(source, green, line_index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

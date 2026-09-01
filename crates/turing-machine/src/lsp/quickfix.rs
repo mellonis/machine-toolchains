@@ -65,8 +65,8 @@ struct BodyExtent {
 fn state_stub(state: &DocState, name: &str, at: Span) -> Option<Action> {
     let green = state.green.as_ref()?;
     let root = RootView::cast(SyntaxNode::new_root(Rc::clone(green)))?;
-    let index = TextLineIndex::new(&state.text);
-    let extent = enclosing_body(&root, state.program.as_ref(), at, &index)?;
+    let index = &state.line_index;
+    let extent = enclosing_body(&root, state.program.as_ref(), at, index)?;
     let cells = vec!["*"; extent.arity.max(1)].join(", ");
     // Insert on its own line just before the closing brace, one level in
     // from it. The block's own depth is read off that brace rather than

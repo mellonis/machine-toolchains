@@ -154,6 +154,12 @@ impl ConfigResolver<'_> {
 struct DocState {
     /// The document's current text, verbatim from the framework.
     text: String,
+    /// Line index over `text`, built once per document version in
+    /// `did_update` — the text is immutable per version, so every
+    /// position-mapping consumer (completion, navigation, tokens,
+    /// quickfixes, formatting) borrows this instead of rescanning the
+    /// text per request.
+    line_index: TextLineIndex,
     /// WithComments token stream of the current text; `None` only when
     /// lexing itself failed.
     tokens: Option<Vec<Token>>,
@@ -600,6 +606,7 @@ impl LanguageService for PmcLanguageService {
         };
         let mut state = DocState {
             text: text.to_string(),
+            line_index: TextLineIndex::new(text),
             tokens: staged.tokens,
             green: staged.green,
             analysis: staged.analysis,
@@ -720,8 +727,7 @@ impl LanguageService for PmcLanguageService {
         let green = state.green.as_ref()?;
         let root = SyntaxNode::new_root(Rc::clone(green));
         let file = FileView::cast(root).expect("root is FILE");
-        let index = TextLineIndex::new(&state.text);
-        Some(tree_symbols(file.items(), &index))
+        Some(tree_symbols(file.items(), &state.line_index))
     }
 
     fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
@@ -733,9 +739,18 @@ impl LanguageService for PmcLanguageService {
         // Whole-document formatting (docs/lsp.md (formatting)): reads the
         // DOCSTORE's text — the framework diffs the returned text against
         // exactly what `did_update` last received, never a re-read from
-        // disk or a stale revision.
+        // disk or a stale revision. Prints from the state's own green
+        // tree and line index (`fmt::format_tree`) instead of re-lexing
+        // and re-parsing the text they were built from; `green` is
+        // `None` exactly when a lex/parse fatal exists, the same inputs
+        // on which the full `format` would return `Err`.
         let state = self.docs.get(uri)?;
-        crate::fmt::format(&state.text).ok()
+        let green = state.green.as_ref()?;
+        Some(crate::fmt::format_tree(
+            &state.text,
+            green,
+            &state.line_index,
+        ))
     }
 }
 

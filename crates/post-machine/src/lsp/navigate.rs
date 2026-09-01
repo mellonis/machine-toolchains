@@ -75,20 +75,20 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
     let green = state.green.as_ref()?;
     let root = SyntaxNode::new_root(Rc::clone(green));
     let file = FileView::cast(root).expect("root is FILE");
-    let index = TextLineIndex::new(&state.text);
+    let index = &state.line_index;
     let offset = index.offset(pos);
 
     if let Some(function) = enclosing_function_chain(&file, offset).pop()
-        && let Some((value, origin)) = label_reference_at(&function, &index, pos)
+        && let Some((value, origin)) = label_reference_at(&function, index, pos)
     {
-        return label_span(&function, &index, value).map(|span| DefTarget {
+        return label_span(&function, index, value).map(|span| DefTarget {
             uri: uri.to_string(),
             span,
             origin: Some(origin),
         });
     }
 
-    if let Some((full_path, origin)) = use_path_at(&file, &index, offset) {
+    if let Some((full_path, origin)) = use_path_at(&file, index, offset) {
         return if full_path.starts_with("std::") {
             std_path_target(state, &full_path, origin)
         } else {
@@ -438,9 +438,9 @@ pub(super) fn hover_target(state: &DocState, pos: Pos) -> Option<(String, Span)>
     let green = state.green.as_ref()?;
     let root = SyntaxNode::new_root(Rc::clone(green));
     let file = FileView::cast(root).expect("root is FILE");
-    let index = TextLineIndex::new(&state.text);
+    let index = &state.line_index;
     let offset = index.offset(pos);
-    use_path_at(&file, &index, offset)
+    use_path_at(&file, index, offset)
 }
 
 /// The fully-qualified name a step-1 [`Resolution`] ultimately names —

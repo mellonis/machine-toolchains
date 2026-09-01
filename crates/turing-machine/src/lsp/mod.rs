@@ -190,6 +190,11 @@ impl ConfigResolver<'_> {
 pub(crate) struct DocState {
     /// The document's current text, verbatim from the framework.
     pub(crate) text: String,
+    /// Line index over `text`, built once per document version in
+    /// `did_update` — the text is immutable per version, so every
+    /// position-mapping consumer (symbols, quickfixes, formatting)
+    /// borrows this instead of rescanning the text per request.
+    pub(crate) line_index: TextLineIndex,
     /// WithComments token stream of the current text; `None` only when
     /// lexing itself failed.
     pub(crate) tokens: Option<Vec<Token>>,
@@ -271,6 +276,7 @@ fn assert_every_other_docstate_field_is_send(state: DocState) {
     fn assert_send<T: Send>(_: T) {}
     let DocState {
         text,
+        line_index,
         tokens,
         green: _,
         program,
@@ -283,6 +289,7 @@ fn assert_every_other_docstate_field_is_send(state: DocState) {
         overlay,
     } = state;
     assert_send(text);
+    assert_send(line_index);
     assert_send(tokens);
     assert_send(program);
     assert_send(resolved);
@@ -796,6 +803,7 @@ impl LanguageService for TmcLanguageService {
         };
         let mut state = DocState {
             text: text.to_string(),
+            line_index: TextLineIndex::new(text),
             tokens: staged.tokens,
             green: staged.green,
             program: staged.program,
@@ -889,8 +897,8 @@ impl LanguageService for TmcLanguageService {
         let state = self.docs.get(uri)?;
         let green = state.green.as_ref()?;
         let root = RootView::cast(SyntaxNode::new_root(Rc::clone(green)))?;
-        let index = TextLineIndex::new(&state.text);
-        Some(tree_symbols(root.items(), &index))
+        let index = &state.line_index;
+        Some(tree_symbols(root.items(), index))
     }
 
     fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
@@ -901,9 +909,19 @@ impl LanguageService for TmcLanguageService {
     fn format(&mut self, uri: &str) -> Option<String> {
         // Whole-document formatting: reads the DOCSTORE's text — the
         // framework diffs the returned text against exactly what
-        // `did_update` last received, never a re-read from disk.
+        // `did_update` last received, never a re-read from disk. Prints
+        // from the state's own green tree and line index
+        // (`fmt::format_tree`) instead of re-lexing and re-parsing the
+        // text they were built from; `green` is `None` exactly when a
+        // lex/parse fatal exists, the same inputs on which the full
+        // `format` would return `Err`.
         let state = self.docs.get(uri)?;
-        crate::fmt::format(&state.text).ok()
+        let green = state.green.as_ref()?;
+        Some(crate::fmt::format_tree(
+            &state.text,
+            green,
+            &state.line_index,
+        ))
     }
 }
 

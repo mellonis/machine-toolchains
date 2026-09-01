@@ -211,9 +211,25 @@ const LINE_WIDTH: usize = 80;
 pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
-    let root = RootView::cast(SyntaxNode::new_root(green)).expect("the green root is a ROOT node");
     let index = TextLineIndex::new(source);
-    let out = flush(&render_top_items(root.syntax(), 0, source, &index));
+    Ok(format_tree(source, &green, &index))
+}
+
+/// [`format`] past its front half: prints from an ALREADY-PARSED green
+/// tree and a caller-held line index — the language service's entry
+/// (docs/lsp.md (formatting)), whose document state already holds both
+/// and must not pay a re-lex and re-parse of text it just parsed.
+/// `source` is the text the tree was parsed FROM (the conservation
+/// gate compares against it); infallible, since every error `format`
+/// can return precedes the print.
+pub(crate) fn format_tree(
+    source: &str,
+    green: &std::rc::Rc<mtc_core::syntax::GreenNode>,
+    index: &TextLineIndex,
+) -> String {
+    let root = RootView::cast(SyntaxNode::new_root(std::rc::Rc::clone(green)))
+        .expect("the green root is a ROOT node");
+    let out = flush(&render_top_items(root.syntax(), 0, source, index));
     // An empty file still reprints as exactly one newline; a non-empty one
     // already ends in the last item's newline.
     let out = if out.is_empty() {
@@ -223,16 +239,16 @@ pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     };
     #[cfg(debug_assertions)]
     assert_comment_conservation(source, &out);
-    Ok(out)
+    out
 }
 
 /// The conservation gate behind every debug-build render: each comment
 /// in the source reprints in the output exactly once, text intact up to
 /// the per-line trailing-whitespace trim [`normalize_comment_text`] is
-/// allowed (docs/tmt/fmt.md (comments) — trivia-preserving; relocate,
-/// never drop). The printer coordinates independent claimants — leading
-/// runs, trailing slots, brace rides, interior-list splices, relocations
-/// — by per-surface slice boundaries with no structural guarantee that
+/// allowed (docs/tmt/fmt.md (comments are never moved) — never moved,
+/// never dropped). The printer coordinates independent claimants —
+/// leading runs, trailing slots, brace rides, interior-list splices —
+/// by per-surface slice boundaries with no structural guarantee that
 /// every comment is claimed exactly once, and a missed surface loses a
 /// comment SILENTLY: `tmt fmt` rewrites in place, and no other property
 /// can see the loss (token equivalence lexes `WithoutComments`;

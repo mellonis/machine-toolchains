@@ -45,7 +45,7 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
     let green = state.green.as_ref()?;
     let root = SyntaxNode::new_root(Rc::clone(green));
     let file = FileView::cast(root).expect("root is FILE");
-    let index = TextLineIndex::new(&state.text);
+    let index = &state.line_index;
 
     // `Span` has no `Hash` (only `Ord`) — a `BTreeMap` is the map-keyed
     // lookup this table needs without adding a derive to the shared
@@ -60,7 +60,7 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
         .collect();
 
     let mut out = Vec::new();
-    walk_items(file.items(), &index, &resolutions, state, &mut out);
+    walk_items(file.items(), index, &resolutions, state, &mut out);
     out.sort_by_key(|token| token.span.start);
     debug_assert!(
         out.windows(2)

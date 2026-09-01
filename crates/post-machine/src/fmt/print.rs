@@ -74,7 +74,11 @@
 //!   stops a raw comment token from printing standalone when the walk
 //!   reaches it directly as a plain sibling.
 
-use mtc_core::syntax::{AstNode, SyntaxElement, SyntaxNode, SyntaxToken, TextLineIndex, token};
+use std::rc::Rc;
+
+use mtc_core::syntax::{
+    AstNode, GreenNode, SyntaxElement, SyntaxNode, SyntaxToken, TextLineIndex, token,
+};
 
 use crate::compiler::CompileError;
 use crate::lexer::{LexMode, lex_with, normalize_doc_payload};
@@ -120,12 +124,27 @@ fn normalize_comment_text(text: &str) -> String {
 pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
-    let root = SyntaxNode::new_root(green);
     // Threaded through every print function from here down:
     // `compute_trailing_spacing`'s aligned/ragged verdict reads each
     // trailing comment's own SOURCE column (`docs/pmt/fmt.md`
     // (comments)), which only a line index can answer.
     let line_index = TextLineIndex::new(source);
+    Ok(format_tree(source, &green, &line_index))
+}
+
+/// [`format`] past its front half: prints from an ALREADY-PARSED green
+/// tree and a caller-held line index — the language service's entry
+/// (docs/lsp.md (formatting)), whose document state already holds both
+/// and must not pay a re-lex and re-parse of text it just parsed.
+/// `source` is the text the tree was parsed FROM (the conservation
+/// gate compares against it); infallible, since every error `format`
+/// can return precedes the print.
+pub(crate) fn format_tree(
+    source: &str,
+    green: &Rc<GreenNode>,
+    line_index: &TextLineIndex,
+) -> String {
+    let root = SyntaxNode::new_root(Rc::clone(green));
     let mut out = String::new();
     print_items(
         &mut out,
@@ -133,7 +152,7 @@ pub(crate) fn format(source: &str) -> Result<String, CompileError> {
         0,
         &[],
         &[],
-        &line_index,
+        line_index,
     );
     // Edge case (`docs/pmt/fmt.md` (indentation), mirrored from C1's
     // `print_cst`): an empty or whitespace-only file still reprints as
@@ -143,7 +162,7 @@ pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     }
     #[cfg(debug_assertions)]
     assert_comment_conservation(source, &out);
-    Ok(out)
+    out
 }
 
 /// The conservation gate behind every debug-build render: each comment

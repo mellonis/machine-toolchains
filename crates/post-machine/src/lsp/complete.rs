@@ -51,7 +51,7 @@ use std::rc::Rc;
 
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{Candidate, CandidateKind};
-use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
+use mtc_core::syntax::{AstNode, SyntaxNode};
 
 use crate::compiler::{ScopeSummary, full_name};
 use crate::lexer::{Token, TokenKind};
@@ -611,7 +611,7 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     let view: Option<(FileView, u32)> = state.green.as_ref().map(|green| {
         let root = SyntaxNode::new_root(Rc::clone(green));
         let file = FileView::cast(root).expect("root is FILE");
-        let offset = TextLineIndex::new(&state.text).offset(pos);
+        let offset = state.line_index.offset(pos);
         (file, offset)
     });
 
@@ -775,7 +775,7 @@ fn label_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candi
     };
     let root = SyntaxNode::new_root(Rc::clone(green));
     let file = FileView::cast(root).expect("root is FILE");
-    let index = TextLineIndex::new(&state.text);
+    let index = &state.line_index;
     let offset = index.offset(pos);
     let chain = enclosing_function_chain(&file, offset);
     let Some(f) = chain.last() else {
@@ -783,7 +783,7 @@ fn label_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candi
     };
     let mut seen: HashSet<u32> = HashSet::new();
     let mut out = Vec::new();
-    for label in function_labels(f, &index) {
+    for label in function_labels(f, index) {
         if seen.insert(label.value) {
             out.push(mk_candidate(
                 &label.value.to_string(),
