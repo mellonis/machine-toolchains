@@ -1,116 +1,44 @@
-//! Source layout for the green tree: verbatim per-token text and the
-//! trivia (whitespace + comments) between tokens, reconstructed from
-//! the UNCHANGED lexer's output plus the source text. Token start
-//! positions (1-based line, 1-based char column) are trusted; ends are
-//! derived per kind and validated by the invariant that everything
-//! between two tokens is whitespace. The concatenation of all pieces
-//! is the source, byte for byte — the green tree's lossless law starts
-//! here.
+//! Source layout for the green tree — the `.pmc` adapter over core's
+//! language-agnostic layout pass (docs/core.md (syntax trees)): builds
+//! per-token [`LayoutToken`] facts from the UNCHANGED lexer's output
+//! and lets the shared skeleton reconstruct verbatim text and trivia.
+//! What is `.pmc`-specific lives entirely here: which token kinds are
+//! trivia (comments, mapped to their line/block kinds), and which end
+//! rule each kind takes — doc/attention lines run to end-of-line
+//! (their payload is normalized, so no char count exists), Eof is
+//! empty at its start, everything else advances the lexer's own
+//! char-counted `len`.
+
+use mtc_core::syntax::{EndRule, LayoutToken, TokenClass};
 
 use crate::lexer::{CommentKind, Token, TokenKind};
 
 use super::kinds::PmcKind;
 
-pub struct SigLayout {
-    /// Verbatim source text of this significant token ("" for Eof).
-    pub text: String,
-    /// Trivia pieces between the previous significant token and this
-    /// one, in source order: whitespace runs and comment tokens.
-    pub trivia_before: Vec<(PmcKind, String)>,
-}
-
-/// Byte offset of each (line, col) token start, computed by one pass
-/// over the source tracking 1-based line and char column.
-fn start_offsets(source: &str, tokens: &[Token]) -> Vec<usize> {
-    let mut offsets = Vec::with_capacity(tokens.len());
-    let mut ti = 0;
-    let mut line: u32 = 1;
-    let mut col: u32 = 1;
-    for (byte, ch) in source.char_indices() {
-        while ti < tokens.len() && tokens[ti].line == line && tokens[ti].col == col {
-            offsets.push(byte);
-            ti += 1;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    // Eof (and any token starting exactly at end-of-text).
-    while ti < tokens.len() {
-        assert!(
-            matches!(tokens[ti].kind, TokenKind::Eof),
-            "unplaced non-Eof token at {}:{}",
-            tokens[ti].line,
-            tokens[ti].col
-        );
-        offsets.push(source.len());
-        ti += 1;
-    }
-    offsets
-}
-
-/// End byte of token `i`: start + `len` chars for ordinary tokens and
-/// comments (`Comment::text` is verbatim, `len` counts its chars); for
-/// doc/attention lines the payload is normalized, so the token runs to
-/// the end of its source line instead.
-fn end_offset(source: &str, token: &Token, start: usize) -> usize {
-    match &token.kind {
-        TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => source[start..]
-            .find('\n')
-            .map(|nl| start + nl)
-            .unwrap_or(source.len()),
-        TokenKind::Eof => start,
-        _ => {
-            let mut it = source[start..].char_indices();
-            for _ in 0..token.len {
-                it.next();
-            }
-            it.next().map(|(o, _)| start + o).unwrap_or(source.len())
-        }
-    }
-}
+/// The `.pmc` layout entry — core's, with this crate's kind space.
+pub type SigLayout = mtc_core::syntax::SigLayout<PmcKind>;
 
 pub fn layout(source: &str, tokens: &[Token]) -> Vec<SigLayout> {
-    let starts = start_offsets(source, tokens);
-    let mut entries = Vec::new();
-    let mut pending: Vec<(PmcKind, String)> = Vec::new();
-    let mut cursor = 0usize;
-    for (i, t) in tokens.iter().enumerate() {
-        let start = starts[i];
-        let gap = &source[cursor..start];
-        assert!(
-            gap.chars().all(char::is_whitespace),
-            "non-whitespace between tokens at byte {cursor}: {gap:?}"
-        );
-        if !gap.is_empty() {
-            pending.push((PmcKind::Whitespace, gap.to_string()));
-        }
-        let end = end_offset(source, t, start);
-        let text = &source[start..end];
-        cursor = end;
-        match &t.kind {
-            TokenKind::Comment(c) => {
-                debug_assert_eq!(text, c.text, "comment slice vs lexer text");
-                let kind = match c.kind {
+    let facts: Vec<LayoutToken<PmcKind>> = tokens
+        .iter()
+        .map(|t| LayoutToken {
+            line: t.line,
+            col: t.col,
+            end: match &t.kind {
+                TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => EndRule::ToLineEnd,
+                TokenKind::Eof => EndRule::AtStart,
+                _ => EndRule::Chars(t.len),
+            },
+            class: match &t.kind {
+                TokenKind::Comment(c) => TokenClass::Trivia(match c.kind {
                     CommentKind::Line => PmcKind::LineComment,
                     CommentKind::Block => PmcKind::BlockComment,
-                };
-                pending.push((kind, text.to_string()));
-            }
-            _ => {
-                entries.push(SigLayout {
-                    text: text.to_string(),
-                    trivia_before: std::mem::take(&mut pending),
-                });
-            }
-        }
-    }
-    assert!(pending.is_empty(), "trivia after Eof");
-    assert_eq!(cursor, source.len(), "source tail not covered");
-    entries
+                }),
+                _ => TokenClass::Significant,
+            },
+        })
+        .collect();
+    mtc_core::syntax::layout(source, &facts, PmcKind::Whitespace)
 }
 
 #[cfg(test)]

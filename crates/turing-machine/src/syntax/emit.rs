@@ -1,82 +1,17 @@
-//! Green emission for the `.tmc` parser: a `TreeBuilder` fed from a
-//! [`super::SigLayout`] schedule. The parser stays the single owner
-//! of grammar decisions — the sink only mirrors token consumption and
+//! Green emission for the `.tmc` parser — core's language-agnostic
+//! [`GreenSink`] instantiated over this crate's kind space
+//! (docs/core.md (syntax trees)). The parser stays the single owner of
+//! grammar decisions — the sink only mirrors token consumption and
 //! node boundaries, so the green tree and the parser's errors can
-//! never disagree (docs/core.md (syntax trees)). Ported from the
-//! sibling `.pmc` crate's sink of the same name — the mechanism is
-//! language-independent.
-
-use std::rc::Rc;
-
-use mtc_core::syntax::{Checkpoint, GreenNode, TreeBuilder};
+//! never disagree. The sink's own mechanics are unit-tested in core
+//! against a fake kind space; the tests kept here drive the sink
+//! through this crate's REAL lexer and layout adapter — the
+//! integration the fake-kind tests cannot cover.
 
 use super::kinds::TmcKind;
-use super::layout::SigLayout;
 
-pub struct GreenSink {
-    builder: TreeBuilder,
-    entries: Vec<SigLayout>,
-    /// First significant-token index whose trivia is not yet emitted.
-    flushed_upto: usize,
-}
-
-impl GreenSink {
-    pub fn new(entries: Vec<SigLayout>) -> GreenSink {
-        GreenSink {
-            builder: TreeBuilder::new(),
-            entries,
-            flushed_upto: 0,
-        }
-    }
-
-    /// Emit `trivia_before[pos]` into the currently open node, once.
-    /// Idempotent — a later call at the same or an already-flushed
-    /// `pos` is a no-op, so callers needn't track whether some other
-    /// helper already flushed this position.
-    pub fn flush(&mut self, pos: usize) {
-        if self.flushed_upto > pos {
-            return;
-        }
-        debug_assert_eq!(self.flushed_upto, pos, "trivia flushed out of order");
-        for (kind, text) in std::mem::take(&mut self.entries[pos].trivia_before) {
-            self.builder.token(kind.into(), text);
-        }
-        self.flushed_upto = pos + 1;
-    }
-
-    /// Flush, then emit significant token `pos` verbatim.
-    pub fn token(&mut self, pos: usize, kind: TmcKind) {
-        self.flush(pos);
-        let text = std::mem::take(&mut self.entries[pos].text);
-        debug_assert!(!text.is_empty(), "significant token {pos} emitted twice");
-        self.builder.token(kind.into(), text);
-    }
-
-    pub fn start(&mut self, kind: TmcKind) {
-        self.builder.start_node(kind.into());
-    }
-
-    pub fn finish(&mut self) {
-        self.builder.finish_node();
-    }
-
-    pub fn checkpoint(&self) -> Checkpoint {
-        self.builder.checkpoint()
-    }
-
-    pub fn start_at(&mut self, cp: Checkpoint, kind: TmcKind) {
-        self.builder.start_node_at(cp, kind.into());
-    }
-
-    /// Emit the trailing trivia (the Eof entry's schedule) and close.
-    /// Call with the root node still open — this flushes the tail,
-    /// finishes the root, and closes the build.
-    pub fn finish_tree(mut self, pos_after_last: usize) -> Rc<GreenNode> {
-        self.flush(pos_after_last);
-        self.builder.finish_node();
-        self.builder.finish()
-    }
-}
+/// The `.tmc` green sink — core's, with this crate's kind space.
+pub type GreenSink = mtc_core::syntax::GreenSink<TmcKind>;
 
 #[cfg(test)]
 mod tests {
@@ -84,11 +19,7 @@ mod tests {
     use crate::lexer::{LexMode, lex_with};
     use crate::syntax::kinds::TmcKind;
     use crate::syntax::layout::layout;
-    use mtc_core::syntax::{SyntaxNode, debug_dump};
-
-    fn kind_name(kind: mtc_core::syntax::SyntaxKind) -> String {
-        super::super::kind_name(kind).to_string()
-    }
+    use mtc_core::syntax::SyntaxNode;
 
     /// A sink driven by hand reproduces the source exactly. This is the
     /// lossless law one level up from `layout`: the builder must place
@@ -122,28 +53,6 @@ mod tests {
         let green = sink.finish_tree(sig.len() - 1);
         let root = SyntaxNode::new_root(green);
         assert_eq!(root.text(), src, "the sink lost or reordered source");
-    }
-
-    /// `token` refuses to re-emit an already-taken significant position.
-    /// The second call's own `flush(0)` is a no-op (idempotent — see
-    /// `flush`'s doc comment), so by the time it reaches
-    /// `mem::take(&mut entries[0].text)` that slot is already `""` and
-    /// the assert fires. This is the guard that (mis-aimed, at the Eof
-    /// entry rather than a re-taken one) is what actually caught Step
-    /// 1's index-drift bug during development — see
-    /// `a_hand_driven_sink_reproduces_the_source`'s doc comment.
-    #[test]
-    #[cfg(debug_assertions)] // the guard is a debug_assert; release strips it
-    #[should_panic(expected = "emitted twice")]
-    fn a_token_emitted_twice_is_caught() {
-        let entries = vec![SigLayout {
-            text: "a".to_string(),
-            trivia_before: vec![],
-        }];
-        let mut sink = GreenSink::new(entries);
-        sink.start(TmcKind::Root);
-        sink.token(0, TmcKind::Ident);
-        sink.token(0, TmcKind::Ident);
     }
 
     /// A checkpoint started retroactively wraps tokens already emitted —
@@ -186,45 +95,6 @@ mod tests {
             doc_run.text(),
             "? doc",
             "the DocRun node did not actually contain the doc-line token"
-        );
-    }
-
-    /// Direct unit exercise of the sink alone (no lexer/layout schedule
-    /// involved beyond a two-entry stub): `IDENT@0..1 "a"` with one
-    /// space of leading trivia before it, checkpoint-wrapped
-    /// retroactively into a NAMESPACE node. Ported from the sibling
-    /// `.pmc` crate's test of the same name — `PmcKind::File` becomes
-    /// `TmcKind::Root`, everything else carries over unchanged. Also
-    /// covers `flush`'s idempotence directly: `flush(0)` runs first,
-    /// then `token(0, ..)` flushes the SAME position again before
-    /// taking the text — a no-op on the trivia side, proven by the
-    /// dump showing the leading space exactly once.
-    #[test]
-    fn sink_builds_a_minimal_tree_with_checkpoint_wrap() {
-        let entries = vec![
-            SigLayout {
-                text: "a".to_string(),
-                trivia_before: vec![(TmcKind::Whitespace, " ".to_string())],
-            },
-            SigLayout {
-                text: String::new(),
-                trivia_before: vec![],
-            },
-        ];
-        let mut sink = GreenSink::new(entries);
-        sink.start(TmcKind::Root);
-        let cp = sink.checkpoint();
-        sink.flush(0);
-        sink.start_at(cp, TmcKind::Namespace);
-        sink.token(0, TmcKind::Ident);
-        sink.finish(); // Namespace
-        let tree = sink.finish_tree(1);
-        let root = SyntaxNode::new_root(tree);
-        assert_eq!(root.text(), " a");
-        let dump = debug_dump(&root, &kind_name);
-        assert_eq!(
-            dump,
-            "ROOT@0..2\n  NAMESPACE@0..2\n    WHITESPACE@0..1 \" \"\n    IDENT@1..2 \"a\"\n"
         );
     }
 }

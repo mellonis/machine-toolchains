@@ -1,12 +1,10 @@
-//! Source layout for the green tree: verbatim per-token text and the
-//! trivia (whitespace + comments) between tokens, reconstructed from
-//! the UNCHANGED lexer's output plus the source text. Token start
-//! positions (1-based line, 1-based char column) are trusted; ends are
-//! derived per kind and validated by the invariant that everything
-//! between two tokens is whitespace. The concatenation of all pieces
-//! is the source, byte for byte — the green tree's lossless law
-//! starts here. Ported from the sibling `.pmc` crate's pass of the
-//! same name.
+//! Source layout for the green tree — the `.tmc` adapter over core's
+//! language-agnostic layout pass (docs/core.md (syntax trees)): builds
+//! per-token [`LayoutToken`] facts from the UNCHANGED lexer's output
+//! and lets the shared skeleton reconstruct verbatim text and trivia.
+//! What is `.tmc`-specific lives entirely here: which token kinds are
+//! trivia (comments, mapped through [`token_kind`]), and which end
+//! rule each kind takes.
 //!
 //! Three `.tmc` token kinds carry a source spelling that differs from
 //! their payload — [`TokenKind::Glyph`]'s decoded content,
@@ -15,122 +13,45 @@
 //! the lexer's own [`Token::len`] already counts SOURCE characters for
 //! every one of them (quotes and escape backslashes for a glyph, the
 //! digit spelling including leading zeros for a number, 2 vs 1 for an
-//! operator and its sibling), so the single per-kind end derivation
-//! below needs no extra case for any of the three: advancing `len`
-//! source characters from the start already lands past the closing
-//! quote, past the last written digit, or past the second operator
-//! character, exactly as it does for every other token.
+//! operator and its sibling), so the per-kind end derivation below
+//! needs no extra case for any of the three: advancing `len` source
+//! characters from the start already lands past the closing quote,
+//! past the last written digit, or past the second operator character.
+//!
+//! Doc/attention lines get the explicit end-of-line rule instead — not
+//! because `len` is unusable there: the lexer computes it from the
+//! RAW, unstripped line before normalizing the payload, so it already
+//! counts the same source characters. The special case decouples this
+//! pass from that coincidence, so a future lexer change coupling `len`
+//! to the normalized payload could not silently corrupt it.
+
+use mtc_core::syntax::{EndRule, LayoutToken, TokenClass};
 
 use crate::lexer::{Token, TokenKind};
 
 use super::kinds::{TmcKind, token_kind};
 
-pub struct SigLayout {
-    /// Verbatim source text of this significant token ("" for Eof).
-    pub text: String,
-    /// Trivia pieces between the previous significant token and this
-    /// one, in source order: whitespace runs and comment tokens.
-    pub trivia_before: Vec<(TmcKind, String)>,
-}
-
-/// Byte offset of each (line, col) token start, computed by one pass
-/// over the source tracking 1-based line and char column.
-fn start_offsets(source: &str, tokens: &[Token]) -> Vec<usize> {
-    let mut offsets = Vec::with_capacity(tokens.len());
-    let mut ti = 0;
-    let mut line: u32 = 1;
-    let mut col: u32 = 1;
-    for (byte, ch) in source.char_indices() {
-        while ti < tokens.len() && tokens[ti].line == line && tokens[ti].col == col {
-            offsets.push(byte);
-            ti += 1;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    // Eof (and any token starting exactly at end-of-text).
-    while ti < tokens.len() {
-        assert!(
-            matches!(tokens[ti].kind, TokenKind::Eof),
-            "unplaced non-Eof token at {}:{}",
-            tokens[ti].line,
-            tokens[ti].col
-        );
-        offsets.push(source.len());
-        ti += 1;
-    }
-    offsets
-}
-
-/// End byte of token `i`: start + `len` chars for ordinary tokens
-/// (`len` is already a source-character count for every kind — see
-/// the module doc comment for `Glyph`, `Number` and the two-character
-/// operators specifically). Doc/attention lines get an explicit
-/// end-of-line rule instead — not because `len` is unusable there:
-/// the lexer computes it from the RAW, unstripped line before
-/// normalizing the payload (one leading space dropped after the
-/// sigil), so it already counts the same source characters the
-/// generic path would advance through, exactly as it does on the
-/// sibling `.pmc` side. The special case is kept anyway, ported
-/// unchanged from `.pmc`: it decouples this function from the
-/// coincidence that `len` still tracks the raw line, so a future
-/// lexer change coupling `len` to the normalized payload instead
-/// could not silently corrupt this pass.
-fn end_offset(source: &str, token: &Token, start: usize) -> usize {
-    match &token.kind {
-        TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => source[start..]
-            .find('\n')
-            .map(|nl| start + nl)
-            .unwrap_or(source.len()),
-        TokenKind::Eof => start,
-        _ => {
-            let mut it = source[start..].char_indices();
-            for _ in 0..token.len {
-                it.next();
-            }
-            it.next().map(|(o, _)| start + o).unwrap_or(source.len())
-        }
-    }
-}
+/// The `.tmc` layout entry — core's, with this crate's kind space.
+pub type SigLayout = mtc_core::syntax::SigLayout<TmcKind>;
 
 pub fn layout(source: &str, tokens: &[Token]) -> Vec<SigLayout> {
-    let starts = start_offsets(source, tokens);
-    let mut entries = Vec::new();
-    let mut pending: Vec<(TmcKind, String)> = Vec::new();
-    let mut cursor = 0usize;
-    for (i, t) in tokens.iter().enumerate() {
-        let start = starts[i];
-        let gap = &source[cursor..start];
-        assert!(
-            gap.chars().all(char::is_whitespace),
-            "non-whitespace between tokens at byte {cursor}: {gap:?}"
-        );
-        if !gap.is_empty() {
-            pending.push((TmcKind::Whitespace, gap.to_string()));
-        }
-        let end = end_offset(source, t, start);
-        let text = &source[start..end];
-        cursor = end;
-        match &t.kind {
-            TokenKind::Comment(c) => {
-                debug_assert_eq!(text, c.text, "comment slice vs lexer text");
-                pending.push((token_kind(&t.kind), text.to_string()));
-            }
-            _ => {
-                entries.push(SigLayout {
-                    text: text.to_string(),
-                    trivia_before: std::mem::take(&mut pending),
-                });
-            }
-        }
-    }
-    assert!(pending.is_empty(), "trivia after Eof");
-    assert_eq!(cursor, source.len(), "source tail not covered");
-    entries
+    let facts: Vec<LayoutToken<TmcKind>> = tokens
+        .iter()
+        .map(|t| LayoutToken {
+            line: t.line,
+            col: t.col,
+            end: match &t.kind {
+                TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => EndRule::ToLineEnd,
+                TokenKind::Eof => EndRule::AtStart,
+                _ => EndRule::Chars(t.len),
+            },
+            class: match &t.kind {
+                TokenKind::Comment(_) => TokenClass::Trivia(token_kind(&t.kind)),
+                _ => TokenClass::Significant,
+            },
+        })
+        .collect();
+    mtc_core::syntax::layout(source, &facts, TmcKind::Whitespace)
 }
 
 #[cfg(test)]
@@ -210,11 +131,11 @@ mod tests {
     /// that gap: the trivia before the first significant token must be
     /// typed, not just byte-equal. Both comment tags are asserted, not
     /// just one — a source with only a line comment leaves the
-    /// `CommentKind::Block => TmcKind::BlockComment` arm unguarded in
-    /// the direction that matters (mapping a real block comment to the
-    /// wrong tag), even though the reverse mutation (a line comment
-    /// mistagged as block) is already caught elsewhere by the two
-    /// fixtures below that pin `TmcKind::LineComment` directly.
+    /// block-comment mapping unguarded in the direction that matters
+    /// (mapping a real block comment to the wrong tag), even though the
+    /// reverse mutation (a line comment mistagged as block) is already
+    /// caught elsewhere by the two fixtures below that pin
+    /// `TmcKind::LineComment` directly.
     #[test]
     fn trivia_pieces_are_typed_and_verbatim() {
         let src = "// c\n/* b */\nalphabet ab { '_' }\n";

@@ -882,6 +882,18 @@ recursive-descent parser wrap an already-emitted prefix once it knows
 the enclosing kind. Balance errors are panics: an unbalanced build is
 a parser bug, not an input error.
 
+One level above the builder, the framework carries the shared
+green-emission pair both toolchain parsers drive: a **layout pass**
+reconstructing verbatim per-token text and the trivia between tokens
+from per-token facts the crate-side adapter supplies (position, an end
+rule, and whether the token is trivia — everything language-specific
+stays in the adapter), and a **`GreenSink`** feeding a `TreeBuilder`
+from that schedule, generic over the language's kind space. The sink
+only mirrors token consumption and node boundaries — the parser stays
+the single owner of grammar decisions — and guards itself with
+idempotent trivia flushes and an emitted-twice check on significant
+positions.
+
 Typed access goes through the `AstNode` contract: a view is a
 zero-copy wrapper over a node of a known kind, declared with the
 `ast_node!` macro and written with the `child`/`children`/`token`

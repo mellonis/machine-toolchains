@@ -370,7 +370,7 @@ pub fn parse_green_from_tokens(
     .file()?;
     Ok(sink
         .expect("parse_green_from_tokens always seeds a sink before calling file()")
-        .into_tree(eof_pos))
+        .finish_tree(eof_pos))
 }
 
 /// One line of a function's bound `?`/`!` run, plus whether a blank
