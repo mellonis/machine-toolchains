@@ -127,6 +127,36 @@ impl SyntaxNode {
         std::iter::successors(self.parent(), SyntaxNode::parent)
     }
 
+    /// The child element at `idx`, constructed alone: the offset comes
+    /// from summing the PRECEDING green children's lengths — u32
+    /// additions, no Rc-backed red element per skipped child, which is
+    /// what `children_with_tokens().nth(idx)` would allocate. The
+    /// sibling queries below loop from extraction's per-declaration
+    /// trivia walks and fmt's trivia queries, so their per-call
+    /// allocation count is what keeps top-level walks linear.
+    fn nth_child_element(&self, idx: usize) -> Option<SyntaxElement> {
+        let children = self.0.green.children();
+        let target = children.get(idx)?;
+        let mut offset = self.0.offset;
+        for c in &children[..idx] {
+            offset += c.text_len();
+        }
+        Some(match target {
+            GreenElement::Node(n) => SyntaxElement::Node(SyntaxNode(Rc::new(NodeData {
+                green: n.clone(),
+                parent: Some(self.clone()),
+                offset,
+                index: idx as u32,
+            }))),
+            GreenElement::Token(t) => SyntaxElement::Token(SyntaxToken {
+                green: t.clone(),
+                parent: self.clone(),
+                offset,
+                index: idx as u32,
+            }),
+        })
+    }
+
     /// The element immediately before this node among its parent's
     /// children, tokens included.
     pub fn prev_sibling_or_token(&self) -> Option<SyntaxElement> {
@@ -135,14 +165,14 @@ impl SyntaxNode {
         if idx == 0 {
             return None;
         }
-        parent.children_with_tokens().nth(idx - 1)
+        parent.nth_child_element(idx - 1)
     }
 
     /// The element immediately after this node among its parent's
     /// children, tokens included.
     pub fn next_sibling_or_token(&self) -> Option<SyntaxElement> {
         let parent = self.parent()?;
-        parent.children_with_tokens().nth(self.0.index as usize + 1)
+        parent.nth_child_element(self.0.index as usize + 1)
     }
 
     /// First token of the subtree, in document order.
@@ -153,19 +183,40 @@ impl SyntaxNode {
         })
     }
 
-    /// Last token of the subtree, in document order.
+    /// Last token of the subtree, in document order — one REVERSE walk
+    /// over the green children per level (offsets tracked by
+    /// subtracting lengths from the node's own end), descending only
+    /// into the nodes actually visited, so a non-empty tree pays
+    /// O(depth) constructions rather than materializing every child at
+    /// every level.
     pub fn last_token(&self) -> Option<SyntaxToken> {
-        let mut result = None;
-        for e in self.children_with_tokens() {
-            let candidate = match e {
-                SyntaxElement::Token(t) => Some(t),
-                SyntaxElement::Node(n) => n.last_token(),
-            };
-            if candidate.is_some() {
-                result = candidate;
+        let children = self.0.green.children();
+        let mut offset = self.0.offset + self.0.green.text_len();
+        for (idx, c) in children.iter().enumerate().rev() {
+            offset -= c.text_len();
+            match c {
+                GreenElement::Token(t) => {
+                    return Some(SyntaxToken {
+                        green: t.clone(),
+                        parent: self.clone(),
+                        offset,
+                        index: idx as u32,
+                    });
+                }
+                GreenElement::Node(n) => {
+                    let node = SyntaxNode(Rc::new(NodeData {
+                        green: n.clone(),
+                        parent: Some(self.clone()),
+                        offset,
+                        index: idx as u32,
+                    }));
+                    if let Some(t) = node.last_token() {
+                        return Some(t);
+                    }
+                }
             }
         }
-        result
+        None
     }
 
     /// Every token of the subtree, document order, all depths.
@@ -231,15 +282,13 @@ impl SyntaxToken {
         if idx == 0 {
             return None;
         }
-        self.parent.children_with_tokens().nth(idx - 1)
+        self.parent.nth_child_element(idx - 1)
     }
 
     /// The element immediately after this token among its parent's
     /// children, tokens included.
     pub fn next_sibling_or_token(&self) -> Option<SyntaxElement> {
-        self.parent
-            .children_with_tokens()
-            .nth(self.index as usize + 1)
+        self.parent.nth_child_element(self.index as usize + 1)
     }
 }
 
@@ -448,5 +497,47 @@ mod tests {
             .map(|t| t.text().to_string())
             .collect();
         assert_eq!(texts, vec!["f", " ", "λx", "\n"]);
+    }
+
+    /// The addressed child constructor agrees with the iterator on every
+    /// index — kind, range (offset arithmetic included, with a multibyte
+    /// token in play), and both sibling directions from every position.
+    /// This is the equivalence pin for the O(index) sibling queries: they
+    /// sum green lengths instead of materializing every earlier child,
+    /// and must land on exactly the element the full walk yields.
+    #[test]
+    fn addressed_children_agree_with_the_iterator_walk() {
+        let root = sample();
+        for holder in [root.clone()]
+            .into_iter()
+            .chain(root.children_with_tokens().filter_map(|e| match e {
+                SyntaxElement::Node(n) => Some(n),
+                SyntaxElement::Token(_) => None,
+            }))
+        {
+            let walked: Vec<SyntaxElement> = holder.children_with_tokens().collect();
+            for (i, e) in walked.iter().enumerate() {
+                let addressed = holder.nth_child_element(i).expect("in range");
+                assert_eq!(addressed.kind(), e.kind());
+                assert_eq!(addressed.text_range(), e.text_range());
+                let prev = match e {
+                    SyntaxElement::Node(n) => n.prev_sibling_or_token(),
+                    SyntaxElement::Token(t) => t.prev_sibling_or_token(),
+                };
+                let next = match e {
+                    SyntaxElement::Node(n) => n.next_sibling_or_token(),
+                    SyntaxElement::Token(t) => t.next_sibling_or_token(),
+                };
+                assert_eq!(
+                    prev.map(|p| p.text_range()),
+                    i.checked_sub(1).map(|j| walked[j].text_range())
+                );
+                assert_eq!(
+                    next.map(|n| n.text_range()),
+                    walked.get(i + 1).map(|n| n.text_range())
+                );
+            }
+            assert!(holder.nth_child_element(walked.len()).is_none());
+        }
     }
 }
