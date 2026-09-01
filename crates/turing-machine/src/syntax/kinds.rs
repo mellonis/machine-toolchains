@@ -119,6 +119,10 @@ pub enum TmcKind {
     Transition = 51,
     BindingArg = 52,
     SymMap = 53,
+    /// A recovery region: the partial parse of a broken item plus the
+    /// tokens skipped to the next sync point (`parse_green_resilient`).
+    /// Nothing reads inside one — extraction and views skip it whole.
+    Error = 54,
 }
 
 impl From<TmcKind> for SyntaxKind {
@@ -192,6 +196,7 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
         k if k == TmcKind::Transition.into() => "TRANSITION",
         k if k == TmcKind::BindingArg.into() => "BINDING_ARG",
         k if k == TmcKind::SymMap.into() => "SYM_MAP",
+        k if k == TmcKind::Error.into() => "ERROR",
         _ => "?",
     }
 }
@@ -391,7 +396,7 @@ mod tests {
     /// by the same argument.
     #[test]
     fn kind_name_never_falls_through_for_an_occupied_discriminant() {
-        for raw in (0u16..=30).chain(32u16..=53) {
+        for raw in (0u16..=30).chain(32u16..=54) {
             let name = kind_name(SyntaxKind(raw));
             assert!(!name.is_empty(), "kind {raw} has no name");
             assert_ne!(name, "?", "kind {raw} has no `kind_name` arm");

@@ -639,11 +639,52 @@ pub fn parse_green_from_tokens(
         pos: 0,
         machine_seen: false,
         sink: Some(sink),
+        recovered: None,
     }
     .file()?;
     Ok(sink
         .expect("parse_green_from_tokens always seeds a sink before calling file()")
         .finish_tree(eof_pos))
+}
+
+/// A resilient parse's product: the tree is ALWAYS built — broken
+/// regions wrapped in [`TmcKind::Error`] nodes — and lossless
+/// (`text() == source`); `errors` carries each recovery's error in
+/// source order, empty on a clean document, where the tree is
+/// byte-identical to [`parse_green_from_tokens`]'s.
+pub struct ResilientParse {
+    pub green: Rc<GreenNode>,
+    pub errors: Vec<CompileError>,
+}
+
+/// [`parse_green_from_tokens`]'s error-recovering twin (docs/core.md
+/// (syntax trees), error recovery) — the language service's entry, so
+/// the editor keeps a CURRENT tree mid-edit. The batch pipeline never
+/// calls this: its fatal contract (first error, no tree) is unchanged.
+/// The first recorded error is always the same error, kind and span,
+/// that the fatal entry reports on the same input.
+pub fn parse_green_resilient(source: &str, tokens: &[Token]) -> ResilientParse {
+    let entries = syntax::layout(source, tokens);
+    let sig = significant_tokens(tokens);
+    let eof_pos = sig.len() - 1;
+    let mut sink = GreenSink::new(entries);
+    sink.start(TmcKind::Root);
+    let parser = Parser {
+        tokens: &sig,
+        pos: 0,
+        machine_seen: false,
+        sink: Some(sink),
+        recovered: Some(Vec::new()),
+    };
+    let (sink, errors) = parser
+        .file_resilient()
+        .expect("resilient mode recovers every item error");
+    ResilientParse {
+        green: sink
+            .expect("parse_green_resilient always seeds a sink")
+            .finish_tree(eof_pos),
+        errors,
+    }
 }
 
 /// Which keyword introduced the `routine`/`graph` declaration
@@ -803,6 +844,18 @@ struct Parser<'a> {
     /// value — those helpers are then no-ops, so the underlying grammar
     /// walk is unaffected by whether a sink is attached.
     sink: Option<GreenSink>,
+    /// `Some` = resilient mode (`parse_green_resilient`): item-level
+    /// errors are recorded here and recovered from at the loop seams;
+    /// `None` = the fatal contract (every other entry).
+    recovered: Option<Vec<CompileError>>,
+}
+
+/// What one `Parser::top_item` iteration decided: the level is done
+/// (Eof at file level, or the terminator was consumed), or one item
+/// was parsed and the loop continues.
+enum Step {
+    Done,
+    Continue,
 }
 
 impl Parser<'_> {
@@ -1056,6 +1109,19 @@ impl Parser<'_> {
         Ok(self.sink)
     }
 
+    /// [`Self::file`] in resilient mode: also hands back the recovered
+    /// errors. `Err` is unreachable — every item error is recovered at
+    /// the loop seams — but the signature keeps the walk's own `?`s.
+    #[allow(clippy::type_complexity)]
+    fn file_resilient(mut self) -> Result<(Option<GreenSink>, Vec<CompileError>), CompileError> {
+        self.top_items(&[], None)?;
+        Ok((
+            self.sink,
+            self.recovered
+                .expect("file_resilient runs in resilient mode"),
+        ))
+    }
+
     /// True iff the current token starts a declaration that accepts a doc run.
     fn next_is_top_doc_accepting(&self) -> bool {
         matches!(&self.peek().kind, TokenKind::Ident(w)
@@ -1063,14 +1129,97 @@ impl Parser<'_> {
                 "export" | "alphabet" | "routine" | "graph" | "machine" | "namespace"))
     }
 
-    /// One namespace level's item loop. Consumes through the block's
-    /// closing `}` (or to EOF at file level).
+    /// One namespace level's item loop — the recovery seam
+    /// (docs/core.md (syntax trees), error recovery). Consumes through
+    /// the block's closing `}` (or to EOF at file level). In fatal mode
+    /// (`recovered: None`) an item error propagates unchanged; in
+    /// resilient mode the error is recorded, the sink unwinds to this
+    /// loop's depth, everything since the iteration's checkpoint is
+    /// retro-wrapped into an ERROR node together with the tokens
+    /// skipped to the next sync point, and the loop continues — one
+    /// broken item never takes its neighbours' parse with it. Mirrors
+    /// the sibling `.pmc` parser's wrapper of the same shape.
     fn top_items(
         &mut self,
         ns: &[String],
         terminator: Option<&TokenKind>,
     ) -> Result<(), CompileError> {
         loop {
+            let cp_for_recovery = self.g_checkpoint();
+            let depth = self.sink.as_ref().map(GreenSink::open_depth);
+            match self.top_item(ns, terminator, cp_for_recovery) {
+                Ok(Step::Done) => return Ok(()),
+                Ok(Step::Continue) => {}
+                Err(e) => {
+                    if self.recovered.is_none() {
+                        return Err(e);
+                    }
+                    self.recovered.as_mut().expect("checked above").push(e);
+                    if let (Some(sink), Some(d)) = (&mut self.sink, depth) {
+                        sink.finish_to(d);
+                    }
+                    self.g_start_at(cp_for_recovery, TmcKind::Error);
+                    self.skip_to_sync(terminator);
+                    self.g_finish(); // Error
+                    if matches!(self.peek().kind, TokenKind::Eof) {
+                        // Nothing left to resync on — an unclosed block
+                        // ends at Eof with its error recorded.
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Skip-and-emit resynchronization: consumes tokens into the open
+    /// ERROR node until a token that can start the next item (a
+    /// doc/attention line, or one of the top-level keywords), the
+    /// level's terminator (left for the loop to consume), or Eof. A `;`
+    /// is consumed INTO the region and ends it. Always makes progress:
+    /// the sync check is skipped on the first token, since a failed
+    /// parse may have consumed nothing and its own first token may
+    /// itself be a sync token.
+    fn skip_to_sync(&mut self, terminator: Option<&TokenKind>) {
+        let mut first = true;
+        loop {
+            let t = self.peek().clone();
+            if matches!(t.kind, TokenKind::Eof) {
+                return;
+            }
+            if let Some(term) = terminator
+                && &t.kind == term
+            {
+                return;
+            }
+            let sync = match &t.kind {
+                TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => true,
+                TokenKind::Ident(w) => matches!(
+                    w.as_str(),
+                    "use" | "alphabet" | "routine" | "graph" | "machine" | "namespace" | "export"
+                ),
+                _ => false,
+            };
+            if sync && !first {
+                return;
+            }
+            let semi = matches!(t.kind, TokenKind::Semi);
+            self.bump();
+            first = false;
+            if semi {
+                return;
+            }
+        }
+    }
+
+    /// One iteration of [`Self::top_items`]'s loop — the former loop
+    /// body, factored out so the recovery wrapper owns the seam.
+    fn top_item(
+        &mut self,
+        ns: &[String],
+        terminator: Option<&TokenKind>,
+        cp_for_recovery: Option<Checkpoint>,
+    ) -> Result<Step, CompileError> {
+        {
             // Green checkpoint for whichever node this item turns out to
             // be: taken at the top of the iteration, BEFORE the doc run
             // (if any) — mirrors PM's `fn_cp` placement
@@ -1083,7 +1232,7 @@ impl Parser<'_> {
             // this token starts no valid top-level declaration at all;
             // harmless, a fresh checkpoint is taken every loop
             // iteration.
-            let cp = self.g_checkpoint();
+            let cp = cp_for_recovery;
             if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
@@ -1100,13 +1249,13 @@ impl Parser<'_> {
             }
             let t = self.peek().clone();
             match (&t.kind, terminator) {
-                (TokenKind::Eof, None) => return Ok(()),
+                (TokenKind::Eof, None) => return Ok(Step::Done),
                 (TokenKind::Eof, Some(_)) => {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
                 (k, Some(term)) if k == term => {
                     self.bump();
-                    return Ok(());
+                    return Ok(Step::Done);
                 }
                 _ => {}
             }
@@ -1189,6 +1338,7 @@ impl Parser<'_> {
                 _ => return Err(Self::expected(&t, "a top-level declaration")),
             }
         }
+        Ok(Step::Continue)
     }
 
     fn parse_use(&mut self) -> Result<(), CompileError> {
@@ -2324,6 +2474,7 @@ fn bare_parser(tokens: &[Token]) -> Parser<'_> {
         pos: 0,
         machine_seen: false,
         sink: None,
+        recovered: None,
     }
 }
 
