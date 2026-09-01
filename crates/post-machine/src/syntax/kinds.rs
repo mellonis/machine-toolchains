@@ -47,6 +47,10 @@ pub enum PmcKind {
     Label = 39,
     Item = 40,
     CheckArm = 41,
+    /// A recovery region: the partial parse of a broken item plus the
+    /// tokens skipped to the next sync point (`parse_green_resilient`).
+    /// Nothing reads inside one — extraction and views skip it whole.
+    Error = 42,
 }
 
 impl From<PmcKind> for SyntaxKind {
@@ -86,6 +90,7 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
         k if k == PmcKind::Label.into() => "LABEL",
         k if k == PmcKind::Item.into() => "ITEM",
         k if k == PmcKind::CheckArm.into() => "CHECK_ARM",
+        k if k == PmcKind::Error.into() => "ERROR",
         _ => "?",
     }
 }
