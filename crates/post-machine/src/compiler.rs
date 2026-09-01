@@ -482,6 +482,13 @@ pub(crate) struct StagedAnalysis {
     /// trees)); `None` when lexing or parsing failed. The `.pmc` language
     /// service's position walks index by byte range against this tree.
     pub green: Option<Rc<GreenNode>>,
+    /// The RESILIENT parse's tree (docs/core.md (syntax trees), error
+    /// recovery), built exactly when `green` is `None` for a
+    /// parse-stage fatal: lossless over the current text, broken
+    /// regions wrapped in ERROR nodes. Green-tier features that can
+    /// tolerate a partial tree (symbols) fall back to it; everything
+    /// keyed to a CLEAN parse (formatting) reads `green` alone.
+    pub recovered_green: Option<Rc<GreenNode>>,
     /// `None` if any stage failed (parse, duplicate-binding check, or
     /// lowering).
     pub analysis: Option<Analysis>,
@@ -504,6 +511,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
             return StagedAnalysis {
                 tokens: None,
                 green: None,
+                recovered_green: None,
                 analysis: None,
                 fatal: Some(fatal),
             };
@@ -512,9 +520,19 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
     let green = match crate::parser::parse_green_from_tokens(source, &lexed) {
         Ok(green) => green,
         Err(fatal) => {
+            // A parse-stage fatal no longer costs the editor its tree:
+            // the resilient parse (docs/core.md (syntax trees), error
+            // recovery) wraps the broken regions in ERROR nodes and
+            // keeps the rest — the green-tier features answer from the
+            // CURRENT text. The fatal itself is unchanged (it equals
+            // the resilient parse's first error by that entry's own
+            // contract), and every later stage stays degraded exactly
+            // as before.
+            let resilient = crate::parser::parse_green_resilient(source, &lexed);
             return StagedAnalysis {
                 tokens: Some(lexed),
                 green: None,
+                recovered_green: Some(resilient.green),
                 analysis: None,
                 fatal: Some(fatal),
             };
@@ -527,6 +545,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         return StagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
+            recovered_green: None,
             analysis: None,
             fatal: Some(fatal),
         };
@@ -542,6 +561,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         Ok((_ir, warnings)) => StagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
+            recovered_green: None,
             analysis: Some(Analysis {
                 ast: program,
                 scopes,
@@ -554,6 +574,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         Err(fatal) => StagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
+            recovered_green: None,
             analysis: None,
             fatal: Some(fatal),
         },

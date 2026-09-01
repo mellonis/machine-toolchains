@@ -206,6 +206,13 @@ pub(crate) struct DocState {
     /// `document_symbols` and by `quickfix.rs`'s `state_stub`, both
     /// indexing into the SAME tree by byte range rather than reparsing.
     pub(crate) green: Option<Rc<GreenNode>>,
+    /// The resilient parse's tree (docs/core.md (syntax trees), error
+    /// recovery), `Some` exactly when a parse-stage fatal left `green`
+    /// `None`: lossless over the CURRENT text, broken regions wrapped
+    /// in ERROR nodes. Symbols fall back to it; formatting,
+    /// `state_stub`, and every clean-parse-keyed feature read `green`
+    /// alone.
+    pub(crate) recovered_green: Option<Rc<GreenNode>>,
     /// The flat program — survives a resolve-stage fatal.
     pub(crate) program: Option<Program>,
     /// The resolved module (`None` when any stage up to resolve failed).
@@ -279,6 +286,7 @@ fn assert_every_other_docstate_field_is_send(state: DocState) {
         line_index,
         tokens,
         green: _,
+        recovered_green: _,
         program,
         resolved,
         warnings,
@@ -806,6 +814,7 @@ impl LanguageService for TmcLanguageService {
             line_index: TextLineIndex::new(text),
             tokens: staged.tokens,
             green: staged.green,
+            recovered_green: staged.recovered_green,
             program: staged.program,
             resolved: staged.resolved,
             warnings: staged.diagnostics,
@@ -891,11 +900,13 @@ impl LanguageService for TmcLanguageService {
 
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
         // Green-tier: answered as long as parsing succeeded, even if the
-        // resolve or expansion stage then fatals. Indexes `state.green`
-        // directly — the tree `analyze_staged` already built — rather
-        // than reparsing the token stream.
+        // resolve or expansion stage then fatals — and, one tier further
+        // down, from the RESILIENT tree on a parse-stage fatal
+        // (docs/core.md (syntax trees), error recovery): the
+        // declarations around a broken region keep their symbols, from
+        // the CURRENT text. `None` only when lexing itself failed.
         let state = self.docs.get(uri)?;
-        let green = state.green.as_ref()?;
+        let green = state.green.as_ref().or(state.recovered_green.as_ref())?;
         let root = RootView::cast(SyntaxNode::new_root(Rc::clone(green)))?;
         let index = &state.line_index;
         Some(tree_symbols(root.items(), index))

@@ -1827,6 +1827,23 @@ fn a_lint_finding_that_carries_a_fix_becomes_an_action() {
 
 // -- symbols, tokens, formatting -----------------------------------------
 
+/// The resilient tier (docs/core.md (syntax trees), error recovery): a
+/// document broken mid-edit still lists the OTHER declarations'
+/// symbols, from the CURRENT text — `ab` keeps its symbol while the
+/// second alphabet's header is broken.
+#[test]
+fn document_symbols_answer_from_the_resilient_tree_on_a_parse_failure() {
+    let (mut service, uri) = opened("alphabet ab { '_' }\nalphabet { '0' }\n");
+    let symbols = service
+        .document_symbols(&uri)
+        .expect("symbols answer from the resilient tree");
+    assert!(
+        symbols.iter().any(|s| s.name == "ab"),
+        "the surviving declaration keeps its symbol, got {:?}",
+        symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn document_symbols_name_the_alphabets_worlds_and_their_members() {
     let (mut service, uri) = opened(CROSS_WORLD);

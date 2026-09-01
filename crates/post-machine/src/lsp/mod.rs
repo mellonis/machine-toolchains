@@ -170,6 +170,12 @@ struct DocState {
     /// construction, and this field is what pins that — `Rc` is
     /// `!Send`, so `DocState` cannot cross a thread boundary either.
     green: Option<Rc<GreenNode>>,
+    /// The resilient parse's tree (docs/core.md (syntax trees), error
+    /// recovery), `Some` exactly when a parse-stage fatal left `green`
+    /// `None`: lossless over the CURRENT text, broken regions wrapped
+    /// in ERROR nodes. Symbols fall back to it; formatting and every
+    /// clean-parse-keyed feature read `green` alone.
+    recovered_green: Option<Rc<GreenNode>>,
     /// Post-parse analysis of the current text (`None` when any stage
     /// failed).
     analysis: Option<Analysis>,
@@ -609,6 +615,7 @@ impl LanguageService for PmcLanguageService {
             line_index: TextLineIndex::new(text),
             tokens: staged.tokens,
             green: staged.green,
+            recovered_green: staged.recovered_green,
             analysis: staged.analysis,
             lint,
             fatal: staged.fatal,
@@ -722,9 +729,14 @@ impl LanguageService for PmcLanguageService {
 
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
         // Parse-tier: answered as long as parsing succeeded, even if a
-        // later stage (duplicate-binding check, `ir::lower`) fatals.
+        // later stage (duplicate-binding check, `ir::lower`) fatals —
+        // and, one tier further down, from the RESILIENT tree on a
+        // parse-stage fatal (docs/core.md (syntax trees), error
+        // recovery): the declarations around a broken region keep their
+        // symbols, from the CURRENT text. `None` only when lexing
+        // itself failed.
         let state = self.docs.get(uri)?;
-        let green = state.green.as_ref()?;
+        let green = state.green.as_ref().or(state.recovered_green.as_ref())?;
         let root = SyntaxNode::new_root(Rc::clone(green));
         let file = FileView::cast(root).expect("root is FILE");
         Some(tree_symbols(file.items(), &state.line_index))
@@ -1888,9 +1900,32 @@ export main() {
     }
 
     #[test]
-    fn document_symbols_none_when_parsing_failed() {
+    fn document_symbols_answer_from_the_resilient_tree_on_a_parse_failure() {
+        // The resilient tier (docs/core.md (syntax trees), error
+        // recovery): a document broken mid-edit still lists the OTHER
+        // declarations' symbols, from the CURRENT text — here `helper`
+        // shows its current name while the `main(` header is broken.
         let mut service = PmcLanguageService::new();
-        service.did_update("untitled:Untitled-1", "main( {");
+        service.did_update(
+            "untitled:Untitled-1",
+            "main( {\nhelper() {\n 1: right;\n}\n",
+        );
+        let symbols = service
+            .document_symbols("untitled:Untitled-1")
+            .expect("symbols answer from the resilient tree");
+        assert!(
+            symbols.iter().any(|s| s.name == "helper"),
+            "the surviving declaration keeps its symbol, got {:?}",
+            symbols.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// Only a LEX failure leaves symbols unanswered — there is no token
+    /// stream to build any tree from.
+    #[test]
+    fn document_symbols_none_when_lexing_failed() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", "main() { 1: right; } @");
         assert_eq!(service.document_symbols("untitled:Untitled-1"), None);
     }
 

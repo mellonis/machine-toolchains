@@ -894,6 +894,20 @@ the single owner of grammar decisions — and guards itself with
 idempotent trivia flushes and an emitted-twice check on significant
 positions.
 
+**Error recovery.** The sink also tracks its open-node depth
+(`open_depth`/`finish_to`), which is what a parser's resilient entry
+builds on: each toolchain offers a `parse_green_resilient` beside its
+fatal parse, recovering at top-level item boundaries — on an item
+error the sink unwinds to the loop's depth, everything since the
+iteration's checkpoint plus the tokens skipped to the next sync point
+is retro-wrapped into an `Error`-kind node, the error is recorded, and
+the loop continues. Any input that lexes therefore yields a lossless
+tree; the first recorded error always equals the fatal entry's, and on
+a clean document the two entries build the identical tree. The batch
+pipelines never call the resilient entry — first error, no tree stays
+their contract; the language services use it so green-tier features
+answer from the current text mid-edit (docs/lsp.md).
+
 Typed access goes through the `AstNode` contract: a view is a
 zero-copy wrapper over a node of a known kind, declared with the
 `ast_node!` macro and written with the `child`/`children`/`token`

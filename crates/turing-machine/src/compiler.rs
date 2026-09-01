@@ -1261,6 +1261,14 @@ pub(crate) struct TmcStagedAnalysis {
     /// `lsp/quickfix.rs`), both indexing into it by byte range rather
     /// than reparsing.
     pub green: Option<Rc<GreenNode>>,
+    /// The RESILIENT parse's tree (docs/core.md (syntax trees), error
+    /// recovery), built exactly when `green` is `None` for a
+    /// parse-stage fatal: lossless over the current text, broken
+    /// regions wrapped in ERROR nodes. Green-tier features that can
+    /// tolerate a partial tree (symbols) fall back to it; everything
+    /// keyed to a CLEAN parse (formatting, `state_stub`) reads `green`
+    /// alone.
+    pub recovered_green: Option<Rc<GreenNode>>,
     /// The flat program, extracted from the green tree — present whenever
     /// the green parse succeeded, retained even when the resolve stage then
     /// fails.
@@ -1300,6 +1308,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
             return TmcStagedAnalysis {
                 tokens: None,
                 green: None,
+                recovered_green: None,
                 program: None,
                 resolved: None,
                 diagnostics: Vec::new(),
@@ -1310,9 +1319,19 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
     let green = match parse_green_from_tokens(source, &tokens) {
         Ok(green) => green,
         Err(fatal) => {
+            // A parse-stage fatal no longer costs the editor its tree:
+            // the resilient parse (docs/core.md (syntax trees), error
+            // recovery) wraps the broken regions in ERROR nodes and
+            // keeps the rest — the green-tier features answer from the
+            // CURRENT text. The fatal itself is unchanged (it equals
+            // the resilient parse's first error by that entry's own
+            // contract), and every later stage stays degraded exactly
+            // as before.
+            let resilient = crate::parser::parse_green_resilient(source, &tokens);
             return TmcStagedAnalysis {
                 tokens: Some(tokens),
                 green: None,
+                recovered_green: Some(resilient.green),
                 program: None,
                 resolved: None,
                 diagnostics: Vec::new(),
@@ -1326,6 +1345,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
+            recovered_green: None,
             program: Some(program),
             resolved: Some(resolved),
             diagnostics,
@@ -1334,6 +1354,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
         Err(fatal) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
+            recovered_green: None,
             program: Some(program),
             resolved: None,
             diagnostics: Vec::new(),

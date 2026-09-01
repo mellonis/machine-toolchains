@@ -132,6 +132,17 @@ moment a bracket is unbalanced is useless, and mid-edit is exactly when
 completion matters. Only names and glyphs can ever be one edit old;
 nothing positional is ever retained.
 
+Below the parse tier sits one more: on a parse-stage fatal each source
+service also holds the **resilient parse**'s tree (docs/core.md (syntax
+trees), error recovery) — lossless over the current text, broken
+regions wrapped in error nodes. Document symbols answer from it, so
+the declarations around a broken region keep their symbols from the
+CURRENT text, positions included; only a lex failure leaves them
+unanswered. Formatting deliberately does NOT: canonical layout over an
+error region is undefined, and silently reformatting around broken
+text on save would be worse than refusing, so `format` keeps requiring
+a clean parse.
+
 The stages differ per language, so each service's tier table lives in its
 own profile below. The two assembly services stage differently from the
 two source services in one structural way: their assembly CST is
@@ -768,8 +779,8 @@ or not.
 | Go-to-definition | a full successful analysis (the resolution table) | `null` |
 | Code actions (quickfixes) | a full successful analysis (lint ran) | empty list |
 | Semantic tokens | a full successful analysis (resolution-aware) | `null` — clients keep the previous tokens or static grammar coloring |
-| Document symbols | a successful parse (the tree only) | `null` |
-| Formatting | a successful parse (the tree only) | `null` — the parse error is already on screen as a diagnostic |
+| Document symbols | a lexable document (the resilient tree; **Staged analysis**, above) | `null` only on a lex failure — a parse-broken document still lists the declarations around the broken region |
+| Formatting | a successful parse (the CLEAN tree only — deliberate; **Staged analysis**, above) | `null` — the parse error is already on screen as a diagnostic |
 | Cross-file overlay (completion, hover, go-to-definition, the `undeclared-external` refinement) | membership in a declared project target (**Cross-file resolution (the project overlay)**, above) | the single-file view described everywhere above |
 
 ### Materialized standard library
@@ -834,8 +845,8 @@ service adds for its fatal (**Diagnostics**, above).
 | Go-to-definition | a successful parse | `null` |
 | Code actions (quickfixes) | a fatal the service knows how to repair, overlapping the request | empty list |
 | Semantic tokens | the source lexes | `null` |
-| Document symbols | a successful parse (the tree only) | `null` |
-| Formatting | a successful parse (the tree only) | `null` — the parse error is already on screen as a diagnostic |
+| Document symbols | a lexable document (the resilient tree; **Staged analysis**, above) | `null` only on a lex failure — a parse-broken document still lists the declarations around the broken region |
+| Formatting | a successful parse (the CLEAN tree only — deliberate; **Staged analysis**, above) | `null` — the parse error is already on screen as a diagnostic |
 | Cross-file overlay (completion, hover, go-to-definition, the `undeclared-external` refinement) | membership in a declared project target (**Cross-file resolution (the project overlay)**, above) — semantic tokens are NOT part of this row: `.tmc`'s legend has no resolution tier for the overlay to extend | the single-file view described everywhere above |
 
 Two of those tiers are lower than the `.pmc` equivalents, deliberately.

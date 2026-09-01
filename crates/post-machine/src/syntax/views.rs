@@ -49,16 +49,22 @@ fn cast_top(node: SyntaxNode) -> Option<TopView> {
 /// filtered, because every consumer of this iterator treats a short
 /// list as "the file had fewer items".
 fn top_items(node: &SyntaxNode) -> impl Iterator<Item = TopView> + '_ {
-    node.children().filter_map(|child| {
-        let kind = child.kind();
-        let top = cast_top(child);
-        debug_assert!(
-            top.is_some(),
-            "unexpected node kind at top level: {:?}",
-            kind
-        );
-        top
-    })
+    node.children()
+        // A resilient parse's recovery region (docs/core.md (syntax
+        // trees), error recovery): nothing reads inside one — the
+        // items walk skips it whole, so the green-tier features see
+        // the declarations around a broken region.
+        .filter(|child| child.kind() != PmcKind::Error.into())
+        .filter_map(|child| {
+            let kind = child.kind();
+            let top = cast_top(child);
+            debug_assert!(
+                top.is_some(),
+                "unexpected node kind at top level: {:?}",
+                kind
+            );
+            top
+        })
 }
 
 impl FileView {

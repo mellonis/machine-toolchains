@@ -147,7 +147,14 @@ impl TopView {
 /// only USE / ALPHABET / REUSE / MACHINE / NAMESPACE.
 fn top_items(node: &SyntaxNode) -> impl Iterator<Item = TopView> + '_ {
     node.children()
-        .filter(|child| child.kind() != TmcKind::DocRun.into())
+        .filter(|child| {
+            // DocRun: see above. Error: a resilient parse's recovery
+            // region (docs/core.md (syntax trees), error recovery) —
+            // nothing reads inside one; the items walk skips it whole,
+            // so the green-tier features see the declarations around a
+            // broken region.
+            child.kind() != TmcKind::DocRun.into() && child.kind() != TmcKind::Error.into()
+        })
         .filter_map(|child| {
             let kind = child.kind();
             let top = TopView::cast(child);
