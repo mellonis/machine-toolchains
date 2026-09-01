@@ -36,34 +36,37 @@
 //! each still answers over a document that fails to assemble — mid-edit is
 //! exactly when they matter most.
 //!
-//! # Recovering line structure from a `.tma` CST
+//! # Line structure comes from the green tree
 //!
-//! `AsmCst` is flat, and `AsmComment` alone carries no line of its own. The
-//! `.pma` service recovers the missing lines by zipping items against the
-//! source's non-blank lines, one item per line. **That invariant does not hold
-//! for `.tma`**: `tm1_syntax()` turns the `.rept` capability on, and a `.rept`
-//! … `.endr` block collapses many source lines into ONE item whose body items
-//! nest inside it. [`flatten`] therefore walks the tree instead, taking each
-//! item's line from its own span and consuming a non-blank line only for the
-//! one shape that has no span to read — a comment. Nested `.rept` bodies are
-//! flattened in place, so a cursor inside a macro body classifies against the
-//! body line it is really on.
+//! `AsmCst` is flat, `AsmComment` alone carries no line of its own, and
+//! `tm1_syntax()` turns the `.rept` capability on — so a `.rept` … `.endr`
+//! block is ONE item spanning many source lines with its body items nested
+//! inside it. The service parses through `parse_asm_green`, and [`flatten`]
+//! takes every item's line from the lossless tree built alongside the CST
+//! (docs/core.md (syntax trees)): `locate_items` pairs each item — comments
+//! included, since in the tree a comment is a token with a byte range like
+//! anything else — with its tree element, `.rept` bodies spliced in place,
+//! so a cursor inside a macro body classifies against the body line it is
+//! really on. Nothing here counts non-blank lines any more.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use mtc_core::asm::cst::{
     AsmCst, AsmItem, AsmItemKind, FrameDirectiveCst, FrameHeaderCst, FuncCst, OperandToken,
-    RoutineDirectiveCst, TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with,
+    RoutineDirectiveCst, TableDirectiveCst, TableDirectiveKind, parse_asm_green,
 };
+use mtc_core::asm::views::locate_items;
 use mtc_core::asm::{AsmError, Flow, SyntaxEntry, format_asm_with};
 use mtc_core::diagnostics::{Diagnostic, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
+use mtc_core::syntax::{GreenNode, SyntaxNode, TextLineIndex};
 use mtc_core::vm::OperandKind;
 
 use crate::asm::tm1_syntax;
@@ -125,79 +128,27 @@ pub(crate) struct FlatItem {
     pub(crate) item: AsmItem,
 }
 
-/// The document's items in source order with their lines recovered.
-///
-/// Every shape but `Comment` carries its own span, so its line is read
-/// directly. A comment has only a column, so it consumes the next unclaimed
-/// non-blank source line — which lands correctly because the item before it
-/// has already advanced the cursor past its own last line. Total: a malformed
-/// document simply yields whatever items parsed, and running out of non-blank
-/// lines leaves a comment on the last line seen rather than panicking.
-fn flatten(text: &str, cst: &AsmCst) -> Vec<FlatItem> {
-    let nonblank: Vec<u32> = text
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| line.chars().any(|c| c != ' ' && c != '\t'))
-        .map(|(i, _)| i as u32 + 1)
-        .collect();
-    let mut out = Vec::new();
-    let mut cursor = 0usize;
-    walk(&cst.items, &nonblank, &mut cursor, &mut out);
-    out
-}
-
-/// [`flatten`]'s recursive worker: `cursor` indexes `nonblank` and only ever
-/// moves forward, so the two sequences stay aligned across nesting.
-fn walk(items: &[AsmItem], nonblank: &[u32], cursor: &mut usize, out: &mut Vec<FlatItem>) {
-    for item in items {
-        match &item.kind {
-            AsmItemKind::Comment(_) => {
-                let line = nonblank
-                    .get(*cursor)
-                    .copied()
-                    .or_else(|| out.last().map(|f| f.line))
-                    .unwrap_or(1);
-                *cursor += 1;
-                out.push(FlatItem {
-                    line,
-                    item: item.clone(),
-                });
-            }
-            AsmItemKind::Rept(rept) => {
-                let header = rept.span.start.line;
-                advance_past(nonblank, cursor, header);
-                out.push(FlatItem {
-                    line: header,
-                    item: item.clone(),
-                });
-                walk(&rept.body, nonblank, cursor, out);
-                // The closing `.endr` shapes no item of its own; skip its line
-                // so a comment after the block is not mis-seated on it.
-                advance_past(nonblank, cursor, rept.endr_span.end.line);
-            }
-            _ => {
-                let Some(span) = item_span(item) else {
-                    continue;
-                };
-                advance_past(nonblank, cursor, span.end.line);
-                out.push(FlatItem {
-                    line: span.start.line,
-                    item: item.clone(),
-                });
-            }
-        }
-    }
-}
-
-/// Move `cursor` to the first non-blank line strictly after `line`.
-fn advance_past(nonblank: &[u32], cursor: &mut usize, line: u32) {
-    while *cursor < nonblank.len() && nonblank[*cursor] <= line {
-        *cursor += 1;
-    }
+/// The document's items in source order, each with its line read off the
+/// green tree `parse_asm_green` built alongside `cst`: `locate_items` pairs
+/// every item with its tree element (a node, or an own-line comment's own
+/// token), and a `TextLineIndex` over the same text turns the element's
+/// start offset into the line. A `.rept` block's line is its header's; its
+/// body items follow it, spliced in place. Total: any text parses, and the
+/// tree mirrors the CST by construction, so every item is located.
+fn flatten(text: &str, cst: &AsmCst, green: Rc<GreenNode>) -> Vec<FlatItem> {
+    let root = SyntaxNode::new_root(green);
+    let index = TextLineIndex::new(text);
+    locate_items(cst, &root)
+        .into_iter()
+        .map(|located| FlatItem {
+            line: index.line_col(located.range.start).0,
+            item: located.item.clone(),
+        })
+        .collect()
 }
 
 /// An item's own span — `None` only for a comment, the one shape with no span
-/// of its own (its line is recovered by the cursor walk instead).
+/// of its own (its line comes from the tree, see [`flatten`]).
 fn item_span(item: &AsmItem) -> Option<Span> {
     match &item.kind {
         AsmItemKind::Func(f) => Some(f.span),
@@ -500,18 +451,19 @@ impl LanguageService for TmaLanguageService {
         .resolve(uri);
 
         // 2. Total CST, always — parsed once here and shared with both the
-        //    lint route and the descriptor channel below. One `lint_tma_cst`
-        //    call over that CST gives the fatal gate AND the lint findings
-        //    without re-parsing it — the same findings `tmt lint` reports, so
-        //    both surfaces agree.
-        let cst = parse_asm_cst_with(text, tm1_syntax().caps);
+        //    lint route and the descriptor channel below, with the green
+        //    tree the item lines are read from. One `lint_tma_cst` call
+        //    over that CST gives the fatal gate AND the lint findings
+        //    without re-parsing it — the same findings `tmt lint` reports,
+        //    so both surfaces agree.
+        let (cst, green) = parse_asm_green(text, tm1_syntax().caps);
         let (fatal, lint_findings) = match lint_tma_cst(text, &cst, &effective_allow) {
             Ok(findings) => (None, Some(findings)),
             Err(e) => (Some(e), None),
         };
 
         // 3. The CST-tier descriptor channel, independent of the gate.
-        let flat = flatten(text, &cst);
+        let flat = flatten(text, &cst, green);
         let descriptor_findings = descriptors::check(&flat);
 
         let state = TmaDocState {
