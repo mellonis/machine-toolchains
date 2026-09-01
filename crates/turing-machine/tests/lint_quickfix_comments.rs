@@ -1,68 +1,34 @@
-//! Pins the APPLIED TEXT of every quickfix helper that locates its edit by
-//! ADJACENCY — by indexing off a neighbouring token rather than searching
-//! (`docs/tmt/lint.md` (the `.tmc` rules)). There are five:
+//! Pins the APPLIED TEXT of every quickfix whose edit span comes from
+//! `lint/rules/spans.rs` (`docs/tmt/lint.md` (quickfix availability)) —
+//! the six span queries over the green tree:
 //!
-//! | helper | rules | the indexed neighbour |
+//! | query | rules | what it answers |
 //! |---|---|---|
-//! | `decl_span` | `unused-alphabet` | the keyword before the name |
-//! | `braced_world_decl_span` | `unused-routine`, `unused-graph` | the keyword before the name |
-//! | `reuse_statement_span` | `unused-binding`, `unused-graft-instance` | the keyword before the target |
-//! | `as_clause_span` | `unused-graft-name` | the `)` before `as`, and the name after it |
-//! | `marker_span` | `leftover-debugger` | the token after `->`, and the one after that |
+//! | `decl_span::<AlphabetView>` | `unused-alphabet` | the declaration node's range |
+//! | `decl_span::<ReuseView>` | `unused-routine`, `unused-graph` | the declaration node's range |
+//! | `decl_span::<GraftView>` / `::<BindView>` | `unused-graft-instance`, `unused-binding` | the statement node's range |
+//! | `as_clause_span` | `unused-graft-name` | from the `)` to the instance name, inside the GRAFT node |
+//! | `marker_span` | `leftover-debugger` | the `debugger` token to the next element, inside the RULE node |
+//! | `arrow_span` | `dead-map-pair` | the pair's arrow token |
 //!
-//! **That is the complete set, established by enumeration rather than by
-//! counting.** Every one of them reads `LintContext.tokens`, and `tokens` has
-//! exactly six readers in the whole lint layer — these five plus `arrow_span`
-//! (`dead-map-pair`). `arrow_span` is excluded on a mechanism, not on a
-//! guess: it finds its arrow by RANGE CONTAINMENT, so extra tokens in the
-//! stream cannot move its answer. The last test in this file is the witness
-//! for that exclusion, and it was measured — it passes with the filter
-//! removed, while four comment-bearing tests fail (the re-measured count
-//! below).
+//! Every query is a RANGE query — the innermost node of a kind containing
+//! an anchor the resolved module keeps, then that node's range or a token
+//! pair inside it — so a comment written anywhere in a declaration cannot
+//! void a span or cut it short: the node is lossless and holds the comment
+//! too. The only thing a comment changes is the guard's verdict —
+//! `run_rules` withholds a fix whose span holds one, finding kept
+//! (docs/tmt/lint.md (quickfix availability)) — and the `*_withheld_*`
+//! fixtures here pin exactly that `None`, at the placements that once
+//! defeated the token-adjacency helpers these queries replaced: between a
+//! keyword and its name (the fix used to vanish), and between a bound
+//! doc/attention run and the keyword (the fix used to ship with the run
+//! orphaned — a parse error). The `*_not_truncated` fixtures are the pins
+//! against that second shape ever returning.
 //!
-//! The compiler front end lexes `LexMode::WithComments` — the green tree it
-//! parses through is built from the source text and its trivia together — so
-//! comments DO reach `crate::compiler::Analysis`. What keeps them away from
-//! these helpers is one filter: `lint()` passes the stream through
-//! `parser::significant_tokens` before filling `LintContext.tokens`. This
-//! file is what proves that filter is load-bearing rather than decorative.
-//!
-//! Two distinct things break if the raw stream reaches them, and a fixture
-//! for one is blind to the other:
-//!
-//! 1. **The fix disappears.** A comment between a declaration's keyword and
-//!    its name becomes the token immediately before the name, the adjacency
-//!    check fails, the helper returns `None`, and no fix ships at all.
-//! 2. **The fix ships BROKEN source.** A comment between a leading
-//!    doc/attention run and the keyword leaves adjacency intact, so a fix is
-//!    still produced — but the doc-run walk-back stops at the comment, and
-//!    the deleted declaration leaves its `?`/`!` run behind. An orphaned run
-//!    is a parse error, so this outcome is strictly worse than shipping
-//!    nothing.
-//!
-//! `run_rules`' comment guard (docs/tmt/lint.md (quickfix availability))
-//! reshaped what these fixtures can observe. A span the helpers compute
-//! CORRECTLY over a comment-bearing shape now holds that comment, so the
-//! guard withholds the fix rather than letting it ride along — the
-//! `*_withheld_*` fixtures assert exactly that `None`. For failure mode 1
-//! that makes the filter's absence observationally identical (helper-voided
-//! and guard-withheld are the same `None`), so those pins no longer
-//! discriminate the filter. Failure mode 2 still does, in the direction that
-//! matters: an unfiltered walk-back stops AT the comment, the TRUNCATED span
-//! holds no comment, and a run-orphaning fix ships as `Some` right past the
-//! guard — which the `*_withheld_not_truncated` fixtures reject. Measured:
-//! removing the filter turns four of these sixteen tests red (the three
-//! doc-run orphaning shapes and the debugger marker void), and the
-//! `arrow_span` witness stays green.
-//!
-//! The comment-free fixtures' expected texts were verified green against the
-//! pre-green front end first, so a failure there means a REGRESSION, never a
-//! new expectation that needs deriving. That provenance stays checkable
-//! rather than becoming folklore: the pre-green front end (`lex` + `parse`)
-//! is still callable and is held to the current one, source for source, by
-//! `tests/tmc_green_analyze.rs`. The comment-bearing fixtures' expectations
-//! changed deliberately with the guard and are NOT pre-green-verifiable —
-//! their authority is the guard's own posture: finding reported, fix
+//! The comment-free fixtures' expected texts were verified green against
+//! the pre-green front end first, so a failure there means a REGRESSION,
+//! never a new expectation that needs deriving. The comment-bearing
+//! fixtures' authority is the guard's own posture: finding reported, fix
 //! withheld, never a silent comment deletion.
 
 use mtc_core::diagnostics::{Diagnostic, Edit, Pos};
@@ -219,7 +185,7 @@ fn unused_alphabet_doc_run_fix_is_withheld_not_truncated() {
     );
 }
 
-// -- unused-routine / braced_world_decl_span -------------------------------
+// -- unused-routine / decl_span::<ReuseView> -------------------------------
 //
 // `helper` must go unused while `api` (exported) stays, so exactly one
 // `unused-routine` finding fires; the machine's tape is moved so no
@@ -319,7 +285,7 @@ fn unused_routine_fix_deletes_the_declaration() {
         .next()
         .unwrap()
         .fix
-        .expect("braced_world_decl_span found the declaration");
+        .expect("decl_span found the declaration node");
     assert_eq!(apply_fix(ROUTINE_CLEAN, &fix.edits), ROUTINE_FIXED);
 }
 
@@ -327,7 +293,7 @@ fn unused_routine_fix_deletes_the_declaration() {
 fn unused_routine_fix_is_withheld_when_a_comment_rides_the_span() {
     let ds = findings_for(ROUTINE_COMMENT, "unused-routine");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    // `braced_world_decl_span` computes the whole declaration with the
+    // `decl_span::<ReuseView>` answers the whole declaration node with the
     // `/* c */` interior to it; the comment guard withholds the fix (see
     // the alphabet sibling above).
     assert!(
@@ -345,7 +311,7 @@ fn unused_routine_fix_deletes_the_declaration_with_its_doc_run() {
         .next()
         .unwrap()
         .fix
-        .expect("braced_world_decl_span found the declaration");
+        .expect("decl_span found the declaration node");
     // The doc line is bound to `helper` and must go with it — `back_over_doc_run`
     // is what walks the span start back over it.
     assert_eq!(apply_fix(ROUTINE_DOC_RUN, &fix.edits), ROUTINE_FIXED);
@@ -367,7 +333,7 @@ fn unused_routine_doc_run_fix_is_withheld_not_truncated() {
     );
 }
 
-// -- unused-binding / reuse_statement_span ---------------------------------
+// -- unused-binding / decl_span::<BindView> --------------------------------
 //
 // `h` binds `helper` but nothing calls `h`, so exactly one `unused-binding`
 // finding fires (not `unused-routine`: a bind target counts as a use, by
@@ -433,13 +399,12 @@ machine {
 ";
 
 /// The `bind … as h;` statement — plus its leading doc run when the input
-/// has one — is gone. `reuse_statement_span` anchors on the TARGET name
-/// (`helper`), so its span starts at the `bind`/`?` keyword-or-doc-run
-/// token, not at the start of the (indented) line: the two leading spaces
-/// that indented the deleted statement are untouched text and stay behind,
-/// leaving a line of bare indentation where the statement sat. That is not
-/// a typo — deleting it would be a different, wider fix this helper does
-/// not make.
+/// has one — is gone. The span is the BIND node's own range, which starts
+/// at the `bind` keyword or the doc run bound to it, not at the start of
+/// the (indented) line: the two leading spaces that indented the deleted
+/// statement are untouched text and stay behind, leaving a line of bare
+/// indentation where the statement sat. That is not a typo — deleting it
+/// would be a different, wider fix the rule does not make.
 const BIND_FIXED: &str = "alphabet ab { '_', 'a' }\nroutine helper(tape t: ab) {\n  entry state s { [*] -> return; }\n}\nmachine {\n  tape t: ab;\n  \n  entry state go { [*] -> move [>] stop; }\n}\n";
 
 #[test]
@@ -452,7 +417,7 @@ fn unused_binding_fix_deletes_the_statement() {
         .next()
         .unwrap()
         .fix
-        .expect("reuse_statement_span found the statement");
+        .expect("decl_span found the statement node");
     assert_eq!(apply_fix(BIND_CLEAN, &fix.edits), BIND_FIXED);
 }
 
@@ -460,7 +425,7 @@ fn unused_binding_fix_deletes_the_statement() {
 fn unused_binding_fix_is_withheld_when_a_comment_rides_the_span() {
     let ds = findings_for(BIND_COMMENT, "unused-binding");
     assert_eq!(ds.len(), 1, "{ds:?}");
-    // `reuse_statement_span` computes the whole statement with the `/* c */`
+    // `decl_span::<BindView>` answers the whole statement with the `/* c */`
     // interior to it; the comment guard withholds the fix (see the alphabet
     // sibling above).
     assert!(
@@ -478,7 +443,7 @@ fn unused_binding_fix_deletes_the_statement_with_its_doc_run() {
         .next()
         .unwrap()
         .fix
-        .expect("reuse_statement_span found the statement");
+        .expect("decl_span found the statement node");
     // The doc line is bound to the `bind` statement and must go with it —
     // `back_over_doc_run` is what walks the span start back over it.
     assert_eq!(apply_fix(BIND_DOC_RUN, &fix.edits), BIND_FIXED);
@@ -500,10 +465,10 @@ fn unused_binding_doc_run_fix_is_withheld_not_truncated() {
 
 // -- unused-graft-name / as_clause_span ------------------------------------
 //
-// `as_clause_span` anchors on the `as` keyword and requires the token BEFORE
-// it to be the signature's `)` and the token AFTER it to be the instance
-// name. Two adjacency checks rather than one, so a comment on either side of
-// `as` voids the fix.
+// `as_clause_span` finds the GRAFT node, its instance-name token, and the
+// binding list's `)` behind the `as` keyword, trivia skipped; the span runs
+// from that `)` through the name, so a comment on either side of `as` lands
+// inside it and the guard withholds the fix.
 
 const GRAFT_NAME_CLEAN: &str = "\
 alphabet marks { '_', 'x' }
@@ -669,21 +634,14 @@ fn leftover_debugger_fix_is_unchanged_by_a_comment_before_the_marker() {
     );
 }
 
-// -- the one ctx.tokens consumer that is NOT adjacency-sensitive -----------
+// -- dead-map-pair / arrow_span --------------------------------------------
 //
-// `arrow_span` (`dead-map-pair`) is the sixth and last reader of
-// `LintContext.tokens`, and the only one the filter does not protect —
-// because it needs no protection. It locates the `=>`/`->` of a map pair by
-// RANGE CONTAINMENT (an Arrow token whose span lies between the pair's source
-// and destination glyphs), never by index arithmetic off a neighbour, and a
-// comment lexes as one `Comment` token that can never match `TokenKind::Arrow`.
-// Extra tokens in the stream therefore cannot move the result.
-//
-// This fixture is the witness for that exclusion, which is what makes the
-// five-helper hazard set a CLOSED enumeration rather than a count. It does
-// not discriminate the filter (it passes with the filter removed — measured);
-// it discriminates a future rewrite of `arrow_span` into an index walk, which
-// is exactly when the exclusion would stop holding.
+// `arrow_span` locates the `=>`/`->` of a map pair by RANGE CONTAINMENT —
+// the ARROW token whose range lies between the pair's source and
+// destination glyphs — and a comment is a trivia token that can never be
+// that arrow. A single-token replacement never spans a comment, so the
+// guard has nothing to withhold either: the fix ships unchanged next to a
+// comment, which this fixture pins.
 
 /// A comment sitting immediately before the arrow of the very pair that
 /// fires. `dead-map-pair` is opt-in, so it is requested explicitly below.

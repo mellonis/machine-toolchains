@@ -11,15 +11,16 @@
 //!    because a front-end switch changes which function raises the error,
 //!    and only a source that errors exercises that at all.
 //!
-//! 2. **The lint layer still sees the old stream.** `analyze` keeps a
-//!    comment-bearing `tokens`, and `lint()` filters it back through
-//!    `parser::significant_tokens` before the rules walk it. That filter is
-//!    only sound if the filtered stream equals a comment-free lex EXACTLY —
-//!    same kinds, same lines, same columns, same lengths — because several
-//!    quickfixes locate a declaration by token adjacency
-//!    (`tests/lint_quickfix_comments.rs` pins what breaks when they don't).
-//!    This one runs over every `.tmc` the repo ships, so a corpus file added
-//!    later is covered for free.
+//! 2. **The token-tier readers still see the old stream.** `analyze` and
+//!    the staged analysis keep a comment-bearing `tokens`, and the editor's
+//!    token-tier features (semantic tokens, cursor classification for
+//!    completions) filter it back through `parser::significant_tokens`
+//!    before walking it by index. That filter is only sound if the
+//!    filtered stream equals a comment-free lex EXACTLY — same kinds, same
+//!    lines, same columns, same lengths. (The lint layer no longer reads a
+//!    filtered stream at all: its quickfix spans are range queries over the
+//!    green tree, `lint/rules/spans.rs`.) This one runs over every `.tmc`
+//!    the repo ships, so a corpus file added later is covered for free.
 //!
 //! **What this file cannot see, by construction.** It computes the front
 //! itself and never calls `analyze` — which is `pub(crate)` and out of an
@@ -263,9 +264,10 @@ fn broken_sources_fail_with_a_fixed_kind_and_span() {
     }
 }
 
-/// Claim 2: `significant_tokens` of the `WithComments` stream `analyze` now
-/// keeps is element-for-element identical to the comment-free lex it used to
-/// keep — kind, line, col and len alike, not merely the kinds.
+/// Claim 2: `significant_tokens` of the `WithComments` stream the analyses
+/// keep is element-for-element identical to the comment-free lex the
+/// token-tier editor features were written against — kind, line, col and
+/// len alike, not merely the kinds.
 ///
 /// `Token` derives `PartialEq`, and the whole-`Vec` `assert_eq!` also catches
 /// a length difference, so a mode that dropped or added a NON-comment token

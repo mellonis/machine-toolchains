@@ -18,11 +18,12 @@
 //! pair's `->` arrow token with `=>`, and a span covering a single token can
 //! never contain a comment, so the guard has nothing to withhold there.
 //!
-//! Comment placement matters: each comment sits where the rule's span helper
-//! still produces a fix (inside a body, a binding list, or the `as` clause),
-//! not between a keyword and its name — THAT position voids the fix through
-//! the adjacency helpers instead, and is pinned by
-//! `tests/lint_quickfix_comments.rs`, a different mechanism from this guard.
+//! Comment placement is free: every span is a node range read off the
+//! green tree (`lint/rules/spans.rs`), so a comment anywhere inside a
+//! declaration — its body, a binding list, the `as` clause, even between
+//! the keyword and the name — lands inside the computed span, and this
+//! guard is the ONE mechanism that withholds the fix. The applied texts of
+//! the comment-free shapes are pinned by `tests/lint_quickfix_comments.rs`.
 
 use mtc_turing_machine::lint::{LintOptions, lint};
 

@@ -83,6 +83,15 @@ ones listed on this page. A fix that merely REPLACES a single token
 (`dead-map-pair`'s arrow demotion) can never span a comment and is
 never withheld.
 
+Every fix span is read off the lossless syntax tree the compiler
+builds (docs/core.md (syntax trees)): a declaration or statement to
+delete is its own node's extent — the bound doc lines, an `export` or
+`entry`, and the closing `}` or `;` included — and a smaller edit (an
+`as` clause, a `debugger` marker, a map arrow) is a token pair inside
+that node. A comment written anywhere inside the declaration therefore
+falls inside the span, where this guard sees it; it can never make the
+span come out short or make the fix silently disappear.
+
 The `.tma` surface carries the same guard: the assembly lint layer
 withholds any fix whose edit span touches a comment. In practice that
 is the "delete this instruction" edit of `leftover-debugger` and
