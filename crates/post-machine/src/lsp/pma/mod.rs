@@ -15,22 +15,27 @@
 //! placement) — never gated on `fatal`/`lint`, so every one of them still
 //! answers over a document that fails to assemble (docs/lsp.md; total CST).
 //! `AsmCst` is flat (no per-function nesting the way `.pmc`'s `Cst` has,
-//! and `AsmComment` alone carries no line of its own) — [`item_lines`] and
-//! [`enclosing_function_range`] below recover the per-line/per-function
-//! structure every feature module needs from that flat shape.
+//! and `AsmComment` alone carries no line of its own) — the per-item lines
+//! come from the green tree `parse_asm_green` builds alongside the CST
+//! ([`item_lines`], computed once per update; docs/core.md (syntax trees)),
+//! and [`enclosing_function_range`] below recovers the per-function
+//! grouping every feature module needs from that flat shape.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::SystemTime;
 
-use mtc_core::asm::cst::{AsmCst, AsmItem, AsmItemKind, FuncCst, OperandToken, parse_asm_cst_with};
+use mtc_core::asm::cst::{AsmCst, AsmItem, AsmItemKind, FuncCst, OperandToken, parse_asm_green};
+use mtc_core::asm::views::locate_items;
 use mtc_core::asm::{AsmError, Flow, SyntaxEntry, lint};
 use mtc_core::diagnostics::{Diagnostic, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
+use mtc_core::syntax::{GreenNode, SyntaxNode, TextLineIndex};
 use mtc_core::vm::OperandKind;
 
 use crate::asm::{format_asm, pm1_syntax};
@@ -70,6 +75,9 @@ struct PmaDocState {
     /// Total: every text parses into a CST (docs/formats.md (assembly
     /// text)) — Raw items mark the lines that are not assembly-shaped.
     cst: AsmCst,
+    /// The 1-based source line of each item in `cst.items`, parallel to
+    /// it — read off the green tree once per update ([`item_lines`]).
+    lines: Vec<u32>,
     /// The one fatal, when `lower`/`assemble` refused the file.
     fatal: Option<AsmError>,
     /// Lint findings, retained fixes included (the quickfix source);
@@ -170,17 +178,20 @@ impl LanguageService for PmaLanguageService {
         //    (lower/assemble failure) AND the lint findings in one shot,
         //    without re-parsing it — `.pma` has no separate compile-warning
         //    channel. Parsed under PM-1's own caps, so the service sees the
-        //    same grammar the assembler accepts (`.volatile` included).
+        //    same grammar the assembler accepts (`.volatile` included); the
+        //    green tree built alongside is what the item lines come from.
         let syntax = pm1_syntax();
-        let cst = parse_asm_cst_with(text, syntax.caps);
+        let (cst, green) = parse_asm_green(text, syntax.caps);
         let (fatal, lint_findings) = match lint::lint_cst(&syntax, text, &cst, &effective_allow) {
             Ok(findings) => (None, Some(findings)),
             Err(e) => (Some(e), None),
         };
+        let lines = item_lines(text, &cst, green);
 
         let state = PmaDocState {
             text: text.to_string(),
             cst,
+            lines,
             fatal,
             lint: lint_findings,
             config_errors,
@@ -243,7 +254,7 @@ impl LanguageService for PmaLanguageService {
         // CST-tier (total): answered for any known document, broken or
         // not — `.pma` has no post-CST analysis stage to gate on.
         let state = self.docs.get(uri)?;
-        Some(document_symbols(&state.text, &state.cst))
+        Some(document_symbols(&state.cst, &state.lines))
     }
 
     fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
@@ -275,25 +286,26 @@ const MODIFIER_DECLARATION: u32 = 1 << 0;
 #[allow(dead_code)]
 const MODIFIER_DEFAULT_LIBRARY: u32 = 1 << 1;
 
-/// One CST item paired with its 1-based source line. `AsmCst` is flat
-/// (docs/formats.md (assembly text)) and every item but `Comment` already
-/// carries its own line inside a `Span` — `AsmComment` is the one shape
-/// with no line of its own (just `col`). Recovered instead by zipping
-/// `cst.items` against the source's own non-blank lines, in order: exactly
-/// one item per non-blank line is `parse_asm_cst`'s own invariant
-/// (enforced by `cst.rs`'s `total_and_every_nonblank_line_becomes_an_item`
-/// proptest), so the two sequences always line up.
-fn item_lines(text: &str, cst: &AsmCst) -> Vec<u32> {
-    let lines: Vec<u32> = text
-        .lines()
-        .enumerate()
-        .filter(|(_, line)| line.chars().any(|c| c != ' ' && c != '\t'))
-        .map(|(i, _)| i as u32 + 1)
+/// The 1-based source line of each item in `cst.items`, in order, read
+/// off the green tree `parse_asm_green` built alongside the CST
+/// (docs/core.md (syntax trees)): `locate_items` pairs every item —
+/// `AsmComment` included, the one shape with no line of its own in the
+/// CST, but a token with a byte range like any other in the tree — with
+/// its tree element, and a `TextLineIndex` over the same text turns the
+/// element's start offset into the line. The pairing's order is the
+/// flattened item walk with `.rept` bodies spliced in; PM-1 enables no
+/// `rept`, so here that walk IS `cst.items` and the two stay parallel.
+fn item_lines(text: &str, cst: &AsmCst, green: Rc<GreenNode>) -> Vec<u32> {
+    let root = SyntaxNode::new_root(green);
+    let index = TextLineIndex::new(text);
+    let lines: Vec<u32> = locate_items(cst, &root)
+        .iter()
+        .map(|located| index.line_col(located.range.start).0)
         .collect();
     debug_assert_eq!(
         lines.len(),
         cst.items.len(),
-        "parse_asm_cst's own invariant: one item per non-blank line"
+        "PM-1 shapes no `.rept` block, so the flattened walk is the item list"
     );
     lines
 }
@@ -416,8 +428,7 @@ fn name_span(operand: &OperandToken) -> Span {
 /// reusing `Function` for both is the accepted mapping, not a widening of
 /// the enum). Total over the CST: answered even when the document does
 /// not assemble.
-fn document_symbols(text: &str, cst: &AsmCst) -> Vec<SymbolNode> {
-    let lines = item_lines(text, cst);
+fn document_symbols(cst: &AsmCst, lines: &[u32]) -> Vec<SymbolNode> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < cst.items.len() {

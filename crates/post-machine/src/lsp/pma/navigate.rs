@@ -18,8 +18,8 @@ use mtc_core::lsp::DefTarget;
 use crate::asm::pm1_syntax;
 
 use super::{
-    OperandRole, PmaDocState, doc_functions, enclosing_function_range, item_at_line, item_lines,
-    name_span, operand_role,
+    OperandRole, PmaDocState, doc_functions, enclosing_function_range, item_at_line, name_span,
+    operand_role,
 };
 
 /// Half-open span containment, 1-based (mirrors `.pmc`'s own
@@ -29,8 +29,8 @@ fn span_contains(span: Span, pos: Pos) -> bool {
 }
 
 pub(super) fn definition(state: &PmaDocState, uri: &str, pos: Pos) -> Option<DefTarget> {
-    let lines = item_lines(&state.text, &state.cst);
-    let item = item_at_line(&state.cst, &lines, pos.line)?;
+    let lines: &[u32] = &state.lines;
+    let item = item_at_line(&state.cst, lines, pos.line)?;
     let AsmItemKind::Line(line) = &item.kind else {
         return None;
     };
@@ -50,7 +50,7 @@ pub(super) fn definition(state: &PmaDocState, uri: &str, pos: Pos) -> Option<Def
             })
         }
         OperandRole::Label => {
-            let (_, range) = enclosing_function_range(&state.cst, &lines, pos.line)?;
+            let (_, range) = enclosing_function_range(&state.cst, lines, pos.line)?;
             let target = state.cst.items[range].iter().find_map(|it| {
                 let AsmItemKind::Line(l) = &it.kind else {
                     return None;

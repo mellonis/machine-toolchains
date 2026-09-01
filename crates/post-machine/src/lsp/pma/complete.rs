@@ -41,12 +41,12 @@ use crate::asm::pm1_syntax;
 
 use super::{
     OperandRole, PmaDocState, doc_function_names, enclosing_function_range, item_at_line,
-    item_lines, name_span, operand_role,
+    name_span, operand_role,
 };
 
 pub(super) fn completion(state: &PmaDocState, pos: Pos) -> Vec<Candidate> {
-    let lines = item_lines(&state.text, &state.cst);
-    let Some(item) = item_at_line(&state.cst, &lines, pos.line) else {
+    let lines: &[u32] = &state.lines;
+    let Some(item) = item_at_line(&state.cst, lines, pos.line) else {
         return word_position_candidates(zero_span(pos));
     };
     let AsmItemKind::Line(line) = &item.kind else {
@@ -85,7 +85,7 @@ pub(super) fn completion(state: &PmaDocState, pos: Pos) -> Vec<Candidate> {
         }
         Some(OperandRole::Label) => {
             let replace = current.map_or_else(|| zero_span(pos), |o| o.span);
-            enclosing_label_candidates(state, pos.line, &lines, replace)
+            enclosing_label_candidates(state, pos.line, lines, replace)
         }
         None => Vec::new(),
     }

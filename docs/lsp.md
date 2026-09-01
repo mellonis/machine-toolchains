@@ -922,13 +922,16 @@ so no defect is reported twice. Defects the assembler tolerates are out of
 scope here — flagging those is a lint rule's job, on both surfaces at
 once, not a service-only opinion.
 
-**Line structure.** The `.pma` service recovers the line of each CST item
-by zipping items against the source's non-blank lines, one item per line.
-That invariant does not hold for `.tma`: the dialect enables the `.rept`
-macro, and a `.rept` … `.endr` block collapses many source lines into one
-item whose body items nest inside it. The `.tma` service walks the tree
-instead, taking each item's line from its own span, so a cursor inside a
-macro body classifies against the body line it is really on.
+**Line structure.** Both assembly services read the line of each CST
+item off the green tree the parse builds alongside the CST
+(docs/core.md (syntax trees)): every item — an own-line comment
+included, the one shape the CST holds no line for — is paired with its
+tree element, whose byte offset the line index turns into a line. The
+`.tma` dialect enables the `.rept` macro, so a `.rept` … `.endr` block
+is one item spanning many source lines with its body items nested
+inside; the pairing splices the body in place, so a cursor inside a
+macro body classifies against the body line it is really on. Neither
+service counts non-blank lines or walks a cursor over the CST any more.
 
 ## Wiring a generic LSP client
 
