@@ -11,33 +11,11 @@
 //! would become `… -> ;`, the "expected a transition" parse error, so no fix is
 //! offered there. `MaybeIncorrect` — the removal deletes a deliberate marker.
 
-use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
-use crate::lexer::{Token, TokenKind};
 use crate::lint::LintContext;
+use crate::lint::rules::spans::marker_span;
 use crate::parser::Transition;
-
-/// The span to delete to remove a rule's `debugger` marker: from the marker
-/// keyword through the start of the following token, so the trailing space goes
-/// too. The marker is the token right after the rule's first `->`. `None` if
-/// the token shape is unexpected (then no fix is offered).
-fn marker_span(tokens: &[Token], rule_span: Span) -> Option<Span> {
-    let within = |s: Span| rule_span.start <= s.start && s.end <= rule_span.end;
-    let arrow_ix = tokens
-        .iter()
-        .position(|t| matches!(t.kind, TokenKind::Arrow) && within(t.span()))?;
-    let marker = tokens.get(arrow_ix + 1)?;
-    if !matches!(&marker.kind, TokenKind::Ident(k) if k == "debugger") {
-        return None;
-    }
-    // Offered only when a following action/transition token remains, so the
-    // token after the marker always exists here.
-    let next = tokens.get(arrow_ix + 2)?;
-    Some(Span {
-        start: marker.span().start,
-        end: next.span().start,
-    })
-}
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for world in &ctx.resolved.worlds {
@@ -52,7 +30,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                     || rule.mov.is_some()
                     || !matches!(rule.transition, Transition::Stay { .. });
                 let fix = has_other
-                    .then(|| marker_span(ctx.tokens, rule.span))
+                    .then(|| marker_span(ctx, rule.span))
                     .flatten()
                     .map(|span| Fix {
                         description: "remove the leftover `debugger` marker".to_string(),

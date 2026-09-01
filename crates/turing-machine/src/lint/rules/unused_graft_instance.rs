@@ -24,8 +24,9 @@ use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
 use crate::compiler::ResolvedWorld;
 use crate::lint::LintContext;
-use crate::lint::rules::spans::reuse_statement_span;
+use crate::lint::rules::spans::decl_span;
 use crate::parser::{BindingArg, BindingValue, Continuation, Transition};
+use crate::syntax::GraftView;
 
 /// Extend `names` with every bare binding-argument target in `args` (a bare
 /// `x = N` target — over-approx of the state continuations among them; see the
@@ -94,15 +95,14 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 continue;
             };
             if !referenced.contains(name.as_str()) {
-                let fix =
-                    reuse_statement_span(ctx.tokens, graft.target_span, "graft").map(|span| Fix {
-                        description: format!("delete the unused graft instance `{name}`"),
-                        applicability: Applicability::MaybeIncorrect,
-                        edits: vec![Edit {
-                            span,
-                            replacement: String::new(),
-                        }],
-                    });
+                let fix = decl_span::<GraftView>(ctx, graft.target_span).map(|span| Fix {
+                    description: format!("delete the unused graft instance `{name}`"),
+                    applicability: Applicability::MaybeIncorrect,
+                    edits: vec![Edit {
+                        span,
+                        replacement: String::new(),
+                    }],
+                });
                 out.push(Diagnostic {
                     code: "unused-graft-instance",
                     span: graft.span,

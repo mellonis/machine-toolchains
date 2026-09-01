@@ -43,34 +43,14 @@
 
 use std::collections::HashMap;
 
-use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
 use crate::compiler::{ResolvedCallTarget, ResolvedWorld};
 use crate::footprint::{self, FootprintTable};
-use crate::lexer::{Token, TokenKind};
 use crate::lint::LintContext;
 use crate::lint::patterns::glyph_label;
-use crate::parser::{BindingArg, BindingValue, MapArrow, MapPair};
-
-/// The `->` token inside one map pair — the span the demote edit replaces.
-/// Recovered from the comment-free token stream: the arrow's position survives
-/// in no other artifact (`MapPair` keeps the two literals' spans and the pair's
-/// own, and reduces the arrow to a [`MapArrow`] discriminant). Nothing but the
-/// arrow can sit between the two literals, so the search is exact rather than
-/// positional. `None` if the token shape is unexpected — the finding then
-/// ships without a fix.
-fn arrow_span(tokens: &[Token], pair: &MapPair) -> Option<Span> {
-    let after_src = pair.src.span().end;
-    let before_dst = pair.dst.span().start;
-    tokens
-        .iter()
-        .find(|t| {
-            matches!(t.kind, TokenKind::Arrow)
-                && after_src <= t.span().start
-                && t.span().end <= before_dst
-        })
-        .map(|t| t.span())
-}
+use crate::lint::rules::spans::arrow_span;
+use crate::parser::{BindingArg, BindingValue, MapArrow};
 
 /// The position of `glyph` in a glyph vector.
 fn index_of(glyphs: &[String], glyph: &str) -> Option<u32> {
@@ -168,7 +148,7 @@ fn check_binding(
             }
             let src = glyph_label(&pair.src);
             let fix = demotion_preserves_acceptance(host_glyphs, callee_glyphs, &src, dst_index)
-                .then(|| arrow_span(ctx.tokens, pair))
+                .then(|| arrow_span(ctx, pair))
                 .flatten()
                 .map(|span| Fix {
                     description: format!("demote to a one-way pair (`'{src}' => '{dst}'`)"),

@@ -16,33 +16,11 @@
 //! source-level over `Resolved`. The fix removes exactly the ` as NAME`
 //! clause, leaving a valid unnamed entry graft.
 
-use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
-use crate::lexer::{Token, TokenKind};
 use crate::lint::LintContext;
+use crate::lint::rules::spans::as_clause_span;
 use crate::lint::rules::unused_graft_instance::body_referenced_names;
-
-/// The span of the ` as NAME` clause within a graft — from the end of the
-/// binding's closing `)` through the end of the instance name. Read off the
-/// comment-free token stream: the `as` keyword's position survives in no other
-/// artifact (the AST and CST keep only the NAME identifier's span). Deleting
-/// exactly this span turns `graft T(args) as N;` into `graft T(args);`, which
-/// an entry graft may legally be. `None` if the token shape is unexpected.
-fn as_clause_span(tokens: &[Token], graft_span: Span) -> Option<Span> {
-    let within = |s: Span| graft_span.start <= s.start && s.end <= graft_span.end;
-    let as_ix = tokens
-        .iter()
-        .position(|t| matches!(&t.kind, TokenKind::Ident(k) if k == "as") && within(t.span()))?;
-    let close = tokens.get(as_ix.checked_sub(1)?)?;
-    let name = tokens.get(as_ix + 1)?;
-    if !matches!(close.kind, TokenKind::RParen) || !matches!(name.kind, TokenKind::Ident(_)) {
-        return None;
-    }
-    Some(Span {
-        start: close.span().end,
-        end: name.span().end,
-    })
-}
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for world in &ctx.resolved.worlds {
@@ -56,7 +34,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 continue;
             };
             if !referenced.contains(name.as_str()) {
-                let fix = as_clause_span(ctx.tokens, graft.span).map(|span| Fix {
+                let fix = as_clause_span(ctx, graft.span).map(|span| Fix {
                     description: format!("remove the unused instance name `{name}`"),
                     applicability: Applicability::MaybeIncorrect,
                     edits: vec![Edit {

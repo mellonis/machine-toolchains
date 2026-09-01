@@ -33,7 +33,10 @@ pub(crate) mod patterns;
 pub mod rules;
 pub mod tma;
 
+use std::rc::Rc;
+
 use mtc_core::diagnostics::{Diagnostic, Span};
+use mtc_core::syntax::{SyntaxNode, TextLineIndex};
 
 use crate::compiler::{self, CompileError, Resolved};
 use crate::lexer::Token;
@@ -96,22 +99,25 @@ pub(crate) struct LintContext<'a> {
     /// The parsed AST — source-level detail the resolved module elides (a
     /// signature parameter's own span, read by `unused-exit`).
     pub program: &'a Program,
-    /// The COMMENT-FREE token stream. Both entry paths lex `WithComments` —
-    /// the batch `lint()` through `analyze`, the editor service through
-    /// `analyze_staged` — and both filter through
-    /// [`crate::parser::significant_tokens`] before filling this field, so a
-    /// token-index walk finds the same neighbours in either. Several fixes
-    /// recover spans no earlier artifact keeps (a declaration's `}`, a
-    /// graft's `as` keyword) by walking those neighbours BY ADJACENCY; the
-    /// filter is what keeps a comment from voiding or truncating such a span.
-    pub tokens: &'a [Token],
-    /// The COMMENT-INCLUSIVE token stream — `TokenKind::Comment` trivia the
-    /// `tokens` field above never carries. Read by `run_rules`' shared guard,
-    /// which withholds any fix whose edit span holds a comment (deleting one
-    /// silently would be a defect fmt itself avoids by relocating rather
-    /// than dropping). Filling it costs neither entry path an extra lex:
-    /// both are REQUIRED to lex `WithComments` for reasons of their own, and
-    /// already hold the stream when they build this context.
+    /// The green tree's root (docs/core.md (syntax trees)) — the one
+    /// `analyze`/`analyze_staged` built. Every quickfix span is a range
+    /// query over it (`rules::spans`): the innermost node of a kind
+    /// containing an anchor the resolved module keeps, then that node's
+    /// own range or a token pair inside it. No rule reads a comment-free
+    /// token stream: a comment anywhere in a declaration lands inside the
+    /// node's range, where the guard below sees it, instead of voiding or
+    /// truncating a span computed by token adjacency.
+    pub root: &'a SyntaxNode,
+    /// Byte offsets ↔ line/column over the same source, for the range
+    /// queries above (`Span` stays the diagnostics' currency).
+    pub index: &'a TextLineIndex,
+    /// The COMMENT-INCLUSIVE token stream. Read by `run_rules`' shared
+    /// guard, which withholds any fix whose edit span holds a comment
+    /// (deleting one silently would be a defect fmt itself avoids by
+    /// relocating rather than dropping). Filling it costs neither entry
+    /// path an extra lex: both are REQUIRED to lex `WithComments` for
+    /// reasons of their own, and already hold the stream when they build
+    /// this context.
     ///
     /// That requirement is a standing one, not a fact about today's
     /// implementation. `syntax::layout` reconstructs a token's verbatim text
@@ -234,9 +240,9 @@ pub(crate) fn run_rules(ctx: &LintContext, allow: &[String], warn: &[String]) ->
     diagnostics
 }
 
-/// Whether any comment token (from the comment-INCLUSIVE stream — the
-/// ordinary `LintContext.tokens` never carries one) lands inside `span`,
-/// under the half-open-range overlap test over [`Span`]'s derived `Ord`.
+/// Whether any comment token (from the comment-INCLUSIVE stream) lands
+/// inside `span`, under the half-open-range overlap test over [`Span`]'s
+/// derived `Ord`.
 fn span_touches_a_comment(comment_tokens: &[Token], span: Span) -> bool {
     comment_tokens.iter().any(|t| {
         matches!(t.kind, crate::lexer::TokenKind::Comment(_))
@@ -254,49 +260,18 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
     validate_allow(&options.allow)?;
     validate_allow(&options.warn)?;
     let analysis = compiler::analyze(source)?;
-    // `analyze` lexes WithComments (the green parse needs the trivia), so
-    // that ONE stream serves both channels: `comment_tokens` takes it whole,
-    // `tokens` takes it filtered.
-    //
-    // The filter is load-bearing, not tidiness. FIVE quickfix helpers locate
-    // their edit by ADJACENCY — by indexing off a neighbouring token rather
-    // than searching — and every one of them is voided or shifted by a
-    // comment landing in the indexed position:
-    //
-    //   `decl_span`              `unused-alphabet`
-    //   `braced_world_decl_span` `unused-routine`, `unused-graph`
-    //   `reuse_statement_span`   `unused-binding`, `unused-graft-instance`
-    //   `as_clause_span`         `unused-graft-name`
-    //   `marker_span`            `leftover-debugger`
-    //
-    // That list is the complete set, not a sample: these five plus
-    // `arrow_span` (`dead-map-pair`) are ALL the readers of the `tokens`
-    // field below, and `arrow_span` is excluded on a stated mechanism — it
-    // finds its arrow by range containment, so extra tokens cannot move it.
-    //
-    // Two failure modes, both real. A comment between a keyword and the name
-    // it declares voids the fix outright. A comment between a doc run and its
-    // keyword truncates the span instead, so the deleted declaration leaves
-    // an orphaned `?`/`!` run behind — a parse error, i.e. a quickfix that
-    // ships broken source, which is worse than shipping none.
-    //
-    // All of it is pinned by `tests/lint_quickfix_comments.rs`: removing this
-    // filter turns four of its sixteen tests red — the three doc-run
-    // orphaning shapes and the debugger marker void — while the `arrow_span`
-    // witness stays green. Four, not the eight it once was: `run_rules`'
-    // comment guard withholds a fix whose span holds a comment, and for the
-    // keyword-to-name shapes "helper voided by a comment neighbour" and
-    // "guard withheld the computed fix" are the same observable `None`, so
-    // those pins no longer discriminate the filter. The orphaning shapes
-    // still do, in the direction that matters: an unfiltered walk-back stops
-    // AT the comment, the truncated span holds no comment, and a
-    // run-orphaning fix ships as `Some` right past the guard.
-    let significant = crate::parser::significant_tokens(&analysis.tokens);
+    // `analyze` lexes WithComments (the green parse needs the trivia); that
+    // one stream is the guard's comment channel, and the tree it parsed
+    // into is where every quickfix span comes from — the editor path
+    // builds the identical context off its staged analysis.
+    let root = SyntaxNode::new_root(Rc::clone(&analysis.green));
+    let index = TextLineIndex::new(source);
     let ctx = LintContext {
         resolved: &analysis.resolved,
         diagnostics: &analysis.diagnostics,
         program: &analysis.program,
-        tokens: &significant,
+        root: &root,
+        index: &index,
         comment_tokens: &analysis.tokens,
     };
     let diagnostics = run_rules(&ctx, &options.allow, &options.warn);

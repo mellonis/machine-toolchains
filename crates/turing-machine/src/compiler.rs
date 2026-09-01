@@ -1023,12 +1023,15 @@ pub(crate) struct Analysis {
     pub program: Program,
     /// The lexed token stream, COMMENT-INCLUSIVE — the green parse needs the
     /// trivia, so this is the `LexMode::WithComments` stream it was built
-    /// from. Retained so lint rules can recover a span no earlier artifact
-    /// keeps (the `as` keyword of a graft's `as NAME` clause) and so the one
-    /// lex serves both channels of [`crate::lint::LintContext`]. Rules that
-    /// walk token neighbourhoods by ADJACENCY must take
-    /// [`crate::parser::significant_tokens`] of this first; `lint()` does.
+    /// from. Retained for the lint layer's comment guard, which withholds a
+    /// fix whose span holds a comment ([`crate::lint::LintContext`]'s
+    /// `comment_tokens`). No rule reads a comment-free stream any more:
+    /// every quickfix span is a range query over `green`.
     pub tokens: Vec<Token>,
+    /// The green tree the program was extracted from (docs/core.md (syntax
+    /// trees)) — the lint layer's quickfix spans are node ranges read off
+    /// it, the same `Rc` the staged analysis retains for the editor.
+    pub green: Rc<GreenNode>,
 }
 
 /// lex → green parse → extract → duplicate-binding check → resolve alphabets
@@ -1046,13 +1049,14 @@ pub(crate) struct Analysis {
 pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
-    let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
+    let program = crate::syntax::extract_program(&SyntaxNode::new_root(Rc::clone(&green)), source);
     let (resolved, diagnostics) = resolve_program(&program)?;
     Ok(Analysis {
         resolved,
         diagnostics,
         program,
         tokens,
+        green,
     })
 }
 

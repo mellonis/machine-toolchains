@@ -15,7 +15,8 @@ use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
 use crate::compiler::ResolvedCallTarget;
 use crate::lint::LintContext;
-use crate::lint::rules::spans::reuse_statement_span;
+use crate::lint::rules::spans::decl_span;
+use crate::syntax::BindView;
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for world in &ctx.resolved.worlds {
@@ -29,15 +30,14 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             .collect();
         for bind in &world.binds {
             if !called.contains(bind.name.as_str()) {
-                let fix =
-                    reuse_statement_span(ctx.tokens, bind.target_span, "bind").map(|span| Fix {
-                        description: format!("delete the unused bind `{}`", bind.name),
-                        applicability: Applicability::MaybeIncorrect,
-                        edits: vec![Edit {
-                            span,
-                            replacement: String::new(),
-                        }],
-                    });
+                let fix = decl_span::<BindView>(ctx, bind.target_span).map(|span| Fix {
+                    description: format!("delete the unused bind `{}`", bind.name),
+                    applicability: Applicability::MaybeIncorrect,
+                    edits: vec![Edit {
+                        span,
+                        replacement: String::new(),
+                    }],
+                });
                 out.push(Diagnostic {
                     code: "unused-binding",
                     span: bind.span,

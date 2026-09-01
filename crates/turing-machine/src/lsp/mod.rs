@@ -44,7 +44,7 @@ use crate::compiler::{CompileError, Resolved, analyze_staged};
 use crate::config;
 use crate::lexer::Token;
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
-use crate::parser::{Doc, Program, significant_tokens};
+use crate::parser::{Doc, Program};
 use crate::syntax::{
     BindView, GraftView, MachineView, NamespaceView, ReuseView, RootView, StateView, TmcKind,
     TopView,
@@ -776,25 +776,28 @@ impl LanguageService for TmcLanguageService {
             fatal = Some(e);
         }
 
-        // 4. Lint over the resolved module when there is one. The rules also
-        //    read the AST and a COMMENT-FREE token stream; the editor lexes
-        //    with comment trivia, so filter to `significant_tokens` to match
-        //    the batch path's stream (identical findings either way — the
-        //    batch `lint()` filters the very same way).
-        //    The editor already has the comment-INCLUSIVE stream too
-        //    (`raw_tokens`, pre-filter) — handed over as-is, at no extra cost.
+        // 4. Lint over the resolved module when there is one. The rules
+        //    read the AST, the green tree (every quickfix span is a range
+        //    query over it — the same tree `staged.green` retains for the
+        //    green-tier features) with the line index built here for the
+        //    whole document state, and the COMMENT-INCLUSIVE token stream
+        //    for the comment guard — the identical context the batch
+        //    `lint()` builds, so findings agree.
+        let line_index = TextLineIndex::new(text);
         let lint = match (
             staged.resolved.as_ref(),
             staged.program.as_ref(),
             staged.tokens.as_deref(),
+            staged.green.as_ref(),
         ) {
-            (Some(resolved), Some(program), Some(raw_tokens)) => {
-                let tokens = significant_tokens(raw_tokens);
+            (Some(resolved), Some(program), Some(raw_tokens), Some(green)) => {
+                let root = SyntaxNode::new_root(Rc::clone(green));
                 let ctx = LintContext {
                     resolved,
                     diagnostics: &staged.diagnostics,
                     program,
-                    tokens: &tokens,
+                    root: &root,
+                    index: &line_index,
                     comment_tokens: raw_tokens,
                 };
                 Some(run_rules(&ctx, &effective_allow, &effective_warn))
@@ -811,7 +814,7 @@ impl LanguageService for TmcLanguageService {
         };
         let mut state = DocState {
             text: text.to_string(),
-            line_index: TextLineIndex::new(text),
+            line_index,
             tokens: staged.tokens,
             green: staged.green,
             recovered_green: staged.recovered_green,

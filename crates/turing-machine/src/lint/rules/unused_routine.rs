@@ -22,7 +22,8 @@ use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
 use crate::compiler::{ResolvedCallTarget, WorldKind};
 use crate::lint::LintContext;
-use crate::lint::rules::spans::braced_world_decl_span;
+use crate::lint::rules::spans::decl_span;
+use crate::syntax::ReuseView;
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     let mut referenced: HashSet<&str> = HashSet::new();
@@ -42,15 +43,14 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             && world.local
             && !referenced.contains(world.name.as_str())
         {
-            let fix =
-                braced_world_decl_span(ctx.tokens, world.name_span, "routine").map(|span| Fix {
-                    description: format!("delete the unused routine `{}`", world.name),
-                    applicability: Applicability::MaybeIncorrect,
-                    edits: vec![Edit {
-                        span,
-                        replacement: String::new(),
-                    }],
-                });
+            let fix = decl_span::<ReuseView>(ctx, world.name_span).map(|span| Fix {
+                description: format!("delete the unused routine `{}`", world.name),
+                applicability: Applicability::MaybeIncorrect,
+                edits: vec![Edit {
+                    span,
+                    replacement: String::new(),
+                }],
+            });
             out.push(Diagnostic {
                 code: "unused-routine",
                 span: world.name_span,
