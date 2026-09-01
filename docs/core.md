@@ -894,6 +894,18 @@ the single owner of grammar decisions — and guards itself with
 idempotent trivia flushes and an emitted-twice check on significant
 positions.
 
+**The assembly languages ride the same framework.** The `.pma`/`.tma`
+parse — total, line-oriented — emits a green tree through the same
+sink from its one shaping walk: `parse_asm_green` returns the familiar
+assembly CST paired with a lossless tree over the assembly kind space
+(one node per item, the item's significant tokens flat inside it,
+comments and blank lines as trivia between nodes). `text()` equals the
+source byte-for-byte for any input, CRLF included — the tree carries
+the actual bytes where the CST's own text fields deliberately rejoin
+with LF. The plain `parse_asm_cst` entries are unchanged and the CST
+remains what every assembler-side consumer reads; typed views over the
+tree are follow-up territory.
+
 **Error recovery.** The sink also tracks its open-node depth
 (`open_depth`/`finish_to`), which is what a parser's resilient entry
 builds on: each toolchain offers a `parse_green_resilient` beside its

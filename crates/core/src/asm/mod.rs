@@ -7,6 +7,8 @@ pub mod cst;
 pub(crate) mod decode;
 mod disassembler;
 pub mod fmt;
+#[cfg(feature = "std")]
+pub mod kinds;
 pub(crate) mod lexer;
 pub mod lint;
 mod lower;

@@ -15,6 +15,23 @@ use super::lexer::{AsmToken, AsmTokenKind, lex_line};
 use super::syntax::AsmCaps;
 use crate::diagnostics::{Pos, Span};
 
+/// The one hook green emission listens on (docs/core.md (syntax
+/// trees)): the shaping loop reports each item it pushes together with
+/// the records it consumed, and the std-gated emitter mirrors them into
+/// a green tree. The trait keeps the loop itself no_std-clean — the
+/// no-op [`NoEmit`] is what [`parse_asm_cst_with`] drives — and keeps
+/// ONE shaping walk producing both artifacts, so they cannot drift.
+trait GreenEmit {
+    fn item(&mut self, kind: &AsmItemKind, records: &[LineRecord<'_>]);
+}
+
+/// The plain entries' no-op listener.
+struct NoEmit;
+
+impl GreenEmit for NoEmit {
+    fn item(&mut self, _kind: &AsmItemKind, _records: &[LineRecord<'_>]) {}
+}
+
 // ---------------------------------------------------------------------
 // Directive words — the single spelling of every directive the
 // assembler framework recognizes (docs/formats.md (assembly text)).
@@ -435,7 +452,114 @@ pub fn parse_asm_cst(source: &str) -> AsmCst {
 /// caps and the item sequence is unchanged — one item per non-blank
 /// physical line.
 pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
+    parse_with_emit(source, caps, &mut NoEmit)
+}
+
+/// [`parse_asm_cst_with`] plus the green tree (docs/core.md (syntax
+/// trees)): the SAME shaping walk builds both — the CST the consumers
+/// eat and a lossless green tree over the framework's kind space
+/// ([`super::kinds::AsmKind`]), one node per item with the item's
+/// significant tokens flat inside it, comments and whitespace as
+/// trivia between nodes. `text()` equals the source byte-for-byte for
+/// ANY input, CRLF and all (the CST's own text fields rejoin with LF;
+/// the tree carries the actual bytes).
+#[cfg(feature = "std")]
+pub fn parse_asm_green(
+    source: &str,
+    caps: AsmCaps,
+) -> (AsmCst, std::rc::Rc<crate::syntax::GreenNode>) {
+    use super::kinds::AsmKind;
+    use crate::syntax::{EndRule, LayoutToken, TokenClass};
+
     let records = line_records(source, caps);
+    let mut facts: Vec<LayoutToken<AsmKind>> = Vec::new();
+    for r in &records {
+        for t in &r.tokens {
+            facts.push(LayoutToken {
+                line: t.line,
+                col: t.col,
+                end: EndRule::Chars(t.len),
+                class: match &t.kind {
+                    AsmTokenKind::Comment(_) => TokenClass::Trivia(AsmKind::Comment),
+                    _ => TokenClass::Significant,
+                },
+            });
+        }
+    }
+    // The Eof entry: empty at end-of-text, carrying the trailing trivia.
+    facts.push(LayoutToken {
+        line: u32::MAX,
+        col: 1,
+        end: EndRule::AtStart,
+        class: TokenClass::Significant,
+    });
+    let entries = crate::syntax::layout(source, &facts, AsmKind::Whitespace);
+    let eof_pos = entries.len() - 1;
+    let mut sink = crate::syntax::GreenSink::new(entries);
+    sink.start(AsmKind::Root);
+    let mut emit = Emit { sink, next_sig: 0 };
+    let cst = parse_with_emit_records(records, caps, &mut emit);
+    (cst, emit.sink.finish_tree(eof_pos))
+}
+
+/// The std-gated [`GreenEmit`] listener: brackets one node per item and
+/// emits its significant tokens by their global schedule position.
+#[cfg(feature = "std")]
+struct Emit {
+    sink: crate::syntax::GreenSink<super::kinds::AsmKind>,
+    /// Next significant-token index in the layout schedule — advanced
+    /// in lockstep with the shaping loop's own record consumption.
+    next_sig: usize,
+}
+
+#[cfg(feature = "std")]
+impl GreenEmit for Emit {
+    fn item(&mut self, kind: &AsmItemKind, records: &[LineRecord<'_>]) {
+        use super::kinds::{AsmKind, token_green_kind};
+        // A comment-only item is pure trivia in the tree: no node, and
+        // its token was classified trivia by the schedule, so there is
+        // nothing to advance either.
+        let node = match kind {
+            AsmItemKind::Comment(_) => None,
+            AsmItemKind::Line(_) => Some(AsmKind::Line),
+            AsmItemKind::Func(_) => Some(AsmKind::Func),
+            AsmItemKind::Raw(_) => Some(AsmKind::Raw),
+            AsmItemKind::Section(_) => Some(AsmKind::Section),
+            AsmItemKind::TableDirective(_) => Some(AsmKind::TableDirective),
+            AsmItemKind::Rept(_) => Some(AsmKind::Rept),
+            AsmItemKind::RoutineDirective(_) => Some(AsmKind::RoutineDirective),
+            AsmItemKind::Volatile(_) => Some(AsmKind::Volatile),
+            AsmItemKind::FrameDirective(_) => Some(AsmKind::FrameDirective),
+        };
+        let Some(node) = node else {
+            return;
+        };
+        // Trivia before the item's first significant token belongs to
+        // the parent (the source-language convention), so flush first.
+        self.sink.flush(self.next_sig);
+        self.sink.start(node);
+        for r in records {
+            for t in &r.tokens {
+                if matches!(t.kind, AsmTokenKind::Comment(_)) {
+                    continue;
+                }
+                self.sink.token(self.next_sig, token_green_kind(&t.kind));
+                self.next_sig += 1;
+            }
+        }
+        self.sink.finish();
+    }
+}
+
+fn parse_with_emit(source: &str, caps: AsmCaps, emit: &mut dyn GreenEmit) -> AsmCst {
+    parse_with_emit_records(line_records(source, caps), caps, emit)
+}
+
+fn parse_with_emit_records(
+    records: Vec<LineRecord<'_>>,
+    caps: AsmCaps,
+    emit: &mut dyn GreenEmit,
+) -> AsmCst {
     let mut items: Vec<AsmItem> = Vec::new();
     let mut i = 0;
     while i < records.len() {
@@ -452,18 +576,20 @@ pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
             if let Some(off) = rest.iter().position(|r| is_endr(&r.tokens)) {
                 let body = shape_body(&rest[..off], caps);
                 let (endr_span, endr_trailing) = endr_parts(&rest[off]);
+                let kind = AsmItemKind::Rept(ReptCst {
+                    var: header.var,
+                    lo: header.lo,
+                    hi: header.hi,
+                    body,
+                    span: header.span,
+                    trailing: header.trailing,
+                    endr_span,
+                    endr_trailing,
+                });
+                emit.item(&kind, &records[i..i + 1 + off + 1]);
                 items.push(AsmItem {
                     blank_before: rec.blank_before,
-                    kind: AsmItemKind::Rept(ReptCst {
-                        var: header.var,
-                        lo: header.lo,
-                        hi: header.hi,
-                        body,
-                        span: header.span,
-                        trailing: header.trailing,
-                        endr_span,
-                        endr_trailing,
-                    }),
+                    kind,
                     // A block is many physical lines but not a continued
                     // list — it carries its own line bounds in `span` and
                     // `endr_span`, and its body items each stay one line.
@@ -479,6 +605,7 @@ pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
         }
         let candidate = continued_len(&records[i..], caps);
         let (kind, used) = shape_records(&records[i..i + candidate], caps);
+        emit.item(&kind, &records[i..i + used]);
         items.push(AsmItem {
             blank_before: rec.blank_before,
             kind,
