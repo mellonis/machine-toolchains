@@ -84,8 +84,8 @@ One rule governs every fix, whatever rule produced it: **a fix whose
 edit span contains a comment is withheld**. Applying such an edit would
 delete the comment silently — and `--fix` rewrites the file in place,
 so that is data loss on the user's own source, the same defect
-`pmt fmt` takes care to avoid (it relocates a comment rather than
-dropping it). The finding still reports, exactly as it would with the
+`pmt fmt` refuses by rule (a comment is never moved, and never
+dropped). The finding still reports, exactly as it would with the
 fix; only the remedy is missing, and deleting the flagged code by hand,
 comment and all, remains the user's call. The check runs once over
 every rule's output rather than inside each rule, so it holds for any

@@ -174,27 +174,41 @@ declarations" rule to enforce.
 
 ## Comments
 
-Every comment keeps its position relative to the code around it: a
-comment on its own line before a declaration or statement stays there
-(and travels with it — a blank line the author placed above the comment
-stays above the comment, not between the comment and what it documents);
-a comment dangling before a body's closing brace prints at the body's
-indent; block-comment interiors are reprinted verbatim, untouched.
+**A comment is never moved**: it prints between the same two
+significant tokens it was written between. fmt may change the
+whitespace around a comment — the line it starts on, its column, the
+blank lines beside it — never which tokens it sits between. That one
+sentence covers every position; the paragraphs below describe the
+layout each family of positions takes, not exceptions to the rule.
 
-One position is the exception. A comment written inside a function's or
-namespace's **header** — between the name and its `(`, inside the empty
-`()`, between `)` and `{`, after `volatile` or `export`, or between a
-namespace's keyword/name and its `{` — has no place on the canonical
-header line, so it relocates to its own line at body indent, ahead of
-the first body element. Nothing is dropped — the rewrite is still
-whitespace-only — and when any header comment is present the open-brace
-comment moves with it, in source order, instead of riding the brace.
-Blank lines around the relocated run reprint from the comments'
-original source lines: `main() // note` with the `{` on the next line
-puts `// note` at body indent with a blank line under it, because the
-first statement sat two lines below the comment in the source. The
-relocated shape is one the printer reprints unchanged, so this settles
-in a single pass.
+A comment on its own line before a declaration or statement stays
+there (and travels with it — a blank line the author placed above the
+comment stays above the comment, not between the comment and what it
+documents); a comment dangling before a body's closing brace prints at
+the body's indent; block-comment interiors are reprinted verbatim,
+untouched.
+
+A comment written inside a function's or namespace's **header** —
+between the name and its `(`, inside the empty `()`, between `)` and
+`{`, after `volatile` or `export`, or between a namespace's
+keyword/name and its `{` — prints on the header line, in its written
+slot (`main /* x */() {`). A `//` comment consumes the rest of its
+physical line, so the remainder of the header continues on the next
+line at the declaration's indent. The open-brace comment rides the
+brace either way.
+
+A comment in a statement's **label region** — between a label's number
+and its `:`, or between two stacked labels — prints in place in the
+label prefix, and the statement takes the own-line-label layout, with
+the command below (`1: // mid` continues `2:` on the next line). A
+comment between the last item and the `;` prints **before the `;`**;
+when it is a `//` comment, the `;` moves to its own line below it. A
+comment nested inside an item's own parens — `check`'s arms, a
+command's successor, a call's arguments — prints inside the item, in
+its written slot, as does a comment inside a `use` path's segments.
+Blank lines inside a header, a label region, or an item's parens do
+not survive: those regions render compactly, and only the comment's
+token slot is preserved there.
 
 A trailing comment (same line as the statement it follows) gets one
 space before its `//` by default. When the author aligned a **run** of

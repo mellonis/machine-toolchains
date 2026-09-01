@@ -67,12 +67,11 @@
 //! `fmt_programs.rs`'s real-program corpus instead, and each excluded for a
 //! reason a future widening should re-read before undoing it:
 //!
-//! * **A comment between a statement's labels and its command.** Formatting
-//!   that shape is not idempotent — the printer draws the comment up onto
-//!   the label line, which pushes the command down a line, and the second
-//!   pass then reads that as an author-written own-line-label break. It
-//!   converges after one further pass and is long-standing behaviour, not a
-//!   regression of this suite's own properties.
+//! * **A comment between a statement's labels and its command.** Under the
+//!   never-move rule the shape is idempotent now — the comment prints in
+//!   place in the label region — and `tests/comment_positions.rs` pins it
+//!   in both flavours; the generator simply predates the position and has
+//!   not been widened to emit it.
 //! * **Nested function declarations inside a body**, which would make
 //!   [`command_columns_agree`]'s statement-start walk need a full nested
 //!   declaration parser to tell `step() {` from a command.

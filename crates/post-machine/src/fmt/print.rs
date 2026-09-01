@@ -149,17 +149,18 @@ pub(crate) fn format(source: &str) -> Result<String, CompileError> {
 /// The conservation gate behind every debug-build render: each comment
 /// in the source reprints in the output exactly once, text intact up to
 /// the per-line trailing-whitespace trim [`normalize_comment_text`] is
-/// allowed (docs/pmt/fmt.md (comments) — relocate, never drop). The
-/// printer coordinates independent claimants — leading runs, trailing
-/// slots, brace rides, `use`-list splices, relocations — by per-surface
-/// boundaries with no structural guarantee that every comment is
-/// claimed exactly once, and a missed surface loses a comment SILENTLY:
-/// `pmt fmt` rewrites in place, and no other property can see the loss
-/// (token equivalence lexes `WithoutComments`; idempotence holds on the
-/// lossy output). This printer shipped exactly that failure on
-/// header-interior comments. A MULTISET is compared, not a sequence:
-/// relocation legitimately reorders a comment relative to tokens, never
-/// drops or duplicates one — the two defects this catches loudly.
+/// allowed (docs/pmt/fmt.md (comments) — never moved, never dropped).
+/// The printer coordinates independent claimants — leading runs,
+/// trailing slots, brace rides, `use`-list splices, in-place header and
+/// label-region walks — by per-surface boundaries with no structural
+/// guarantee that every comment is claimed exactly once, and a missed
+/// surface loses a comment SILENTLY: `pmt fmt` rewrites in place, and
+/// no other property can see the loss (token equivalence lexes
+/// `WithoutComments`; idempotence holds on the lossy output). This
+/// printer shipped exactly that failure on header-interior comments. A
+/// MULTISET is compared, not a sequence, so this gate is layout-blind —
+/// the never-move rule itself is pinned position-by-position in
+/// `tests/comment_positions.rs`.
 #[cfg(debug_assertions)]
 fn assert_comment_conservation(source: &str, formatted: &str) {
     fn multiset(text: &str) -> std::collections::BTreeMap<String, usize> {
@@ -342,16 +343,79 @@ fn unit_start_line(node: &SyntaxNode, line_index: &TextLineIndex) -> u32 {
     line_index.line_col(start).0
 }
 
+/// The canonical header line with its interior comments spliced in
+/// place — the never-move rendering a declaration header takes when a
+/// comment sits between its tokens (`main /* c */ () {`,
+/// `namespace /* c */ n {`). Walks the node's direct header tokens
+/// from the first significant one through the opening `{`: significant
+/// tokens reproduce the canonical spacing (no space before `(`/`)` or
+/// after `(`, one space elsewhere), a comment gets one space before and
+/// after it, and a LINE comment — which nothing can follow on its
+/// physical line — continues the header on the next line at the
+/// declaration's own indent. Comments BEFORE the first significant
+/// token belong to [`doc_run_trailing_comments`], the same claim
+/// boundary [`header_interior_comments`] holds.
+fn render_header_tokens(node: &SyntaxNode, indent: usize) -> String {
+    let mut out = String::new();
+    let mut seen_significant = false;
+    let mut after_comment = false;
+    let mut at_line_start = false;
+    let mut prev: Option<String> = None;
+    for e in node.children_with_tokens() {
+        let SyntaxElement::Token(t) = e else {
+            continue; // a bound DOC_RUN — before the header by construction
+        };
+        if trivia::is_ws(t.kind()) {
+            continue;
+        }
+        if trivia::is_comment(t.kind()) {
+            if !seen_significant {
+                continue;
+            }
+            if !at_line_start {
+                out.push(' ');
+            }
+            out.push_str(&normalize_comment_text(t.text()));
+            if is_line_comment(&t) {
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+                at_line_start = true;
+            } else {
+                at_line_start = false;
+            }
+            after_comment = !at_line_start;
+            continue;
+        }
+        let text = t.text();
+        let space = if !seen_significant || at_line_start {
+            false
+        } else if after_comment {
+            !matches!(text, "(" | ")")
+        } else {
+            !matches!(text, "(" | ")") && !matches!(prev.as_deref(), Some("("))
+        };
+        if space {
+            out.push(' ');
+        }
+        out.push_str(text);
+        seen_significant = true;
+        prev = Some(text.to_string());
+        after_comment = false;
+        at_line_start = false;
+        if t.kind() == PmcKind::LBrace.into() {
+            break;
+        }
+    }
+    out
+}
+
 /// Comment tokens written between a declaration's header tokens — after
 /// its FIRST header token and before its opening `{` — in source order:
 /// between a function's name and its `(`, inside the `()`, between `)`
 /// and `{`, after `volatile`/`export`, or between a namespace's
-/// keyword/name and its `{`. The canonical header line has no place for
-/// them, so they relocate to their own lines at body indent, ahead of
-/// the first body element (docs/pmt/fmt.md (comments)) — and when any
-/// exist, the open-brace run relocates WITH them, in source order,
-/// instead of riding the brace (one pending queue, not two: the caller
-/// appends `open_trailing` to what this returns).
+/// keyword/name and its `{`. Any such comment takes the header to
+/// [`render_header_tokens`], which prints it in place (the never-move
+/// rule).
 ///
 /// The after-the-first-header-token bound is the claim boundary against
 /// [`doc_run_trailing_comments`]: a comment between a bound `DOC_RUN`
@@ -423,20 +487,19 @@ fn print_namespace(
     let node = ns.syntax();
     let pad = " ".repeat(indent);
     out.push_str(&pad);
-    out.push_str("namespace ");
-    out.push_str(&ns.name());
-    out.push_str(" {");
+    if header_interior_comments(node).is_empty() {
+        out.push_str("namespace ");
+        out.push_str(&ns.name());
+        out.push_str(" {");
+    } else {
+        // A header-interior comment prints in place, on the header line
+        // (the never-move rule) — same as a function header's.
+        out.push_str(&render_header_tokens(node, indent));
+    }
     let brace =
         token(node, PmcKind::LBrace.into()).expect("NAMESPACE always carries an L_BRACE token");
     let open = trivia::open_trailing(&brace);
-    let mut relocated = header_interior_comments(node);
-    if !relocated.is_empty() {
-        // Same relocation as a function header's
-        // ([`header_interior_comments`]): the open-brace run joins the
-        // relocated comments instead of riding the brace.
-        relocated.extend(open.iter().cloned());
-        out.push('\n');
-    } else if open.is_empty() {
+    if open.is_empty() {
         out.push('\n');
     } else {
         out.push(' ');
@@ -452,7 +515,7 @@ fn print_namespace(
         brace_interior(node),
         indent + INDENT_UNIT,
         &open,
-        &relocated,
+        &[],
         line_index,
     );
     out.push_str(&pad);
@@ -490,11 +553,10 @@ fn use_decl_interior_comments(node: &SyntaxNode) -> Vec<(usize, SyntaxToken)> {
         match e {
             SyntaxElement::Node(n) if n.kind() == PmcKind::UsePath.into() => {
                 index += 1;
-                for t in n.descendant_tokens() {
-                    if trivia::is_comment(t.kind()) {
-                        out.push((index, t));
-                    }
-                }
+                // A comment NESTED inside the path (`a /* c */ ::b`)
+                // is not a slot comment: it prints in place inside the
+                // path's own rendered text ([`render_use_path`], the
+                // never-move rule).
             }
             SyntaxElement::Token(t) if trivia::is_comment(t.kind()) => out.push((index, t)),
             _ => {}
@@ -637,6 +699,57 @@ fn print_use(out: &mut String, u: &UseDeclView, indent: usize, _line_index: &Tex
 /// decision, ported to read segments/alias off [`UsePathView`] instead
 /// of a parsed `UsePath`.
 fn render_use_path(p: &UsePathView) -> String {
+    let node = p.syntax();
+    if node
+        .descendant_tokens()
+        .any(|t| trivia::is_comment(t.kind()))
+    {
+        // An interior comment prints in place inside the path (the
+        // never-move rule): walk the path's own tokens, canonical `::`
+        // joins, one space before a comment and one after it unless a
+        // `::` follows; a LINE comment continues the path on the next
+        // line at the list's own continuation indent.
+        let mut s = String::new();
+        let mut after_comment = false;
+        let mut at_line_start = false;
+        let mut prev_as = false;
+        for t in node.descendant_tokens() {
+            if trivia::is_ws(t.kind()) {
+                continue;
+            }
+            if trivia::is_comment(t.kind()) {
+                if !at_line_start {
+                    s.push(' ');
+                }
+                s.push_str(&normalize_comment_text(t.text()));
+                if is_line_comment(&t) {
+                    s.push('\n');
+                    s.push_str("    ");
+                    at_line_start = true;
+                } else {
+                    at_line_start = false;
+                }
+                after_comment = !at_line_start;
+                continue;
+            }
+            let text = t.text();
+            let space = if at_line_start {
+                false
+            } else if after_comment {
+                text != "::"
+            } else {
+                text == "as" || prev_as
+            };
+            if space {
+                s.push(' ');
+            }
+            s.push_str(text);
+            prev_as = text == "as";
+            after_comment = false;
+            at_line_start = false;
+        }
+        return s;
+    }
     let mut s = p
         .segments()
         .iter()
@@ -716,28 +829,27 @@ fn print_function(
     }
     let pad = " ".repeat(indent);
     out.push_str(&pad);
-    // Fixed order — `volatile` precedes `export` when both are written
-    // (mirrors `FnHeader`'s own contextual-keyword decode order).
-    let header = func.header();
-    if header.has_volatile {
-        out.push_str("volatile ");
+    if header_interior_comments(node).is_empty() {
+        // Fixed order — `volatile` precedes `export` when both are written
+        // (mirrors `FnHeader`'s own contextual-keyword decode order).
+        let header = func.header();
+        if header.has_volatile {
+            out.push_str("volatile ");
+        }
+        if header.has_export {
+            out.push_str("export ");
+        }
+        out.push_str(header.name.text());
+        out.push_str("() {");
+    } else {
+        // A header-interior comment prints in place, on the header line
+        // (the never-move rule).
+        out.push_str(&render_header_tokens(node, indent));
     }
-    if header.has_export {
-        out.push_str("export ");
-    }
-    out.push_str(header.name.text());
-    out.push_str("() {");
     let brace =
         token(node, PmcKind::LBrace.into()).expect("FUNCTION always carries an L_BRACE token");
     let open = trivia::open_trailing(&brace);
-    let mut relocated = header_interior_comments(node);
-    if !relocated.is_empty() {
-        // Header-interior comments relocate into the body, and the
-        // open-brace run relocates with them instead of riding the brace
-        // (`header_interior_comments`'s own doc — one pending queue).
-        relocated.extend(open.iter().cloned());
-        out.push('\n');
-    } else if open.is_empty() {
+    if open.is_empty() {
         out.push('\n');
     } else {
         out.push(' ');
@@ -748,14 +860,7 @@ fn print_function(
         out.push_str(&texts.join(" "));
         out.push('\n');
     }
-    print_body(
-        out,
-        node,
-        indent + INDENT_UNIT,
-        &open,
-        &relocated,
-        line_index,
-    );
+    print_body(out, node, indent + INDENT_UNIT, &open, &[], line_index);
     out.push_str(&pad);
     out.push('}');
     if let Some(c) = trivia::trailing_comment(node) {
@@ -911,6 +1016,18 @@ struct StmtElem {
     label_break: bool,
     newline_before: Vec<bool>,
     item_leading: Vec<Vec<SyntaxToken>>,
+    /// Each `ITEM`'s own green node, for the comment-splicing token
+    /// renderer ([`render_item_tokens`]) — an item whose node carries an
+    /// interior comment renders from its tokens, comments in place.
+    item_nodes: Vec<SyntaxNode>,
+    /// Per label: the comments inside the `LABEL` node and the run up to
+    /// the next label ([`label_region_comments`]) — printed in place in
+    /// the label prefix; any entry forces the label-break layout.
+    label_region: Vec<(Vec<SyntaxToken>, Vec<SyntaxToken>)>,
+    /// The tail slot: comments between the last item and the `;`
+    /// ([`item_leading_comments`]'s popped last entry) — printed before
+    /// the `;`, never past it (the never-move rule).
+    pre_semi: Vec<SyntaxToken>,
     trailing: Option<SyntaxToken>,
 }
 
@@ -940,7 +1057,7 @@ struct StmtElem {
 /// tokens sits INSIDE the statement, not at body level, so that query
 /// would ask the wrong question entirely).
 enum BodyElem {
-    Statement(StmtElem),
+    Statement(Box<StmtElem>),
     Nested(FunctionView),
     Comment(SyntaxToken),
     TailComment(SyntaxToken),
@@ -1001,75 +1118,82 @@ fn resolved_trailing(elem: &BodyElem) -> Option<SyntaxToken> {
 /// surface.
 fn item_leading_comments(stmt: &SyntaxNode) -> Vec<Vec<SyntaxToken>> {
     let mut out: Vec<Vec<SyntaxToken>> = vec![Vec::new()];
+    // Comments seen before it's known whether a LABEL follows: a comment
+    // that precedes another label belongs to the LABEL REGION
+    // ([`label_region_comments`]) and prints interleaved with the labels,
+    // never in an item slot — only the run between the LAST label and the
+    // first item is slot 0's (the comment sits between `:` and the first
+    // command, and prints there).
+    let mut pending: Vec<SyntaxToken> = Vec::new();
+    let mut items_started = false;
     for e in stmt.children_with_tokens() {
         match e {
             SyntaxElement::Node(n) if n.kind() == PmcKind::Label.into() => {
-                let slot = out.last_mut().expect("out is never empty");
-                slot.extend(
-                    n.descendant_tokens()
-                        .filter(|t| trivia::is_comment(t.kind())),
-                );
+                pending.clear();
             }
             SyntaxElement::Node(n) if n.kind() == PmcKind::Item.into() => {
+                if !items_started {
+                    items_started = true;
+                    out.last_mut()
+                        .expect("out is never empty")
+                        .append(&mut pending);
+                }
+                // A comment NESTED inside the item (`check(1 /* c */, 2)`)
+                // is not collected here: it prints in place inside the
+                // item's own rendered text ([`render_item_tokens`], the
+                // never-move rule), never in a slot.
                 out.push(Vec::new());
-                let slot = out.last_mut().expect("just pushed");
-                slot.extend(
-                    n.descendant_tokens()
-                        .filter(|t| trivia::is_comment(t.kind())),
-                );
             }
             SyntaxElement::Token(t) if trivia::is_comment(t.kind()) => {
-                out.last_mut().expect("out is never empty").push(t);
+                if items_started {
+                    out.last_mut().expect("out is never empty").push(t);
+                } else {
+                    pending.push(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    // A labels-only statement can end with pending comments and no item;
+    // they sit between the last label and the `;` — the tail slot's.
+    out.last_mut()
+        .expect("out is never empty")
+        .append(&mut pending);
+    out
+}
+
+/// Per label, the comments the never-move rule keys to that label: the
+/// run INSIDE the `LABEL` node (between its number and its `:`) and the
+/// run AFTER it up to the NEXT label (between two stacked labels).
+/// Comments after the LAST label belong to slot 0 of
+/// [`item_leading_comments`] instead — they sit between the `:` and the
+/// first command and print there. Any comment here takes the statement
+/// to the label-break layout, with the comments printed in place in the
+/// label prefix.
+fn label_region_comments(stmt: &SyntaxNode) -> Vec<(Vec<SyntaxToken>, Vec<SyntaxToken>)> {
+    let mut out: Vec<(Vec<SyntaxToken>, Vec<SyntaxToken>)> = Vec::new();
+    let mut pending: Vec<SyntaxToken> = Vec::new();
+    for e in stmt.children_with_tokens() {
+        match e {
+            SyntaxElement::Node(n) if n.kind() == PmcKind::Label.into() => {
+                if let Some(prev) = out.last_mut() {
+                    prev.1.append(&mut pending);
+                }
+                pending.clear();
+                let inside = n
+                    .descendant_tokens()
+                    .filter(|t| trivia::is_comment(t.kind()))
+                    .collect();
+                out.push((inside, Vec::new()));
+            }
+            SyntaxElement::Node(_) => break,
+            SyntaxElement::Token(t) if trivia::is_comment(t.kind()) => {
+                pending.push(t);
             }
             _ => {}
         }
     }
     out
-}
-
-/// The one comment [`print_statement`] prints as `node`'s own trailing
-/// comment, plus every OTHER comment from its tail slot
-/// ([`item_leading_comments`]'s popped last entry) that instead becomes
-/// an ordinary standalone [`BodyElem::TailComment`] — the green
-/// re-derivation of C1's `Parser::take_trailing`
-/// (`docs/pmt/fmt.md` (comments)). C1 checked only the SINGLE comment
-/// pending at the moment `;` was reached, wherever it physically sits —
-/// nested inside the last item, directly between it and `;` (both
-/// `tail`, tried first since they precede `;` in source), or
-/// immediately after `;` on the same line ([`trivia::trailing_comment`],
-/// tried only when `tail` is empty — reachable at all only because a
-/// nested/pre-`;` comment always drains before a post-`;` one gets the
-/// chance) — claiming it only if it is NOT own-line and shares `;`'s own
-/// physical line. Every comment in `tail` beyond that first one, and any
-/// genuine post-`;` comment a `tail` member already claimed the role
-/// from, becomes a standalone comment instead: `tail`'s own members
-/// always with blank-before `false` (a `tail` member's source line can
-/// never exceed `;`'s — it precedes `;` in the token stream — so C1's
-/// `cline > prev_end_line + 1` check, `prev_end_line` already `;`'s own
-/// line by the time it runs, can never fire for one); a genuine post-`;`
-/// leftover is a real body-level sibling token instead, so
-/// [`print_body`]'s OWN existing comment-collection arm already picks it
-/// up and gives it the ordinary [`blank_immediately_before`] treatment —
-/// this function returns only the `tail`-side leftovers.
-fn statement_trailing_and_leftovers(
-    node: &SyntaxNode,
-    tail: &[SyntaxToken],
-    line_index: &TextLineIndex,
-) -> (Option<SyntaxToken>, Vec<SyntaxToken>) {
-    match tail.split_first() {
-        Some((first, rest)) => {
-            let semi =
-                token(node, PmcKind::Semi.into()).expect("STATEMENT always carries a SEMI token");
-            let semi_line = line_index.line_col(semi.text_range().start).0;
-            let first_line = line_index.line_col(first.text_range().start).0;
-            if !comment_own_line(first) && first_line == semi_line {
-                (Some(first.clone()), rest.to_vec())
-            } else {
-                (None, tail.to_vec())
-            }
-        }
-        None => (trivia::trailing_comment(node), Vec::new()),
-    }
 }
 
 /// A `FUNCTION` node's own body — [`brace_interior`] between its `{` and
@@ -1175,31 +1299,34 @@ fn print_body(
                 let tail = item_leading
                     .pop()
                     .expect("item_leading_comments always yields items.len() + 1 slots (the tail)");
-                let (trailing, leftover) =
-                    statement_trailing_and_leftovers(sv.syntax(), &tail, line_index);
                 let stmt = extract_statement(&sv, line_index);
+                let label_region = label_region_comments(sv.syntax());
+                // A label-region comment forces the label-break layout:
+                // the comment prints in place in the prefix, and the
+                // prefix no longer competes for the shared inline label
+                // column (`max_inline_label_prefix_width` keys on this
+                // flag).
+                let label_break = label_break
+                    || label_region
+                        .iter()
+                        .any(|(i, a)| !i.is_empty() || !a.is_empty());
+                // The tail slot prints BEFORE the `;` — the comment
+                // precedes it in source, and the never-move rule keeps it
+                // there. The statement's own trailing comment is only ever
+                // a genuine post-`;` one now.
+                let trailing = trivia::trailing_comment(sv.syntax());
                 override_prev_line.push(pending_prev_line.take());
-                body.push(BodyElem::Statement(StmtElem {
+                body.push(BodyElem::Statement(Box::new(StmtElem {
                     node: node.clone(),
                     stmt,
                     label_break,
                     newline_before,
                     item_leading,
+                    item_nodes: item_views.iter().map(|v| v.syntax().clone()).collect(),
+                    label_region,
+                    pre_semi: tail,
                     trailing,
-                }));
-                // A tail-slot comment `statement_trailing_and_leftovers`
-                // did NOT resolve as `trailing` reprints as an ordinary
-                // standalone comment, positioned right after the
-                // statement it was physically nested inside (see that
-                // function's own doc, and `BodyElem::TailComment`'s).
-                // Each one both consumes and re-establishes
-                // `pending_prev_line`, C1's own per-comment
-                // `prev_end_line` update replayed one entry at a time.
-                for c in leftover {
-                    override_prev_line.push(pending_prev_line.take());
-                    pending_prev_line = Some(line_index.line_col(c.text_range().end).0);
-                    body.push(BodyElem::TailComment(c));
-                }
+                })));
             }
             SyntaxElement::Node(node) if node.kind() == PmcKind::Function.into() => {
                 let fv = FunctionView::cast(node.clone()).expect("kind checked above");
@@ -1263,14 +1390,7 @@ fn print_body(
     let codes: Vec<String> = body
         .iter()
         .map(|elem| match elem {
-            BodyElem::Statement(s) => render_statement_code(
-                &s.stmt.labels,
-                s.label_break,
-                &s.stmt.items,
-                &s.newline_before,
-                &s.item_leading,
-                command_col,
-            ),
+            BodyElem::Statement(s) => render_statement_code(s, command_col),
             BodyElem::Nested(_) | BodyElem::Comment(_) | BodyElem::TailComment(_) => String::new(),
         })
         .collect();
@@ -1412,6 +1532,7 @@ fn print_body(
             indent,
             &codes[i],
             trailing_spacing[i],
+            command_col,
             line_index,
         );
     }
@@ -1432,10 +1553,11 @@ fn print_body_item(
     indent: usize,
     code: &str,
     trailing_spacing: usize,
+    command_col: usize,
     line_index: &TextLineIndex,
 ) {
     match elem {
-        BodyElem::Statement(s) => print_statement(out, s, code, trailing_spacing),
+        BodyElem::Statement(s) => print_statement(out, s, code, trailing_spacing, command_col),
         BodyElem::Nested(fv) => print_function(out, fv, indent, line_index),
         BodyElem::Comment(_) | BodyElem::TailComment(_) => unreachable!(
             "print_body's own loop handles BodyElem::Comment/BodyElem::TailComment directly \
@@ -1510,16 +1632,25 @@ fn label_margin(command_col: usize, prefix_width: usize) -> Option<usize> {
 /// statement, up front, by [`print_body`]'s own pre-pass — see that
 /// function's own doc for why [`compute_trailing_spacing`] needs every
 /// statement's code rendered before any of them prints.
-fn render_statement_code(
-    labels: &[Label],
-    label_break: bool,
-    items: &[Item],
-    newline_before: &[bool],
-    item_leading: &[Vec<SyntaxToken>],
-    command_col: usize,
-) -> String {
+fn render_statement_code(s: &StmtElem, command_col: usize) -> String {
+    let labels = &s.stmt.labels;
+    let label_break = s.label_break;
+    let label_region = &s.label_region;
+    let region_commented = label_region
+        .iter()
+        .any(|(i, a)| !i.is_empty() || !a.is_empty());
     let mut out = String::new();
     if labels.is_empty() {
+        out.push_str(&" ".repeat(command_col));
+    } else if region_commented {
+        // Label-region comments print in place, interleaved with the
+        // labels at a fixed one-space indent (the margin alignment is
+        // meaningless once comments stretch the prefix), and the
+        // statement always takes the label-break layout — `label_break`
+        // was already forced true where this element was built.
+        out.push(' ');
+        out.push_str(&label_prefix_with_comments(labels, label_region));
+        out.push('\n');
         out.push_str(&" ".repeat(command_col));
     } else {
         let prefix = label_prefix_text(labels);
@@ -1542,26 +1673,91 @@ fn render_statement_code(
         }
     }
     out.push_str(&render_items(
-        items,
-        newline_before,
-        item_leading,
+        &s.stmt.items,
+        &s.newline_before,
+        &s.item_leading,
+        &s.item_nodes,
         command_col,
     ));
+    // The tail slot: comments between the last item and the `;` print
+    // BEFORE the `;`, in their written slot (the never-move rule) — an
+    // own-line comment keeps its own line at the command column, a
+    // same-line one rides the code line.
+    for c in &s.pre_semi {
+        if comment_own_line(c) {
+            out.push('\n');
+            out.push_str(&" ".repeat(command_col));
+        } else {
+            out.push(' ');
+        }
+        out.push_str(&normalize_comment_text(c.text()));
+    }
     out
+}
+
+/// The label prefix with the label-region comments interleaved in their
+/// written slots: `1 /* a */: /* b */ 2:` — an inside comment between
+/// its number and `:`, an after comment between the `:` and the next
+/// label. A LINE comment eats the rest of its physical line, so the
+/// remainder continues on the next line at the same one-space indent.
+fn label_prefix_with_comments(
+    labels: &[Label],
+    region: &[(Vec<SyntaxToken>, Vec<SyntaxToken>)],
+) -> String {
+    let mut s = String::new();
+    for (i, l) in labels.iter().enumerate() {
+        if i > 0 && !s.ends_with(' ') {
+            s.push(' ');
+        }
+        s.push_str(&l.written);
+        let (inside, after) = &region[i];
+        for c in inside {
+            s.push(' ');
+            s.push_str(&normalize_comment_text(c.text()));
+            if is_line_comment(c) {
+                s.push('\n');
+                s.push(' ');
+            }
+        }
+        s.push(':');
+        for c in after {
+            s.push(' ');
+            s.push_str(&normalize_comment_text(c.text()));
+            if is_line_comment(c) {
+                s.push('\n');
+                s.push(' ');
+            }
+        }
+    }
+    s
+}
+
+/// Whether a comment token is the `//` kind — the kind nothing can
+/// follow on its physical line.
+fn is_line_comment(c: &SyntaxToken) -> bool {
+    c.text().trim_start().starts_with("//")
 }
 
 /// One statement's final line(s): the precomputed `code`
 /// ([`render_statement_code`], rendered once by [`print_body`]'s own
 /// pre-pass), the `;`, then a same-line trailing comment if any — spaced
 /// per `trailing_spacing` ([`compute_trailing_spacing`],
-/// `docs/pmt/fmt.md` (comments)) — then the newline. Ported from
-/// C1's `print_statement`, reading the trailing comment off `s`'s
-/// own resolved `trailing` field ([`statement_trailing_and_leftovers`])
-/// instead of a `StatementCst::trailing` field — NOT a fresh
-/// `trivia::trailing_comment(&s.node)` call, which would miss a
-/// relocated pre-`;` comment entirely (that function's own doc).
-fn print_statement(out: &mut String, s: &StmtElem, code: &str, trailing_spacing: usize) {
+/// `docs/pmt/fmt.md` (comments)) — then the newline. The `;` abuts the
+/// code — or, when the tail slot's last comment is a LINE comment
+/// (nothing can follow it on its line), moves to its own line at
+/// `command_col`.
+fn print_statement(
+    out: &mut String,
+    s: &StmtElem,
+    code: &str,
+    trailing_spacing: usize,
+    command_col: usize,
+) {
     out.push_str(code);
+    if s.pre_semi.last().is_some_and(is_line_comment) {
+        out.push('\n');
+        out.push_str(&" ".repeat(command_col));
+    }
     out.push(';');
     if let Some(tc) = &s.trailing {
         out.push_str(&" ".repeat(trailing_spacing));
@@ -1780,13 +1976,28 @@ fn render_items(
     items: &[Item],
     newline_before: &[bool],
     leading: &[Vec<SyntaxToken>],
+    item_nodes: &[SyntaxNode],
     command_col: usize,
 ) -> String {
     let layouts: Vec<LeadingLayout> = leading.iter().map(|l| layout_leading(l)).collect();
     let texts: Vec<String> = items
         .iter()
+        .enumerate()
         .zip(&layouts)
-        .map(|(item, layout)| format!("{}{}", layout.inline_prefix, render_item(item)))
+        .map(|((i, item), layout)| {
+            // An item whose node carries an interior comment renders from
+            // its own tokens with the comments in place (the never-move
+            // rule); a comment-free item keeps the classic canonical
+            // rendering (byte-identical for it).
+            let body = match item_nodes
+                .get(i)
+                .filter(|n| n.descendant_tokens().any(|t| trivia::is_comment(t.kind())))
+            {
+                Some(node) => render_item_tokens(node, command_col + 4),
+                None => render_item(item),
+            };
+            format!("{}{}", layout.inline_prefix, body)
+        })
         .collect();
     let mut groups: Vec<Vec<usize>> = vec![vec![0]];
     for (i, &nb) in newline_before.iter().enumerate().skip(1) {
@@ -1955,6 +2166,58 @@ fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
             col = line_width_after(command_col, text);
         }
     }
+}
+
+/// Canonical item text with the item's INTERIOR comments spliced in
+/// place — the never-move rendering an item takes when its node carries
+/// one (`check(1 /* c */, 2)`, `right( /* c */ 3)`, `@b( /* c */ !)`).
+/// Walks the item's own tokens in source order: significant tokens
+/// reproduce [`render_item`]'s canonical spacing (byte-identical on a
+/// comment-free item, pinned by the fmt corpus), a comment gets one
+/// space before it and one after unless a `,`/`)` follows, and a LINE
+/// comment — which nothing can follow on its physical line — continues
+/// the item on the next line at `cont_col`.
+fn render_item_tokens(node: &SyntaxNode, cont_col: usize) -> String {
+    let mut out = String::new();
+    let mut prev: Option<String> = None; // last emitted SIGNIFICANT text
+    let mut after_comment = false;
+    let mut at_line_start = false;
+    for t in node.descendant_tokens() {
+        if trivia::is_ws(t.kind()) {
+            continue;
+        }
+        if trivia::is_comment(t.kind()) {
+            if !at_line_start {
+                out.push(' ');
+            }
+            out.push_str(&normalize_comment_text(t.text()));
+            if is_line_comment(&t) {
+                out.push('\n');
+                out.push_str(&" ".repeat(cont_col));
+                at_line_start = true;
+            } else {
+                at_line_start = false;
+            }
+            after_comment = !at_line_start;
+            continue;
+        }
+        let text = t.text();
+        let space = if at_line_start {
+            false
+        } else if after_comment {
+            !matches!(text, "," | ")")
+        } else {
+            matches!(prev.as_deref(), Some(",") | Some("goto"))
+        };
+        if space {
+            out.push(' ');
+        }
+        out.push_str(text);
+        prev = Some(text.to_string());
+        after_comment = false;
+        at_line_start = false;
+    }
+    out
 }
 
 /// Canonical item text — ported unchanged from C1's `render_item`
@@ -2127,24 +2390,16 @@ mod tests {
         formats_to("use std::goToEnd as far;\n", "use std::goToEnd as far;\n");
     }
 
-    /// A comment lexed inside a `USE_PATH` node (`std::/* c */goToEnd`,
-    /// one level below `UseDecl`) drains at the SAME point as one written
-    /// just after that path — task 2's own guard test for this shape
-    /// (`a_comment_nested_inside_a_use_path_is_not_silently_dropped`) no
-    /// longer applies once task 6 implements the surface it was standing
-    /// in for: `use_decl_interior_comments`' own doc derives why this is
-    /// real handling, not a narrower guard, and this fixture is real
-    /// input a user can write, so it belongs here as an ordinary
-    /// printed-output case instead.
+    /// A comment lexed inside a `USE_PATH` node (`std::/* c */goToEnd`)
+    /// prints in place inside the path ([`render_use_path`]'s
+    /// token-splicing branch, the never-move rule) — between the `::`
+    /// and the segment it was written before.
     #[test]
-    fn a_comment_nested_inside_a_use_path_is_reattributed_to_the_next_slot() {
-        formats_to(
-            "use std::/* c */goToEnd;\n",
-            "use std::goToEnd /* c */\n    ;\n",
-        );
+    fn a_comment_nested_inside_a_use_path_prints_in_place() {
+        formats_to("use std::/* c */goToEnd;\n", "use std:: /* c */ goToEnd;\n");
         formats_to(
             "use std::/* c */goToEnd, std::goToBegin;\n",
-            "use std::goToEnd, /* c */\n    std::goToBegin;\n",
+            "use std:: /* c */ goToEnd, std::goToBegin;\n",
         );
     }
 
@@ -2986,28 +3241,17 @@ mod tests {
         );
     }
 
-    /// `render_items`' group-split condition is `nb || layouts[i].forced_break`
-    /// — NOT redundant, despite a LINE comment always consuming to end of
-    /// its own physical line: `item_leading_comments` attributes a
-    /// comment nested INSIDE item `i-1`'s own subtree (here, between
-    /// `@f(`'s `(` and its `)`) to item `i`'s leading slot, not item
-    /// `i-1`'s. Item `i-1`'s own CLOSING token (`)`) can land on a LATER
-    /// physical line than the nested comment — here, the SAME line item
-    /// `i` itself starts on — so `newline_before[i]` (which compares
-    /// item `i`'s start against item `i-1`'s own END, not the comment's
-    /// line) is `false` even though `layouts[i].forced_break` is `true`.
-    /// Verified against the real C1 formatter: `main() {\n 1: @f( //
-    /// c\n), left;\n}\n"` formats to `"main() {\n 1: @f(), // c\n
-    /// left;\n}\n"` — the group DOES break between `@f()` and `left`
-    /// even though both share no real newline between them in the raw
-    /// token stream. A mutant dropping `|| layouts[i].forced_break` here
-    /// would instead keep them on one line, unable to place `// c`
-    /// anywhere at all without corrupting the source.
+    /// A LINE comment nested inside an item's own parens stays inside
+    /// them ([`render_item_tokens`], the never-move rule): the item
+    /// continues on the next line at the continuation column, and the
+    /// following item rides the SAME group unchanged — the comment no
+    /// longer reattributes to the next item's leading slot, so it forces
+    /// no group break.
     #[test]
-    fn a_comment_nested_inside_the_previous_item_still_forces_the_next_items_break() {
+    fn a_comment_nested_inside_the_previous_item_stays_inside_it() {
         formats_to(
             "main() {\n 1: @f( // c\n), left;\n}\n",
-            "main() {\n 1: @f(), // c\n    left;\n}\n",
+            "main() {\n 1: @f( // c\n        ), left;\n}\n",
         );
     }
 
@@ -3071,300 +3315,197 @@ mod tests {
         );
     }
 
-    /// The drain-point rule extended past `ITEM` to `LABEL`: a comment
-    /// nested inside a label (between the number and the colon, or
-    /// between two stacked labels) drains at the same point as one
-    /// written just after the labels — item 0's leading run — exactly
-    /// like a comment nested inside a `USE_PATH`
-    /// (`item_leading_comments`'s own doc).
+    /// A comment in the LABEL REGION — between a label's number and its
+    /// colon, or between two stacked labels — prints in place in the
+    /// label prefix ([`label_region_comments`], the never-move rule),
+    /// and the statement takes the label-break layout.
     #[test]
-    fn a_comment_nested_inside_a_label_joins_item_zeros_leading_run() {
+    fn a_comment_in_the_label_region_prints_in_place() {
         formats_to(
             "main() { 1/* lbl */: left; }\n",
-            "main() {\n 1: /* lbl */ left;\n}\n",
+            "main() {\n 1 /* lbl */:\n    left;\n}\n",
         );
         formats_to(
             "main() { 1: 2/* between labels */: left; }\n",
-            "main() {\n  1: 2: /* between labels */ left;\n}\n",
+            "main() {\n 1: 2 /* between labels */:\n    left;\n}\n",
         );
     }
 
-    // -- Task 6: the pre-`;` trailing-comment relocation -----------------
+    // -- The tail slot, under the never-move rule ------------------------
     //
-    // `statement_trailing_and_leftovers` re-derives C1's `Parser::take_trailing`:
-    // a comment nested inside the last item, or sitting directly between it
-    // and the terminating `;`, can win the statement's OWN trailing-comment
-    // role ahead of an ordinary post-`;` one — ordinary `use`-list interior
-    // comments have no counterpart to this at all (`print_use`'s own doc).
+    // A comment between the last item and the `;` prints BEFORE the `;`,
+    // in its written slot — it precedes the `;` in source, and the rule
+    // keeps it there. Only a genuine post-`;` same-line comment is the
+    // statement's trailing comment now.
 
-    /// The two ways a comment can occupy the tail slot — nested inside the
-    /// last item's own internals (`check(1 /* c */, 2)`, a child of
-    /// `ITEM`'s `CHECK_ARM`) and directly between the last item and `;`
-    /// (`left /* c */;`) — both relocate to the statement's trailing
-    /// comment identically.
+    /// A same-line block comment before the `;` stays before it; one
+    /// nested inside the last item stays inside the item's own text
+    /// ([`render_item_tokens`]).
     #[test]
-    fn a_pre_semicolon_comment_relocates_to_the_statements_trailing_comment() {
+    fn a_pre_semicolon_comment_prints_before_the_semicolon() {
         formats_to(
             "main() {\n 1: left /* c */;\n}\n",
-            "main() {\n 1: left; /* c */\n}\n",
+            "main() {\n 1: left /* c */;\n}\n",
         );
         formats_to(
             "main() {\n 1: check(1 /* c */, 2);\n}\n",
-            "main() {\n 1: check(1, 2); /* c */\n}\n",
+            "main() {\n 1: check(1 /* c */, 2);\n}\n",
         );
         formats_to(
             "main() {\n 1: left, /* a */right /* b */;\n}\n",
-            "main() {\n 1: left, /* a */ right; /* b */\n}\n",
+            "main() {\n 1: left, /* a */ right /* b */;\n}\n",
         );
     }
 
-    /// C1's `take_trailing` checks only the FIRST comment pending at `;` —
-    /// a pre-`;` comment, once claimed, means a later same-line POST-`;`
-    /// comment is NOT also trailing; it falls back to an ordinary
-    /// standalone comment instead (`statement_trailing_and_leftovers`'s
-    /// own doc). Pins that `print_body`'s `already_trailing` check reads
-    /// `s.trailing` (which here is the PRE-`;` comment), never a fresh
-    /// `trivia::trailing_comment` recomputation (which would find the
-    /// POST-`;` one instead and wrongly treat it as already accounted
-    /// for, dropping it).
+    /// A pre-`;` comment and a genuine post-`;` one coexist: the first
+    /// prints before the `;`, the second is the statement's trailing
+    /// comment ([`trivia::trailing_comment`], the only trailing source
+    /// now).
     #[test]
-    fn a_pre_semicolon_comment_wins_the_trailing_role_over_a_post_semicolon_one() {
+    fn a_pre_and_a_post_semicolon_comment_each_keep_their_side() {
         formats_to(
             "main() {\n 1: left /*a*/; // b\n}\n",
-            "main() {\n 1: left; /*a*/\n    // b\n}\n",
+            "main() {\n 1: left /*a*/; // b\n}\n",
         );
     }
 
-    /// The candidate tail-slot comment failing EITHER half of C1's check
-    /// (own-line, or not sharing `;`'s own physical line) claims nothing:
-    /// the WHOLE tail reverts to ordinary standalone comments instead,
-    /// each with blank-before always `false` regardless of how many blank
-    /// lines separate it from the statement in source (`statement_trailing_and_leftovers`'s
-    /// own doc — a tail member's source line can never exceed `;`'s).
+    /// An own-line tail comment keeps its own line at the command
+    /// column, still BEFORE the `;` — and since a LINE comment eats the
+    /// rest of its physical line, the `;` moves to its own line below
+    /// ([`print_statement`]). Blank lines inside the tail are not
+    /// preserved (the slot renders compactly).
     #[test]
-    fn an_own_line_pre_semicolon_comment_becomes_a_standalone_tail_comment() {
+    fn an_own_line_pre_semicolon_comment_keeps_its_line_before_the_semicolon() {
         formats_to(
             "main() {\n 1: left\n// own line\n;\n}\n",
-            "main() {\n 1: left;\n    // own line\n}\n",
+            "main() {\n 1: left\n    // own line\n    ;\n}\n",
         );
         formats_to(
             "main() {\n 1: left\n\n// own line\n;\n}\n",
-            "main() {\n 1: left;\n    // own line\n}\n",
+            "main() {\n 1: left\n    // own line\n    ;\n}\n",
         );
     }
 
-    /// `check(1,\n // a\n 2);` — `// a` sits on line 3, `;` on line 4:
-    /// `first_line == semi_line` is false, so this candidate fails the
-    /// SAME-LINE half. Renamed from an earlier, factually wrong doc
-    /// comment that described this fixture as sharing `;`'s line (it
-    /// doesn't — the comment and `;` are two lines apart). `// a` also
-    /// happens to be own-line, so INVERTING `==` alone does not flip
-    /// this specific test (own_line still independently rejects it) —
-    /// that half's inversion is already pinned elsewhere (five other
-    /// fixtures in this module go red for it). This one exists for the
-    /// SHAPE — a leftover nested inside `check(...)`'s own multi-line
-    /// arm list — not to uniquely discriminate either comparison
-    /// operator on its own.
+    /// A LINE comment nested inside `check(...)`'s own multi-line arm
+    /// list stays inside the arms ([`render_item_tokens`]): nothing can
+    /// follow it on its physical line, so the item continues on the next
+    /// line at the continuation column.
     #[test]
-    fn a_tail_comment_failing_the_same_line_half_of_the_check_becomes_standalone() {
+    fn a_line_comment_inside_check_arms_stays_inside_them() {
         formats_to(
             "main() {\n 1: check(1,\n // a\n 2);\n}\n",
-            "main() {\n 1: check(1, 2);\n    // a\n}\n",
+            "main() {\n 1: check(1, // a\n        2);\n}\n",
         );
     }
 
-    /// The genuine own-line-only counterpart: `/* c */;` — the block
-    /// comment sits on its OWN line (own_line: true) yet `;` follows it
-    /// on that SAME line (same_line: true too) — the ONLY thing standing
-    /// between this candidate and the trailing role is `comment_own_line`
-    /// itself. `statement_trailing_and_leftovers`'s `!comment_own_line(first)`
-    /// conjunct has NO other fixture in this module where deleting it
-    /// outright (not merely inverting it) changes the verdict: every
-    /// other own-line leftover fixture uses a LINE comment, which by
-    /// construction can never share `;`'s physical line, so
-    /// `first_line == semi_line` is ALREADY false there regardless of
-    /// `comment_own_line` — deleting the conjunct is invisible to those.
-    /// Here it is the whole story: C1 printed
-    /// `"main() {\n 1: left;\n    /* c */\n}\n"` (leftover, own line,
-    /// AFTER `;`), never `"main() {\n 1: left; /* c */\n}\n"` (which a
-    /// conjunct-deleted mutant would produce instead).
+    /// An own-line BLOCK comment directly before the `;` keeps its own
+    /// line and the `;` follows it there — before-the-`;` in token
+    /// order, exactly as written (its own-line flag re-derives true on
+    /// the next parse, so this is a fixed point).
     #[test]
-    fn a_tail_comment_failing_only_the_own_line_half_becomes_standalone() {
+    fn an_own_line_block_comment_before_the_semicolon_stays_before_it() {
         formats_to(
             "main() {\n 1: left\n/* c */;\n}\n",
-            "main() {\n 1: left;\n    /* c */\n}\n",
+            "main() {\n 1: left\n    /* c */;\n}\n",
         );
     }
 
-    /// Two statements whose trailing comments share a SOURCE column, one
-    /// relocated from before its `;` and one an ordinary post-`;`
-    /// comment: `compute_trailing_spacing`'s alignment run treats them
-    /// identically once resolved — the run stays aligned. A mutant that
-    /// read a fresh `trivia::trailing_comment(&s.node)` instead of
-    /// `s.trailing` in `comment_w`/`source_cols` would find NOTHING for
-    /// the first statement (its comment sits before `;`, not after),
-    /// panicking on the `has_trailing`-guarantees-`Some` `expect`.
+    /// A pre-`;` comment is NOT a trailing comment: it prints before its
+    /// `;` and joins no alignment run — only the genuine post-`;`
+    /// comment on the next statement does (a run of one, so it takes the
+    /// single space).
     #[test]
-    fn a_relocated_and_an_ordinary_trailing_comment_can_share_one_alignment_run() {
+    fn a_pre_semicolon_comment_joins_no_alignment_run() {
         formats_to(
             "main() {\n 1: left /* a */;\n 2: right;    // b\n}\n",
-            "main() {\n 1: left; /* a */\n 2: right; // b\n}\n",
+            "main() {\n 1: left /* a */;\n 2: right; // b\n}\n",
         );
     }
 
-    /// A genuine post-`;` comment that a pre-`;` one already beat to the
-    /// trailing role (`a_pre_semicolon_comment_wins_the_trailing_role_over_a_post_semicolon_one`'s
-    /// own shape), immediately followed by ANOTHER statement with no
-    /// blank line: `// b` becomes statement 1's leftover `BodyElem::Comment`,
-    /// which ALSO surfaces as statement 2's own `leading_comments` run
-    /// (the same no-blank-line overlap `print_items`'/`print_body`'s
-    /// `consumed` set exists for everywhere else) — printed via
-    /// statement 2's leading run, filtered out of `body`'s own raw-token
-    /// scan by `claimed`. `print_body`'s SECOND `consumed` builder (the
-    /// one guarding THIS leading-run print) must also read
-    /// [`resolved_trailing`], not a fresh `trivia::trailing_comment`
-    /// recomputation: the naive version finds `// b` too (it directly
-    /// follows statement 1's node with no newline) and wrongly marks it
-    /// "already consumed" — dropping it from BOTH the leading-run print
-    /// AND the raw-token scan (`claimed` already excludes it there),
-    /// losing it outright rather than double-printing it.
+    /// Both sides of the `;` keep their comments with another statement
+    /// following: the pre-`;` block prints before the `;`, the post-`;`
+    /// line comment is statement 1's trailing comment, and statement 2
+    /// is untouched.
     #[test]
-    fn a_leftover_post_semicolon_comment_still_prints_via_the_next_statements_leading_run() {
+    fn pre_and_post_semicolon_comments_hold_with_a_following_statement() {
         formats_to(
             "main() {\n 1: left /*a*/; // b\n 2: right;\n}\n",
-            "main() {\n 1: left; /*a*/\n    // b\n 2: right;\n}\n",
+            "main() {\n 1: left /*a*/; // b\n 2: right;\n}\n",
         );
     }
 
-    /// A leftover tail comment relocates C1's `prev_end_line` baseline
-    /// forward to ITS OWN line, not the statement's `;` — so a genuine
-    /// standalone comment that follows, even with no blank line between
-    /// IT and `;` in the real tree, can still be "blank before" relative
-    /// to the RELOCATED baseline (`statement_trailing_and_leftovers`'s own
-    /// doc; `print_body`'s `override_prev_line`). The naive
-    /// `blank_immediately_before(tok)` query (the real sibling gap, which
-    /// sees only the ONE newline between `;` and `// b`) would say
-    /// "not blank" here; C1 said blank, since the leftover `// own line`
-    /// sits three lines earlier and nothing resets the baseline in
-    /// between.
+    /// An own-line tail comment stays before its `;`, and what follows
+    /// the `;` is untouched by it: a post-`;` standalone comment prints
+    /// as its own body element (no blank inserted — none separates it
+    /// from `;` in the real tree).
     #[test]
-    fn blank_before_after_a_leftover_measures_from_the_leftovers_own_line() {
+    fn a_tail_comment_leaves_what_follows_the_semicolon_alone() {
         formats_to(
             "main() {\n 1: left\n// own line\n\n\n;\n// b\n}\n",
-            "main() {\n 1: left;\n    // own line\n\n    // b\n}\n",
+            "main() {\n 1: left\n    // own line\n    ;\n    // b\n}\n",
         );
-    }
-
-    /// The same override, but the element AFTER the leftover is a REAL
-    /// STATEMENT rather than a standalone comment — `unit_start_line`'s
-    /// own branch of `override_prev_line`, not `blank_immediately_before`'s.
-    /// Many blank lines separate the leftover from `;`, but only ONE
-    /// newline separates `;` from statement 2 in the real tree — the
-    /// naive `trivia::blank_before_unit(node)` query would say "not
-    /// blank"; C1, measuring from the leftover's own (much earlier) line,
-    /// says blank.
-    #[test]
-    fn blank_before_after_a_leftover_applies_to_the_next_statement_too() {
         formats_to(
             "main() {\n 1: left\n// own line\n\n\n\n\n;\n 2: right;\n}\n",
-            "main() {\n 1: left;\n    // own line\n\n 2: right;\n}\n",
+            "main() {\n 1: left\n    // own line\n    ;\n 2: right;\n}\n",
         );
     }
 
-    /// TWO leftovers from the SAME tail (both nested inside the last
-    /// item, both failing the trailing check since neither shares `;`'s
-    /// own line): the SECOND one's blank-before measures against the
-    /// FIRST leftover's own line, not against `;` — C1's per-comment
-    /// `prev_end_line` update replayed across a whole `drain_pending()`
-    /// batch, not just the tail-to-first-follower transition the other
-    /// two fixtures in this group pin.
+    /// TWO comments nested inside the same item's arms both stay inside
+    /// it, in order (blank lines inside an item's parens are not
+    /// preserved — the arms render on one line once the comments are
+    /// blocks).
     #[test]
-    fn a_second_leftover_in_the_same_tail_measures_against_the_first() {
+    fn two_comments_inside_one_items_arms_both_stay_inside() {
         formats_to(
             "main() {\n 1: check(1 /* a */,\n\n\n 2 /* b */);\n}\n",
-            "main() {\n 1: check(1, 2);\n    /* a */\n\n    /* b */\n}\n",
+            "main() {\n 1: check(1 /* a */, 2 /* b */);\n}\n",
         );
     }
 
-    /// The Task-6 fix-round bug, found by review, not by this task's own
-    /// mutation sweep: the FIRST comment after a leftover is itself
-    /// CLAIMED by the NEXT node's own `leading_comments` run (no blank
-    /// line separates them), so the print loop's `BodyElem::Comment` arm
-    /// `continue`s WITHOUT ever reading its `override_prev_line` entry —
-    /// the override was computed correctly at collection time but
-    /// silently discarded at print time, and the element that actually
-    /// performs the blank-before check (the claiming node) reads its OWN
-    /// `override_prev_line` slot instead, which is `None` (nothing was
-    /// pending when IT was pushed — the leftover's override belonged to
-    /// the comment in between, not to it). Fixed by `carried_prev_line`:
-    /// a skipped, claimed comment now hands its own `blank_override`
-    /// forward to whatever prints next, exactly mirroring how C1's single
-    /// evolving `prev_end_line` cursor is untouched by which BodyItems a
-    /// human would call "leading" vs "standalone" — every comment in the
-    /// pending queue updates it, claimed or not.
+    /// A tail comment plus a claimed standalone after the `;`: each
+    /// prints on its own side of the `;`, the following statement's
+    /// leading run untouched.
     #[test]
-    fn blank_before_survives_past_a_leftover_into_a_claimed_comment() {
+    fn a_tail_comment_and_a_claimed_comment_each_keep_their_side() {
         formats_to(
             "main() {\n 1: left\n// own line\n;\n// c\n 2: right;\n}\n",
-            "main() {\n 1: left;\n    // own line\n\n    // c\n 2: right;\n}\n",
+            "main() {\n 1: left\n    // own line\n    ;\n    // c\n 2: right;\n}\n",
         );
-    }
-
-    /// The same carry, but the element the leftover's blank line must
-    /// reach is a NESTED FUNCTION's own leading run, not a statement's —
-    /// `unit_start_line` applied to a `FUNCTION` node, reached only via
-    /// the carry (the claiming node here is `step()`, not a `STATEMENT`).
-    #[test]
-    fn blank_before_survives_past_a_leftover_into_a_nested_functions_leading_run() {
-        formats_to(
-            "main() {\n 1: left\n// own line\n;\n// c\n    step() {\n 1: left;\n    }\n}\n",
-            "main() {\n 1: left;\n    // own line\n\n    // c\n    step() {\n     1: left;\n    }\n}\n",
-        );
-    }
-
-    /// TWO claimed comments in a row between the leftover and the next
-    /// statement (`// c` then `// d`, no blank between them — both bind
-    /// to statement 2's own leading run as ONE run, `leading_comments`'
-    /// own doc): the carry must survive past BOTH skipped entries, not
-    /// just one — mutating `carried_prev_line`'s assignment to fire only
-    /// on the FIRST skip (not re-armed after that) would still catch this
-    /// exact fixture, since the carry is read-then-reset every iteration
-    /// regardless of how many consecutive skips occur — but the fixture
-    /// pins the shape a one-skip-only carry mechanism would need to get
-    /// right.
-    #[test]
-    fn blank_before_survives_past_two_consecutive_claimed_comments() {
         formats_to(
             "main() {\n 1: left\n// own line\n;\n// c\n// d\n 2: right;\n}\n",
-            "main() {\n 1: left;\n    // own line\n\n    // c\n    // d\n 2: right;\n}\n",
+            "main() {\n 1: left\n    // own line\n    ;\n    // c\n    // d\n 2: right;\n}\n",
         );
     }
 
-    /// The tail-slot analogue: the leftover itself is nested inside a
-    /// `check(...)` call rather than sitting directly before `;`, and the
-    /// claimed comment it must reach past documents a SECOND statement
-    /// two positions later — proves the carry mechanism is independent of
-    /// which of `item_leading_comments`'s two leftover shapes produced
-    /// the `BodyElem::TailComment` in the first place.
+    /// The same shape reaching a NESTED FUNCTION's leading run instead
+    /// of a statement's.
     #[test]
-    fn blank_before_survives_past_a_leftover_nested_inside_the_last_item() {
+    fn a_tail_comment_before_a_nested_functions_leading_run() {
+        formats_to(
+            "main() {\n 1: left\n// own line\n;\n// c\n    step() {\n 1: left;\n    }\n}\n",
+            "main() {\n 1: left\n    // own line\n    ;\n    // c\n    step() {\n     1: left;\n    }\n}\n",
+        );
+    }
+
+    /// A LINE comment inside the last item's arms plus a claimed
+    /// standalone after the `;` — the item keeps its comment inside, the
+    /// standalone stays a body element.
+    #[test]
+    fn an_item_interior_comment_and_a_following_standalone_are_independent() {
         formats_to(
             "main() {\n 1: check(1,\n // a\n 2);\n// c\n 2: right;\n}\n",
-            "main() {\n 1: check(1, 2);\n    // a\n\n    // c\n 2: right;\n}\n",
+            "main() {\n 1: check(1, // a\n        2);\n    // c\n 2: right;\n}\n",
         );
     }
 
-    /// The control case: with a REAL blank line already present between
-    /// the leftover and the claimed comment, C1 and green already agreed
-    /// before this fix (the ordinary `blank_before_unit`/`blank_immediately_before`
-    /// path was never wrong on its own) — pinned here so a future change
-    /// to the carry mechanism can't regress the case it was never
-    /// responsible for.
+    /// A REAL blank line between the `;` and a claimed standalone
+    /// comment survives — the ordinary `blank_immediately_before`
+    /// sibling-gap query, unaffected by the tail slot.
     #[test]
-    fn a_real_blank_line_before_a_claimed_comment_needs_no_carry() {
+    fn a_real_blank_line_before_a_claimed_comment_survives() {
         formats_to(
             "main() {\n 1: left\n// own line\n;\n\n// c\n 2: right;\n}\n",
-            "main() {\n 1: left;\n    // own line\n\n    // c\n 2: right;\n}\n",
+            "main() {\n 1: left\n    // own line\n    ;\n\n    // c\n 2: right;\n}\n",
         );
     }
 
@@ -3498,26 +3639,16 @@ mod tests {
     }
 
     /// The same rule with a comment between the two labels: the comment
-    /// does not make the gap a break either, and it prints where the
-    /// printer has always put a comment ahead of a statement's first
-    /// item — drawn up onto the label line, with the command below it.
-    ///
-    /// One pass only, deliberately: that output re-reads as an
-    /// author-written own-line-label break, so a second pass moves the
-    /// comment down to its own line and settles there. That two-step
-    /// settle predates the green tree — the pre-cutover printer does the
-    /// same thing on the same input, byte for byte — and it is why the
-    /// property suite's generator leaves this one comment position out of
-    /// its idempotence sweep.
+    /// does not make the gap a break either. A LINE comment between two
+    /// stacked labels prints between them — the second label continues
+    /// on the next line — and the shape is a fixed point in ONE pass:
+    /// this was fmt's single non-idempotent position before the
+    /// never-move port ([`label_region_comments`]).
     #[test]
-    fn a_comment_between_stacked_labels_does_not_make_a_break() {
+    fn a_comment_between_stacked_labels_stays_between_them() {
         formats_to(
             "main() {\n 1:\n // mid\n 2: left;\n}\n",
-            "main() {\n  1: 2: // mid\n        left;\n}\n",
-        );
-        formats_to(
-            "main() {\n  1: 2: // mid\n        left;\n}\n",
-            "main() {\n 1: 2:\n    // mid\n    left;\n}\n",
+            "main() {\n 1: // mid\n 2:\n    left;\n}\n",
         );
     }
 
@@ -3615,119 +3746,106 @@ mod tests {
         );
     }
 
-    // -- Header-interior comments relocate into the body ----------------
+    // -- Header-interior comments print in place ------------------------
     //
     // A comment written between a declaration's header tokens — between
     // the name and `(`, inside the parens, between `)` and `{`, after
     // `volatile`/`export`, or between a namespace's keyword/name and its
-    // `{` — has no place on the canonical header line: it relocates to
-    // its own line at body indent, ahead of the first body element, and
-    // blank lines around it are measured from the ORIGINAL source lines
-    // (the same relocated-baseline rule `BodyElem::TailComment`
-    // documents). Every `expected` below was captured from the C1
-    // printer built from master `38ca36f`: the green printer's first cut
-    // DELETED these comments outright — a whitespace-only violation no
-    // fixture and no property could see, because token equivalence lexes
-    // `WithoutComments` — and these fixtures pin the restored behavior.
+    // `{` — prints on the header line, between the same two tokens it
+    // was written between ([`render_header_tokens`], the never-move
+    // rule). A LINE comment continues the header on the next line at
+    // the declaration's own indent. These fixtures replaced the old
+    // relocate-to-body pins when the never-move port landed; the C1
+    // relocation behavior they used to pin is retired.
 
     #[test]
-    fn header_comment_between_parens_and_brace_relocates() {
+    fn header_comment_between_parens_and_brace_stays() {
         formats_to_fixed_point(
             "main() /* keep me */ {\n  1: right;\n}\n",
-            "main() {\n    /* keep me */\n 1: right;\n}\n",
+            "main() /* keep me */ {\n 1: right;\n}\n",
         );
     }
 
     #[test]
-    fn header_comment_between_name_and_parens_relocates() {
+    fn header_comment_between_name_and_parens_stays() {
         formats_to_fixed_point(
             "main /* x */ () {\n  1: right;\n}\n",
-            "main() {\n    /* x */\n 1: right;\n}\n",
+            "main /* x */() {\n 1: right;\n}\n",
         );
     }
 
     #[test]
-    fn header_comment_inside_the_parens_relocates() {
+    fn header_comment_inside_the_parens_stays() {
         formats_to_fixed_point(
             "main( /* b */ ) {\n  1: right;\n}\n",
-            "main() {\n    /* b */\n 1: right;\n}\n",
+            "main( /* b */) {\n 1: right;\n}\n",
         );
     }
 
     #[test]
-    fn header_comments_after_volatile_and_export_relocate() {
+    fn header_comments_after_volatile_and_export_stay() {
         formats_to_fixed_point(
             "export /* c */ f() {\n  1: right;\n}\nmain() {\n  1: @f();\n}\n",
-            "export f() {\n    /* c */\n 1: right;\n}\nmain() {\n 1: @f();\n}\n",
+            "export /* c */ f() {\n 1: right;\n}\nmain() {\n 1: @f();\n}\n",
         );
         formats_to_fixed_point(
             "volatile /* v */ main() {\n  1: right;\n}\n",
-            "volatile main() {\n    /* v */\n 1: right;\n}\n",
+            "volatile /* v */ main() {\n 1: right;\n}\n",
         );
         formats_to_fixed_point(
             "volatile /* v */ export /* e */ main() {\n  1: right;\n}\n",
-            "volatile export main() {\n    /* v */\n    /* e */\n 1: right;\n}\n",
+            "volatile /* v */ export /* e */ main() {\n 1: right;\n}\n",
         );
     }
 
-    /// A `//` header comment consumes the rest of its line, so the `{`
-    /// sits on the NEXT line and the first statement one further — a
-    /// two-line original gap, which the relocated-baseline rule turns
-    /// into a blank line under the relocated comment.
+    /// A `//` header comment consumes the rest of its line, so the rest
+    /// of the header — here the `{` — continues on the next line at the
+    /// declaration's indent.
     #[test]
-    fn header_line_comment_gap_reprints_as_a_blank() {
+    fn a_header_line_comment_continues_the_header_below() {
         formats_to_fixed_point(
             "main() // note\n{\n  1: right;\n}\n",
-            "main() {\n    // note\n\n 1: right;\n}\n",
+            "main() // note\n{\n 1: right;\n}\n",
         );
     }
 
-    /// Blank lines are measured from the comments' ORIGINAL lines, on
-    /// both sides: between two relocated comments (blank iff their
-    /// source lines were more than one apart) and between the last one
-    /// and the first statement.
+    /// Blank lines inside a header do not survive — the header renders
+    /// compactly, comments in their written token slots.
     #[test]
-    fn relocated_blanks_measure_original_lines() {
-        // Adjacent source lines: no blank between the pair.
+    fn header_blanks_render_compactly() {
         formats_to_fixed_point(
             "main() /* a */\n/* c */ {\n  1: right;\n}\n",
-            "main() {\n    /* a */\n    /* c */\n 1: right;\n}\n",
+            "main() /* a */ /* c */ {\n 1: right;\n}\n",
         );
-        // A blank between the pair in the source: it survives.
         formats_to_fixed_point(
             "main() /* a */\n\n/* c */ {\n  1: right;\n}\n",
-            "main() {\n    /* a */\n\n    /* c */\n 1: right;\n}\n",
+            "main() /* a */ /* c */ {\n 1: right;\n}\n",
         );
-        // A blank between `{` and the statement: measured against the
-        // comment's line, still a blank.
         formats_to_fixed_point(
             "main() /* a */ {\n\n  1: right;\n}\n",
-            "main() {\n    /* a */\n\n 1: right;\n}\n",
+            "main() /* a */ {\n 1: right;\n}\n",
         );
-        // The `{` two lines below the comment, statement right after it:
-        // the ORIGINAL gap to the comment is what reprints, so a blank.
         formats_to_fixed_point(
             "main() /* a */\n\n{\n  1: right;\n}\n",
-            "main() {\n    /* a */\n\n 1: right;\n}\n",
+            "main() /* a */ {\n 1: right;\n}\n",
         );
     }
 
     #[test]
-    fn two_header_comments_relocate_in_source_order() {
+    fn two_header_comments_stay_in_source_order() {
         formats_to_fixed_point(
             "main() /* a */ /* b */ {\n  1: right;\n}\n",
-            "main() {\n    /* a */\n    /* b */\n 1: right;\n}\n",
+            "main() /* a */ /* b */ {\n 1: right;\n}\n",
         );
     }
 
-    /// With a header comment present the open-brace comment cannot ride
-    /// the brace — C1 drained them through one pending queue, so the
-    /// open-trailing comment joins the relocated run in source order.
+    /// The open-brace comment rides the brace even with a header comment
+    /// present — the two are independent surfaces now.
     #[test]
-    fn header_comment_pulls_the_open_brace_comment_off_the_brace() {
+    fn a_header_comment_leaves_the_open_brace_comment_on_the_brace() {
         formats_to_fixed_point(
             "main() /* a */ { // t\n  1: right;\n}\n",
-            "main() {\n    /* a */\n    // t\n 1: right;\n}\n",
+            "main() /* a */ { // t\n 1: right;\n}\n",
         );
     }
 
@@ -3735,39 +3853,39 @@ mod tests {
     fn header_comment_coexists_with_a_doc_run() {
         formats_to_fixed_point(
             "? doc\nmain() /* h */ {\n  1: right;\n}\n",
-            "? doc\nmain() {\n    /* h */\n 1: right;\n}\n",
+            "? doc\nmain() /* h */ {\n 1: right;\n}\n",
         );
     }
 
     #[test]
-    fn nested_function_header_comment_relocates_one_level_deeper() {
+    fn nested_function_header_comment_stays_one_level_deeper() {
         formats_to_fixed_point(
             "main() {\n  step() /* n */ {\n    1: right;\n  }\n  1: @step();\n}\n",
-            "main() {\n    step() {\n        /* n */\n     1: right;\n    }\n 1: @step();\n}\n",
+            "main() {\n    step() /* n */ {\n     1: right;\n    }\n 1: @step();\n}\n",
         );
     }
 
     #[test]
-    fn namespace_header_comments_relocate() {
+    fn namespace_header_comments_stay() {
         // Between the name and `{`.
         formats_to_fixed_point(
             "namespace n /* nk */ {\n  export f() {\n    1: right;\n  }\n}\nmain() {\n  1: @n::f();\n}\n",
-            "namespace n {\n    /* nk */\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
+            "namespace n /* nk */ {\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
         );
         // Between the keyword and the name.
         formats_to_fixed_point(
             "namespace /* k */ n {\n  export f() {\n    1: right;\n  }\n}\nmain() {\n  1: @n::f();\n}\n",
-            "namespace n {\n    /* k */\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
+            "namespace /* k */ n {\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
         );
-        // The original-lines blank rule holds here too.
+        // Header blanks render compactly here too.
         formats_to_fixed_point(
             "namespace n /* k */\n\n{\n  export f() {\n    1: right;\n  }\n}\nmain() {\n  1: @n::f();\n}\n",
-            "namespace n {\n    /* k */\n\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
+            "namespace n /* k */ {\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
         );
-        // And the open-brace comment joins the relocation here too.
+        // And the open-brace comment stays on the brace here too.
         formats_to_fixed_point(
             "namespace n /* k */ { // t\n  export f() {\n    1: right;\n  }\n}\nmain() {\n  1: @n::f();\n}\n",
-            "namespace n {\n    /* k */\n    // t\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
+            "namespace n /* k */ { // t\n    export f() {\n     1: right;\n    }\n}\nmain() {\n 1: @n::f();\n}\n",
         );
     }
 }
