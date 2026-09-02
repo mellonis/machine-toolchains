@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "ru.mellonis"
-version = "0.2.0"
+version = "0.2.1"
 
 kotlin {
     // Pinned, not just "any JDK 17+": the IntelliJ Platform Gradle Plugin

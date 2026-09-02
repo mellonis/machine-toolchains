@@ -46,6 +46,46 @@
                                         implementationClass="ru.mellonis.pmc.PmcLangSyntaxHighlighterFactory"/>
         <lang.syntaxHighlighterFactory language="pma"
                                         implementationClass="ru.mellonis.pmc.PmcLangSyntaxHighlighterFactory"/>
+        <!--
+          A language file type whose language has NO parser definition gets a
+          plain-text PSI file whose language is not the file's base language,
+          and LSP4IJ then never connects the opened document to the server
+          (no didOpen: no navigation, no hover). The whole-text parser
+          definitions keep the PSI file genuinely ours; the server still owns
+          every semantic.
+        -->
+        <lang.parserDefinition language="pmc" implementationClass="ru.mellonis.pmc.PmcParserDefinition"/>
+        <lang.parserDefinition language="pma" implementationClass="ru.mellonis.pmc.PmaParserDefinition"/>
+        <!--
+          LSP4IJ wires several editor features per LANGUAGE and does so only
+          for the languages it knows about (plain text and TextMate, in its
+          own manifest). Files of a language with its own parser get none of
+          them unless the plugin registers them itself — the same five
+          registrations LSP4IJ makes for TEXT/textmate: the semantic-token
+          view provider (the token-precise element under the caret, and the
+          Cmd/Ctrl+hover quick-doc built on it), the Structure view from
+          document symbols, folding, code blocks, and parameter info.
+        -->
+        <lang.fileViewProviderFactory language="pmc"
+                implementationClass="com.redhat.devtools.lsp4ij.features.semanticTokens.viewProvider.LSPSemanticTokensStructurelessFileViewProviderFactory"/>
+        <lang.fileViewProviderFactory language="pma"
+                implementationClass="com.redhat.devtools.lsp4ij.features.semanticTokens.viewProvider.LSPSemanticTokensStructurelessFileViewProviderFactory"/>
+        <lang.psiStructureViewFactory language="pmc"
+                implementationClass="com.redhat.devtools.lsp4ij.features.documentSymbol.LSPDocumentSymbolStructureViewFactory"/>
+        <lang.psiStructureViewFactory language="pma"
+                implementationClass="com.redhat.devtools.lsp4ij.features.documentSymbol.LSPDocumentSymbolStructureViewFactory"/>
+        <lang.foldingBuilder language="pmc" order="first"
+                implementationClass="com.redhat.devtools.lsp4ij.features.foldingRange.LSPFoldingRangeBuilder"/>
+        <lang.foldingBuilder language="pma" order="first"
+                implementationClass="com.redhat.devtools.lsp4ij.features.foldingRange.LSPFoldingRangeBuilder"/>
+        <codeBlockProvider language="pmc" order="first"
+                implementationClass="com.redhat.devtools.lsp4ij.features.codeBlockProvider.LSPCodeBlockProvider"/>
+        <codeBlockProvider language="pma" order="first"
+                implementationClass="com.redhat.devtools.lsp4ij.features.codeBlockProvider.LSPCodeBlockProvider"/>
+        <codeInsight.parameterInfo language="pmc"
+                implementationClass="com.redhat.devtools.lsp4ij.features.signatureHelp.LSPParameterInfoHandler"/>
+        <codeInsight.parameterInfo language="pma"
+                implementationClass="com.redhat.devtools.lsp4ij.features.signatureHelp.LSPParameterInfoHandler"/>
         <notificationGroup id="ru.mellonis.pmc" displayType="BALLOON"/>
         <postStartupActivity implementation="ru.mellonis.pmc.PmtVersionCheck"/>
         <applicationService serviceImplementation="ru.mellonis.pmc.PmtSettings"/>
