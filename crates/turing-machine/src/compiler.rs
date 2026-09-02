@@ -1047,10 +1047,19 @@ pub(crate) struct Analysis {
 /// with, are pinned by `tests/tmc_green_analyze.rs` over a deliberately
 /// broken set.
 pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
+    analyze_with(source, ExternalContracts::Stdlib)
+}
+
+/// [`analyze`] with an explicit choice of the external modules whose
+/// declared write contracts the footprint inference believes.
+pub(crate) fn analyze_with(
+    source: &str,
+    externals: ExternalContracts,
+) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(Rc::clone(&green)), source);
-    let (resolved, diagnostics) = resolve_program(&program)?;
+    let (resolved, diagnostics) = resolve_program(&program, externals)?;
     Ok(Analysis {
         resolved,
         diagnostics,
@@ -1070,7 +1079,10 @@ pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
 /// lowering). The sibling unused-graph / unused-binding /
 /// unused-graft-instance warnings of the same hygiene family are deliberately
 /// deferred to the TM lint layer rather than shipped as compiler diagnostics.
-fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
+fn resolve_program(
+    program: &Program,
+    externals: ExternalContracts,
+) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
     let alphabets = resolve_all_alphabets(program, &scopes)?;
@@ -1082,7 +1094,7 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
         diagnostics: Vec::new(),
     };
     ctx.check_worlds(program, &resolved)?;
-    check_contracts(&resolved)?;
+    check_contracts(&resolved, externals)?;
     let WorldCtx {
         imports_used,
         mut diagnostics,
@@ -1090,6 +1102,25 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
     } = ctx;
     unused_import_warnings(program, &imports_used, &mut diagnostics);
     Ok((resolved, diagnostics))
+}
+
+/// A tape parameter's declared EFFECTIVE set (docs/tmt/language.md (contract
+/// clauses)): `writes` — the whole alphabet when there is no `writes` clause —
+/// minus `preserves`. A tape with neither clause therefore answers the whole
+/// alphabet, which is also what an external callee with no contract
+/// contributes to its callers.
+pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
+    let declared = tape
+        .writes
+        .unwrap_or_else(|| SymSet::full(tape.cardinality as u32));
+    let preserved = tape.preserves.unwrap_or_else(SymSet::empty);
+    let mut allowed = SymSet::empty();
+    for index in declared.iter() {
+        if !preserved.contains(index) {
+            allowed.insert(index);
+        }
+    }
+    allowed
 }
 
 /// Check every declared write contract against the inferred write footprint.
@@ -1108,7 +1139,7 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
 ///
 /// The whole-module fixpoint runs at most once per compile, and only when some
 /// world actually declares a clause: an uncontracted module pays nothing.
-fn check_contracts(resolved: &Resolved) -> Result<(), CompileError> {
+fn check_contracts(resolved: &Resolved, externals: ExternalContracts) -> Result<(), CompileError> {
     let contracted = resolved.worlds.iter().any(|w| {
         w.tapes
             .iter()
@@ -1117,7 +1148,7 @@ fn check_contracts(resolved: &Resolved) -> Result<(), CompileError> {
     if !contracted {
         return Ok(());
     }
-    let table = crate::footprint::infer_resolved(resolved);
+    let table = crate::footprint::infer_resolved_with(resolved, &externals.modules());
     // Worlds in resolved order, tapes in signature order, so the first finding
     // on a module with several is the source-first one.
     for world in &resolved.worlds {
@@ -1141,16 +1172,7 @@ fn check_contracts(resolved: &Resolved) -> Result<(), CompileError> {
             if tape.writes.is_none() && tape.preserves.is_none() {
                 continue;
             }
-            let declared = tape
-                .writes
-                .unwrap_or_else(|| SymSet::full(tape.cardinality as u32));
-            let preserved = tape.preserves.unwrap_or_else(SymSet::empty);
-            let mut allowed = SymSet::empty();
-            for index in declared.iter() {
-                if !preserved.contains(index) {
-                    allowed.insert(index);
-                }
-            }
+            let allowed = declared_effective(tape);
             let inferred = footprint.tapes.get(k).copied().unwrap_or_default();
             let glyphs = resolved
                 .alphabets
@@ -1306,6 +1328,12 @@ pub(crate) struct TmcStagedAnalysis {
 ///
 /// Consumed by the phase-7 `.tmc` language service, not by `compile()`.
 pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
+    analyze_staged_with(source, ExternalContracts::Stdlib)
+}
+
+/// [`analyze_staged`] with an explicit choice of the external modules whose
+/// declared write contracts the footprint inference believes.
+pub(crate) fn analyze_staged_with(source: &str, externals: ExternalContracts) -> TmcStagedAnalysis {
     let tokens = match lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
         Err(fatal) => {
@@ -1345,7 +1373,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
     };
     let green_retained = Some(Rc::clone(&green));
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
-    match resolve_program(&program) {
+    match resolve_program(&program, externals) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
@@ -2076,8 +2104,33 @@ fn unused_import_warnings(program: &Program, used: &[bool], diagnostics: &mut Ve
 // `compile()` field-for-field, with `.tma` text where PM-1 has `.pma`.
 // ---------------------------------------------------------------------------
 
+/// Which modules outside the compilation unit the write-footprint inference
+/// may believe (docs/tmt/language.md (contract clauses)): a callee found in
+/// one of them contributes its DECLARED effective set, projected through
+/// the binding; a callee found nowhere contributes the whole alphabet. The
+/// standard library is the default; its own analysis passes `None`, which
+/// is also what keeps the once-per-process stdlib cache from initializing
+/// itself recursively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExternalContracts {
+    #[default]
+    Stdlib,
+    None,
+}
+
+impl ExternalContracts {
+    pub(crate) fn modules(self) -> Vec<&'static Resolved> {
+        match self {
+            ExternalContracts::Stdlib => vec![crate::stdlib::resolved()],
+            ExternalContracts::None => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompileOptions {
+    /// Whose declared write contracts the footprint inference believes.
+    pub externals: ExternalContracts,
     /// `-g`: record label/line debug info in the object, remapped to `.tmc`.
     pub debug_info: bool,
     /// `--strip-debugger`: drop `brk` at codegen. The optimizer runs BEFORE
@@ -2178,7 +2231,7 @@ pub struct CompileOutput {
 /// [`validate_world`] (the T6 invariant check, run here where `.pmc` runs
 /// `validate_function`), and the generated `.tma` failing to assemble.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
-    let mut analysis = analyze(source)?;
+    let mut analysis = analyze_with(source, options.externals)?;
     // Drop rules a second catch-all shadows before expansion (docs/tmt/
     // language.md (rules)) so codegen never emits two all-wildcard match rows.
     // Done here, on the compile path only — the language service and the batch
@@ -3753,6 +3806,22 @@ routine mark(tape t: bits writes {'0'}) {
         // The finding lands on the PARAMETER that declared the contract, not
         // on the rule that writes.
         assert_eq!(e.span.start.line, 2);
+    }
+
+    #[test]
+    fn a_caller_of_a_contracted_library_routine_may_declare_its_own_writes() {
+        // `std::binaryNumbers::goToNumbersStart` declares `writes {}`, so a
+        // caller reaching it transparently writes only what its own body
+        // writes — and may say so. Before the inference believed external
+        // contracts, the library call answered with the whole alphabet and
+        // no caller through the library could declare anything narrower.
+        ok("\
+alphabet bin { '_', '^', '$', '0', '1' }
+routine setZero(tape n: bin writes { '$' }) {
+  entry state start { [*] -> call std::binaryNumbers::goToNumbersStart() then put; }
+  state put         { [*] -> write ['$'] return; }
+}
+");
     }
 
     #[test]

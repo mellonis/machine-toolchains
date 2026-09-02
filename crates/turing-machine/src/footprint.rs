@@ -8,9 +8,14 @@
 //! `inferred ⊇ actual`. Every consumer must reason in that direction only —
 //! a symbol OUTSIDE a set provably never lands on that tape, while a symbol
 //! inside it merely may. Wherever a rule is uncertain the analysis ADDS to
-//! the set and never trims: a call whose target is not in the program
-//! contributes the caller tape's whole alphabet, and so does a binding whose
-//! shape does not fit the callee it names.
+//! the set and never trims: a call whose target no visible module vouches
+//! for contributes the caller tape's whole alphabet, and so does a binding
+//! whose shape does not fit the callee it names. A callee outside the
+//! compilation unit whose resolved signature IS visible — the standard
+//! library's, by default — contributes its declared effective set instead
+//! (docs/tmt/language.md (contract clauses)): its own contract check held
+//! its body to that promise, so believing it is as sound as believing a
+//! local body's inferred set.
 //!
 //! Two facts bound the representation. A tape's alphabet holds at most 127
 //! glyphs (docs/tmt/language.md (alphabets)), so a single `u128` is a whole
@@ -435,6 +440,7 @@ fn source_pairs(
 /// difference rejects programs rather than changing what a legal one writes.
 fn binding_contribution(
     resolved: &Resolved,
+    callee_module: &Resolved,
     host: &ResolvedWorld,
     callee: &ResolvedWorld,
     callee_sets: &[SymSet],
@@ -488,10 +494,13 @@ fn binding_contribution(
             // decides the whole projection from the two cardinalities.
             None => Vec::new(),
             Some(m) => {
+                // Host glyphs resolve in this module; callee glyphs in the
+                // callee's own module — the same one for a local callee, the
+                // external module for a callee it vouches for.
                 let glyphs = resolved
                     .alphabets
                     .get(&host_tape.alphabet)
-                    .zip(resolved.alphabets.get(&ct.alphabet));
+                    .zip(callee_module.alphabets.get(&ct.alphabet));
                 match glyphs.and_then(|(h, c)| source_pairs(m, &h.glyphs, &c.glyphs)) {
                     Some(pairs) => pairs,
                     // A glyph outside its alphabet, or an alphabet resolution
@@ -543,9 +552,12 @@ fn unresolved_contribution(host: &ResolvedWorld, args: &[BindingArg]) -> Vec<Sym
 }
 
 /// One reuse edge out of a world: the callee's mangled name (`None` when this
-/// module cannot see its body) and the source-form binding args.
+/// module cannot see its body), the full path it was resolved to outside this
+/// module when it is external (what an external module is looked up by), and
+/// the source-form binding args.
 struct Edge<'a> {
     target: Option<&'a str>,
+    external: Option<&'a str>,
     args: &'a [BindingArg],
 }
 
@@ -561,6 +573,7 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
                 args,
             } => edges.push(Edge {
                 target: (!external).then_some(name.as_str()),
+                external: external.then_some(name.as_str()),
                 args,
             }),
             // A bind-call's binding lives on the `bind` declaration, shared by
@@ -569,12 +582,14 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
                 match world.binds.iter().find(|b| b.name == *name) {
                     Some(b) => edges.push(Edge {
                         target: (!b.external).then_some(b.target.as_str()),
+                        external: b.external.then_some(b.target.as_str()),
                         args: &b.args,
                     }),
                     // A bind name with no declaration cannot happen (the call
                     // resolved AS a bind by matching one); answer full anyway.
                     None => edges.push(Edge {
                         target: None,
+                        external: None,
                         args: &[],
                     }),
                 }
@@ -586,10 +601,39 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
     for graft in &world.grafts {
         edges.push(Edge {
             target: Some(graft.target.as_str()),
+            external: None,
             args: &graft.args,
         });
     }
     edges
+}
+
+/// An external callee found in one of the external modules by its full
+/// path: the module (for its alphabets) and the world.
+fn find_external<'a>(
+    externals: &[&'a Resolved],
+    path: &str,
+) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
+    externals.iter().find_map(|module| {
+        module
+            .worlds
+            .iter()
+            .find(|w| w.name == path)
+            .map(|w| (*module, w))
+    })
+}
+
+/// What an external callee promises per tape: its declared effective sets
+/// (docs/tmt/language.md (contract clauses)) — the whole alphabet on a tape
+/// with no clause, exactly the answer an opaque callee gets. Believing a
+/// declaration is as sound as believing a local body's inferred set: the
+/// callee's own contract check already held its body to it.
+fn declared_sets(callee: &ResolvedWorld) -> Vec<SymSet> {
+    callee
+        .tapes
+        .iter()
+        .map(crate::compiler::declared_effective)
+        .collect()
 }
 
 /// Infer every world's write footprint from the resolved SOURCE module.
@@ -599,6 +643,17 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
 /// stated. Graphs take part in the same fixpoint: a graph may graft another
 /// graph even though it may never call a routine.
 pub(crate) fn infer_resolved(resolved: &Resolved) -> FootprintTable {
+    infer_resolved_with(resolved, &[crate::stdlib::resolved()])
+}
+
+/// [`infer_resolved`] believing the declared write contracts of the worlds
+/// in `externals` — modules outside this compilation unit whose resolved
+/// signatures are visible (the standard library's, by default). An external
+/// callee found there contributes its declared effective sets projected
+/// through the binding exactly as a local callee contributes its inferred
+/// ones; one found nowhere — a library object at the link boundary, whose
+/// signature carries no contract — keeps the whole-alphabet answer.
+pub(crate) fn infer_resolved_with(resolved: &Resolved, externals: &[&Resolved]) -> FootprintTable {
     let by_name: HashMap<&str, usize> = resolved
         .worlds
         .iter()
@@ -683,14 +738,30 @@ pub(crate) fn infer_resolved(resolved: &Resolved) -> FootprintTable {
                 let contribution = match edge.target.and_then(|t| by_name.get(t)) {
                     Some(&callee_ix) => binding_contribution(
                         resolved,
+                        resolved,
                         world,
                         &resolved.worlds[callee_ix],
                         &sets[callee_ix],
                         edge.args,
                     ),
                     // A callee outside this compilation unit: its body is not
-                    // here to walk, so it may write anything it can reach.
-                    None => unresolved_contribution(world, edge.args),
+                    // here to walk. A module that vouches for it — declared
+                    // contracts on a visible signature — is believed; nothing
+                    // vouching, it may write anything it can reach.
+                    None => match edge
+                        .external
+                        .and_then(|path| find_external(externals, path))
+                    {
+                        Some((module, callee)) => binding_contribution(
+                            resolved,
+                            module,
+                            world,
+                            callee,
+                            &declared_sets(callee),
+                            edge.args,
+                        ),
+                        None => unresolved_contribution(world, edge.args),
+                    },
                 };
                 for (tape, add) in contribution.into_iter().enumerate() {
                     if let (Some(slot), Some(cap)) = (sets[wi].get_mut(tape), caps[wi].get(tape)) {
@@ -1435,6 +1506,77 @@ export routine outer(tape v: tri) {
         assert_eq!(table.worlds["inner"].tapes[0], one);
         assert_eq!(table.worlds["mid"].tapes[0], one, "one graft hop");
         assert_eq!(table.worlds["outer"].tapes[0], one, "two graft hops");
+    }
+
+    /// A transparent call into the standard library binds tapes by index.
+    /// `goToNumbersStart` declares `writes {}` on its one tape: with the
+    /// library's resolved module as an external, the host's footprint is
+    /// its own writes alone; with no externals, the callee is opaque and
+    /// answers with the whole alphabet — today's behavior, kept for a
+    /// callee no module can vouch for.
+    const STD_CALLER: &str = "\
+alphabet bin { '_', '^', '$', '0', '1' }
+
+routine setZero(tape n: bin) {
+  entry state start { [*] -> call std::binaryNumbers::goToNumbersStart() then put; }
+  state put         { [*] -> write ['$'] return; }
+}
+";
+
+    /// TEMPORARY probe for the stdlib-contracts round (deleted before
+    /// commit): every exported stdlib world's tapes that declare no clause,
+    /// with the exact inferred set as clause text.
+    #[test]
+    fn every_stdlib_export_declares_an_exact_contract() {
+        // `docs/tmt/stdlib.md (roster)` promises two things of the embedded
+        // library: every exported world declares a `writes`/`preserves`
+        // clause on every signature tape, and each clause is exact — its
+        // effective set is precisely what the world's own transitions
+        // write, so a caller believing it (`infer_resolved`) learns the
+        // truth and nothing wider. Inference here runs with no external
+        // modules: the library's own calls all resolve within it.
+        let std = crate::stdlib::resolved();
+        let inferred = infer_resolved_with(std, &[]);
+        let mut checked = 0usize;
+        for world in std.worlds.iter().filter(|world| world.exported) {
+            for (k, tape) in world.tapes.iter().enumerate() {
+                assert!(
+                    tape.writes.is_some() || tape.preserves.is_some(),
+                    "std export {} declares no contract clause on tape {}",
+                    world.name,
+                    tape.name
+                );
+                let glyphs = &std.alphabets[&tape.alphabet].glyphs;
+                let render = |set: SymSet| -> Vec<&str> {
+                    set.iter().map(|i| glyphs[i as usize].as_str()).collect()
+                };
+                let declared = crate::compiler::declared_effective(tape);
+                let actual = inferred.worlds[&world.name].tapes[k];
+                assert_eq!(
+                    render(declared),
+                    render(actual),
+                    "std export {} declares an inexact clause on tape {}",
+                    world.name,
+                    tape.name
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked, 40,
+            "the stdlib roster changed; re-check its contract clauses"
+        );
+    }
+
+    #[test]
+    fn an_external_callees_declared_contract_is_believed() {
+        let resolved = resolve(STD_CALLER);
+        let believed = infer_resolved_with(&resolved, &[crate::stdlib::resolved()]);
+        let mut dollar = SymSet::empty();
+        dollar.insert(2);
+        assert_eq!(believed.worlds["setZero"].tapes[0], dollar);
+        let opaque = infer_resolved_with(&resolved, &[]);
+        assert_eq!(opaque.worlds["setZero"].tapes[0], SymSet::full(5));
     }
 
     #[test]

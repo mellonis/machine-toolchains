@@ -38,7 +38,9 @@ use std::sync::OnceLock;
 use mtc_core::diagnostics::Span;
 use mtc_core::formats::object::ObjectFile;
 
-use crate::compiler::{CompileOptions, WorldKind, analyze_staged, compile};
+use crate::compiler::{
+    CompileOptions, ExternalContracts, Resolved, WorldKind, analyze_staged_with, compile,
+};
 use crate::optimizer::OptLevel;
 use crate::parser::Doc;
 
@@ -60,6 +62,9 @@ pub fn object() -> &'static ObjectFile {
             CompileOptions {
                 opt_level: OptLevel::O1,
                 strip_debugger: true,
+                // The library vouches for nobody but itself — and must not
+                // consult its own once-per-process cache while building it.
+                externals: ExternalContracts::None,
                 ..Default::default()
             },
         )
@@ -96,10 +101,13 @@ pub(crate) struct RosterEntry {
 /// from — one pass already produces both, so a second `OnceLock` would
 /// just be caching a field projection.
 // consumer: roster() and docs() below.
-fn analysis() -> &'static (Vec<RosterEntry>, HashMap<String, Doc>) {
-    static ANALYSIS: OnceLock<(Vec<RosterEntry>, HashMap<String, Doc>)> = OnceLock::new();
+fn analysis() -> &'static (Vec<RosterEntry>, Resolved) {
+    static ANALYSIS: OnceLock<(Vec<RosterEntry>, Resolved)> = OnceLock::new();
     ANALYSIS.get_or_init(|| {
-        let resolved = analyze_staged(SOURCE)
+        // `ExternalContracts::None`: the library's own contract check must
+        // not reach for this very cache while it is being initialized, and
+        // the library calls nothing outside itself anyway.
+        let resolved = analyze_staged_with(SOURCE, ExternalContracts::None)
             .resolved
             .expect("the embedded stdlib always resolves");
         let roster = resolved
@@ -111,8 +119,15 @@ fn analysis() -> &'static (Vec<RosterEntry>, HashMap<String, Doc>) {
                 name_span: world.name_span,
             })
             .collect();
-        (roster, resolved.docs)
+        (roster, resolved)
     })
+}
+
+/// The embedded stdlib's whole resolved module — the external module whose
+/// declared write contracts every requesting document's footprint inference
+/// believes by default (`crate::compiler::ExternalContracts`).
+pub(crate) fn resolved() -> &'static Resolved {
+    &analysis().1
 }
 
 /// The stdlib's exported routines — the linkable `std::` symbols. Graphs
@@ -134,7 +149,7 @@ pub(crate) fn roster() -> &'static [RosterEntry] {
 // consumer: the .tmc language service's hover surface, wired in separately
 // from this module.
 pub(crate) fn docs() -> &'static HashMap<String, Doc> {
-    &analysis().1
+    &analysis().1.docs
 }
 
 /// The cache directory root: `$XDG_CACHE_HOME` falling back to
@@ -418,7 +433,7 @@ mod tests {
     /// mapped through `twin_of`.
     #[test]
     fn the_volatile_twins_mirror_their_plain_namespaces() {
-        let resolved = analyze_staged(SOURCE)
+        let resolved = crate::compiler::analyze_staged(SOURCE)
             .resolved
             .expect("the embedded stdlib always resolves");
 

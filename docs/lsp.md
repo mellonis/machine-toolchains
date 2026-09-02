@@ -437,7 +437,13 @@ The set is projected through calls: a routine that never writes its own
 tape directly but hands it to a callee under a symbol map still shows
 whatever the callee's write set maps back onto it, since a caller's write
 set is host-independent — it depends only on what the callee, and
-everything the callee in turn calls, provably writes.
+everything the callee in turn calls, provably writes. A callee in the
+standard library contributes what it *declares*: its `writes`/`preserves`
+clauses are a promise its own compile enforced, so a call into a library
+routine that declares `writes {}` adds nothing to the caller's line, and
+one that declares no clause adds the whole alphabet. A callee whose
+signature is not visible at all — a library object at the link boundary —
+adds the whole alphabet too.
 
 **Declared and inferred are two different statements, and a hover can
 show both at once.** When a tape parameter carries a `writes`/`preserves`

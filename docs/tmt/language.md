@@ -309,6 +309,20 @@ everything it calls or grafts, is allowed to write there — is `writes`
 `preserves` wins, and the `writes` entry naming it is simply inert — the
 `contract-clause-overlap` lint reports exactly that (`docs/tmt/lint.md`).
 
+The effective set is also what a callee **promises its callers**. When a
+world calls or binds a routine outside its own compilation unit whose
+resolved signature is visible — the standard library's routines are — the
+caller's inferred footprint takes the callee's effective set, projected
+through the binding, in place of the callee's body it cannot walk: a
+library routine declaring `writes {}` adds nothing to its caller's
+footprint, one declaring `writes { '0', '1' }` adds those two glyphs, and
+one declaring no clause adds the whole alphabet, exactly as an opaque
+callee does. That is why a caller reaching the standard library can carry
+a contract of its own that is narrower than the alphabet. A callee whose
+signature is not visible at all — a library object at the link boundary,
+whose signature section carries tapes and cardinalities but no clauses —
+still adds the whole alphabet.
+
 Declaring either clause is checked in two independent steps, at two
 different spans. First, while a clause resolves, each glyph it names
 must be a symbol of the parameter's own alphabet — a glyph that is not
