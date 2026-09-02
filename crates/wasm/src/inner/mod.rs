@@ -1,6 +1,7 @@
 //! The layer under the JS boundary: plain Rust, natively testable.
 
 pub mod diagnostics;
+pub mod listing;
 pub mod positions;
 pub mod program;
 pub mod registry;
