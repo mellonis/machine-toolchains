@@ -219,11 +219,19 @@ pub fn number(v: &JsValue, key: &str) -> Option<f64> {
     field(v, key).and_then(|x| x.as_f64())
 }
 
-pub fn limits(v: &JsValue) -> Limits {
-    Limits {
-        max_steps: number(v, "maxSteps").map(|n| n as u64),
-        max_tacts: number(v, "maxTacts").map(|n| n as u64),
+fn limit_field(v: &JsValue, key: &str) -> Result<Option<u64>, String> {
+    match number(v, key) {
+        None => Ok(None),
+        Some(n) if !n.is_finite() || n < 0.0 => Err(format!("`{key}` must be a finite number ≥ 0")),
+        Some(n) => Ok(Some(n as u64)),
     }
+}
+
+pub fn limits(v: &JsValue) -> Result<Limits, String> {
+    Ok(Limits {
+        max_steps: limit_field(v, "maxSteps")?,
+        max_tacts: limit_field(v, "maxTacts")?,
+    })
 }
 
 /// `seeds` is `undefined`, or an array of `{ cells, head?, origin? }` where
@@ -243,7 +251,7 @@ pub fn seeds(v: &JsValue) -> Result<Vec<Seed>, String> {
                 field(&s, "cells").ok_or_else(|| format!("seed {i}: missing `cells`"))?;
             let cells: Vec<u8> = if cells_val.is_instance_of::<Uint8Array>() {
                 Uint8Array::new(&cells_val).to_vec()
-            } else {
+            } else if Array::is_array(&cells_val) {
                 Array::from(&cells_val)
                     .iter()
                     .map(|x| {
@@ -252,6 +260,10 @@ pub fn seeds(v: &JsValue) -> Result<Vec<Seed>, String> {
                             .ok_or_else(|| format!("seed {i}: non-numeric cell"))
                     })
                     .collect::<Result<_, _>>()?
+            } else {
+                return Err(format!(
+                    "seed {i}: `cells` must be a Uint8Array or a number array"
+                ));
             };
             Ok(Seed {
                 cells,

@@ -10,6 +10,8 @@ use mtc_wasm::inner::session::{
 
 const PMC_INC: &str = "main() {\n    1: right(2);\n    2: check(1, 3);\n    3: mark(4);\n    4: left(5);\n    5: check(4, 6);\n    6: right(!);\n}\n";
 const TMC_REPLACE_B: &str = "alphabet ab { '_', 'a', 'b' }\n\nmachine {\n  tape main: ab;\n\n  entry state scan {\n    ['b'] -> write ['a'] move [>] goto scan;\n    ['a'] ->             move [>] goto scan;\n    ['_'] -> stop;\n  }\n}\n";
+/// Only 'a' has a rule; seeding 'b' traps on entry with no applicable transition.
+const TMC_NO_TRANSITION: &str = "alphabet ab { '_', 'a', 'b' }\n\nmachine {\n  tape main: ab;\n\n  entry state scan {\n    ['a'] -> move [>] goto scan;\n  }\n}\n";
 
 fn no_limits() -> Limits {
     Limits {
@@ -134,6 +136,25 @@ fn step_limit_is_a_trap_with_its_kind() {
         s.finished().unwrap().is_some(),
         "the result is repeatable after finishing"
     );
+}
+
+#[test]
+fn no_transition_is_a_trap_with_its_address() {
+    let (program, _) = build(Lang::Tmc, TMC_NO_TRANSITION, 0).unwrap();
+    let mut s = Session::new(&program, &[seed(&[2])], no_limits()).unwrap();
+    let fin = run_to_end(&mut s);
+    match fin.outcome {
+        OutcomeInfo::Trapped(t) => {
+            assert_eq!(t.kind, "no-transition");
+            assert!(t.at.is_some(), "a positioned trap carries its address");
+            assert!(
+                t.detail.contains("no applicable transition"),
+                "{}",
+                t.detail
+            );
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

@@ -182,14 +182,14 @@ fn cause(c: PauseCause) -> Cause {
 }
 
 /// A TM-1 image's declared tape count must be `1..=16` before it ever
-/// reaches the machine: `Tm1::new` (and the core's device wiring) treat an
-/// out-of-range count as a caller bug and panic on it, but a `tape_count`
-/// this guard rejects can only get into an `Executable` through a
-/// hand-crafted or corrupted image, never through the compiler/linker — so
-/// refusing it here, before `Machine::from_executable` is ever called,
-/// turns that corruption into an ordinary `SessionError::Load` instead of
-/// a panic. The compiler/linker never emits a multi-tape PM-1 image, so
-/// the guard is a no-op for `Lang::Pmc`.
+/// reaches the machine. A `tape_count` this guard rejects can only get
+/// into an `Executable` through a hand-crafted or corrupted image, never
+/// through the compiler/linker — so refusing it here, before
+/// `Machine::from_executable` is ever called, turns that corruption into
+/// an ordinary `SessionError::Load` up front instead of letting it reach
+/// core's device wiring as a device-count mismatch mid-run. The
+/// compiler/linker never emits a multi-tape PM-1 image, so the guard is a
+/// no-op for `Lang::Pmc`.
 pub fn check_tape_count(lang: Lang, tape_count: u8) -> Result<(), SessionError> {
     match lang {
         Lang::Pmc => Ok(()),

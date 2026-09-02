@@ -37,6 +37,8 @@ const PMC_INC = "main() {\n    1: right(2);\n    2: check(1, 3);\n    3: mark(4)
 const PMC_UNUSED_LABEL = "namespace api {\nhelper() {\n5: right;\n}\n}\nmain() { @api::helper(); }\n";
 const TMC_REPLACE_B = "alphabet ab { '_', 'a', 'b' }\n\nmachine {\n  tape main: ab;\n\n  entry state scan {\n    ['b'] -> write ['a'] move [>] goto scan;\n    ['a'] ->             move [>] goto scan;\n    ['_'] -> stop;\n  }\n}\n";
 const TMC_UNUSED_ALPHABET = "alphabet ab { '_', 'a', 'b' }\nalphabet spare { '_', 'x' }\n\nmachine {\n  tape main: ab;\n\n  entry state scan {\n    ['b'] -> write ['a'] move [>] goto scan;\n    ['a'] ->             move [>] goto scan;\n    ['_'] -> stop;\n  }\n}\n";
+// Only 'a' has a rule; seeding 'b' traps on entry with no applicable transition.
+const TMC_NO_TRANSITION = "alphabet ab { '_', 'a', 'b' }\n\nmachine {\n  tape main: ab;\n\n  entry state scan {\n    ['a'] -> move [>] goto scan;\n  }\n}\n";
 
 function runToEnd(session) {
   for (;;) {
@@ -95,13 +97,30 @@ check(threw, "unknown lang throws");
   const s = p.session([{ cells: new Uint8Array([2, 2, 2]) }], { maxSteps: 1000 });
   s.pause();
   eq(s.pump().kind, "paused", "tmc manual pause fires");
+  check(
+    typeof s.ip === "number" && typeof s.mf === "boolean" &&
+    typeof s.fr === "number" && typeof s.depth === "number",
+    "getters have their types",
+  );
+  eq(s.stack(), [], "empty stack at start");
+  const bpAddr = p.listing()[1].addr;
+  s.addBreakpoint(bpAddr);
+  const ev = s.pump();
+  eq(ev.kind, "paused", "tmc breakpoint pause fires");
+  eq(ev.cause?.breakpoint, bpAddr, "…at the planted address");
+  s.removeBreakpoint(bpAddr);
   const result = runToEnd(s);
   eq(result.outcome.kind, "stopped", "tmc stopped");
   const snap = s.snapshot(0);
   eq(Array.from(snap.cells.slice(0, 3)), [1, 1, 1], "tmc final tape");
   eq(snap.head, 3, "tmc head on the first blank");
+  check(s.snapshots().length === 1, "snapshots() has one band");
+  check(s.finished()?.outcome.kind === "stopped", "finished() repeats the result");
   const stats = s.stop();
   check(stats.steps > 0, "tmc stats carry steps");
+  let threwOnFree = false;
+  try { s.free(); } catch { threwOnFree = true; }
+  check(!threwOnFree, "free after stop does not throw");
   p.free();
 }
 {
@@ -110,6 +129,15 @@ check(threw, "unknown lang throws");
   const result = runToEnd(s);
   eq(result.outcome.kind, "trapped", "tmc step limit traps");
   eq(result.outcome.trap?.kind, "step-limit", "…as step-limit");
+  r.program.free();
+}
+{
+  const r = Toolchain.build("tmc", TMC_NO_TRANSITION);
+  const s = r.program.session([{ cells: [2] }]);
+  const result = runToEnd(s);
+  eq(result.outcome.kind, "trapped", "tmc no-transition traps");
+  eq(result.outcome.trap?.kind, "no-transition", "…as no-transition");
+  check(typeof result.outcome.trap?.at === "number", "no-transition carries at");
   r.program.free();
 }
 {

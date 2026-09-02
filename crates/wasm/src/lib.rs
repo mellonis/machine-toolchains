@@ -190,8 +190,9 @@ impl Program {
         #[wasm_bindgen(unchecked_param_type = "Limits | undefined")] limits: JsValue,
     ) -> Result<Session, JsError> {
         let seeds = js::seeds(&seeds).map_err(|m| JsError::new(&m))?;
-        let inner = inner::session::Session::new(&self.inner, &seeds, js::limits(&limits))
-            .map_err(session_err)?;
+        let limits = js::limits(&limits).map_err(|m| JsError::new(&m))?;
+        let inner =
+            inner::session::Session::new(&self.inner, &seeds, limits).map_err(session_err)?;
         Ok(Session { inner })
     }
 }
@@ -206,9 +207,18 @@ pub struct Session {
 #[wasm_bindgen]
 impl Session {
     #[wasm_bindgen(unchecked_return_type = "PumpEvent")]
-    pub fn pump(&mut self, budget: Option<u32>) -> Result<JsValue, JsError> {
+    pub fn pump(&mut self, budget: Option<f64>) -> Result<JsValue, JsError> {
+        let budget = match budget {
+            None => None,
+            Some(n) if !n.is_finite() || n < 1.0 => {
+                return Err(JsError::new(
+                    "budget must be a finite number ≥ 1, or undefined to run to the next pause",
+                ));
+            }
+            Some(n) => Some(n.min(u64::MAX as f64) as u64),
+        };
         self.inner
-            .pump(budget.map(u64::from))
+            .pump(budget)
             .map(|e| js::event(&e))
             .map_err(session_err)
     }

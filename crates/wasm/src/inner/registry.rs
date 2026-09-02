@@ -8,6 +8,10 @@
 //! width-agnostic and the constructor only validates the declared tape
 //! count as a sanity check, retaining nothing — so a single `Tm1` handles
 //! every tape count. The registry is built once and leaked on first use.
+//! It lives in a `thread_local!`, not a plain `static`, because `Arch`
+//! carries no `Send + Sync` bound and a `static OnceLock` cannot hold it;
+//! a wasm page is single-threaded, so in practice this is one instance
+//! per process.
 
 use std::cell::OnceCell;
 
