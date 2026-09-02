@@ -57,6 +57,9 @@ pub struct Import {
     pub path: Vec<String>,
     /// `as NAME` rebinds the bare name; the declared symbol is unchanged.
     pub alias: Option<String>,
+    /// The alias NAME's own span — the declaration a reference written
+    /// with the alias navigates to (docs/lsp.md (go-to-definition)).
+    pub alias_span: Option<Span>,
     pub line: u32,
     /// The declaring namespace path; empty = file level.
     pub ns: Vec<String>,

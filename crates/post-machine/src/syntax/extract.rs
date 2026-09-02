@@ -304,6 +304,7 @@ fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> I
         .expect("USE_PATH always carries at least one segment");
     let path = segments.iter().map(|t| t.text().to_string()).collect();
     let alias = view.alias_token().map(|t| t.text().to_string());
+    let alias_span = view.alias_token().map(|t| index.span(t.text_range()));
     let line = index.line_col(first.text_range().start).0;
     let span = index.span(TextRange::new(
         first.text_range().start,
@@ -312,6 +313,7 @@ fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> I
     Import {
         path,
         alias,
+        alias_span,
         line,
         ns: ns.to_vec(),
         span,

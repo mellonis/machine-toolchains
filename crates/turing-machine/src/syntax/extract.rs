@@ -642,6 +642,7 @@ pub(crate) fn extract_import(view: &UsePathView, ns: &[String], index: &TextLine
     Import {
         path: segments.iter().map(|t| t.text().to_string()).collect(),
         alias: view.alias_token().map(|t| t.text().to_string()),
+        alias_span: view.alias_token().map(|t| index.span(t.text_range())),
         line: index.line_col(first.text_range().start).0,
         ns: ns.to_vec(),
         span: index.span(TextRange::new(

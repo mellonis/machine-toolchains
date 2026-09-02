@@ -48,12 +48,17 @@ enum Target {
     Bind { world: String, name: String },
     /// A tape (machine declaration or signature parameter) of a world.
     Tape { world: String, name: String },
-    /// A graft instance; navigation goes to the GRAPH it splices, which is
-    /// where the states it contributes are actually written.
+    /// A graft instance; navigation goes to the `as NAME` of the `graft`
+    /// statement that declares it. The graph it splices is one more hop,
+    /// from that statement's target name.
     Graft { world: String, instance: String },
     /// A signature parameter of another world, named on a binding
     /// argument's left-hand side.
     Param { world: String, name: String },
+    /// A `use … as ALIAS` binding, referenced by its alias; navigation
+    /// goes to the alias itself. The imported declaration is one more
+    /// hop, from the `use` path's segments.
+    Import { alias: String },
     /// A `call`/`bind` target this document does not declare: a
     /// `::`-qualified name, or the full path a `use` binding names. `path`
     /// is exactly what a cross-unit reference must be — never re-resolved
@@ -224,6 +229,34 @@ fn external_path(program: &Program, written: &str) -> Option<String> {
         .map(|import| import.full_path())
 }
 
+/// `written` is exactly the alias of one of the document's `use … as`
+/// bindings — the [`Target::Import`] every reference to an alias becomes,
+/// checked before any resolution so the alias is never resolved through.
+fn import_alias(program: &Program, written: &str) -> Option<Target> {
+    program
+        .imports
+        .iter()
+        .find(|import| import.alias.as_deref() == Some(written))
+        .map(|import| Target::Import {
+            alias: import.binding().to_string(),
+        })
+}
+
+/// The declaration a `use` binding stands for: a world this document
+/// declares under that full path, else the path as an external reference.
+fn import_stands_for(program: &Program, alias: &str) -> Option<Target> {
+    let import = program
+        .imports
+        .iter()
+        .find(|import| import.alias.as_deref() == Some(alias))?;
+    let full = import.full_path();
+    Some(if world_exists(program)(&full) {
+        Target::World(full)
+    } else {
+        Target::External { path: full }
+    })
+}
+
 fn alphabet_exists(program: &Program) -> impl Fn(&str) -> bool + '_ {
     move |name: &str| {
         program
@@ -248,8 +281,19 @@ fn world_exists(program: &Program) -> impl Fn(&str) -> bool + '_ {
 
 /// What `pos` names, and the exact span of the reference it names it by.
 fn reference_at(program: &Program, pos: Pos) -> Option<(Target, Span)> {
-    // A `use` path: the imported declaration itself.
+    // A `use` path: the imported declaration itself; its `as ALIAS` is a
+    // declaration of its own.
     for import in &program.imports {
+        if let (Some(alias), Some(alias_span)) = (&import.alias, import.alias_span)
+            && span_touches(alias_span, pos)
+        {
+            return Some((
+                Target::Import {
+                    alias: alias.clone(),
+                },
+                alias_span,
+            ));
+        }
         if span_touches(import.span, pos) {
             let full = import.full_path();
             if alphabet_exists(program)(&full) {
@@ -330,6 +374,9 @@ fn reference_in_world(
     for bind in world.binds {
         if span_touches(bind.target.span, pos) {
             let written = bind.target.joined();
+            if let Some(hit) = import_alias(program, &written) {
+                return Some((hit, bind.target.span));
+            }
             let hit = match resolve_written(program, &written, world.ns, world_exists(program)) {
                 Some(mangled) => Target::World(mangled),
                 None => Target::External {
@@ -384,6 +431,11 @@ fn reference_in_world(
                                 },
                                 target.span,
                             ));
+                        }
+                        // A call written with a `use … as ALIAS` names the
+                        // alias — its own declaration, before any resolution.
+                        if let Some(hit) = import_alias(program, &written) {
+                            return Some((hit, target.span));
                         }
                         let hit = match resolve_written(
                             program,
@@ -538,23 +590,20 @@ fn declaration_span(state: &DocState, program: &Program, target: &Target) -> Opt
             .into_iter()
             .find(|w| w.mangled == *world)
             .and_then(|w| w.tapes.iter().find(|t| t.name == name).map(|t| t.name_span)),
-        // A graft instance's states are written in the GRAPH it splices,
-        // so that graph's declaration is the useful destination.
-        Target::Graft { world, instance } => {
-            let graft = graft_of(program, world, instance)?;
-            let views = world_views(program);
-            let scope = views.iter().find(|w| w.mangled == *world)?.ns;
-            let mangled = resolve_written(
-                program,
-                &graft.target.joined(),
-                scope,
-                world_exists(program),
-            )?;
-            views
-                .iter()
-                .find(|w| w.mangled == mangled)
-                .map(|w| w.name_span)
-        }
+        // A graft instance is declared by its `graft … as NAME;` statement,
+        // and that is where a reference to it lands — the binding (which
+        // tapes and exit states the instance wires) lives there, and two
+        // instances of one graph stay distinguishable. The graph is the
+        // next hop, from the statement's own target name.
+        Target::Graft { world, instance } => graft_of(program, world, instance)?
+            .as_name
+            .as_ref()
+            .map(|as_name| as_name.span),
+        Target::Import { alias } => program
+            .imports
+            .iter()
+            .find(|import| import.alias.as_deref() == Some(alias.as_str()))
+            .and_then(|import| import.alias_span),
         Target::Param { world, name } => {
             // The parameter belongs to whatever world the argument list
             // targets; the enclosing world is where the reference was
@@ -720,6 +769,19 @@ fn render(program: &Program, state: &DocState, target: &Target) -> Option<String
             )
         }
         Target::Param { name, .. } => (format!("binding argument {name}"), None),
+        // An alias renders as what it stands for, under its `use` line.
+        Target::Import { alias } => {
+            let underlying = import_stands_for(program, alias)?;
+            let full = match &underlying {
+                Target::World(full) | Target::External { path: full } => full.clone(),
+                _ => unreachable!("import_stands_for yields a world or an external path"),
+            };
+            let head = format!("use {full} as {alias}");
+            return Some(match render(program, state, &underlying) {
+                Some(body) => format!("{head}\n\n{body}"),
+                None => head,
+            });
+        }
         // The qualified path IS the head — a requesting document's own
         // analysis never holds a std entry, so there is no local signature
         // to render one from (unlike `World`, above).

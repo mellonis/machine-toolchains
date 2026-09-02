@@ -1147,13 +1147,103 @@ fn a_goto_navigates_to_the_state_it_names() {
     assert_eq!(target.origin, Some(span_of_nth(TWO_TAPE, "done", 0)));
 }
 
+/// A graft instance is declared by its `graft … as NAME;` statement, and
+/// that statement is where a reference to the instance lands: the binding
+/// (which tapes and exit states the instance wires) lives there, and two
+/// instances of one graph stay distinguishable. The graph is one more
+/// hop away, from the statement's target name.
+const GRAFT_HOPS: &str = "\
+alphabet wide { '_', 'a' }
+
+graph findX(tape t: wide, state found) {
+  entry state walk {
+    ['a'] -> found;
+    [*] -> move [>] goto walk;
+  }
+}
+
+machine {
+  tape data: wide;
+
+  entry state main { [*] -> goto seek; }
+
+  graft findX(t = data, found = done) as seek;
+
+  state done { [*] -> stop; }
+}
+";
+
 #[test]
-fn a_graft_instance_navigates_to_the_graph_it_splices() {
-    let (mut service, uri) = opened(CROSS_WORLD);
+fn a_goto_on_a_graft_instance_navigates_to_the_graft_statement() {
+    let (mut service, uri) = opened(GRAFT_HOPS);
     let target = service
-        .definition(&uri, pos_after(CROSS_WORLD, "as seek", 3))
+        .definition(&uri, pos_after(GRAFT_HOPS, "goto seek", 6))
         .expect("a definition");
-    assert_eq!(target.span, span_of_nth(CROSS_WORLD, "findX", 0));
+    assert_eq!(target.span, span_of_nth(GRAFT_HOPS, "seek", 1));
+    assert_eq!(target.origin, Some(span_of_nth(GRAFT_HOPS, "seek", 0)));
+}
+
+#[test]
+fn a_graft_instance_name_is_its_own_declaration() {
+    let (mut service, uri) = opened(GRAFT_HOPS);
+    let target = service
+        .definition(&uri, pos_after(GRAFT_HOPS, "as seek", 3))
+        .expect("a definition");
+    assert_eq!(target.span, span_of_nth(GRAFT_HOPS, "seek", 1));
+}
+
+/// The same rule for a `use` alias: a call written with the alias lands
+/// on the `as ALIAS` of the `use` statement, and the imported declaration
+/// is one hop further, from the path's last segment.
+const USE_ALIAS_HOPS: &str = "\
+alphabet bits { '_', '1' }
+
+namespace lib {
+  export routine plusOne(tape num: bits) {
+    entry state inc { [*] -> write ['1'] return; }
+  }
+}
+
+use lib::plusOne as increment;
+
+machine {
+  tape ctl: bits;
+
+  entry state main { [*] -> call increment(num = ctl) then done; }
+
+  state done { [*] -> stop; }
+}
+";
+
+#[test]
+fn a_call_on_a_use_alias_navigates_to_the_alias() {
+    let (mut service, uri) = opened(USE_ALIAS_HOPS);
+    let target = service
+        .definition(&uri, pos_after(USE_ALIAS_HOPS, "call increment", 6))
+        .expect("a definition");
+    assert_eq!(target.span, span_of_nth(USE_ALIAS_HOPS, "increment", 0));
+    assert_eq!(
+        target.origin,
+        Some(span_of_nth(USE_ALIAS_HOPS, "increment", 1))
+    );
+}
+
+#[test]
+fn a_use_paths_last_segment_is_the_hop_to_the_declaration() {
+    let (mut service, uri) = opened(USE_ALIAS_HOPS);
+    let target = service
+        .definition(&uri, pos_after(USE_ALIAS_HOPS, "use lib::plusOne", 10))
+        .expect("a definition");
+    assert_eq!(target.span, span_of_nth(USE_ALIAS_HOPS, "plusOne", 0));
+}
+
+#[test]
+fn a_grafts_target_name_is_the_hop_to_the_graph() {
+    let (mut service, uri) = opened(GRAFT_HOPS);
+    let target = service
+        .definition(&uri, pos_after(GRAFT_HOPS, "graft findX", 7))
+        .expect("a definition");
+    assert_eq!(target.span, span_of_nth(GRAFT_HOPS, "findX", 0));
 }
 
 #[test]

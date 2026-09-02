@@ -329,7 +329,11 @@ same walk, so the two can never disagree about what the cursor meant.
 
 **`.pmc`** resolves local and nested functions, import bindings, qualified
 internal and external calls, label references, and standard-library
-routines (through the materialized copy described below). Clients that
+routines (through the materialized copy described below). A call written
+with a `use … as ALIAS` lands on that `as ALIAS` — the alias is a
+declaration of this document — and the imported routine is one more hop,
+from the `use` path itself; an unaliased import binds no new name, so a
+call through it jumps straight to the routine. Clients that
 declare link support get a response scoped to the exact reference span
 under the cursor, so the editor underlines only that reference instead of
 guessing a word boundary; clients that do not declare it get a plain
@@ -337,9 +341,12 @@ location. Every service answers this way.
 
 **`.tmc`** resolves alphabet references, world (routine/graph) names, a
 world's states, its bind and graft instances, its tapes, and a signature
-parameter named on a binding argument's left-hand side. A graft instance
-navigates to the *graph it splices*, which is where the states it
-contributes are actually written. The reference side is answered against
+parameter named on a binding argument's left-hand side. Every `as NAME`
+is a declaration: a reference to a graft instance, a bind instance, or a
+`use` alias lands on that `as NAME`, and the thing it stands for is one
+more hop from the same statement — the graph from a graft's target name,
+the routine from a bind's target name or a `use` path's last segment.
+The reference side is answered against
 the flat program, so navigation keeps working on a document whose
 semantics do not yet check out; the target side consults the resolved
 module where one exists, which is what lets a bind target resolve to the

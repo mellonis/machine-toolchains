@@ -121,6 +121,23 @@ fn resolve_call(
             use_span,
             full_path,
         } => {
+            // A call written with a `use … as ALIAS` names the alias, and
+            // the alias is its own declaration in this document; the
+            // imported symbol is one more hop, from the `use` path
+            // (docs/lsp.md (go-to-definition)). An unaliased import binds
+            // no new name, so it still jumps through.
+            if let Some(alias_span) = state
+                .analysis
+                .as_ref()
+                .and_then(|a| a.ast.imports.iter().find(|i| i.span == *use_span))
+                .and_then(|import| import.alias_span)
+            {
+                return Some(DefTarget {
+                    uri: uri.to_string(),
+                    span: alias_span,
+                    origin: Some(origin),
+                });
+            }
             if full_path.starts_with("std::") {
                 // `std_path_target` already tries the overlay before the
                 // roster — no separate overlay attempt here, and (like
@@ -709,10 +726,18 @@ mod tests {
         let mut service = PmcLanguageService::new();
         service.did_update(URI, NAV_FIXTURE);
 
-        let pos = pos_after(NAV_FIXTURE, "@ge()", 1);
+        // `@ge()` lands on its own `as ge`; the `use` path is the hop into
+        // the materialized standard library.
+        let alias = service
+            .definition(URI, pos_after(NAV_FIXTURE, "@ge()", 1))
+            .expect("an aliased call lands on its alias");
+        assert_eq!(alias.uri, URI);
+        assert_eq!(alias.span, span_of(NAV_FIXTURE, "ge"));
+
+        let pos = pos_after(NAV_FIXTURE, "std::goToEnd", 6);
         let target = service
             .definition(URI, pos)
-            .expect("ge is bound to std::goToEnd, and materialization succeeds in this env");
+            .expect("the path names std::goToEnd, and materialization succeeds in this env");
 
         assert!(target.uri.starts_with("file://"), "uri: {}", target.uri);
         let path = uri_to_path(&target.uri).expect("a file: uri decodes to a path");
@@ -723,7 +748,7 @@ mod tests {
             .find(|e| e.full_path == "std::goToEnd")
             .expect("goToEnd is in the roster");
         assert_eq!(target.span, entry.name_span);
-        assert_eq!(target.origin, Some(span_after(NAV_FIXTURE, "@ge()", 1, 2)));
+        assert_eq!(target.origin, Some(span_of(NAV_FIXTURE, "std::goToEnd")));
     }
 
     #[test]
@@ -1218,18 +1243,18 @@ mod tests {
             "stdlib:false kills the materialized jump"
         );
 
-        // The aliased `ImportBinding` shape (`use std::goToEnd as ge;`)
-        // goes through a different `resolve_call` arm than the bare
-        // qualified call above — gate it too, not just
-        // `QualifiedExternal`.
+        // The aliased `ImportBinding` shape (`use std::goToEnd as ge;`):
+        // the call lands on the alias, a declaration in THIS document,
+        // which no stdlib gate can touch — the gate applies one hop
+        // later, on the `use` path itself (checked below).
         const ALIAS_SRC: &str = "use std::goToEnd as ge;\nexport main() {\n    @ge();\n}\n";
         service.did_update(&app_uri, ALIAS_SRC);
         let alias_pos = pos_after(ALIAS_SRC, "@ge()", 1);
-        assert_eq!(
-            service.definition(&app_uri, alias_pos),
-            None,
-            "stdlib:false kills the materialized jump for an aliased std import too"
-        );
+        let alias_target = service
+            .definition(&app_uri, alias_pos)
+            .expect("an aliased call lands on its own `as` alias");
+        assert_eq!(alias_target.uri, app_uri);
+        assert_eq!(alias_target.span, span_of(ALIAS_SRC, "ge"));
 
         // The `use std::goToEnd;` path segment itself (step 3, `use_path_at`)
         // is the third and last `std_path_target` call site — gate it too.
@@ -1291,7 +1316,12 @@ mod tests {
         const SRC: &str = "use std::goToEnd as ge;\nexport main() {\n    @ge();\n}\n";
         service.did_update(&app_uri, SRC);
 
-        let pos = pos_after(SRC, "@ge()", 1);
+        let alias = service
+            .definition(&app_uri, pos_after(SRC, "@ge()", 1))
+            .expect("an aliased call lands on its alias");
+        assert_eq!(alias.span, span_of(SRC, "ge"));
+
+        let pos = pos_after(SRC, "use std::goToEnd", 12);
         let target = service
             .definition(&app_uri, pos)
             .expect("std::goToEnd is not shadowed by any sibling in this project");
@@ -1341,12 +1371,13 @@ mod tests {
     }
 
     #[test]
-    fn std_import_binding_alias_jumps_into_the_shadowing_sibling() {
+    fn std_import_binding_alias_lands_on_the_alias_then_the_path_jumps_into_the_shadowing_sibling()
+    {
         // Same shadowing proof, through the `ImportBinding` arm instead
-        // of `QualifiedExternal` (`use std::goToEnd as ge;` — the alias
-        // this repo's own `stdlib_false_kills_std_hover_and_the_materialized_jump`
-        // test also exercises separately for the OTHER (disabled) half
-        // of this same gate).
+        // of `QualifiedExternal` (`use std::goToEnd as ge;`). The alias
+        // is a declaration of its own: `@ge()` lands on `as ge` in this
+        // document, and the `use` path is the hop that resolves to the
+        // shadowing sibling.
         let dir = unique_tmp_dir("nav-std-shadow-import-binding");
         fs::write(
             dir.join("pmt.json"),
@@ -1362,10 +1393,16 @@ mod tests {
         service.did_update(&app_uri, SRC);
 
         let pos = pos_after(SRC, "@ge()", 1);
-        let target = service
+        let alias = service
             .definition(&app_uri, pos)
-            .expect("the aliased std import resolves to the shadowing sibling");
+            .expect("the aliased call lands on its own alias");
+        assert_eq!(alias.uri, app_uri);
+        assert_eq!(alias.span, span_of(SRC, "ge"));
 
+        let path_pos = pos_after(SRC, "use std::goToEnd", 12);
+        let target = service
+            .definition(&app_uri, path_pos)
+            .expect("the `use` path resolves to the shadowing sibling");
         assert_eq!(target.uri, file_uri(&dir.join("shared.pmc")));
         assert_eq!(target.span, span_of(SHARED, "goToEnd"));
     }
