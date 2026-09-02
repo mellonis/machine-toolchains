@@ -7,7 +7,11 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
-## [0.5.0] - 2026-09-02
+## [0.5.0-rc.1] - 2026-09-02
+
+The first release candidate for 0.5.0, cut so the browser demo can
+integrate the bundle before the final release; the entry is retitled
+`0.5.0` at that cut, with whatever lands in between folded in.
 
 The browser release, and the release in which the front ends stop
 parsing twice. `mtc-wasm` exposes both toolchains to JavaScript — compile,
@@ -25,8 +29,8 @@ broken mid-edit still answers.
 
 | Version space | This release | Previous |
 |---|---|---|
-| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.5.0** | 0.4.0 |
-| `mtc-wasm` crate / JavaScript API | **0.5.0** — new | — |
+| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.5.0-rc.1** | 0.4.0 |
+| `mtc-wasm` crate / JavaScript API | **0.5.0-rc.1** — new | — |
 | `.pmc` language | 0.4 — unchanged | 0.4 |
 | PM-1 `.pma` dialect | 0.3 — unchanged | 0.3 |
 | `.tmc` language | 0.1 — unchanged | 0.1 |

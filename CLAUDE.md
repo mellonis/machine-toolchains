@@ -6,12 +6,12 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 ## Current state
 
-**v0.5.0, released 2026-09-02** — "the browser release": `mtc-wasm` and the release-attached bundle (`docs/wasm.md`), one parse path per source language (the hand-written CSTs deleted), fmt's never-move comment rule on both languages, the lint-fix comment guard, exact stdlib `writes` contracts, the as-name navigation rule, JetBrains 0.2.1. Previous: v0.4.0 (2026-08-17), the debugging release.
+**v0.5.0-rc.1, released 2026-09-02** (the first candidate for 0.5.0, cut for the demo's integration) — "the browser release": `mtc-wasm` and the release-attached bundle (`docs/wasm.md`), one parse path per source language (the hand-written CSTs deleted), fmt's never-move comment rule on both languages, the lint-fix comment guard, exact stdlib `writes` contracts, the as-name navigation rule, JetBrains 0.2.1. Previous: v0.4.0 (2026-08-17), the debugging release.
 
 | Contract | Version |
 |---|---|
-| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.5.0 |
-| `mtc-wasm` crate / JS API | 0.5.0 |
+| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.5.0-rc.1 |
+| `mtc-wasm` crate / JS API | 0.5.0-rc.1 |
 | `.pmc` language / PM-1 `.pma` dialect | 0.4 / 0.3 |
 | `.tmc` language / TM-1 `.tma` dialect | 0.1 / 0.3 |
 | PM IR / TM IR | 4 / 3 |

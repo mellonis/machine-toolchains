@@ -147,7 +147,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "mtc-core"
-version = "0.5.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "proptest",
  "serde",
@@ -156,7 +156,7 @@ dependencies = [
 
 [[package]]
 name = "mtc-post-machine"
-version = "0.5.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "mtc-core",
  "proptest",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "mtc-turing-machine"
-version = "0.5.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "mtc-core",
  "proptest",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "mtc-wasm"
-version = "0.5.0"
+version = "0.5.0-rc.1"
 dependencies = [
  "js-sys",
  "mtc-core",

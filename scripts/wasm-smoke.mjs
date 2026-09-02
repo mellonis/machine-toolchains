@@ -25,7 +25,7 @@ for (const [file, sha] of Object.entries(manifest.files)) {
   const actual = createHash("sha256").update(readFileSync(join(dist, file))).digest("hex");
   eq(actual, sha, `checksum ${file}`);
 }
-check(/^\d+\.\d+\.\d+$/.test(manifest.crate_version), `crate_version ${manifest.crate_version}`);
+check(/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(manifest.crate_version), `crate_version ${manifest.crate_version}`);
 
 // --- load --------------------------------------------------------------
 const glue = await import(pathToFileURL(join(dist, "mtc_wasm.js")).href);
