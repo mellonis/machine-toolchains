@@ -7,14 +7,15 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
-## [0.5.0-rc.2] - 2026-09-02
+## [0.5.0] - 2026-09-02
 
-The second release candidate for 0.5.0. The first was cut the same day
-so the browser demo could integrate the bundle before the final release;
-this one folds in the three surfaces the demo's design turned out to
+Two release candidates preceded this cut on the same day: the first so
+the browser demo could integrate the bundle before the final release,
+the second folding in the three surfaces the demo's design turned out to
 need — assembly, tape blocks, and the standard library with its lines
-(the section of that name below). The entry is retitled `0.5.0` at the
-final cut, with whatever lands in between folded in.
+(the section of that name below). The demo drove every surface of the
+second candidate end to end before this release; nothing changed between
+that candidate and the final.
 
 The browser release, and the release in which the front ends stop
 parsing twice. `mtc-wasm` exposes both toolchains to JavaScript — compile,
@@ -32,8 +33,8 @@ broken mid-edit still answers.
 
 | Version space | This release | Previous |
 |---|---|---|
-| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.5.0-rc.2** | 0.4.0 |
-| `mtc-wasm` crate / JavaScript API | **0.5.0-rc.2** — new | — |
+| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.5.0** | 0.4.0 |
+| `mtc-wasm` crate / JavaScript API | **0.5.0** — new | — |
 | `.pmc` language | 0.4 — unchanged | 0.4 |
 | PM-1 `.pma` dialect | 0.3 — unchanged | 0.3 |
 | `.tmc` language | 0.1 — unchanged | 0.1 |

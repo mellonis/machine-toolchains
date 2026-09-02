@@ -6,12 +6,12 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 ## Current state
 
-**v0.5.0-rc.2, released 2026-09-02** (the second candidate for 0.5.0; rc.1 was cut the same day for the demo's integration, rc.2 folds in the three surfaces the demo-side design asked for) — "the browser release": `mtc-wasm` and the release-attached bundle (`docs/wasm.md`) — four languages, the tape-block codec, the stdlib with lines — one parse path per source language (the hand-written CSTs deleted), fmt's never-move comment rule on both languages, the lint-fix comment guard, exact stdlib `writes` contracts, the as-name navigation rule, JetBrains 0.2.1. Previous: v0.4.0 (2026-08-17), the debugging release.
+**v0.5.0, released 2026-09-02** (two same-day release candidates preceded it: rc.1 cut for the browser demo's integration, rc.2 folding in the three surfaces the demo-side design asked for; the final adds nothing over rc.2) — "the browser release": `mtc-wasm` and the release-attached bundle (`docs/wasm.md`) — four languages, the tape-block codec, the stdlib with lines — one parse path per source language (the hand-written CSTs deleted), fmt's never-move comment rule on both languages, the lint-fix comment guard, exact stdlib `writes` contracts, the as-name navigation rule, JetBrains 0.2.1. Previous: v0.4.0 (2026-08-17), the debugging release.
 
 | Contract | Version |
 |---|---|
-| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.5.0-rc.2 |
-| `mtc-wasm` crate / JS API | 0.5.0-rc.2 |
+| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.5.0 |
+| `mtc-wasm` crate / JS API | 0.5.0 |
 | `.pmc` language / PM-1 `.pma` dialect | 0.4 / 0.3 |
 | `.tmc` language / TM-1 `.tma` dialect | 0.1 / 0.3 |
 | PM IR / TM IR | 4 / 3 |
