@@ -89,13 +89,11 @@ TM stdlib's on-disk cache — are host-only by nature and are not wrapped.
   (span → UTF-16), `snapshot.rs` (device ↔ snapshot ↔ layout),
   `listing.rs` (map + `listing_parts` → rows), `program.rs` (compile,
   link, layouts), `session.rs` (device slot, pump, events), `registry.rs`
-  (`'static` `ArchRegistry`s holding `Pm1` and `Tm1`). A single
-  process-wide registry turned out impossible at planning time —
-  `Tm1::new(tape_count)` is per program — so the registry is one leaked
-  `ArchRegistry` per tape count, cached and bounded by the `u8` count (at
-  most 255 small boxes per page). Either way the registry is `'static`,
-  which gives `Machine<'static>` and `AsyncSession<'static>`, so a session
-  can own its machine without self-references.
+  (a single process-wide leaked `ArchRegistry` holding `Pm1` and `Tm1`;
+  `Tm1` is width-agnostic — its constructor only validates the tape
+  count — so one instance serves every program). The registry is
+  `'static`, which gives `Machine<'static>` and `AsyncSession<'static>`,
+  so a session can own its machine without self-references.
 - **Bundle** produced by `scripts/build-wasm-bundle.sh`:
   `cargo build -p mtc-wasm --release --target wasm32-unknown-unknown`
   under a `[profile.release]` that sets `opt-level = "z"`, `lto = "fat"`,

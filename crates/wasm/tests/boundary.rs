@@ -31,20 +31,15 @@ fn inner_module_never_names_the_js_boundary() {
 }
 
 #[test]
-fn registry_serves_both_arches_per_tape_count() {
-    use mtc_wasm::inner::registry::registry_for;
-    let r1 = registry_for(1);
-    assert!(r1.get(0x01).is_some(), "PM-1 registered");
-    assert!(r1.get(0x02).is_some(), "TM-1 registered");
-    assert!(r1.get(0x7F).is_none(), "the fake test arch is not");
-    let again = registry_for(1);
+fn registry_serves_both_arches_and_is_cached() {
+    use mtc_wasm::inner::registry::registry;
+    let r = registry();
+    assert!(r.get(0x01).is_some(), "PM-1 registered");
+    assert!(r.get(0x02).is_some(), "TM-1 registered");
+    assert!(r.get(0x7F).is_none(), "the fake test arch is not");
+    let again = registry();
     assert!(
-        std::ptr::eq(r1, again),
-        "one registry per tape count, cached"
-    );
-    let r4 = registry_for(4);
-    assert!(
-        !std::ptr::eq(r1, r4),
-        "a different tape count is a different registry"
+        std::ptr::eq(r, again),
+        "the same registry comes back every call"
     );
 }
