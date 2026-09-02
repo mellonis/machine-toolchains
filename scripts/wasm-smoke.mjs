@@ -146,6 +146,32 @@ check(threw, "unknown lang throws");
   eq(r.diagnostics.length, 1, "…with one diagnostic");
 }
 
+// --- pump budget / limits / seed validation (A2/A3/A4) ------------------
+{
+  const r = Toolchain.build("tmc", TMC_REPLACE_B);
+  const s = r.program.session([{ cells: [2, 2, 2] }]);
+  let threwOnZero = false;
+  try { s.pump(0); } catch { threwOnZero = true; }
+  check(threwOnZero, "pump(0) throws instead of spinning forever");
+  const ev = s.pump(2 ** 32);
+  eq(ev.kind, "finished", "pump(2**32) runs the whole program instead of truncating to 0");
+  r.program.free();
+}
+{
+  const r = Toolchain.build("tmc", TMC_REPLACE_B);
+  let threw = false;
+  try { r.program.session([{ cells: [2, 2, 2] }], { maxSteps: -1 }); } catch { threw = true; }
+  check(threw, "negative maxSteps throws instead of saturating to an instant trap");
+  r.program.free();
+}
+{
+  const r = Toolchain.build("tmc", TMC_REPLACE_B);
+  let threw = false;
+  try { r.program.session([{ cells: {} }]); } catch { threw = true; }
+  check(threw, "a non-array `cells` throws instead of seeding a blank band");
+  r.program.free();
+}
+
 // --- size ceiling ------------------------------------------------------
 const raw = statSync(join(dist, "mtc_wasm_bg.wasm")).size;
 const gz = gzipSync(wasmBytes, { level: 9 }).length;
