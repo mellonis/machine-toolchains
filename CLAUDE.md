@@ -249,4 +249,11 @@ with the CHANGELOG entry; merge, tag `vX.Y.Z`, `gh release create` with
 the freshly built plugin artifacts attached. The tag push also triggers
 `release.yml`, which builds the wasm bundle on CI and attaches it to the
 release; `gh release create` should run first (it creates the tag), and
-the job waits up to 30 minutes for the release otherwise.
+the job waits up to 30 minutes for the release otherwise. **Plugin
+artifacts attach to final release tags only, and only when a plugin's
+own version moved** (ruled 2026-09-02 at the v0.5.0-rc.1 cut): the
+plugins version independently of the crates, sideload verification is
+the maintainer's manual step, and a release candidate carries the wasm
+bundle alone. Standing gap: the JetBrains 0.2.1 zips (the didOpen fix)
+have never been attached anywhere — v0.4.0 carries the 0.2.0 set — so
+the final 0.5.0 must attach them, sideload-checked.
