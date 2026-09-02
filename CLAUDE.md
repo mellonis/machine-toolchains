@@ -11,6 +11,7 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 | Contract | Version |
 |---|---|
 | crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.4.0 |
+| `mtc-wasm` crate / JS API | 0.4.0 |
 | `.pmc` language / PM-1 `.pma` dialect | 0.4 / 0.3 |
 | `.tmc` language / TM-1 `.tma` dialect | 0.1 / 0.3 |
 | PM IR / TM IR | 4 / 3 |
@@ -20,7 +21,7 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 **Both toolchain arcs are complete.** PM-1/`pmt` and TM-1/`tmt` each ship the whole chain — compiler, assembler, disassembler, linker, VM, lint, fmt, LSP, DAP, a project manifest with a `build` driver, an embedded stdlib, and a two-plugin editor pair. The TM-1 flagship `docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma` — a hand-written universal Turing machine interpreting brainfuck — assembles, links and runs, proven by derivation-first goldens.
 
-**Open work.** #6 the browser arc — the three libraries already build for wasm32 (gated in CI); what remains is a `wasm-bindgen` cdylib crate over compile → link → `AsyncSession` and the demo-side pages, designed in that order (#55, a brainfuck-runner example, is an independent CLI showcase, not a prerequisite); #87 a hardware PM-1 RTL core against the bus contract; #30 a tape-machine testing library (`pmt test`/`tmt test`); #9 a post-machine-js dialect front end; #94 letting a tapeblock buffer a step's per-tape commands and run them in parallel, instead of the bus serializing one device at a time. The C2 green-tree migration (#14) is MERGED and its follow-ups #100–#108 are closed (formatter comment-layout bugs, review quality findings, error-resilient parsing, the asm green tree, lint spans off the tree); #109 (incremental reparse) stays gated on measurements.
+**Open work.** #6 the browser arc — the `mtc-wasm` crate and bundle have landed; what remains is the demo-side round in `machines-demo`; #87 a hardware PM-1 RTL core against the bus contract; #30 a tape-machine testing library (`pmt test`/`tmt test`); #9 a post-machine-js dialect front end; #94 letting a tapeblock buffer a step's per-tape commands and run them in parallel, instead of the bus serializing one device at a time. The C2 green-tree migration (#14) is MERGED and its follow-ups #100–#108 are closed (formatter comment-layout bugs, review quality findings, error-resilient parsing, the asm green tree, lint spans off the tree); #109 (incremental reparse) stays gated on measurements.
 
 **Where the history lives.** How the repo got here — the phase-by-phase trace, and the things that were probed and rejected — is `docs/superpowers/build-history.md`, deliberately not loaded into every session. Per-release facts: `CHANGELOG.md`. Design rationale: `docs/superpowers/specs/`. **Keep this file at standing state** — current versions, live constraints, open work. A finished round's story goes to the history file, not back into this preamble.
 
@@ -33,6 +34,8 @@ cargo clippy --workspace --all-targets -- -D warnings   # quality gate
 cargo fmt --check                                       # quality gate
 cargo build -p mtc-core --no-default-features        # no_std vm gate (docs/core.md (async session))
 cargo build --workspace --lib --target wasm32-unknown-unknown   # wasm32 gate: the three libraries stay buildable for the browser (docs/core.md (async session))
+scripts/build-wasm-bundle.sh                              # the browser bundle → target/wasm-bundle/ (needs wasm-bindgen CLI at the crate's pin + binaryen)
+node scripts/wasm-smoke.mjs target/wasm-bundle/dist       # end-to-end over the built bundle
 ```
 
 Single test file / single test:
@@ -48,7 +51,7 @@ Regenerate golden files (explicit, `#[ignore]`d — writes into `crates/post-mac
 cargo test -p mtc-post-machine --test golden_programs regen -- --ignored
 ```
 
-CI (`.github/workflows/test.yml`) runs fmt → clippy → the no_std build → the wasm32 library build → `cargo nextest run --workspace` on ubuntu. **The toolchain is pinned in `rust-toolchain.toml`**, so CI and every local checkout compile with the same compiler by construction — plain `cargo clippy` here IS the gate CI runs, with no side-toolchain dance. Bumping the pin is its own deliberate commit: a newer compiler may emit lints the old one never did, and those get fixed in that same change. The file itself carries the why. The wasm32 target rides the same pin (`targets` in that file), so rustup installs it wherever the toolchain is; that gate is compile-only — `std` on `wasm32-unknown-unknown` is a stub OS layer, so a filesystem or clock call leaking into a library would still build and only misbehave in a browser.
+CI (`.github/workflows/test.yml`) runs fmt → clippy → the no_std build → the wasm32 library build → the bundle build and its Node smoke test → `cargo nextest run --workspace` on ubuntu. **The toolchain is pinned in `rust-toolchain.toml`**, so CI and every local checkout compile with the same compiler by construction — plain `cargo clippy` here IS the gate CI runs, with no side-toolchain dance. Bumping the pin is its own deliberate commit: a newer compiler may emit lints the old one never did, and those get fixed in that same change. The file itself carries the why. The wasm32 target rides the same pin (`targets` in that file), so rustup installs it wherever the toolchain is; that gate is compile-only — `std` on `wasm32-unknown-unknown` is a stub OS layer, so a filesystem or clock call leaking into a library would still build and only misbehave in a browser.
 
 `pmt` exit codes from `run`: 0 = program stopped (`stp`), 2 = halted (`hlt`), 3 = trapped. Full flag reference: `docs/pmt/cli.md`; `tmt` shares the exit codes.
 
@@ -60,11 +63,12 @@ Editor plugin builds live only under `editors/` (never repo root). Two independe
 
 ## Architecture
 
-Three-crate workspace with a hard boundary. The subsections below carry per-subsystem detail; this is the ownership map.
+Four-crate workspace with a hard boundary. The subsections below carry per-subsystem detail; this is the ownership map.
 
 - **`crates/core` (`mtc-core`)** — arch-agnostic **by contract**, carrying **zero PM-1/TM-1 knowledge**: container codecs (MO/MX/MT), the sans-I/O VM core + bus + driver + tape devices + `DebugSession`, the linker (including table-section emission and the composition algebra), the assembler/disassembler frameworks over a total lossless assembly CST (`asm/{lexer,cst,lower}.rs`, spanned coded `AsmError`; `parse_asm_green` pairs it with a green tree from the same shaping walk, and `asm/views.rs` holds the typed views plus `locate_items`, the CST↔tree pairing both asm language services take item lines from) with capability-gated extensions behind `AsmCaps { tables, rept, vectors, volatile }` (default all-off: `.section`/`.row`/`.targets` match+dispatch tables with discipline validation, `.rept`/`{expr}` text macros, `[..]` vector operands, the `.routine` signature directive), the arch-agnostic `asm/lint/` (5 rules driven by `Flow`/`break_opcode`) and canonical-grid `asm/fmt.rs`, the language-agnostic lossless **syntax-tree framework** (`syntax/` — green/red model, `TreeBuilder` with retroactive checkpoints, the `AstNode` typed-view contract and its `ast_node!` macro, `TextLineIndex`; `docs/core.md` (syntax trees)), and the language-agnostic LSP and DAP server frameworks (`lsp/`, `dap/` — transport, JSON-RPC, protocol types, position mapping, document store, multi-service routing behind the `LanguageService` trait). It proves its neutrality by testing against a crate-private fake arch (`vm/arch.rs::test_arch`, arch id `0x7F`) and fake asm dialects.
 - **`crates/post-machine` (`mtc-post-machine`)** — everything PM-1: the arch module, the `.pmc` pipeline and its optimizer, the embedded stdlib, the `.pmc`/`.pma` lint and fmt layers, `pmt.json` + the `pmt build` driver, both `LanguageService`s, the DAP adapter, and the `pmt` binary. `pm1_syntax()` opts into exactly one `AsmCaps` capability — `volatile`, for the `.volatile` build-column directive; tables/`.rept`/vectors stay off, and PM-1 byte-identity is a standing regression gate.
 - **`crates/turing-machine` (`mtc-turing-machine`)** — everything TM-1 (arch id `0x02`): the arch module (`Tm1::new(tape_count)`, 20 opcodes — the base set plus `trap`, the framed `call.m`/`retx`, and the fused `wrmv`; batch `rd` over all heads, `mtc`/`djmp` table dispatch, per-tape `wr`/`mov` vectors with `-` keep and `<`/`>`/`.` moves; MR written only by `mtc`), the `.tma` dialect (`tm1_syntax()`, caps all on), the `.tmc` front end, the embedded stdlib twins, both lint layers and the `.tmc` formatter, `tmt.json` + the `tmt build` driver, the completions registry, both `LanguageService`s, the DAP adapter, and the `tmt` binary (thirteen subcommands, same exit codes as `pmt`).
+- **`crates/wasm` (`mtc-wasm`)** — the browser binding: three wasm-bindgen classes (`Toolchain`, `Program`, `Session`) over a plain-Rust `inner/` layer (positions → UTF-16, the lint/format/build channels, listing rows, a pumped `Session` over `AsyncSession` with owned `WideTape`s, one leaked static `ArchRegistry` (`Tm1` is width-agnostic) for the `'static` lifetimes a class needs). The only crate carrying `wasm-bindgen`/`js-sys`, both pinned; `inner/` is held free of them by a test. Reference: `docs/wasm.md`.
 
 Dependencies are deliberately minimal: `serde`/`serde_json` only, `proptest` as a dev-dep. **No clap** — CLI arg parsing is hand-rolled.
 
@@ -242,4 +246,7 @@ Realized release flow (v0.2.0 precedent): docs audit first (per-page
 claim verification + citation-keyword resolution); bump both crates,
 both editor plugins, and their `MIN_TESTED_PMT` floors in one commit
 with the CHANGELOG entry; merge, tag `vX.Y.Z`, `gh release create` with
-the freshly built plugin artifacts attached.
+the freshly built plugin artifacts attached. The tag push also triggers
+`release.yml`, which builds the wasm bundle on CI and attaches it to the
+release; `gh release create` should run first (it creates the tag), and
+the job waits up to 30 minutes for the release otherwise.

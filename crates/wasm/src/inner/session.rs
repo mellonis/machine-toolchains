@@ -1,6 +1,7 @@
 //! A pumped run over owned tapes. The embedder (the JS worker) drives it
 //! by calling `pump`; the pause priority and budget semantics are core's
-//! (`docs/core.md (async session)`) and are not restated here.
+//! (`docs/core.md (async session)`) and are not restated here. The
+//! JS-facing contract is docs/wasm.md (sessions).
 
 use mtc_core::formats::tapeblock::TapeSnapshot;
 use mtc_core::vm::{

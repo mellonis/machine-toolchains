@@ -11,6 +11,10 @@ and each driven by its own CLI:
   worlds, grafts, and link-time composition, compiled through a `.tma`
   assembly stage and linked to a multi-tape processor, driven by `tmt`.
 
+Both toolchains also run in a browser: `mtc-wasm` exposes compile, lint,
+format, disassembly and a pumped run session to JavaScript, and every
+release ships the resulting bundle. See `docs/wasm.md`.
+
 The two share `crates/core`: the sans-I/O VM and its buses, the tape
 devices, the container formats, the linker, and the assembler/disassembler
 frameworks are arch-agnostic by contract — neither machine's specifics leak
@@ -324,6 +328,9 @@ that cover what they hold in common.
   launch config, the protocol surface, breakpoints and stepping, the
   writable-state contract, and degradation without `-g`.
 - `docs/history.md` — where both designs come from.
+- `docs/wasm.md` — the browser bundle: what it contains and how to verify
+  it, the `Toolchain`/`Program`/`Session` object model, UTF-16 positions,
+  and the session contract.
 
 The full design behind the Post-machine half was written up as a spec, now
 frozen as a historical record and no longer the authority code cites or docs
@@ -331,7 +338,7 @@ are derived from day to day; `docs/history.md` explains the handover.
 
 ## Workspace layout
 
-A three-crate Cargo workspace:
+A four-crate Cargo workspace:
 
 - `crates/core` (library) — the VM core and buses, tape devices, the
   `MO`/`MX`/`MT` container formats, the linker (including the link-time
@@ -347,6 +354,9 @@ A three-crate Cargo workspace:
   architecture module, the `.tmc` compiler and optimizer, the `.tma`
   assembly dialect, the standard library, the lint/fmt/completions/
   language-server surface, and the `tmt` CLI.
+- `crates/wasm` (library, browser-only) — the `mtc-wasm` binding: three
+  wasm-bindgen classes over the other three crates' public APIs, built to
+  the bundle every release ships. See `docs/wasm.md`.
 - `editors/` — ready-made editor integrations built on the language
   servers: a VS Code extension and a JetBrains/LSP4IJ plugin for each
   toolchain, with their shared TextMate grammars in `editors/grammars/`.
@@ -363,7 +373,7 @@ another front end) without going through a subprocess.
 cargo test --workspace
 ```
 
-runs everything: unit tests co-located in all three crates, integration
+runs everything: unit tests co-located in all four crates, integration
 tests under each crate's `tests/` directory (format/relaxation round-trips,
 compiler/assembler/linker end-to-end programs, golden ports of the historic
 `Sum.pms`/`Ty.pms` and the TM-1 language's worked examples, optimizer

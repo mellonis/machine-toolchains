@@ -2,7 +2,7 @@
 //! the three crates' public APIs and is what the native tests exercise;
 //! this file and `js.rs` are the wasm-bindgen layer over it: three classes,
 //! plain JS objects for every data type, and the TypeScript declarations of
-//! those objects.
+//! those objects. Reference: docs/wasm.md (the object model).
 
 #[doc(hidden)]
 pub mod inner;
