@@ -2015,6 +2015,15 @@ fn document_symbols_survive_a_resolve_stage_fatal() {
 fn one_parse_per_language_service_request_is_measured_not_assumed() {
     use crate::parser::PARSE_GREEN_FROM_TOKENS_CALLS;
 
+    // The contract check believes the standard library's declared
+    // clauses, so the first `did_update` in a process also resolves the
+    // embedded stdlib — one more green parse, on whichever thread gets
+    // there first, and never again. That is a once-per-process cost, not
+    // a per-request one; warm it here so the counter below measures
+    // only the document's own parse. Without this the test's verdict
+    // depends on the runner: one test per process (nextest) counts the
+    // stdlib parse, a shared process (`cargo test`) usually does not.
+    let _ = crate::stdlib::resolved();
     PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.set(0));
 
     let mut service = TmcLanguageService::new();
