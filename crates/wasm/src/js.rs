@@ -232,6 +232,9 @@ pub fn seeds(v: &JsValue) -> Result<Vec<Seed>, String> {
     if v.is_undefined() || v.is_null() {
         return Ok(Vec::new());
     }
+    if !Array::is_array(v) {
+        return Err("`seeds` must be an array of { cells, head?, origin? }".to_string());
+    }
     Array::from(v)
         .iter()
         .enumerate()

@@ -110,7 +110,10 @@ impl Toolchain {
         source: &str,
         #[wasm_bindgen(unchecked_param_type = "BuildOptions | undefined")] opts: JsValue,
     ) -> Result<JsValue, JsError> {
-        let opt_level = js::number(&opts, "optLevel").map(|n| n as u8).unwrap_or(1);
+        let opt_level: u8 = match js::number(&opts, "optLevel") {
+            Some(0.0) => 0,
+            _ => 1,
+        };
         let o = js::obj();
         match inner::program::build(lang(lang_name)?, source, opt_level) {
             Ok((program, warnings)) => {
