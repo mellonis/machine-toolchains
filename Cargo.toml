@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/post-machine", "crates/turing-machine"]
+members = ["crates/core", "crates/post-machine", "crates/turing-machine", "crates/wasm"]
 
 [workspace.package]
 edition = "2024"
@@ -18,3 +18,16 @@ repository = "https://github.com/mellonis/machine-toolchains"
 # 34.7s) — a dev-tool choice, not a manifest setting.
 [profile.dev]
 debug = "line-tables-only"
+
+# The browser bundle's profile. Scoped as its own profile rather than
+# overrides on `release`: `lto`, `panic` and `strip` are profile-wide
+# settings that per-package overrides cannot set, and the two CLIs keep
+# their ordinary release profile. Measured 2026-09-02: `opt-level = "z"`
+# came out 25% smaller than `"s"` for this module with no observable cost.
+[profile.wasm]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -144,6 +144,10 @@ pub(crate) fn format_tree(
     green: &Rc<GreenNode>,
     line_index: &TextLineIndex,
 ) -> String {
+    // `source` feeds the conservation gate, which is compiled only with
+    // debug assertions; without them the parameter would be unused.
+    #[cfg(not(debug_assertions))]
+    let _ = source;
     let root = SyntaxNode::new_root(Rc::clone(green));
     let mut out = String::new();
     print_items(
