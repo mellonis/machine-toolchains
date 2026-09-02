@@ -1,9 +1,10 @@
 name: test
 
-# The full quality gate: the same five commands the repo asks for locally,
+# The full quality gate: the same seven commands the repo asks for locally,
 # in the same order — formatting, lints, the no_std build of the core crate,
-# the wasm32 build of the three libraries, then the workspace test suite.
-# Runs on every push to master and on every pull request targeting it.
+# the wasm32 build of the three libraries, the browser bundle and its Node
+# smoke test, then the workspace test suite. Runs on every push to master
+# and on every pull request targeting it.
 #
 # The suite runs under cargo-nextest: one process per test, which keeps
 # tests that touch shared temporary paths from colliding the way they can
@@ -39,6 +40,18 @@ jobs:
         # The target comes from rust-toolchain.toml; rustup installs it with
         # the toolchain. Libraries only — the two CLIs are host programs.
         run: cargo build --workspace --lib --target wasm32-unknown-unknown
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.127
+      - name: Install binaryen
+        run: sudo apt-get update -q && sudo apt-get install -y -q binaryen
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build the wasm bundle
+        run: scripts/build-wasm-bundle.sh
+      - name: Smoke-test the wasm bundle under Node
+        run: node scripts/wasm-smoke.mjs target/wasm-bundle/dist
       - uses: taiki-e/install-action@nextest
       - name: Run the workspace test suite
         run: cargo nextest run --workspace
