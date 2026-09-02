@@ -64,3 +64,52 @@ fn every_mnemonic_appears_in_the_text_listing() {
         );
     }
 }
+
+const PMC_TWO_FUNCTIONS: &str =
+    "namespace api {\nhelper() {\n5: right;\n}\n}\nmain() { @api::helper(); }\n";
+
+#[test]
+fn rows_resolve_functions_and_labels_across_a_two_function_image() {
+    let (program, _) = build(Lang::Pmc, PMC_TWO_FUNCTIONS, 0).unwrap();
+    let map = &program.map;
+    assert!(
+        map.functions.len() >= 2,
+        "two linked functions: {:?}",
+        map.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let rows = rows(&program);
+    for f in &map.functions {
+        // Every row inside the function's half-open range names it.
+        for row in rows.iter().filter(|r| r.addr >= f.start && r.addr < f.end) {
+            assert_eq!(
+                row.function.as_deref(),
+                Some(f.name.as_str()),
+                "row {:#x}",
+                row.addr
+            );
+        }
+        // The row at the function start is labelled with the function's own name.
+        let start = rows
+            .iter()
+            .find(|r| r.addr == f.start)
+            .expect("a row starts each function");
+        assert_eq!(start.label.as_deref(), Some(f.name.as_str()));
+        // An interior label is rendered `function.label`. `f.labels` is
+        // empty for this fixture's two functions (a `.pmc` numbered
+        // statement like `5:` becomes line-table info, not a `MapFunction`
+        // label), so this loop's body never runs here; kept for whichever
+        // fixture does carry interior labels, and the function-range
+        // assertions above are the load-bearing half of this test.
+        for (label, addr) in f.labels.iter().filter(|(_, a)| *a != f.start) {
+            let row = rows.iter().find(|r| r.addr == *addr).unwrap_or_else(|| {
+                panic!("label {label} at {addr:#x} is on an instruction boundary")
+            });
+            assert_eq!(
+                row.label.as_deref(),
+                Some(format!("{}.{label}", f.name).as_str())
+            );
+        }
+    }
+    // No row falls outside every function.
+    assert!(rows.iter().all(|r| r.function.is_some()));
+}
