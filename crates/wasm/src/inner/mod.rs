@@ -6,6 +6,7 @@ pub mod positions;
 pub mod program;
 pub mod registry;
 pub mod session;
+pub mod tapeblock;
 
 /// The two architectures. Everything downstream of a build — the
 /// program, its sessions, the listing, the registry — keys on this alone;

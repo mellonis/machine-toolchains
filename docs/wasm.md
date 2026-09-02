@@ -2,7 +2,8 @@
 
 The toolchains run in a browser. `mtc-wasm` is the crate that exposes them
 to JavaScript: compile, lint, format and disassemble `.pmc` and `.tmc`
-sources, assemble `.pma` and `.tma` text, and run the linked program in a session the page drives. The
+sources, assemble `.pma` and `.tma` text, read and write tape-block
+snapshots, and run the linked program in a session the page drives. The
 bundle it builds to is attached to every release.
 
 ## What the bundle contains
@@ -41,7 +42,8 @@ Three classes; every other type is a plain JavaScript object, declared in
   canonical whitespace-only text, or that fatal. `build(lang, source,
   { optLevel? })` compiles with the line table on, links against the
   embedded stdlib, and returns a `Program` plus the compile channel's
-  warnings — or the fatal as one error.
+  warnings — or the fatal as one error. `decodeTapeBlock(bytes)` and
+  `encodeTapeBlock(block)` are the tape-block codec (below).
 - **`Program`**: `tapes()` (one `{ name, glyphs }` per band — the
   machine block's alphabets for `.tmc`; blank and mark for `.pmc`),
   `listing()` (one row per instruction with address, bytes, mnemonic,
@@ -52,7 +54,8 @@ Three classes; every other type is a plain JavaScript object, declared in
   rather than a deliberate distinction; compare either with `!= null`),
   `disassembly()` (reassembleable
   assembly text), `bytes()` (the executable image the CLI would write)
-  and `mapJson()` (its map sidecar), and `session(seeds, limits)`. Every class has `free()` and
+  and `mapJson()` (its map sidecar), `seedsFromTapeBlock(block)` (below),
+  and `session(seeds, limits)`. Every class has `free()` and
   `[Symbol.dispose]`, so `using` works; call one when done. (The glue
   also exports `initSync` beside the default async `init`.) Freeing a
   `Program` while one of its sessions is still running is safe — the
@@ -106,6 +109,54 @@ cardinalities and nothing else, so `tapes()` names the bands `tape0`,
 `Program.disassembly()` of a source-built program is `build`-able as
 that architecture's assembly language and yields the same code bytes:
 the text-expressibility gate, through the browser.
+
+## Tape blocks
+
+`.pmt`/`.tmt` snapshots — the MT container `docs/formats.md (tape-block
+snapshot)` describes — travel through two stateless calls:
+
+```ts
+Toolchain.decodeTapeBlock(bytes: Uint8Array): TapeBlock
+Toolchain.encodeTapeBlock(block: TapeBlockInput): Uint8Array
+```
+
+A decoded `TapeBlock` is `{ alphabet, tapes }`: the block-level alphabet
+and, per tape, `{ origin, cells, head, glyphs }` where `glyphs` is the
+table the tape's cells actually index — its own if the file gave it one,
+the block's otherwise — the same table `tmt run` renders and validates
+against. A magic, CRC, version or bounds failure throws, with the codec's
+message.
+
+`encodeTapeBlock` is the inverse, and its input is the decoded shape with
+the redundancies made optional: a tape without `glyphs` inherits the
+block `alphabet`; a block without `alphabet` takes the first tape's
+`glyphs`; `head` and `origin` default to 0; `cells` may be a `Uint8Array`
+or a number array. The per-tape field is called `glyphs` on purpose — a
+`Session` snapshot is a valid tape as it is, so
+`encodeTapeBlock({ tapes: session.snapshots() })` saves a run's final
+bands. Every cell is validated against its tape's effective table before
+anything is written, and a shape the container cannot hold — no tapes,
+more than 255 tapes or symbols, a glyph over 65535 bytes — throws rather
+than aborting.
+
+The container version is the format's own rule, not a parameter: a tape
+whose `glyphs` equal the block alphabet is written as inheriting, and a
+block in which every tape inherits is version 1 — what `pmt` writes —
+while any tape with its own table makes it version 2, what `tmt` writes
+for bands that differ. A block is decoded and re-encoded to the same
+block; the bytes are identical unless a version-2 tape carried an own
+table equal to the block's, which re-encodes as inheriting.
+
+`Program.seedsFromTapeBlock(block)` maps a block onto the program's
+bands by glyph: block tape `i` seeds band `i`, and each cell's glyph is
+looked up in that band's glyph list (`tapes()[i].glyphs`), so a block
+that spells the alphabet in another order still lands on the right
+symbols. It returns the `Seed[]` `session` takes, with `head` and
+`origin` carried, so a page can render the loaded bands before running.
+More tapes than bands, or a glyph the band does not know, throws naming
+the tape, the glyph and the band — a block authored for another program
+never silently relabels. It accepts the decoded shape and the encode
+input shape alike.
 
 ## Positions
 

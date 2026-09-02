@@ -139,6 +139,22 @@ additive: every call the first candidate had keeps its meaning.
   CLI's tape-block authoring already uses. The disassembly of a
   source-built program builds as assembly to the same code bytes — the
   text-expressibility gate, through the browser.
+- **Tape blocks travel as values.** `decodeTapeBlock(bytes)` returns the
+  block alphabet and, per tape, its cells with the glyph table those
+  cells actually index — the tape's own if the file gave it one, the
+  block's otherwise; `encodeTapeBlock(block)` is the inverse, taking the
+  decoded shape with its redundancies optional, and a session's
+  snapshots as they are. The container version is the format's own rule
+  rather than a parameter: every tape inheriting the block alphabet is
+  version 1, what `pmt` writes; any tape with its own table is version
+  2, what `tmt` writes for bands that differ. Cells are validated before
+  anything is written, and every shape the container cannot hold throws
+  instead of aborting the module. `Program.seedsFromTapeBlock(block)`
+  maps a block onto the program's bands **by glyph**, so a block that
+  spells an alphabet in another order still lands on the right symbols,
+  and a glyph the band does not know throws naming the tape, the glyph
+  and the band — a block authored for another program never silently
+  relabels.
 - One change outside the crate: each toolchain's allow-list validator
   is public, so the binding validates lint `allow` codes on assembly
   through the same shared namespace the CLI does.

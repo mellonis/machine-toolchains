@@ -29,6 +29,11 @@ export interface ListingRow { addr: number; bytes: string; mnemonic: string; ope
 export interface SourceLoc { function: string; line: number | null }
 export interface Seed { cells: Uint8Array | number[]; head?: number; origin?: number }
 export interface Limits { maxSteps?: number; maxTacts?: number }
+export interface TapeBlock { alphabet: string[]; tapes: TapeBlockTape[] }
+export interface TapeBlockTape { origin: number; cells: Uint8Array; head: number; glyphs: string[] }
+export interface TapeBlockInput { alphabet?: string[]; tapes: TapeBlockTapeInput[] }
+export interface TapeBlockTapeInput { cells: Uint8Array | number[]; head?: number; origin?: number;
+                                      glyphs?: string[] }
 export type PumpEvent =
   | { kind: "deviceWait" }
   | { kind: "budgetSpent" }
@@ -67,7 +72,8 @@ fn session_err(e: SessionError) -> JsError {
     })
 }
 
-/// Stateless entry points: the lint channel, the formatter, the build.
+/// Stateless entry points: the lint channel, the formatter, the build,
+/// and the tape-block codec.
 #[wasm_bindgen]
 pub struct Toolchain;
 
@@ -131,6 +137,21 @@ impl Toolchain {
         }
         Ok(o.into())
     }
+
+    #[wasm_bindgen(js_name = decodeTapeBlock, unchecked_return_type = "TapeBlock")]
+    pub fn decode_tape_block(bytes: &[u8]) -> Result<JsValue, JsError> {
+        inner::tapeblock::decode(bytes)
+            .map(|b| js::tape_block(&b))
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = encodeTapeBlock)]
+    pub fn encode_tape_block(
+        #[wasm_bindgen(unchecked_param_type = "TapeBlockInput")] block: JsValue,
+    ) -> Result<Vec<u8>, JsError> {
+        let input = js::tape_block_input(&block).map_err(|m| JsError::new(&m))?;
+        inner::tapeblock::encode(&input).map_err(|e| JsError::new(&e.to_string()))
+    }
 }
 
 /// A linked program: the executable, its map, and everything the browser
@@ -172,6 +193,19 @@ impl Program {
     #[wasm_bindgen(js_name = addressForLine)]
     pub fn address_for_line(&self, line: u32) -> Option<u32> {
         self.inner.address_for_line(line)
+    }
+
+    #[wasm_bindgen(js_name = seedsFromTapeBlock, unchecked_return_type = "Seed[]")]
+    pub fn seeds_from_tape_block(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "TapeBlock | TapeBlockInput")] block: JsValue,
+    ) -> Result<JsValue, JsError> {
+        let input = js::tape_block_input(&block).map_err(|m| JsError::new(&m))?;
+        let block = input.resolve().map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner
+            .seeds_from_tape_block(&block)
+            .map(|seeds| seeds.iter().map(js::seed).collect::<js_sys::Array>().into())
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn disassembly(&self) -> String {

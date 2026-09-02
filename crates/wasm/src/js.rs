@@ -8,6 +8,7 @@ use crate::inner::diagnostics::{Diag, Severity};
 use crate::inner::listing::Row;
 use crate::inner::program::{SourceLoc, TapeLayout};
 use crate::inner::session::{Cause, Event, Finished, Limits, OutcomeInfo, Seed, Snapshot, Stats};
+use crate::inner::tapeblock::{TapeBlock, TapeBlockInput, TapeInput};
 
 pub fn obj() -> Object {
     Object::new()
@@ -193,6 +194,33 @@ pub fn snapshot(s: &Snapshot) -> JsValue {
     o.into()
 }
 
+pub fn tape_block(b: &TapeBlock) -> JsValue {
+    let o = obj();
+    set(&o, "alphabet", strings(&b.alphabet));
+    let tapes: Array = b
+        .tapes
+        .iter()
+        .map(|t| {
+            let to = obj();
+            set(&to, "origin", t.origin as f64);
+            set(&to, "cells", Uint8Array::from(t.cells.as_slice()));
+            set(&to, "head", t.head as f64);
+            set(&to, "glyphs", strings(&t.glyphs));
+            JsValue::from(to)
+        })
+        .collect();
+    set(&o, "tapes", tapes);
+    o.into()
+}
+
+pub fn seed(s: &Seed) -> JsValue {
+    let o = obj();
+    set(&o, "cells", Uint8Array::from(s.cells.as_slice()));
+    set(&o, "head", s.head as f64);
+    set(&o, "origin", s.origin as f64);
+    o.into()
+}
+
 // ---- readers -----------------------------------------------------------
 
 fn field(v: &JsValue, key: &str) -> Option<JsValue> {
@@ -215,8 +243,73 @@ pub fn string_list(v: &JsValue, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `None` when the key is absent (or null); an error when it is present
+/// but not an array of strings.
+fn opt_string_list(v: &JsValue, key: &str, who: &str) -> Result<Option<Vec<String>>, String> {
+    match field(v, key) {
+        None => Ok(None),
+        Some(arr) if Array::is_array(&arr) => Array::from(&arr)
+            .iter()
+            .map(|x| {
+                x.as_string()
+                    .ok_or_else(|| format!("{who}: `{key}` must be an array of strings"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(format!("{who}: `{key}` must be an array of strings")),
+    }
+}
+
 pub fn number(v: &JsValue, key: &str) -> Option<f64> {
     field(v, key).and_then(|x| x.as_f64())
+}
+
+/// `cells` as a `Uint8Array` or a number array.
+fn cells(v: &JsValue, who: &str) -> Result<Vec<u8>, String> {
+    let cells_val = field(v, "cells").ok_or_else(|| format!("{who}: missing `cells`"))?;
+    if cells_val.is_instance_of::<Uint8Array>() {
+        Ok(Uint8Array::new(&cells_val).to_vec())
+    } else if Array::is_array(&cells_val) {
+        Array::from(&cells_val)
+            .iter()
+            .map(|x| {
+                x.as_f64()
+                    .map(|n| n as u8)
+                    .ok_or_else(|| format!("{who}: non-numeric cell"))
+            })
+            .collect()
+    } else {
+        Err(format!(
+            "{who}: `cells` must be a Uint8Array or a number array"
+        ))
+    }
+}
+
+/// `{ alphabet?, tapes: [{ cells, head?, origin?, glyphs? }] }` — the
+/// decoded `TapeBlock` shape is accepted as it is, `glyphs` included.
+pub fn tape_block_input(v: &JsValue) -> Result<TapeBlockInput, String> {
+    if v.is_undefined() || v.is_null() {
+        return Err("a tape block must be an object with `tapes`".to_string());
+    }
+    let alphabet = opt_string_list(v, "alphabet", "tape block")?;
+    let tapes_val = field(v, "tapes").ok_or_else(|| "tape block: missing `tapes`".to_string())?;
+    if !Array::is_array(&tapes_val) {
+        return Err("tape block: `tapes` must be an array".to_string());
+    }
+    let tapes = Array::from(&tapes_val)
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let who = format!("tape {i}");
+            Ok(TapeInput {
+                cells: cells(&t, &who)?,
+                head: number(&t, "head").map(|n| n as i64).unwrap_or(0),
+                origin: number(&t, "origin").map(|n| n as i64).unwrap_or(0),
+                glyphs: opt_string_list(&t, "glyphs", &who)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(TapeBlockInput { alphabet, tapes })
 }
 
 fn limit_field(v: &JsValue, key: &str) -> Result<Option<u64>, String> {
@@ -247,26 +340,8 @@ pub fn seeds(v: &JsValue) -> Result<Vec<Seed>, String> {
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let cells_val =
-                field(&s, "cells").ok_or_else(|| format!("seed {i}: missing `cells`"))?;
-            let cells: Vec<u8> = if cells_val.is_instance_of::<Uint8Array>() {
-                Uint8Array::new(&cells_val).to_vec()
-            } else if Array::is_array(&cells_val) {
-                Array::from(&cells_val)
-                    .iter()
-                    .map(|x| {
-                        x.as_f64()
-                            .map(|n| n as u8)
-                            .ok_or_else(|| format!("seed {i}: non-numeric cell"))
-                    })
-                    .collect::<Result<_, _>>()?
-            } else {
-                return Err(format!(
-                    "seed {i}: `cells` must be a Uint8Array or a number array"
-                ));
-            };
             Ok(Seed {
-                cells,
+                cells: cells(&s, &format!("seed {i}"))?,
                 head: number(&s, "head").map(|n| n as i64).unwrap_or(0),
                 origin: number(&s, "origin").map(|n| n as i64).unwrap_or(0),
             })

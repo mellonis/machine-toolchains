@@ -2,7 +2,7 @@
 // End-to-end over the BUILT bundle (not the Rust crate): load the web-target
 // glue from bytes, then for both languages check → format → build → run,
 // verifying manifest checksums, the line table, and a size ceiling; then
-// the assembly languages.
+// the assembly languages and the tape-block codec.
 //
 //   node scripts/wasm-smoke.mjs target/wasm-bundle/dist
 import { createHash } from "node:crypto";
@@ -205,6 +205,41 @@ check(threw, "unknown lang throws");
   eq(again.program.tapes(), [{ name: "tape0", glyphs: ["0", "1", "2"] }], "tma bands are image-labelled");
   again.program.free();
   compiled.free();
+}
+
+// --- tape blocks (#114) ------------------------------------------------
+{
+  const r = Toolchain.build("tmc", TMC_REPLACE_B, undefined);
+  const p = r.program;
+  const s = p.session([{ cells: [2, 1, 2] }], undefined);
+  runToEnd(s);
+  const bytes = Toolchain.encodeTapeBlock({ tapes: s.snapshots() });
+  check(bytes instanceof Uint8Array && bytes.length > 10, "snapshots encode to a tape block");
+  eq(bytes[3] | (bytes[4] << 8), 1, "one inheriting band is a version-1 block");
+  const block = Toolchain.decodeTapeBlock(bytes);
+  eq(block.alphabet, ["_", "a", "b"], "the block alphabet is the band's");
+  eq(Array.from(block.tapes[0].cells.slice(0, 3)), [1, 1, 1], "the final tape came through");
+  eq(block.tapes[0].head, 3, "…with its head");
+  // A block spelling the alphabet in another order maps by glyph.
+  const seeds = p.seedsFromTapeBlock({ alphabet: ["_", "b", "a"], tapes: [{ cells: [1, 1, 2], head: 1 }] });
+  eq(Array.from(seeds[0].cells), [2, 2, 1], "seedsFromTapeBlock maps by glyph");
+  eq(seeds[0].head, 1, "…and carries the head");
+  const s2 = p.session(seeds, undefined);
+  eq(runToEnd(s2).outcome.kind, "stopped", "the mapped seeds run");
+  let threw = false;
+  try { p.seedsFromTapeBlock({ alphabet: ["_", "x"], tapes: [{ cells: [1] }] }); } catch (e) { threw = String(e).includes("`x`"); }
+  check(threw, "an unknown glyph throws naming it");
+  threw = false;
+  const flipped = new Uint8Array(bytes); flipped[flipped.length - 1] ^= 1;
+  try { Toolchain.decodeTapeBlock(flipped); } catch { threw = true; }
+  check(threw, "a CRC mismatch throws");
+  threw = false;
+  try { Toolchain.encodeTapeBlock({ tapes: [{ cells: [3], glyphs: ["_", "a"] }] }); } catch { threw = true; }
+  check(threw, "a cell outside its alphabet throws");
+  const v2 = Toolchain.encodeTapeBlock({ alphabet: ["_", "a"], tapes: [{ cells: [1] }, { cells: [1], glyphs: ["_", "1"] }] });
+  eq(v2[3] | (v2[4] << 8), 2, "a band with its own table is a version-2 block");
+  eq(Toolchain.decodeTapeBlock(v2).tapes[1].glyphs, ["_", "1"], "…and decodes to the effective glyphs");
+  s.stop(); s2.stop(); p.free();
 }
 
 // --- size ceiling ------------------------------------------------------

@@ -9,6 +9,8 @@ use mtc_core::linker::{LinkOptions, MapFile};
 
 use super::diagnostics::{Diag, Severity, asm_fatal, from_core, pm_fatal, tm_fatal};
 use super::positions::Utf16Index;
+use super::session::Seed;
+use super::tapeblock::TapeBlock;
 use super::{Arch, Lang};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +23,40 @@ pub struct TapeLayout {
 pub struct SourceLoc {
     pub function: String,
     pub line: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedMapError {
+    TooManyTapes {
+        given: usize,
+        bands: usize,
+    },
+    /// The band has no glyph list to map through (a layout-less image).
+    NoGlyphs {
+        band: usize,
+    },
+    UnknownGlyph {
+        tape: usize,
+        glyph: String,
+        band: String,
+    },
+}
+
+impl std::fmt::Display for SeedMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SeedMapError::TooManyTapes { given, bands } => {
+                write!(f, "{given} tapes for {bands} band(s)")
+            }
+            SeedMapError::NoGlyphs { band } => write!(f, "band {band} has no glyphs to map onto"),
+            SeedMapError::UnknownGlyph { tape, glyph, band } => {
+                write!(
+                    f,
+                    "tape {tape}: glyph `{glyph}` is not in band `{band}`'s alphabet"
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -190,6 +226,11 @@ impl Program {
         &self.layouts
     }
 
+    /// The band count the machine will have — the image's, one for PM-1.
+    pub fn bands(&self) -> usize {
+        usize::from(self.exe.tape_count).max(1)
+    }
+
     pub fn line_of(&self, addr: u32) -> Option<SourceLoc> {
         self.line_index.resolve(addr).map(|loc| SourceLoc {
             function: loc.function.to_string(),
@@ -201,6 +242,55 @@ impl Program {
     /// so the per-file filter is not used.
     pub fn address_for_line(&self, line: u32) -> Option<u32> {
         self.line_index.address_for_line(line, None)
+    }
+
+    /// Maps a tape block onto this program's bands by glyph: block tape
+    /// `i` seeds band `i`, each cell's glyph looked up in the band's own
+    /// glyph list. A glyph the band does not know is an error naming it —
+    /// a block authored for another program does not silently relabel.
+    pub fn seeds_from_tape_block(&self, block: &TapeBlock) -> Result<Vec<Seed>, SeedMapError> {
+        let bands = self.bands();
+        if block.tapes.len() > bands {
+            return Err(SeedMapError::TooManyTapes {
+                given: block.tapes.len(),
+                bands,
+            });
+        }
+        block
+            .tapes
+            .iter()
+            .enumerate()
+            .map(|(i, tape)| {
+                let layout = self
+                    .layouts
+                    .get(i)
+                    .ok_or(SeedMapError::NoGlyphs { band: i })?;
+                let cells = tape
+                    .cells
+                    .iter()
+                    .map(|&c| {
+                        // `resolve`/`decode` validated every index against
+                        // the tape's own glyphs, so the lookup cannot miss.
+                        let glyph = &tape.glyphs[usize::from(c)];
+                        layout
+                            .glyphs
+                            .iter()
+                            .position(|g| g == glyph)
+                            .map(|p| p as u8)
+                            .ok_or_else(|| SeedMapError::UnknownGlyph {
+                                tape: i,
+                                glyph: glyph.clone(),
+                                band: layout.name.clone(),
+                            })
+                    })
+                    .collect::<Result<Vec<u8>, _>>()?;
+                Ok(Seed {
+                    cells,
+                    head: tape.head,
+                    origin: tape.origin,
+                })
+            })
+            .collect()
     }
 
     /// The reassembleable `.pma`/`.tma` text, names from the map.
