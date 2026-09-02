@@ -1,5 +1,6 @@
 //! The layer under the JS boundary: plain Rust, natively testable.
 
+pub mod positions;
 pub mod registry;
 
 /// Which source language a call is about. The public library APIs of the
