@@ -31,8 +31,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-bindgen@0.2.127
-      - name: Install binaryen
-        run: sudo apt-get update -q && sudo apt-get install -y -q binaryen
+      - name: Install binaryen (pinned)
+        # Ubuntu's apt binaryen is 108 (2022) and its wasm-opt validates
+        # against the MVP feature set; a pinned upstream release matches the
+        # version the maintainers run and keeps the bundle reproducible.
+        run: |
+          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_132/binaryen-version_132-x86_64-linux.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_132/bin" >> "$GITHUB_PATH"
       - name: Build the wasm bundle
         run: scripts/build-wasm-bundle.sh
       - uses: actions/setup-node@v4

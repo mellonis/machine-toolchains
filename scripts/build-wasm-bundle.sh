@@ -34,7 +34,13 @@ mkdir -p "$dist"
 cargo build -p mtc-wasm --profile wasm --target wasm32-unknown-unknown
 wasm-bindgen --target web --out-dir "$dist" --out-name mtc_wasm \
   target/wasm32-unknown-unknown/wasm/mtc_wasm.wasm
-wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int \
+# Name every feature the Rust wasm32 target emits by default (sign-ext,
+# mutable-globals, reference-types, multivalue, bulk-memory,
+# nontrapping-fptoint): an older wasm-opt validates against the MVP set
+# unless told otherwise and refuses a module it could have optimised.
+echo "using $(wasm-opt --version)"
+wasm-opt -Oz --enable-sign-ext --enable-mutable-globals --enable-reference-types \
+  --enable-multivalue --enable-bulk-memory --enable-nontrapping-float-to-int \
   -o "$dist/mtc_wasm_bg.wasm" "$dist/mtc_wasm_bg.wasm"
 
 # wasm-bindgen's web target may also emit a *_bg.wasm.d.ts; keep only the
