@@ -5,7 +5,7 @@
 use mtc_core::asm::listing_parts;
 use mtc_core::linker::MapFile;
 
-use super::Lang;
+use super::Arch;
 use super::program::Program;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,9 +41,9 @@ fn label_at(map: &MapFile, addr: u32) -> Option<String> {
 }
 
 pub fn rows(program: &Program) -> Vec<Row> {
-    let syntax = match program.lang {
-        Lang::Pmc => mtc_post_machine::asm::pm1_syntax(),
-        Lang::Tmc => mtc_turing_machine::asm::tm1_syntax(),
+    let syntax = match program.arch {
+        Arch::Pm1 => mtc_post_machine::asm::pm1_syntax(),
+        Arch::Tm1 => mtc_turing_machine::asm::tm1_syntax(),
     };
     let map = &program.map;
     let code = &program.exe.code;

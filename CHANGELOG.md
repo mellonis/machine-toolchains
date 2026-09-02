@@ -112,10 +112,36 @@ loads.
   built with `panic = "abort"`, so it takes the module with it. An
   embedder that sees an undocumented throw should discard the module
   and recreate its worker rather than keep calling in.
-- **What the binding does not carry**, deliberately: assembly sources,
-  project manifests and user libraries, the language-server surface,
-  and a JavaScript-implemented tape device. None is needed to compile,
-  inspect and run a program in a page.
+- **What the binding does not carry**, deliberately: project manifests
+  and user libraries, the composition of several assembly units, the
+  language-server surface, and a JavaScript-implemented tape device.
+  None is needed to compile, inspect and run a program in a page.
+
+### Assembly, tape blocks, and the standard library with its lines
+
+Three surfaces the demo's own design asked of the first candidate, all
+additive: every call the first candidate had keeps its meaning.
+
+- **Assembly is a language, not a read-only view.** `lang` takes
+  `"pma"` and `"tma"` beside `"pmc"` and `"tmc"` — a language is an
+  architecture crossed with a kind, and everything downstream of a build
+  keys on the architecture alone. `build` on an assembly language runs
+  the assembler with its line table on, so `lineOf` and
+  `addressForLine` answer against the physical lines the instructions
+  were written on, and links the unit against the embedded stdlib, so a
+  hand-written `call std::goToEnd` resolves; the result is the same
+  `Program`, and `optLevel` is accepted and ignored. An assembler
+  refusal is the one error, carrying the assembler's own code. `check`
+  runs the assembly lint behind the same assemble gate the CLI uses, and
+  `format` prints the canonical column grid. A TM-1 image carries only
+  cardinalities, so an assembled program's bands are `tape0`, `tape1`, …
+  labelled with the decimal strings `0`…`card-1`, the convention the
+  CLI's tape-block authoring already uses. The disassembly of a
+  source-built program builds as assembly to the same code bytes — the
+  text-expressibility gate, through the browser.
+- One change outside the crate: each toolchain's allow-list validator
+  is public, so the binding validates lint `allow` codes on assembly
+  through the same shared namespace the CLI does.
 
 ### One parse path
 

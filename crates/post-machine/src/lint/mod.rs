@@ -96,7 +96,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
 /// of `lint()` so the LSP (the `PmcLanguageService`) can validate an
 /// IDE-settings or `pmt.json` allow-list up front, independently of
 /// running the rules over any particular analysis.
-pub(crate) fn validate_allow(codes: &[String]) -> Result<(), LintError> {
+pub fn validate_allow(codes: &[String]) -> Result<(), LintError> {
     for code in codes {
         let known = RULES.iter().any(|(c, _)| c == code)
             || mtc_core::asm::lint::RULES.iter().any(|(c, _)| c == code);

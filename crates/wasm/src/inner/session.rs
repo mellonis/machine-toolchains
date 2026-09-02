@@ -9,7 +9,7 @@ use mtc_core::vm::{
     RunResult, RunStats, SyncAsAsync, Trap, WideTape,
 };
 
-use super::Lang;
+use super::Arch;
 use super::program::{Program, TapeLayout};
 use super::registry::registry;
 
@@ -189,11 +189,11 @@ fn cause(c: PauseCause) -> Cause {
 /// an ordinary `SessionError::Load` up front instead of letting it reach
 /// core's device wiring as a device-count mismatch mid-run. The
 /// compiler/linker never emits a multi-tape PM-1 image, so the guard is a
-/// no-op for `Lang::Pmc`.
-pub fn check_tape_count(lang: Lang, tape_count: u8) -> Result<(), SessionError> {
-    match lang {
-        Lang::Pmc => Ok(()),
-        Lang::Tmc => {
+/// no-op for PM-1.
+pub fn check_tape_count(arch: Arch, tape_count: u8) -> Result<(), SessionError> {
+    match arch {
+        Arch::Pm1 => Ok(()),
+        Arch::Tm1 => {
             if (1..=16).contains(&tape_count) {
                 Ok(())
             } else {
@@ -234,7 +234,7 @@ pub struct Session {
 impl Session {
     pub fn new(program: &Program, seeds: &[Seed], limits: Limits) -> Result<Session, SessionError> {
         let exe = &program.exe;
-        check_tape_count(program.lang, exe.tape_count)?;
+        check_tape_count(program.arch, exe.tape_count)?;
         let bands = exe.tape_count.max(1) as usize;
         if seeds.len() > bands {
             return Err(SessionError::TooManySeeds {
@@ -285,9 +285,9 @@ impl Session {
         };
         // PM-1 latches the initial mark through device 0 on the first pump;
         // TM-1 never latches and carries its table ROM.
-        let inner = match program.lang {
-            Lang::Pmc => machine.async_session(opts),
-            Lang::Tmc => machine.async_session_tapes(opts),
+        let inner = match program.arch {
+            Arch::Pm1 => machine.async_session(opts),
+            Arch::Tm1 => machine.async_session_tapes(opts),
         };
         let layouts = program.tapes().to_vec();
         Ok(Session {

@@ -191,7 +191,7 @@ pub(crate) fn known_code(code: &str) -> bool {
 /// the shared namespace. Split out of `lint()` so a caller (the future editor
 /// service, `tmt.json` loading) can validate an allow-list up front,
 /// independently of running the rules over any particular analysis.
-pub(crate) fn validate_allow(codes: &[String]) -> Result<(), LintError> {
+pub fn validate_allow(codes: &[String]) -> Result<(), LintError> {
     for code in codes {
         if !known_code(code) {
             return Err(LintError::UnknownAllowCode(code.clone()));

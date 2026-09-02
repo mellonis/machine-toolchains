@@ -2,11 +2,11 @@
 //! final tapes against the goldens' derivations, seed validation, and the
 //! after-stop contract.
 
-use mtc_wasm::inner::Lang;
 use mtc_wasm::inner::program::build;
 use mtc_wasm::inner::session::{
     Cause, Event, Limits, OutcomeInfo, Seed, Session, SessionError, check_tape_count,
 };
+use mtc_wasm::inner::{Arch, Lang};
 
 const PMC_INC: &str = "main() {\n    1: right(2);\n    2: check(1, 3);\n    3: mark(4);\n    4: left(5);\n    5: check(4, 6);\n    6: right(!);\n}\n";
 const TMC_REPLACE_B: &str = "alphabet ab { '_', 'a', 'b' }\n\nmachine {\n  tape main: ab;\n\n  entry state scan {\n    ['b'] -> write ['a'] move [>] goto scan;\n    ['a'] ->             move [>] goto scan;\n    ['_'] -> stop;\n  }\n}\n";
@@ -180,19 +180,19 @@ fn seeds_are_validated_against_the_band() {
 #[test]
 fn tape_count_guard_refuses_a_corrupt_tm_image_before_touching_the_machine() {
     assert!(matches!(
-        check_tape_count(Lang::Tmc, 0),
+        check_tape_count(Arch::Tm1, 0),
         Err(SessionError::Load(_))
     ));
     assert!(matches!(
-        check_tape_count(Lang::Tmc, 17),
+        check_tape_count(Arch::Tm1, 17),
         Err(SessionError::Load(_))
     ));
-    assert!(check_tape_count(Lang::Tmc, 1).is_ok());
-    assert!(check_tape_count(Lang::Tmc, 16).is_ok());
+    assert!(check_tape_count(Arch::Tm1, 1).is_ok());
+    assert!(check_tape_count(Arch::Tm1, 16).is_ok());
     // The compiler/linker never emits a multi-tape PM-1 image; the guard is
     // a no-op for `Lang::Pmc` regardless of the count.
-    assert!(check_tape_count(Lang::Pmc, 0).is_ok());
-    assert!(check_tape_count(Lang::Pmc, 17).is_ok());
+    assert!(check_tape_count(Arch::Pm1, 0).is_ok());
+    assert!(check_tape_count(Arch::Pm1, 17).is_ok());
 }
 
 #[test]

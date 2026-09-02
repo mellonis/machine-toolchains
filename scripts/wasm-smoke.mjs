@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // End-to-end over the BUILT bundle (not the Rust crate): load the web-target
 // glue from bytes, then for both languages check → format → build → run,
-// verifying manifest checksums, the line table, and a size ceiling.
+// verifying manifest checksums, the line table, and a size ceiling; then
+// the assembly languages.
 //
 //   node scripts/wasm-smoke.mjs target/wasm-bundle/dist
 import { createHash } from "node:crypto";
@@ -170,6 +171,40 @@ check(threw, "unknown lang throws");
   try { r.program.session([{ cells: {} }]); } catch { threw = true; }
   check(threw, "a non-array `cells` throws instead of seeding a blank band");
   r.program.free();
+}
+
+// --- assembly (#113) ---------------------------------------------------
+{
+  // `pmt compile -S` of PMC_INC: right to the blank, mark, left to the blank, right, stop.
+  const PMA_INC = ".func main\nL1:\n        rgt\n        jm      L1\n        wr      1\nL4:\n        lft\n        jm      L4\n        rgt\n        stp\n";
+  const r = Toolchain.build("pma", PMA_INC, undefined);
+  check(r.ok, "pma builds");
+  const p = r.program;
+  eq(p.tapes(), [{ name: "tape", glyphs: [" ", "*"] }], "pma tape layout");
+  const addr = p.addressForLine(3);
+  check(addr != null, "pma line 3 (`rgt`) has an address");
+  eq(p.lineOf(addr), { file: "user", function: "main", line: 3 }, "pma lineOf is the physical line");
+  const s = p.session([{ cells: [1, 1, 1] }], undefined);
+  const result = runToEnd(s);
+  eq(result.outcome.kind, "stopped", "pma stopped");
+  eq(Array.from(s.snapshot(0).cells.slice(0, 4)), [1, 1, 1, 1], "pma final tape");
+  s.stop();
+  p.free();
+
+  const bad = Toolchain.build("pma", ".func main\n        bogus\n", undefined);
+  eq(bad.ok, false, "pma refusal is not ok");
+  eq(bad.diagnostics[0]?.code, "unknown-mnemonic", "…with the assembler's code");
+  check(Toolchain.check("pma", ".func main\nL1:\n        stp\n", undefined).some(d => d.code === "unused-label"), "pma check runs the asm lint");
+  eq(Toolchain.format("pma", ".func main\n  L1:  rgt\n jm L1\n").text, ".func main\nL1:     rgt\n        jm      L1\n", "pma format is the canonical grid");
+
+  // A compiled program's disassembly reassembles to the same image.
+  const compiled = Toolchain.build("tmc", TMC_REPLACE_B, undefined).program;
+  const again = Toolchain.build("tma", compiled.disassembly(), undefined);
+  check(again.ok, "tma builds from disassembly");
+  eq(Array.from(again.program.bytes()), Array.from(compiled.bytes()), "…to the same image");
+  eq(again.program.tapes(), [{ name: "tape0", glyphs: ["0", "1", "2"] }], "tma bands are image-labelled");
+  again.program.free();
+  compiled.free();
 }
 
 // --- size ceiling ------------------------------------------------------

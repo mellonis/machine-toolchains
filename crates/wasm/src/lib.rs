@@ -16,7 +16,7 @@ use inner::session::SessionError;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TYPES: &str = r#"
-export type Lang = "pmc" | "tmc";
+export type Lang = "pmc" | "tmc" | "pma" | "tma";
 export interface CheckOptions { allow?: string[]; warn?: string[] }
 export interface BuildOptions { optLevel?: 0 | 1 }
 export type FormatResult = { ok: true; text: string } | { ok: false; error: Diagnostic };
@@ -48,8 +48,11 @@ export interface Edit { from: number; to: number; replacement: string }
 "#;
 
 fn lang(s: &str) -> Result<Lang, JsError> {
-    Lang::parse(s)
-        .ok_or_else(|| JsError::new(&format!("unknown lang `{s}`; expected \"pmc\" or \"tmc\"")))
+    Lang::parse(s).ok_or_else(|| {
+        JsError::new(&format!(
+            "unknown lang `{s}`; expected \"pmc\", \"tmc\", \"pma\" or \"tma\""
+        ))
+    })
 }
 
 fn session_err(e: SessionError) -> JsError {

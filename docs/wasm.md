@@ -2,7 +2,7 @@
 
 The toolchains run in a browser. `mtc-wasm` is the crate that exposes them
 to JavaScript: compile, lint, format and disassemble `.pmc` and `.tmc`
-sources, and run the linked program in a session the page drives. The
+sources, assemble `.pma` and `.tma` text, and run the linked program in a session the page drives. The
 bundle it builds to is attached to every release.
 
 ## What the bundle contains
@@ -18,7 +18,7 @@ the contract a consumer pins.
 
 The module is built with the `wasm` cargo profile (`opt-level = "z"`,
 fat LTO, `panic = "abort"`) and `wasm-opt -Oz`. Measured at 0.5.0 with the
-JavaScript boundary included: 1.12 MB raw and 450 KB gzipped, for both
+JavaScript boundary included: 1.18 MB raw and 466 KB gzipped, for both
 toolchains' full chains — of the same order as a diagram-rendering
 library. The VM-and-compilers core alone measured 321 KB gzipped before
 the boundary was added, so the boundary — glue, JS object construction,
@@ -31,7 +31,9 @@ follow-up. A ceiling of 1 MB gzipped is enforced by the smoke test.
 Three classes; every other type is a plain JavaScript object, declared in
 `mtc_wasm.d.ts`.
 
-- **`Toolchain`** (static methods, `lang` is `"pmc"` or `"tmc"`).
+- **`Toolchain`** (static methods, `lang` is one of `"pmc"`, `"tmc"`,
+  `"pma"`, `"tma"` — a language is an architecture, PM-1 or TM-1,
+  crossed with a kind, source or assembly).
   `check(lang, source, { allow?, warn? })` returns the lint channel:
   findings as warnings, plus a compile fatal as one error. Compile
   *warnings* are not here; they come with `build`, the same split the CLI
@@ -44,13 +46,13 @@ Three classes; every other type is a plain JavaScript object, declared in
   machine block's alphabets for `.tmc`; blank and mark for `.pmc`),
   `listing()` (one row per instruction with address, bytes, mnemonic,
   operand, and the function and label from the map), `lineOf(addr)` and
-  `addressForLine(line)` (the line table both ways — `lineOf` returns
-  `null` for an unmapped address, `addressForLine` returns `undefined`
-  for an unmapped line, a wasm-bindgen `Option` convention rather than a
-  deliberate distinction; compare either with `!= null`),
-  `disassembly()` (reassembleable assembly text), `bytes()` (the
-  executable image the CLI would write) and `mapJson()` (its map
-  sidecar), and `session(seeds, limits)`. Every class has `free()` and
+  `addressForLine(line)` (the line table both ways — `lineOf`
+  returns `null` for an unmapped address, `addressForLine` returns
+  `undefined` for an unmapped line, a wasm-bindgen `Option` convention
+  rather than a deliberate distinction; compare either with `!= null`),
+  `disassembly()` (reassembleable
+  assembly text), `bytes()` (the executable image the CLI would write)
+  and `mapJson()` (its map sidecar), and `session(seeds, limits)`. Every class has `free()` and
   `[Symbol.dispose]`, so `using` works; call one when done. (The glue
   also exports `initSync` beside the default async `init`.) Freeing a
   `Program` while one of its sessions is still running is safe — the
@@ -72,6 +74,38 @@ Three classes; every other type is a plain JavaScript object, declared in
   alphabet indices plus the band's name and glyphs; `ip`, `mf`, `fr`,
   `depth`, `stack()`, `stats()`, `finished()`; `stop()` returns the
   statistics and ends the session — every later call throws.
+
+## Assembly
+
+`build`, `check` and `format` take `"pma"` and `"tma"` beside the two
+source languages. On an assembly language `build` runs the assembler
+with its line table on — each instruction records the physical line it
+was written on, so `lineOf` and `addressForLine` answer against assembly
+lines exactly as they do against source lines — and links the one unit
+against the embedded stdlib, so a hand-written `call std::goToEnd`
+resolves. The result is the same `Program`; `optLevel` is accepted and
+ignored, the assembler having no optimizer. An assembler refusal (an
+unknown mnemonic, a duplicate label, a line that is not assembly text)
+is the one error, carrying the assembler's own code — `unknown-mnemonic`,
+`raw-line`, and the rest of `docs/core.md (error codes)`.
+
+`check` on assembly runs the assembly lint (`docs/core.md (assembly
+lint)`, plus TM-1's `.tma` rules) behind the same assemble gate the CLI
+uses, findings as warnings; `warn` is ignored, there being no opt-in tier.
+`format` prints the canonical column grid (`docs/formats.md (assembly
+text)`) and is whitespace-only: an unknown mnemonic passes through
+untouched, only a line that is not assembly-shaped is refused.
+
+The band layout of an assembled program follows what the image can say.
+PM-1 is blank and mark, as always. A TM-1 image carries per-tape
+cardinalities and nothing else, so `tapes()` names the bands `tape0`,
+`tape1`, … and labels each band's symbols with the decimal strings
+`0`…`card-1` — the convention `tmt tape-block new --from app.tmx` uses
+(`docs/formats.md (glyph tables)`).
+
+`Program.disassembly()` of a source-built program is `build`-able as
+that architecture's assembly language and yields the same code bytes:
+the text-expressibility gate, through the browser.
 
 ## Positions
 
@@ -123,7 +157,8 @@ recreate its worker rather than keep calling into it.
 
 ## What is not here
 
-Assembly sources (`.pma`/`.tma`), project manifests and user libraries,
-the language-server surface (hover, completion, navigation), and a
+Project manifests and user libraries, the composition of several
+assembly units (`build` takes one, linked against the stdlib), the
+language-server surface (hover, completion, navigation), and a
 JavaScript-implemented tape device. Each is a possible later addition;
 none is needed to compile, inspect and run a program in a page.
