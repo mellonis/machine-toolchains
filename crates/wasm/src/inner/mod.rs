@@ -5,6 +5,7 @@ pub mod listing;
 pub mod positions;
 pub mod program;
 pub mod registry;
+pub mod session;
 
 /// Which source language a call is about. The public library APIs of the
 /// two toolchains are symmetric for everything the binding exposes, so one
