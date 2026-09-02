@@ -1,6 +1,6 @@
 ? A universal Turing machine that interprets brainfuck, written in .tmc.
 ?
-? This is the same machine as docs/examples/brainfuck-utm.tma, expressed in
+? This is the same machine as brainfuck-utm-handwritten.tma beside it, expressed in
 ? the high-level language instead of TM-1 assembly. The two are proven
 ? equivalent by execution: one set of golden tape snapshots, two independent
 ? implementations.

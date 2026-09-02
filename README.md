@@ -277,7 +277,7 @@ that cover what they hold in common.
   `pmt dis` round trip, symbol jumps, the `.volatile` build-column
   directive, and the dialect-version history.
 - `docs/pmt/cli.md` — every `pmt` subcommand and flag.
-- `docs/pmt/optimizer.md` — the `-O1` pipeline: the nine passes, the
+- `docs/pmt/optimizer.md` — the `-O1` pipeline: the eleven passes, the
   contracts binding them, and a worked before/after IR example per pass.
 - `docs/pmt/project.md` — the `pmt.json` project manifest: schema,
   per-section discovery, targets, profiles, and run settings, and how

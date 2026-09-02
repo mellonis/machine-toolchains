@@ -17,7 +17,7 @@ SHA-256 per file). Verify the checksums before loading; the manifest is
 the contract a consumer pins.
 
 The module is built with the `wasm` cargo profile (`opt-level = "z"`,
-fat LTO, `panic = "abort"`) and `wasm-opt -Oz`. Measured at 0.4.0 with the
+fat LTO, `panic = "abort"`) and `wasm-opt -Oz`. Measured at 0.5.0 with the
 JavaScript boundary included: 1.12 MB raw and 450 KB gzipped, for both
 toolchains' full chains — of the same order as a diagram-rendering
 library. The VM-and-compilers core alone measured 321 KB gzipped before
@@ -40,20 +40,22 @@ Three classes; every other type is a plain JavaScript object, declared in
   { optLevel? })` compiles with the line table on, links against the
   embedded stdlib, and returns a `Program` plus the compile channel's
   warnings — or the fatal as one error.
-- **`Program`**: `tapes()` (one `{ name, glyphs }` per band — the machine
-  block's alphabets for `.tmc`; blank and mark for `.pmc`), `listing()`
-  (one row per instruction with address, bytes, mnemonic, operand, and
-  the function and label from the map), `lineOf(addr)` and
+- **`Program`**: `tapes()` (one `{ name, glyphs }` per band — the
+  machine block's alphabets for `.tmc`; blank and mark for `.pmc`),
+  `listing()` (one row per instruction with address, bytes, mnemonic,
+  operand, and the function and label from the map), `lineOf(addr)` and
   `addressForLine(line)` (the line table both ways — `lineOf` returns
   `null` for an unmapped address, `addressForLine` returns `undefined`
   for an unmapped line, a wasm-bindgen `Option` convention rather than a
-  deliberate distinction; compare either with `!= null`), `disassembly()`
-  (reassembleable assembly text), `bytes()` (the executable image the
-  CLI would write) and `mapJson()` (its map sidecar), and `session(seeds,
-  limits)`. Call `free()` when done. Freeing a `Program` while one of its
-  sessions is still running is safe — the session borrows only the
-  process-wide arch registry, not the program — so a page may rebuild a
-  program while an earlier run is in flight.
+  deliberate distinction; compare either with `!= null`),
+  `disassembly()` (reassembleable assembly text), `bytes()` (the
+  executable image the CLI would write) and `mapJson()` (its map
+  sidecar), and `session(seeds, limits)`. Every class has `free()` and
+  `[Symbol.dispose]`, so `using` works; call one when done. (The glue
+  also exports `initSync` beside the default async `init`.) Freeing a
+  `Program` while one of its sessions is still running is safe — the
+  session borrows only the process-wide arch registry, not the program —
+  so a page may rebuild a program while an earlier run is in flight.
 - **Trailing options arguments are required-but-nullable, not optional.**
   `check`'s and `build`'s options argument and `session`'s `seeds` and
   `limits` are typed `T | undefined` in `mtc_wasm.d.ts`, without the `?`

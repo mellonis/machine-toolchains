@@ -7,6 +7,363 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
+## [0.5.0] - 2026-09-02
+
+The browser release, and the release in which the front ends stop
+parsing twice. `mtc-wasm` exposes both toolchains to JavaScript — compile,
+lint, format, disassemble and run a program inside a page — and the
+release workflow builds the bundle it compiles to, smoke-tests it and
+attaches it to the tagged release.
+
+Underneath it sits the larger half of the range: `.pmc` and `.tmc`
+now each parse exactly once, into a lossless syntax tree that
+reproduces its source byte for byte, and the compiler, the formatter,
+the linters and the language servers all read that one tree. What a
+user sees of it is that formatting never moves a comment again on
+either language, that a quickfix never eats one, and that a document
+broken mid-edit still answers.
+
+| Version space | This release | Previous |
+|---|---|---|
+| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.5.0** | 0.4.0 |
+| `mtc-wasm` crate / JavaScript API | **0.5.0** — new | — |
+| `.pmc` language | 0.4 — unchanged | 0.4 |
+| PM-1 `.pma` dialect | 0.3 — unchanged | 0.3 |
+| `.tmc` language | 0.1 — unchanged | 0.1 |
+| TM-1 `.tma` dialect | 0.3 — unchanged | 0.3 |
+| PM IR encoding (JSON) | 4 — unchanged | 4 |
+| TM IR encoding (JSON) | 3 — unchanged | 3 |
+| Container formats (MO / MX / MT) | 3 / 2 / 2 — unchanged | 3 / 2 / 2 |
+| `pmt.json` project-manifest schema | 0.2 — unchanged | 0.2 |
+| `tmt.json` project-manifest schema | 0.2 — unchanged | 0.2 |
+| VS Code extensions (PM-1, TM-1) | 0.2.0 — unchanged | 0.2.0 |
+| JetBrains plugins (PM-1, TM-1) | **0.2.1** | 0.2.0 |
+| Tested-binary floors of all four plugins | 0.4.0 — unchanged | 0.4.0 |
+<!-- maintainer: floors -->
+
+No source language, assembly dialect, IR encoding, container format or
+manifest schema moved this release: a program that built with 0.4.0
+builds unchanged, and every artifact either toolchain wrote still
+loads.
+
+### The browser bundle
+
+- **`mtc-wasm`**, a fourth workspace crate, is the JavaScript binding:
+  three classes — `Toolchain`, `Program` and `Session` — over the same
+  compiler, linker and virtual machine the command-line tools run, with
+  every other type a plain JavaScript object. It needs no filesystem,
+  no clock and no server: a page loads the module and compiles, lints,
+  formats, disassembles and runs `.pmc` and `.tmc` sources locally.
+  `docs/wasm.md` is the reference.
+- **The bundle.** `scripts/build-wasm-bundle.sh` produces the module,
+  the wasm-bindgen glue as an ES module (`web` target, initialised from
+  a URL, a `Response` or raw bytes), a generated `.d.ts` that is the
+  API reference, and a `manifest.json` carrying the toolchain and crate
+  versions, the wasm-bindgen version, the commit it was built from and
+  a SHA-256 per file. The manifest is what a consumer pins; verify the
+  checksums before loading. The release workflow builds the tarball on
+  CI with the pinned toolchain and attaches it to the tagged release.
+- **Size.** Both toolchains' full chains, JavaScript boundary included,
+  measure 1.12 MB raw and 450 KB gzipped — the order of a
+  diagram-rendering library. A ceiling of 1 MB gzipped is enforced by
+  the smoke test, so a size regression fails the build rather than
+  reaching a page.
+- **The compile channels mirror the CLI's.** `check` returns lint
+  findings as warnings and a compile fatal as one error, with the
+  library's own fix edits attached; compile *warnings* come with
+  `build`, the same split the command line keeps between `lint` and
+  `compile`. `format` returns the canonical whitespace-only text or
+  that same fatal. All diagnostic and fix positions are half-open
+  UTF-16 string offsets — the coordinate a browser editor indexes by —
+  and a position past the end of the text clamps to its length.
+- **`Program`** exposes the band layout with real glyphs, a listing row
+  per instruction (address, bytes, mnemonic, operand, plus the
+  containing function and any label), the line table in both directions,
+  reassembleable disassembly text, and the executable image and map
+  sidecar exactly as the CLI would write them. Freeing a program while
+  one of its sessions still runs is safe — the session borrows the
+  process-wide architecture registry, not the program — so a page may
+  rebuild while an earlier run is in flight.
+- **`Session`** is the run, pumped by the embedder: tapes live inside
+  it, one band per machine tape, seeded in alphabet indices and blank
+  where no seed is given. `pump` retires instructions until its budget
+  runs out, a pause fires or the program ends, and reports which;
+  `pause`, breakpoints, per-band snapshots, the registers, the call
+  stack, statistics and `stop` complete the surface. A trap is not a
+  pause: it ends the run, and its kind is spelled the way the CLI's
+  exit-code-3 family spells it, with `stopped` and `halted` matching
+  exit codes 0 and 2. A TM-1 program's tape count must fall in
+  `1..=16`, and a seed cell outside its band's alphabet throws, naming
+  the band.
+- **Two argument conventions worth knowing before the first call.**
+  The trailing options arguments — `check`'s and `build`'s options
+  object, `session`'s seeds and limits — are typed `T | undefined`
+  without TypeScript's `?`, a limitation of the wasm-bindgen version
+  the bundle pins rather than a design choice: pass `undefined`
+  explicitly instead of omitting them. `pump`'s budget is the one
+  genuinely optional parameter, and it rejects anything below 1 — a
+  zero budget would spin rather than advance.
+- **Failure modes are documented, not discovered.** Expected errors are
+  values or thrown errors; a Rust panic is a bug, and the module is
+  built with `panic = "abort"`, so it takes the module with it. An
+  embedder that sees an undocumented throw should discard the module
+  and recreate its worker rather than keep calling in.
+- **What the binding does not carry**, deliberately: assembly sources,
+  project manifests and user libraries, the language-server surface,
+  and a JavaScript-implemented tape device. None is needed to compile,
+  inspect and run a program in a page.
+
+### One parse path
+
+- **Both source languages parse once.** `.pmc` and `.tmc` each build a
+  single lossless syntax tree, and the compiler front end, the
+  formatter, the linters and the language services all read it — the
+  second, hand-written parse tree each crate used to build alongside it
+  is gone. The tree reproduces its source byte for byte, which is what
+  makes "the formatter cannot lose what you wrote" a structural
+  property rather than a promise. `docs/core.md` (syntax trees)
+  describes the framework.
+- **Assembly joins them.** The `.pma`/`.tma` parse emits a tree from
+  the same shaping walk that builds the assembler's own item records,
+  so the two cannot drift, and the tree is byte-lossless for any input
+  — CRLF included. `.rept` blocks nest, and every item, comment
+  included, can be located in it; both assembly language services now
+  take their per-item line structure from the tree instead of zipping
+  against the source's non-blank lines.
+- **A broken document still parses.** Recovery wraps the broken region
+  in an error node and resynchronises: a broken top-level declaration
+  costs its declaration, a broken statement costs its statement inside
+  an otherwise intact function, and a broken state, graft, bind or tape
+  costs itself inside an otherwise intact world. Every sibling keeps
+  its parse, and the tree stays lossless across the damage.
+- **What that buys in the editor**: document symbols answer from the
+  current text across a broken declaration, listing the declarations
+  around the damage with their real positions — only a lexing failure
+  now leaves an outline unanswered. Every other feature stays keyed to
+  the clean parse by construction.
+- **Formatting refuses broken input, deliberately.** Canonical layout
+  over an error region is undefined, and silently reformatting around
+  broken text on save is worse than declining to.
+- **Rule-level recovery inside a `.tmc` state is out of scope** by
+  ruling — the statement and world item are the recovery grain.
+
+### Formatting and comments
+
+- **A comment is never moved, on either language.** `pmt fmt` and
+  `tmt fmt` print every comment between the same two significant
+  tokens it was written between, and both formatters are now
+  unconditionally idempotent — one pass settles, always. This replaces
+  the previous per-position relocation rules, under which a comment in
+  a declaration header, a label region or a list could be drawn
+  somewhere else in the output. `docs/pmt/fmt.md` and `docs/tmt/fmt.md`
+  are the references.
+- **`.tmc`**: header comments stay in their header, in every
+  declaration family; a comment inside a list entry prints inside
+  that entry without forcing the list multi-line; and a rule's
+  action-slot comment stays in its slot, with the state grid ruling on
+  the rule — a block comment keeps its rule on the grid, occupying its
+  column and widening it for the group, while a line comment takes that
+  rule off the grid, where only its own commented vectors break.
+- **Two `.tmc` relocations are recorded residuals**, both stable on the
+  first pass: a `call` transition's own machinery claims comments past
+  its target, and a `with map` comment on a map-bearing argument moves
+  onto the map's opening brace.
+- **`.pmc`**: a comment in the label region prints in the label prefix
+  and the statement takes the own-line-label layout; a comment before
+  the terminating semicolon prints before it; comments inside a
+  `check`'s arms, a command's successor, a call's arguments or a `use`
+  path print inside that item or path; and a header-interior comment
+  prints on the header line in the slot it was written in. The
+  stacked-label shape that used to need a second pass to settle is
+  gone with the relocation machinery.
+- **A consequence to expect**: a blank line inside a header, a label
+  region or an item's parentheses renders compactly, since the comment
+  around it now stays where it was written.
+
+### Lint and quickfixes
+
+- **A quickfix whose edit span contains a comment is withheld** — the
+  finding still reports, only the remedy goes. Applying it would
+  silently delete the comment, and since `pmt lint --fix` writes the
+  result to disk this was data loss, not merely an editor nicety going
+  wrong. The guard is one chokepoint per lint surface rather than a
+  check inside each rule, so a fix-emitting rule added later is covered
+  by construction, and it covers all four languages: both source
+  linters and the architecture-neutral assembly layer. Both entry
+  channels — the batch command and the editor service — run through it.
+  `docs/pmt/lint.md` and `docs/tmt/lint.md` gained a quickfix
+  availability section, and `docs/core.md` documents the assembly-side
+  guard.
+- **`.tmc` quickfix spans are now node-range queries** over the syntax
+  tree — the declaration or statement node's own range, or a token pair
+  inside it — instead of scans outward from an anchor token. A comment
+  anywhere in a declaration therefore lands *inside* the span, where
+  the guard withholds the fix, and no span helper can be truncated or
+  voided by one.
+
+### The standard libraries
+
+- **Every exported tape of the TM-1 standard library declares an exact
+  `writes` clause.** Fifteen of the forty carried one before; the other
+  twenty-five made no machine-checked claim at all. Each clause names
+  precisely the symbols some run of the routine writes, and the
+  compiler's contract check holds the body to it. The compiled object
+  is byte-identical before and after — a clause changes what the
+  compiler checks, never what it emits.
+- **The write-footprint inference believes an external callee's
+  declared contract.** A call whose target lay outside the compilation
+  unit used to contribute the caller tape's whole alphabet, so hovering
+  any routine that touched the standard library reported it as writing
+  every symbol of the tape — including routines that write nothing at
+  all. An external callee whose resolved signature is visible now
+  contributes its declared effective set, projected through the binding
+  exactly as a local callee's inferred set is; a callee nobody vouches
+  for still contributes everything, and objects at the link boundary
+  carry no contracts and stay conservative.
+
+### Language servers and editors
+
+- **Every `as NAME` is a declaration, and what it stands for is one hop
+  away.** A reference to an aliased name lands on the `as NAME` that
+  introduced it — a `goto` on its graft statement's alias, a call
+  written through a `use` alias on the alias itself — and one more
+  jump from that statement reaches the graph or the imported
+  declaration. Two instances of one graph stay distinguishable, and the
+  rule matches what an editor means by "definition" everywhere else.
+  `docs/lsp.md` states it for both languages.
+- **The services are measurably lighter per keystroke**: the line index
+  is built once per document version instead of per request at eight
+  call sites, formatting prints from the tree the document state
+  already holds rather than re-lexing and re-parsing, and the tree's
+  sibling and last-token queries are addressed rather than walked, so a
+  top-level traversal is no longer quadratic in allocations.
+- **JetBrains plugins 0.2.1 — every language feature works again.**
+  Under 0.2.0 both plugins started the language server for an opened
+  file and then went silent: no navigation, no hover, nothing, on every
+  LSP4IJ version. The file types were language file types with no
+  parser definition, and the platform then builds a plain-text syntax
+  model whose language disagrees with the file's — a document the LSP
+  bridge never opens. Each language now owns a minimal parser
+  definition of its own, and both plugins additionally register, for
+  their languages, the per-language extensions the bridge otherwise
+  provides only for plain text: the semantic-token view behind quick
+  documentation, the structure view, folding, code blocks and parameter
+  info.
+- **The Ctrl/Cmd-hover underline is identifier-precise** in both
+  JetBrains plugins, a direct consequence of owning the file's syntax
+  model. The whole-file underline previously recorded as an upstream
+  limitation was ours.
+- **The editor READMEs are user pages now** — requirements, install,
+  settings, tasks or run configurations, debugging, manifest
+  validation — with the build-and-sideload instructions and manual test
+  checklists moved to a maintainers' file beside each and kept out of
+  the packaged extension.
+- **The DAP disassembly view is still unreachable from JetBrains**: the
+  IDE's split debugger front end leaves LSP4IJ's action without a
+  session to act on, so it hides itself. Fixed upstream and verified on
+  a nightly; the plugins pin a released version that does not carry the
+  fix yet.
+- The VS Code extensions are unchanged at 0.2.0, and all four plugins
+  keep their tested-binary floor at 0.4.0.
+
+### Disassembly and debugging
+
+- **Wide instructions read again in the listing.** A sixteen-tape
+  `wrmv` is twenty-five bytes and a ninety-nine-character operand, and
+  folding that into one lane interleaved hex with mnemonics until
+  neither column could be read down. Bytes now wrap after five per
+  line and the operand wraps in its own column, breaking between whole
+  vectors first and inside one only when a single vector cannot fit.
+  `run --trace` is unaffected and stays one row per retired
+  instruction.
+- **The debug adapters send `instructionBytes` separately.** A
+  disassembly row's `instruction` field now holds mnemonic and operand
+  alone, so a client with its own address and bytes columns no longer
+  renders them twice. Both fields come from the same listing the CLI
+  composes its grid from.
+- **`dis` prints the far mnemonic for a linker-narrowed site**, which
+  is why `pmt dis` shows `call` where the image holds `call.s`. That is
+  deliberate — far is the only form the assembler accepts, and
+  re-linking the recovered text re-derives the same narrowing, which is
+  what keeps disassemble → assemble → link byte-exact. Previously
+  recorded only in a source comment, it is now stated in `docs/core.md`
+  and cited from both `dis` references; `--listing` is the byte-exact
+  view beside it.
+
+### Documentation and examples
+
+- **Five worked examples join the flagship**, with one runner over all
+  six. Four are the same RPN calculator under four representations —
+  variable-length binary through the standard library, four hex digits
+  packed into one tape, those digits split into a register over four
+  tapes, and four tapes that *are* the stack — so the trade-off between
+  tape count and vector width is visible side by side rather than
+  asserted: on one addition the standard-library form takes 788,375
+  steps where the packed, register and wide forms take 279, 195 and 164.
+  The fifth is a flat unary machine using no reuse constructs at all.
+  Each example carries three differentials: `-O0` against `-O1`, the
+  three bound-call lowerings against each other, and a
+  disassemble/reassemble round trip, each comparing whole final tapes
+  rather than the one value a case checks.
+- Both `run` command references now carry the exit-code table (PM-1's
+  was prose), the `tmt.json` lint section moved to the lint page where
+  `pmt.json`'s already lived, and both README quick starts show a
+  `--listing` block beside the canonical disassembly.
+- `docs/wasm.md` is the new reference page for the browser bundle.
+
+### Tooling and CI
+
+- **The Rust toolchain is pinned.** `channel = "stable"` pinned
+  nothing — rustup re-resolved it per machine, so a fresh CI runner and
+  a laptop months behind compiled the same commit with different
+  compilers and different lints. The pin is an exact version now — Rust
+  1.98.0 — which makes plain `cargo clippy` locally the same gate CI
+  runs and retires the side-toolchain check that used to compensate.
+  The `wasm32-unknown-unknown` target is pinned beside it, so rustup
+  installs it wherever the toolchain is installed.
+- **All four library crates are gated on `wasm32-unknown-unknown`.**
+  The sans-I/O core was designed for the browser and the compilers and
+  linker touch no filesystem or clock, so the property was already
+  true; CI now enforces it. The gate is compile-only: the standard
+  library on that target is a stub, so a filesystem or clock call
+  leaking into a library would still build and only misbehave in a
+  page.
+- **The bundle is built and smoke-tested on every push to the default
+  branch and every pull request**, loading the real glue and running
+  both toolchains end to end — check, format, build, a pumped session,
+  the line table and a trap — verifying the manifest checksums and
+  holding the gzipped module under its ceiling. The release workflow
+  runs the same smoke test before attaching the tarball to a tag.
+  wasm-opt runs against an explicitly named feature set and binaryen is
+  installed from a pinned upstream release, so a distribution's
+  years-old wasm-opt can no longer reject the module.
+- **The worked examples' case tables run in the test suite**, reading
+  the same tables the shell runner reads, so the two can never assert
+  different things. A case expecting a trap must trap on a missing
+  transition specifically, so an exhausted step budget can no longer
+  pass for a diagnosis.
+
+### Fixes
+
+- Both command-line tools exit quietly when their standard output is
+  closed early — `tmt dis --listing … | head` and its `pmt` twin used to
+  end in a panic about a broken pipe rather than the usual silence a
+  reader that stopped listening deserves.
+- `pmt fmt` no longer duplicates a comment after a function's opening
+  brace on every pass — an empty body, a body of only comments, or a
+  blank line before the first statement grew one more copy per run, and
+  `--check` could never go green on such a file.
+- Two same-line comments between `use` and the first path printed glued
+  together; each is spaced now.
+- A `.tmc` block comment whose text spans lines no longer pads its
+  neighbours' columns against its full width: it takes its rule off the
+  grid, as a line comment always did.
+- The `.pmc` non-camel-case lint stops suggesting a rename to the name
+  already written, and offers a rename only when the derived name lands
+  inside the convention's alphabet — a non-ASCII identifier could
+  previously be advised to become another non-conforming one, or one
+  the lexer rejects outright.
+
 ## [0.4.0] - 2026-08-17
 
 The debugging release. Both toolchains gain a Debug Adapter Protocol

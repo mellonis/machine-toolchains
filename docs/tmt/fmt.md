@@ -431,7 +431,7 @@ F0:     .frame  tapes=(1, 0)
 
 The grid is whitespace-only and idempotent — it does not inherit the
 `.tmc` printer's relocated-comment exception; the flagship
-`docs/examples/brainfuck-utm.tma` reprints identically on the second
+`docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma` reprints identically on the second
 pass. Rewrapping an overlong line is not part of it for most
 lines — an ordinary instruction, or an over-80 `.frame`/`.routine` line,
 stays that way after formatting. The three unbounded lists are the

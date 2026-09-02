@@ -14,7 +14,7 @@
 # lints the previous compiler never emitted. Fix those in the same change,
 # on purpose — not as a side effect of somebody's `rustup update`.
 #
-# The wasm32 target is pinned for the same reason. The three library crates
+# The wasm32 target is pinned for the same reason. The library crates
 # build for bare WebAssembly today without a single cfg — the sans-I/O core
 # was designed for it, and the compilers and linker touch no filesystem or
 # clock — but that is a property nothing enforced until CI built for the

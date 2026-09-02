@@ -6,22 +6,22 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 ## Current state
 
-**v0.4.0, released 2026-08-17** — "the debugging release": `pmt dap`/`tmt dap` plus both editor pairs as DAP clients, the optimizer motion/value round, and map-sidecar source provenance.
+**v0.5.0, released 2026-09-02** — "the browser release": `mtc-wasm` and the release-attached bundle (`docs/wasm.md`), one parse path per source language (the hand-written CSTs deleted), fmt's never-move comment rule on both languages, the lint-fix comment guard, exact stdlib `writes` contracts, the as-name navigation rule, JetBrains 0.2.1. Previous: v0.4.0 (2026-08-17), the debugging release.
 
 | Contract | Version |
 |---|---|
-| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.4.0 |
-| `mtc-wasm` crate / JS API | 0.4.0 |
+| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.5.0 |
+| `mtc-wasm` crate / JS API | 0.5.0 |
 | `.pmc` language / PM-1 `.pma` dialect | 0.4 / 0.3 |
 | `.tmc` language / TM-1 `.tma` dialect | 0.1 / 0.3 |
 | PM IR / TM IR | 4 / 3 |
 | containers MO / MX / MT | 3 / 2 / 2 |
 | `pmt.json` / `tmt.json` `project` schema | 0.2 / 0.2 |
-| editor plugins (all four) | 0.2.0, `MIN_TESTED_PMT`/`MIN_TESTED_TMT` floors at 0.4.0 |
+| editor plugins | VS Code pair 0.2.0, JetBrains pair 0.2.1; `MIN_TESTED_PMT`/`MIN_TESTED_TMT` floors at 0.4.0 |
 
 **Both toolchain arcs are complete.** PM-1/`pmt` and TM-1/`tmt` each ship the whole chain — compiler, assembler, disassembler, linker, VM, lint, fmt, LSP, DAP, a project manifest with a `build` driver, an embedded stdlib, and a two-plugin editor pair. The TM-1 flagship `docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma` — a hand-written universal Turing machine interpreting brainfuck — assembles, links and runs, proven by derivation-first goldens.
 
-**Open work.** #6 the browser arc — the `mtc-wasm` crate and bundle have landed; what remains is the demo-side round in `machines-demo`; #87 a hardware PM-1 RTL core against the bus contract; #30 a tape-machine testing library (`pmt test`/`tmt test`); #9 a post-machine-js dialect front end; #94 letting a tapeblock buffer a step's per-tape commands and run them in parallel, instead of the bus serializing one device at a time. The C2 green-tree migration (#14) is MERGED and its follow-ups #100–#108 are closed (formatter comment-layout bugs, review quality findings, error-resilient parsing, the asm green tree, lint spans off the tree); #109 (incremental reparse) stays gated on measurements.
+**Open work.** #6 the browser arc — the `mtc-wasm` crate and bundle have landed; what remains is the demo-side round in `machines-demo`; #87 a hardware PM-1 RTL core against the bus contract; #30 a tape-machine testing library (`pmt test`/`tmt test`); #9 a post-machine-js dialect front end; #94 letting a tapeblock buffer a step's per-tape commands and run them in parallel, instead of the bus serializing one device at a time. The C2 green-tree migration (#14) is MERGED and its follow-ups #100–#108 are closed (formatter comment-layout bugs, review quality findings, error-resilient parsing, the asm green tree, lint spans off the tree); #109 (incremental reparse) was closed on measurements 2026-09-02: a full reparse is a small fraction of a keystroke; `expand` dominates on the widest `.tmc`.
 
 **Where the history lives.** How the repo got here — the phase-by-phase trace, and the things that were probed and rejected — is `docs/superpowers/build-history.md`, deliberately not loaded into every session. Per-release facts: `CHANGELOG.md`. Design rationale: `docs/superpowers/specs/`. **Keep this file at standing state** — current versions, live constraints, open work. A finished round's story goes to the history file, not back into this preamble.
 
@@ -118,7 +118,7 @@ An architecture plugs into core through two tables, both living in the arch crat
 
 ### Optimizers (`post-machine/src/optimizer/`, `turing-machine/src/optimizer/`)
 
-**PM-1** — program-level `inline` at round start, then eleven per-function passes fixpoint-looped with a round cap: `check-fold`, `jump-threading`, `cell-state`, `branch-fold`, `tail-sink`, `tail-call`, `tail-merge`, `dce`, `move-elim`, `fuse-tape-ops`. **TM-1** — program-level `inline` (a sound superset of the linker engine's collapse) and the default-off `outline` (`--foutline`), then six per-function: `jump-threading`, `tail-call`, `tail-merge`, `dce`, plus TM-native `dead-rows` (same-band cover) and `dispatch-select` (selective-then-catch-all flagged for the compact `jm` lowering, machine world only). `pass_names()` in each crate is the authority — the completions registry and `--fno-<pass>` are drift-guarded against it.
+**PM-1** — program-level `inline` at round start, then ten per-function passes fixpoint-looped with a round cap: `check-fold`, `jump-threading`, `cell-state`, `branch-fold`, `tail-sink`, `tail-call`, `tail-merge`, `dce`, `move-elim`, `fuse-tape-ops`. **TM-1** — program-level `inline` (a sound superset of the linker engine's collapse) and the default-off `outline` (`--foutline`), then six per-function: `jump-threading`, `tail-call`, `tail-merge`, `dce`, plus TM-native `dead-rows` (same-band cover) and `dispatch-select` (selective-then-catch-all flagged for the compact `jm` lowering, machine world only). `pass_names()` in each crate is the authority — the completions registry and `--fno-<pass>` are drift-guarded against it.
 
 Constraints that are contracts, not preferences:
 

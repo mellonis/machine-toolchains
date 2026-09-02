@@ -98,7 +98,7 @@ calls at all, so all three mechanisms give them the same image: for those two
 the check compares a program against itself. The script says so on the line
 where it happens.
 
-Incidentally measured, not asserted: linking `frames` gives an image 44–72% the
+Incidentally measured, not asserted: linking `frames` gives an image 45–73% the
 size of `mono` AND fewer tacts — up to 57% fewer on a multiply — at identical
 step counts, because the two mechanisms swap six `ent` for six `call.m` and
 differ in what each surviving instruction costs.
