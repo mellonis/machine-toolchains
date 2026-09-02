@@ -7,11 +7,14 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
-## [0.5.0-rc.1] - 2026-09-02
+## [0.5.0-rc.2] - 2026-09-02
 
-The first release candidate for 0.5.0, cut so the browser demo can
-integrate the bundle before the final release; the entry is retitled
-`0.5.0` at that cut, with whatever lands in between folded in.
+The second release candidate for 0.5.0. The first was cut the same day
+so the browser demo could integrate the bundle before the final release;
+this one folds in the three surfaces the demo's design turned out to
+need — assembly, tape blocks, and the standard library with its lines
+(the section of that name below). The entry is retitled `0.5.0` at the
+final cut, with whatever lands in between folded in.
 
 The browser release, and the release in which the front ends stop
 parsing twice. `mtc-wasm` exposes both toolchains to JavaScript — compile,
@@ -29,8 +32,8 @@ broken mid-edit still answers.
 
 | Version space | This release | Previous |
 |---|---|---|
-| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.5.0-rc.1** | 0.4.0 |
-| `mtc-wasm` crate / JavaScript API | **0.5.0-rc.1** — new | — |
+| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.5.0-rc.2** | 0.4.0 |
+| `mtc-wasm` crate / JavaScript API | **0.5.0-rc.2** — new | — |
 | `.pmc` language | 0.4 — unchanged | 0.4 |
 | PM-1 `.pma` dialect | 0.3 — unchanged | 0.3 |
 | `.tmc` language | 0.1 — unchanged | 0.1 |
@@ -68,7 +71,7 @@ loads.
   checksums before loading. The release workflow builds the tarball on
   CI with the pinned toolchain and attaches it to the tagged release.
 - **Size.** Both toolchains' full chains, JavaScript boundary included,
-  measure 1.12 MB raw and 450 KB gzipped — the order of a
+  measure 1.18 MB raw and 466 KB gzipped — the order of a
   diagram-rendering library. A ceiling of 1 MB gzipped is enforced by
   the smoke test, so a size regression fails the build rather than
   reaching a page.

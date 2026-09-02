@@ -11,8 +11,9 @@ and each driven by its own CLI:
   worlds, grafts, and link-time composition, compiled through a `.tma`
   assembly stage and linked to a multi-tape processor, driven by `tmt`.
 
-Both toolchains also run in a browser: `mtc-wasm` exposes compile, lint,
-format, disassembly and a pumped run session to JavaScript, and every
+Both toolchains also run in a browser: `mtc-wasm` exposes compile and
+assemble, lint, format, disassembly, the tape-block codec, the standard
+library with its lines, and a pumped run session to JavaScript, and every
 release ships the resulting bundle. See `docs/wasm.md`.
 
 The two share `crates/core`: the sans-I/O VM and its buses, the tape
@@ -329,8 +330,9 @@ that cover what they hold in common.
   writable-state contract, and degradation without `-g`.
 - `docs/history.md` — where both designs come from.
 - `docs/wasm.md` — the browser bundle: what it contains and how to verify
-  it, the `Toolchain`/`Program`/`Session` object model, UTF-16 positions,
-  and the session contract.
+  it, the `Toolchain`/`Program`/`Session` object model, assembly as a
+  language, tape blocks as values, the standard library with its lines,
+  UTF-16 positions, and the session contract.
 
 The full design behind the Post-machine half was written up as a spec, now
 frozen as a historical record and no longer the authority code cites or docs
