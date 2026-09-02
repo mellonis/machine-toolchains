@@ -1,0 +1,52 @@
+name: release
+
+# Attaches the browser bundle to the GitHub release for a pushed `v*` tag.
+# The release itself is still created by the maintainer (`gh release
+# create`, with the editor plugin artifacts); this job only adds the wasm
+# bundle, built on CI from the tagged commit with the pinned toolchain and
+# the pinned wasm-bindgen CLI, so the artifact is reproducible and never
+# depends on a laptop's tool versions.
+#
+# Ordering: `gh release create vX.Y.Z` both creates the tag and the
+# release, so the release normally exists before this job starts. If the
+# tag was pushed first, the upload step waits for the release for up to
+# 30 minutes, then fails; re-run the job after creating the release.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.127
+      - name: Install binaryen
+        run: sudo apt-get update -q && sudo apt-get install -y -q binaryen
+      - name: Build the wasm bundle
+        run: scripts/build-wasm-bundle.sh
+      - name: Wait for the release, then attach the bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          for i in $(seq 1 30); do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" target/wasm-bundle/*.tar.gz --clobber
+              echo "attached to $tag"
+              exit 0
+            fi
+            echo "release $tag not found yet (attempt $i/30); waiting 60s"
+            sleep 60
+          done
+          echo "no release for $tag after 30 minutes" >&2
+          exit 1
