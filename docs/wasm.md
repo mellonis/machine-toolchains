@@ -42,17 +42,18 @@ Three classes; every other type is a plain JavaScript object, declared in
   canonical whitespace-only text, or that fatal. `build(lang, source,
   { optLevel? })` compiles with the line table on, links against the
   embedded stdlib, and returns a `Program` plus the compile channel's
-  warnings — or the fatal as one error. `decodeTapeBlock(bytes)` and
+  warnings — or the fatal as one error. `stdlibSource(lang)` returns the
+  standard library's text (below). `decodeTapeBlock(bytes)` and
   `encodeTapeBlock(block)` are the tape-block codec (below).
 - **`Program`**: `tapes()` (one `{ name, glyphs }` per band — the
   machine block's alphabets for `.tmc`; blank and mark for `.pmc`),
   `listing()` (one row per instruction with address, bytes, mnemonic,
   operand, and the function and label from the map), `lineOf(addr)` and
-  `addressForLine(line)` (the line table both ways — `lineOf`
+  `addressForLine(line, file?)` (the line table both ways — `lineOf`
   returns `null` for an unmapped address, `addressForLine` returns
   `undefined` for an unmapped line, a wasm-bindgen `Option` convention
-  rather than a deliberate distinction; compare either with `!= null`),
-  `disassembly()` (reassembleable
+  rather than a deliberate distinction; compare either with `!= null`;
+  `file` is a `SourceFile`, below), `disassembly()` (reassembleable
   assembly text), `bytes()` (the executable image the CLI would write)
   and `mapJson()` (its map sidecar), `seedsFromTapeBlock(block)` (below),
   and `session(seeds, limits)`. Every class has `free()` and
@@ -67,9 +68,9 @@ Three classes; every other type is a plain JavaScript object, declared in
   a genuinely optional parameter would carry — a generator limitation on
   the version this bundle pins, not a design choice. Pass `undefined`
   explicitly for a default rather than omitting the argument (`p.session(
-  undefined, undefined)`, not `p.session()`). `pump(budget?)` is the one
-  exception: its native optional type comes through as a real optional
-  parameter.
+  undefined, undefined)`, not `p.session()`). `pump(budget?)` and
+  `addressForLine(line, file?)` are the exceptions: their native optional
+  types come through as real optional parameters.
 - **`Session`**: the run. `pump(budget?)` retires instructions until the
   budget runs out, a pause fires, or the program ends, and reports which
   as `{ kind }`. `pause()`, `addBreakpoint(addr)`, `removeBreakpoint(addr)`;
@@ -157,6 +158,42 @@ More tapes than bands, or a glyph the band does not know, throws naming
 the tape, the glyph and the band — a block authored for another program
 never silently relabels. It accepts the decoded shape and the encode
 input shape alike.
+
+## The standard library
+
+`Toolchain.stdlibSource(lang)` returns the embedded `.pmc` or `.tmc` text
+of that language's architecture — for `"pma"`/`"tma"` too, an assembled
+program linking the same library. It is, by construction, exactly the
+text every `build` links: the module carries one copy and both the link
+and this call read it, so a page showing the library beside the user's
+source needs no second fetch to keep in step.
+
+The library the browser links carries its line table (the CLI's copy
+does not; the CLI opens the materialized source through the language
+server instead — `docs/lsp.md (materialized standard library)`). Debug
+info is a side table, so the code bytes are the CLI's: an image built
+here is the image `pmt build`/`tmt build` would write. What changes is
+what the map knows. Every link stamps provenance on both inputs, and
+`SourceLoc` carries it:
+
+```ts
+export type SourceFile = "user" | "std";
+export interface SourceLoc { file: SourceFile; function: string; line: number | null }
+```
+
+`lineOf(addr)` on a stdlib address now answers `{ file: "std", line }`
+with `line` counting into `stdlibSource(lang)`, and
+`addressForLine(line, "std")` plants a breakpoint there; `file` omitted
+is `"user"`. The two files never capture each other's requests — a
+stdlib line and a user line with the same number resolve independently.
+A function is `"std"` exactly when the linker recorded the library as
+its origin, so a user routine shadowing a `std::` name is `"user"`, and
+a linker-synthesized copy takes the provenance of the input it was
+stamped from. `mapJson()` shows the same two strings in each function's
+`source` field (`docs/formats.md (source provenance)`). A `.tmc` routine
+grafts a graph, so its rows map to the graph's lines rather than the
+routine header's; and the entry byte before a function's first mapped
+row is the function's with `line: null`, as everywhere.
 
 ## Positions
 

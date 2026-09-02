@@ -3,7 +3,7 @@
 //! and `format` follow for both dialects.
 
 use mtc_wasm::inner::diagnostics::{CheckError, CheckOptions, Severity, check, format};
-use mtc_wasm::inner::program::build;
+use mtc_wasm::inner::program::{SourceFile, build};
 use mtc_wasm::inner::session::{Event, Limits, OutcomeInfo, Seed, Session};
 use mtc_wasm::inner::{Arch, Lang};
 
@@ -64,13 +64,13 @@ fn pma_builds_runs_and_maps_its_physical_lines() {
     // Line 3 is `rgt`, the first instruction after the entry; the label
     // line above it compiles to nothing and plants at the same address.
     let addr = program
-        .address_for_line(3)
+        .address_for_line(3, SourceFile::User)
         .expect("an instruction line has an address");
     let loc = program.line_of(addr).unwrap();
-    assert_eq!(loc.line, Some(3));
+    assert_eq!((loc.file, loc.line), (SourceFile::User, Some(3)));
     assert_eq!(loc.function, "main");
-    assert_eq!(program.address_for_line(2), Some(addr));
-    let last = program.address_for_line(10).unwrap();
+    assert_eq!(program.address_for_line(2, SourceFile::User), Some(addr));
+    let last = program.address_for_line(10, SourceFile::User).unwrap();
     assert_eq!(program.line_of(last).unwrap().line, Some(10), "`stp`");
 }
 
@@ -97,7 +97,7 @@ fn tma_builds_with_image_labelled_bands() {
     assert_eq!(snap.glyphs, vec!["0", "1", "2"]);
 
     // Line 10 is `rd`, the first instruction of `scan`.
-    let addr = program.address_for_line(10).unwrap();
+    let addr = program.address_for_line(10, SourceFile::User).unwrap();
     assert_eq!(program.line_of(addr).unwrap().line, Some(10));
 }
 
@@ -116,14 +116,13 @@ fn an_assembler_refusal_is_one_coded_error_at_its_span() {
 #[test]
 fn assembly_links_the_stdlib() {
     let (program, _) = build(Lang::Pma, PMA_STD, 1).unwrap();
-    assert!(
-        program
-            .map
-            .functions
-            .iter()
-            .any(|f| f.name == "std::goToEnd"),
-        "the reachable routine is linked in"
-    );
+    let std_fn = program
+        .map
+        .functions
+        .iter()
+        .find(|f| f.name == "std::goToEnd")
+        .expect("the reachable routine is linked in");
+    assert_eq!(std_fn.source.as_deref(), Some("std"));
     let mut s = Session::new(&program, &[seed(&[1, 1])], Limits::default()).unwrap();
     let fin = run_to_end(&mut s);
     assert!(matches!(fin.outcome, OutcomeInfo::Stopped));

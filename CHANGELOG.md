@@ -104,9 +104,10 @@ loads.
   object, `session`'s seeds and limits — are typed `T | undefined`
   without TypeScript's `?`, a limitation of the wasm-bindgen version
   the bundle pins rather than a design choice: pass `undefined`
-  explicitly instead of omitting them. `pump`'s budget is the one
-  genuinely optional parameter, and it rejects anything below 1 — a
-  zero budget would spin rather than advance.
+  explicitly instead of omitting them. `pump`'s budget and
+  `addressForLine`'s file are the genuinely optional parameters, and the
+  budget rejects anything below 1 — a zero budget would spin rather than
+  advance.
 - **Failure modes are documented, not discovered.** Expected errors are
   values or thrown errors; a Rust panic is a bug, and the module is
   built with `panic = "abort"`, so it takes the module with it. An
@@ -155,6 +156,17 @@ additive: every call the first candidate had keeps its meaning.
   and a glyph the band does not know throws naming the tape, the glyph
   and the band — a block authored for another program never silently
   relabels.
+- **The standard library, shown and stepped into.** `stdlibSource(lang)`
+  returns the embedded library text — by construction the exact text
+  every `build` links, so a page showing it needs no second copy to keep
+  in step. The library the browser links now carries its line table
+  (the CLI's copy does not, and its code bytes are pinned equal, so an
+  image built in a page is the image the CLI would write), every link
+  stamps `user`/`std` provenance on the map, and `SourceLoc` gains
+  `file: "user" | "std"`: a stdlib address resolves to a line of
+  `stdlibSource`, `addressForLine(line, "std")` plants a breakpoint
+  there, and the two files never capture each other's requests. A user
+  routine shadowing a `std::` name is the user's.
 - One change outside the crate: each toolchain's allow-list validator
   is public, so the binding validates lint `allow` codes on assembly
   through the same shared namespace the CLI does.

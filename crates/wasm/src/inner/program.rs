@@ -11,7 +11,40 @@ use super::diagnostics::{Diag, Severity, asm_fatal, from_core, pm_fatal, tm_fata
 use super::positions::Utf16Index;
 use super::session::Seed;
 use super::tapeblock::TapeBlock;
-use super::{Arch, Lang};
+use super::{Arch, Lang, stdlib};
+
+/// The provenance string every link stamps on the user's unit
+/// (`docs/formats.md (source provenance)`): the map sidecar's `source`
+/// field, and the discriminator [`SourceFile::User`] reads back.
+pub const USER_SOURCE: &str = "user";
+/// The provenance string stamped on the standard library.
+pub const STD_SOURCE: &str = "std";
+
+/// Which text a resolved address belongs to: the source the program was
+/// built from, or the standard library it linked
+/// (`docs/wasm.md (the standard library)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFile {
+    User,
+    Std,
+}
+
+impl SourceFile {
+    pub fn parse(s: &str) -> Option<SourceFile> {
+        match s {
+            USER_SOURCE => Some(SourceFile::User),
+            STD_SOURCE => Some(SourceFile::Std),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourceFile::User => USER_SOURCE,
+            SourceFile::Std => STD_SOURCE,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TapeLayout {
@@ -21,6 +54,7 @@ pub struct TapeLayout {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLoc {
+    pub file: SourceFile,
     pub function: String,
     pub line: Option<u32>,
 }
@@ -112,19 +146,17 @@ fn image_layouts(exe: &Executable) -> Vec<TapeLayout> {
         .collect()
 }
 
-/// Link one unit against the embedded stdlib.
+/// Link one unit against the stdlib with the line table, stamping both
+/// inputs' provenance so the map tells the two texts apart.
 fn link(arch: Arch, object: ObjectFile) -> Result<mtc_core::linker::LinkOutput, Diag> {
+    let options = LinkOptions {
+        sources: vec![Some(USER_SOURCE.to_string()), Some(STD_SOURCE.to_string())],
+        ..Default::default()
+    };
+    let libraries = [stdlib::object(arch).clone()];
     match arch {
-        Arch::Pm1 => mtc_post_machine::asm::link(
-            &[object],
-            &[mtc_post_machine::stdlib::object().clone()],
-            LinkOptions::default(),
-        ),
-        Arch::Tm1 => mtc_turing_machine::asm::link(
-            &[object],
-            &[mtc_turing_machine::stdlib::object().clone()],
-            LinkOptions::default(),
-        ),
+        Arch::Pm1 => mtc_post_machine::asm::link(&[object], &libraries, options),
+        Arch::Tm1 => mtc_turing_machine::asm::link(&[object], &libraries, options),
     }
     .map_err(|e| link_diag(e.to_string()))
 }
@@ -231,17 +263,26 @@ impl Program {
         usize::from(self.exe.tape_count).max(1)
     }
 
+    /// A function is the library's exactly when the linker recorded the
+    /// library as its origin, so a user routine shadowing a `std::` name
+    /// is the user's, and a linker-synthesized copy takes the provenance
+    /// of the input it was stamped from.
     pub fn line_of(&self, addr: u32) -> Option<SourceLoc> {
         self.line_index.resolve(addr).map(|loc| SourceLoc {
+            file: match loc.source {
+                Some(STD_SOURCE) => SourceFile::Std,
+                _ => SourceFile::User,
+            },
             function: loc.function.to_string(),
             line: loc.line,
         })
     }
 
-    /// Where a breakpoint on `line` lands. A single source in the browser,
-    /// so the per-file filter is not used.
-    pub fn address_for_line(&self, line: u32) -> Option<u32> {
-        self.line_index.address_for_line(line, None)
+    /// Where a breakpoint on `line` of `file` lands — the per-file filter
+    /// the linker's provenance makes possible, so a stdlib line and a user
+    /// line with the same number never capture each other's request.
+    pub fn address_for_line(&self, line: u32, file: SourceFile) -> Option<u32> {
+        self.line_index.address_for_line(line, Some(file.as_str()))
     }
 
     /// Maps a tape block onto this program's bands by glyph: block tape

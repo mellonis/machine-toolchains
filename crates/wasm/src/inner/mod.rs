@@ -6,6 +6,7 @@ pub mod positions;
 pub mod program;
 pub mod registry;
 pub mod session;
+pub mod stdlib;
 pub mod tapeblock;
 
 /// The two architectures. Everything downstream of a build — the

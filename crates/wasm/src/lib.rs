@@ -12,11 +12,13 @@ use wasm_bindgen::prelude::*;
 
 use inner::Lang;
 use inner::diagnostics::{CheckError, CheckOptions};
+use inner::program::SourceFile;
 use inner::session::SessionError;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TYPES: &str = r#"
 export type Lang = "pmc" | "tmc" | "pma" | "tma";
+export type SourceFile = "user" | "std";
 export interface CheckOptions { allow?: string[]; warn?: string[] }
 export interface BuildOptions { optLevel?: 0 | 1 }
 export type FormatResult = { ok: true; text: string } | { ok: false; error: Diagnostic };
@@ -26,7 +28,7 @@ export type BuildResult =
 export interface TapeLayout { name: string; glyphs: string[] }
 export interface ListingRow { addr: number; bytes: string; mnemonic: string; operand: string;
                               function: string | null; label: string | null }
-export interface SourceLoc { function: string; line: number | null }
+export interface SourceLoc { file: SourceFile; function: string; line: number | null }
 export interface Seed { cells: Uint8Array | number[]; head?: number; origin?: number }
 export interface Limits { maxSteps?: number; maxTacts?: number }
 export interface TapeBlock { alphabet: string[]; tapes: TapeBlockTape[] }
@@ -72,8 +74,17 @@ fn session_err(e: SessionError) -> JsError {
     })
 }
 
+fn source_file(s: Option<String>) -> Result<SourceFile, JsError> {
+    match s {
+        None => Ok(SourceFile::User),
+        Some(s) => SourceFile::parse(&s).ok_or_else(|| {
+            JsError::new(&format!("unknown file `{s}`; expected \"user\" or \"std\""))
+        }),
+    }
+}
+
 /// Stateless entry points: the lint channel, the formatter, the build,
-/// and the tape-block codec.
+/// the stdlib text, and the tape-block codec.
 #[wasm_bindgen]
 pub struct Toolchain;
 
@@ -138,6 +149,14 @@ impl Toolchain {
         Ok(o.into())
     }
 
+    /// The embedded standard library of `lang`'s architecture — the exact
+    /// text every `build` links, so a page can show it and resolve stdlib
+    /// lines against it.
+    #[wasm_bindgen(js_name = stdlibSource)]
+    pub fn stdlib_source(lang_name: &str) -> Result<String, JsError> {
+        Ok(inner::stdlib::source(lang(lang_name)?.arch()).to_string())
+    }
+
     #[wasm_bindgen(js_name = decodeTapeBlock, unchecked_return_type = "TapeBlock")]
     pub fn decode_tape_block(bytes: &[u8]) -> Result<JsValue, JsError> {
         inner::tapeblock::decode(bytes)
@@ -190,9 +209,14 @@ impl Program {
             .unwrap_or(JsValue::NULL)
     }
 
+    /// `file` is a `SourceFile`; omitted, it is the user's source.
     #[wasm_bindgen(js_name = addressForLine)]
-    pub fn address_for_line(&self, line: u32) -> Option<u32> {
-        self.inner.address_for_line(line)
+    pub fn address_for_line(
+        &self,
+        line: u32,
+        file: Option<String>,
+    ) -> Result<Option<u32>, JsError> {
+        Ok(self.inner.address_for_line(line, source_file(file)?))
     }
 
     #[wasm_bindgen(js_name = seedsFromTapeBlock, unchecked_return_type = "Seed[]")]

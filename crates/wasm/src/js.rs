@@ -108,6 +108,7 @@ pub fn row(r: &Row) -> JsValue {
 
 pub fn source_loc(l: &SourceLoc) -> JsValue {
     let o = obj();
+    set(&o, "file", l.file.as_str());
     set(&o, "function", l.function.as_str());
     set(
         &o,

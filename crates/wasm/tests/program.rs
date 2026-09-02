@@ -4,7 +4,7 @@
 
 use mtc_wasm::inner::Lang;
 use mtc_wasm::inner::diagnostics::Severity;
-use mtc_wasm::inner::program::build;
+use mtc_wasm::inner::program::{SourceFile, build};
 
 const PMC_INC: &str = "main() {\n    1: right(2);\n    2: check(1, 3);\n    3: mark(4);\n    4: left(5);\n    5: check(4, 6);\n    6: right(!);\n}\n";
 const TMC_REPLACE_B: &str = "alphabet ab { '_', 'a', 'b' }\n\nmachine {\n  tape main: ab;\n\n  entry state scan {\n    ['b'] -> write ['a'] move [>] goto scan;\n    ['a'] ->             move [>] goto scan;\n    ['_'] -> stop;\n  }\n}\n";
@@ -45,10 +45,11 @@ fn line_table_round_trips_through_the_map() {
     for (lang, src, some_line) in [(Lang::Pmc, PMC_INC, 3u32), (Lang::Tmc, TMC_REPLACE_B, 8u32)] {
         let (program, _) = build(lang, src, 0).unwrap();
         let addr = program
-            .address_for_line(some_line)
+            .address_for_line(some_line, SourceFile::User)
             .unwrap_or_else(|| panic!("{lang:?}: line {some_line} has an address under -g"));
         let loc = program.line_of(addr).expect("resolves");
         assert_eq!(loc.line, Some(some_line), "{lang:?}");
+        assert_eq!(loc.file, SourceFile::User, "{lang:?}");
         assert!(!loc.function.is_empty());
         assert!(program.line_of(0xFFFF_FFF0).is_none(), "outside the image");
     }

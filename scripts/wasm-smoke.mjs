@@ -2,7 +2,7 @@
 // End-to-end over the BUILT bundle (not the Rust crate): load the web-target
 // glue from bytes, then for both languages check → format → build → run,
 // verifying manifest checksums, the line table, and a size ceiling; then
-// the assembly languages and the tape-block codec.
+// the assembly languages, the tape-block codec, and the stdlib's lines.
 //
 //   node scripts/wasm-smoke.mjs target/wasm-bundle/dist
 import { createHash } from "node:crypto";
@@ -240,6 +240,40 @@ check(threw, "unknown lang throws");
   eq(v2[3] | (v2[4] << 8), 2, "a band with its own table is a version-2 block");
   eq(Toolchain.decodeTapeBlock(v2).tapes[1].glyphs, ["_", "1"], "…and decodes to the effective glyphs");
   s.stop(); s2.stop(); p.free();
+}
+
+// --- the standard library (#115) -----------------------------------------
+{
+  const std = Toolchain.stdlibSource("pmc");
+  check(std.includes("export goToEnd()"), "stdlibSource(pmc) is the .pmc library");
+  eq(Toolchain.stdlibSource("pma"), std, "…and the same text for pma");
+  check(Toolchain.stdlibSource("tmc").includes("namespace binaryNumbersBare"), "stdlibSource(tmc) is the .tmc library");
+  const PMC_STD = "main() {\n    1: @std::goToEnd();\n    2: right(3);\n    3: mark(!);\n}\n";
+  const r = Toolchain.build("pmc", PMC_STD, undefined);
+  check(r.ok, "a program calling the stdlib builds");
+  const p = r.program;
+  const fn = JSON.parse(p.mapJson()).functions.find(f => f.name === "std::goToEnd");
+  check(fn && fn.source === "std", "the map stamps the library's provenance");
+  const loc = p.lineOf(fn.start + 1);
+  eq(loc?.file, "std", "a stdlib address resolves to the std file");
+  check(typeof loc?.line === "number", "…with a line");
+  check(std.split("\n")[loc.line - 1].includes("right") || std.split("\n")[loc.line - 1].includes("check") || std.split("\n")[loc.line - 1].includes("left"), "…that is a line of goToEnd's body");
+  const stdAddr = p.addressForLine(loc.line, "std");
+  check(stdAddr != null && stdAddr >= fn.start && stdAddr < fn.end, "addressForLine(line, \"std\") plants inside the library");
+  eq(p.lineOf(p.addressForLine(2))?.file, "user", "addressForLine's default file is the user's");
+  let threw = false;
+  try { p.addressForLine(2, "elsewhere"); } catch { threw = true; }
+  check(threw, "an unknown file throws");
+  // Stepping into the library: a breakpoint at its first row pauses there.
+  const s = p.session([{ cells: [1, 1] }], undefined);
+  s.addBreakpoint(stdAddr);
+  const ev = s.pump();
+  eq(ev.kind, "paused", "the stdlib breakpoint fires");
+  eq(p.lineOf(s.ip)?.file, "std", "…with the ip in the std file");
+  s.removeBreakpoint(stdAddr);
+  eq(runToEnd(s).outcome.kind, "stopped", "…and the run finishes");
+  eq(Array.from(s.snapshot(0).cells.slice(0, 3)), [1, 1, 1], "…with the library's effect on the tape");
+  s.stop(); p.free();
 }
 
 // --- size ceiling ------------------------------------------------------
