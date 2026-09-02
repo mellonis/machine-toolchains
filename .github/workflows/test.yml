@@ -2,7 +2,7 @@ name: test
 
 # The full quality gate: the same seven commands the repo asks for locally,
 # in the same order — formatting, lints, the no_std build of the core crate,
-# the wasm32 build of the three libraries, the browser bundle and its Node
+# the wasm32 build of the four libraries, the browser bundle and its Node
 # smoke test, then the workspace test suite. Runs on every push to master
 # and on every pull request targeting it.
 #

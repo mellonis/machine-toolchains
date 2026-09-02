@@ -181,6 +181,19 @@ interface Fix  { description: string; applicability: "machineApplicable" | "mayb
 interface Edit { from: number; to: number; replacement: string }
 ```
 
+The `opts?`/`seeds?`/`limits?` marks above are this doc's shorthand for
+"pass `undefined` to take the default", not a claim about the generated
+`.d.ts`. `check`, `build` and `session` read their trailing options
+argument through `unchecked_param_type`, and wasm-bindgen 0.2.127 does
+not add TypeScript's `?` to a parameter typed that way even when the
+declared type includes `| undefined` — the generated signatures are
+`opts: CheckOptions | undefined`, `opts: BuildOptions | undefined`, and
+`session(seeds: Seed[] | undefined, limits: Limits | undefined)`:
+required-but-nullable, not optional. A caller must pass `undefined`
+explicitly rather than omitting the argument. `pump(budget?: number |
+null)` is unaffected — it takes a native `Option<f64>`, which
+wasm-bindgen does mark optional.
+
 Library entries behind each method (all `pub` today; no widening needed):
 
 | method | post-machine | turing-machine | core |

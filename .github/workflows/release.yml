@@ -4,8 +4,9 @@ name: release
 # The release itself is still created by the maintainer (`gh release
 # create`, with the editor plugin artifacts); this job only adds the wasm
 # bundle, built on CI from the tagged commit with the pinned toolchain and
-# the pinned wasm-bindgen CLI, so the artifact is reproducible and never
-# depends on a laptop's tool versions.
+# the pinned wasm-bindgen CLI, and smoke-tested under Node before it is
+# attached, so the artifact is reproducible, verified, and never depends
+# on a laptop's tool versions.
 #
 # Ordering: `gh release create vX.Y.Z` both creates the tag and the
 # release, so the release normally exists before this job starts. If the
@@ -34,6 +35,11 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q binaryen
       - name: Build the wasm bundle
         run: scripts/build-wasm-bundle.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Smoke-test the bundle
+        run: node scripts/wasm-smoke.mjs target/wasm-bundle/dist
       - name: Wait for the release, then attach the bundle
         env:
           GH_TOKEN: ${{ github.token }}

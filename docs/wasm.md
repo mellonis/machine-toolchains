@@ -21,9 +21,10 @@ fat LTO, `panic = "abort"`) and `wasm-opt -Oz`. Measured at 0.4.0 with the
 JavaScript boundary included: 1.12 MB raw and 450 KB gzipped, for both
 toolchains' full chains — of the same order as a diagram-rendering
 library. The VM-and-compilers core alone measured 321 KB gzipped before
-the boundary was added, so the boundary (glue, JS object construction,
-and the map's JSON serialiser) costs about 130 KB gzipped. A ceiling of
-1 MB gzipped is enforced by the smoke test.
+the boundary was added, so the boundary — glue, JS object construction,
+and whatever the linker could not strip — costs about 130 KB gzipped; a
+size audit attributing that delta to its individual contributors is a
+follow-up. A ceiling of 1 MB gzipped is enforced by the smoke test.
 
 ## The object model
 
@@ -43,10 +44,25 @@ Three classes; every other type is a plain JavaScript object, declared in
   block's alphabets for `.tmc`; blank and mark for `.pmc`), `listing()`
   (one row per instruction with address, bytes, mnemonic, operand, and
   the function and label from the map), `lineOf(addr)` and
-  `addressForLine(line)` (the line table both ways), `disassembly()`
+  `addressForLine(line)` (the line table both ways — `lineOf` returns
+  `null` for an unmapped address, `addressForLine` returns `undefined`
+  for an unmapped line, a wasm-bindgen `Option` convention rather than a
+  deliberate distinction; compare either with `!= null`), `disassembly()`
   (reassembleable assembly text), `bytes()` (the executable image the
   CLI would write) and `mapJson()` (its map sidecar), and `session(seeds,
-  limits)`. Call `free()` when done.
+  limits)`. Call `free()` when done. Freeing a `Program` while one of its
+  sessions is still running is safe — the session borrows only the
+  process-wide arch registry, not the program — so a page may rebuild a
+  program while an earlier run is in flight.
+- **Trailing options arguments are required-but-nullable, not optional.**
+  `check`'s and `build`'s options argument and `session`'s `seeds` and
+  `limits` are typed `T | undefined` in `mtc_wasm.d.ts`, without the `?`
+  a genuinely optional parameter would carry — a generator limitation on
+  the version this bundle pins, not a design choice. Pass `undefined`
+  explicitly for a default rather than omitting the argument (`p.session(
+  undefined, undefined)`, not `p.session()`). `pump(budget?)` is the one
+  exception: its native optional type comes through as a real optional
+  parameter.
 - **`Session`**: the run. `pump(budget?)` retires instructions until the
   budget runs out, a pause fires, or the program ends, and reports which
   as `{ kind }`. `pause()`, `addBreakpoint(addr)`, `removeBreakpoint(addr)`;
@@ -80,14 +96,28 @@ and `halted` match exit codes 0 and 2.
 ready. It is the event a device-backed tape would raise, kept so a page
 written against this API needs no change when one exists.
 
+The `paused` cause union lists every core pause cause, for exhaustiveness
+against `docs/core.md (async session)`; a pumped session raises only
+`brk`, `manual`, and `{ breakpoint }` today. `step` and `{ trap }` never
+fire — single-stepping and trap-as-pause are not exposed through `pump`.
+
 ## Building and verifying
 
 `scripts/build-wasm-bundle.sh` builds the bundle into
 `target/wasm-bundle/`; it needs the wasm-bindgen CLI at exactly the
 version the crate pins and refuses to run otherwise. `node
 scripts/wasm-smoke.mjs target/wasm-bundle/dist` loads the result and runs
-both toolchains end to end; CI runs both on every push, and the release
-workflow attaches the tarball to the tagged release.
+both toolchains end to end; CI runs both on every push to the default
+branch and on every pull request, and the release workflow attaches the
+tarball to the tagged release, smoke-tested under Node first.
+
+**Failure modes.** The module is built with `panic = "abort"`: a Rust
+panic — a bug, never an expected error, which is always a thrown
+`JsError` or `TypeError` instead — aborts the module for good, with no
+message reaching JavaScript. `Toolchain`, `Program` and `Session` all
+become unusable after one; an embedder that sees an unexpected throw
+(not one of the documented `JsError`s) should discard the module and
+recreate its worker rather than keep calling into it.
 
 ## What is not here
 
