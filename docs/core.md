@@ -506,6 +506,17 @@ is exactly the processor VM this section describes, including the
 raw-code `Machine::with_arch` constructor that needs no container
 parsing — the shape a firmware target embeds against.
 
+The browser is the other embedding the sans-I/O design was made for, and
+it needs no such reduction: the whole crate, `std` feature on, builds for
+`wasm32-unknown-unknown`, as do both architecture crates' libraries, and
+CI builds all three for that target. The in-memory chain — compile, link,
+load, run or session — touches no filesystem or clock. What `std` does
+supply on that target is a stub OS layer (filesystem calls fail as
+unsupported, standard output is discarded, the monotonic clock panics),
+so the surfaces that do reach the host — the language-server and
+debug-adapter transports, the project-manifest loaders — are host-only
+by nature, not by any cfg.
+
 ## The assembler framework
 
 The assembler and disassembler are arch-generic: all instruction

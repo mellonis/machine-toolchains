@@ -1,9 +1,9 @@
 name: test
 
-# The full quality gate: the same four commands the repo asks for locally,
+# The full quality gate: the same five commands the repo asks for locally,
 # in the same order — formatting, lints, the no_std build of the core crate,
-# then the workspace test suite. Runs on every push to master and on every
-# pull request targeting it.
+# the wasm32 build of the three libraries, then the workspace test suite.
+# Runs on every push to master and on every pull request targeting it.
 #
 # The suite runs under cargo-nextest: one process per test, which keeps
 # tests that touch shared temporary paths from colliding the way they can
@@ -35,6 +35,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build the core crate without std
         run: cargo build -p mtc-core --no-default-features
+      - name: Build the libraries for wasm32
+        # The target comes from rust-toolchain.toml; rustup installs it with
+        # the toolchain. Libraries only — the two CLIs are host programs.
+        run: cargo build --workspace --lib --target wasm32-unknown-unknown
       - uses: taiki-e/install-action@nextest
       - name: Run the workspace test suite
         run: cargo nextest run --workspace

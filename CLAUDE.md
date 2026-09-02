@@ -20,7 +20,7 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 **Both toolchain arcs are complete.** PM-1/`pmt` and TM-1/`tmt` each ship the whole chain — compiler, assembler, disassembler, linker, VM, lint, fmt, LSP, DAP, a project manifest with a `build` driver, an embedded stdlib, and a two-plugin editor pair. The TM-1 flagship `docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma` — a hand-written universal Turing machine interpreting brainfuck — assembles, links and runs, proven by derivation-first goldens.
 
-**Open work.** #6 a wasm32 build of `mtc-core` plus browser-demo integration, fed by #55 (a brainfuck-runner example); #87 a hardware PM-1 RTL core against the bus contract; #30 a tape-machine testing library (`pmt test`/`tmt test`); #9 a post-machine-js dialect front end; #94 letting a tapeblock buffer a step's per-tape commands and run them in parallel, instead of the bus serializing one device at a time. The C2 green-tree migration (#14) is MERGED and its follow-ups #100–#108 are closed (formatter comment-layout bugs, review quality findings, error-resilient parsing, the asm green tree, lint spans off the tree); #109 (incremental reparse) stays gated on measurements.
+**Open work.** #6 the browser arc — the three libraries already build for wasm32 (gated in CI); what remains is a `wasm-bindgen` cdylib crate over compile → link → `AsyncSession` and the demo-side pages, designed in that order (#55, a brainfuck-runner example, is an independent CLI showcase, not a prerequisite); #87 a hardware PM-1 RTL core against the bus contract; #30 a tape-machine testing library (`pmt test`/`tmt test`); #9 a post-machine-js dialect front end; #94 letting a tapeblock buffer a step's per-tape commands and run them in parallel, instead of the bus serializing one device at a time. The C2 green-tree migration (#14) is MERGED and its follow-ups #100–#108 are closed (formatter comment-layout bugs, review quality findings, error-resilient parsing, the asm green tree, lint spans off the tree); #109 (incremental reparse) stays gated on measurements.
 
 **Where the history lives.** How the repo got here — the phase-by-phase trace, and the things that were probed and rejected — is `docs/superpowers/build-history.md`, deliberately not loaded into every session. Per-release facts: `CHANGELOG.md`. Design rationale: `docs/superpowers/specs/`. **Keep this file at standing state** — current versions, live constraints, open work. A finished round's story goes to the history file, not back into this preamble.
 
@@ -32,6 +32,7 @@ cargo test --workspace                                  # everything: unit + int
 cargo clippy --workspace --all-targets -- -D warnings   # quality gate
 cargo fmt --check                                       # quality gate
 cargo build -p mtc-core --no-default-features        # no_std vm gate (docs/core.md (async session))
+cargo build --workspace --lib --target wasm32-unknown-unknown   # wasm32 gate: the three libraries stay buildable for the browser (docs/core.md (async session))
 ```
 
 Single test file / single test:
@@ -47,7 +48,7 @@ Regenerate golden files (explicit, `#[ignore]`d — writes into `crates/post-mac
 cargo test -p mtc-post-machine --test golden_programs regen -- --ignored
 ```
 
-CI (`.github/workflows/test.yml`) runs fmt → clippy → the no_std build → `cargo nextest run --workspace` on ubuntu. **The toolchain is pinned in `rust-toolchain.toml`**, so CI and every local checkout compile with the same compiler by construction — plain `cargo clippy` here IS the gate CI runs, with no side-toolchain dance. Bumping the pin is its own deliberate commit: a newer compiler may emit lints the old one never did, and those get fixed in that same change. The file itself carries the why.
+CI (`.github/workflows/test.yml`) runs fmt → clippy → the no_std build → the wasm32 library build → `cargo nextest run --workspace` on ubuntu. **The toolchain is pinned in `rust-toolchain.toml`**, so CI and every local checkout compile with the same compiler by construction — plain `cargo clippy` here IS the gate CI runs, with no side-toolchain dance. Bumping the pin is its own deliberate commit: a newer compiler may emit lints the old one never did, and those get fixed in that same change. The file itself carries the why. The wasm32 target rides the same pin (`targets` in that file), so rustup installs it wherever the toolchain is; that gate is compile-only — `std` on `wasm32-unknown-unknown` is a stub OS layer, so a filesystem or clock call leaking into a library would still build and only misbehave in a browser.
 
 `pmt` exit codes from `run`: 0 = program stopped (`stp`), 2 = halted (`hlt`), 3 = trapped. Full flag reference: `docs/pmt/cli.md`; `tmt` shares the exit codes.
 
