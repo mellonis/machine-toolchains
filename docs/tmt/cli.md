@@ -31,7 +31,8 @@ SUBCOMMANDS:
   fmt          canonical formatting for .tmc and .tma sources
   lsp          run the LSP server for .tmc and .tma on stdio
   dap          run the DAP debug-adapter server on stdio
-  completions  emit a shell completion script (zsh; bash/fish follow-on)
+  completions  emit a shell completion script (zsh, bash, fish)
+  man          emit the tmt(1) manual page (roff) to stdout
 
 Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
 ```
@@ -1133,10 +1134,12 @@ rules.
 ```
 USAGE: tmt completions <SHELL>
 
-Emits a shell completion script to stdout for the given SHELL (zsh; bash
-and fish are recognized but not yet implemented).
+Emits a shell completion script to stdout for the given SHELL: zsh, bash,
+or fish.
 
-  tmt completions zsh > ~/.zfunc/_tmt
+  tmt completions zsh  > ~/.zfunc/_tmt
+  tmt completions bash > ~/.local/share/bash-completion/completions/tmt
+  tmt completions fish > ~/.config/fish/completions/tmt.fish
 ```
 
 `tmt` is hand-rolled with no argument-parsing framework, so a completion
@@ -1146,14 +1149,43 @@ each positional's file-extension filter — is described once in an in-crate
 registry, and each shell renderer reads that. A drift-guard test probes the
 real parser with every registry entry and cross-checks the `--fno-<pass>`
 and `--emit-ir=after:<pass>` choices against the optimizer's own pass list,
-so the generated script cannot quietly fall out of step with the flags the
+so no generated script can quietly fall out of step with the flags the
 parser accepts.
 
-`zsh` completes subcommand names (including the nested `tape new` / `set` /
-`show` and `ir graph`), each subcommand's flags, `-O0` / `-O1` as an
-either/or pair, `--call-mech`'s three values, `--lang`'s two, the known
-`--emit-ir` stages, and file arguments filtered to the extension the
-subcommand actually reads — with directories offered alongside for `lint`
-and `fmt`, which walk them. `bash` and `fish` are recognized shell names, so
-naming one gives a message that says so rather than rejecting it as unknown;
-neither renders a script.
+All three shells complete subcommand names (including the nested `tape-block
+new` / `set` / `show` and `ir graph` / `footprints`), each subcommand's
+flags, `-O0` / `-O1` as an either/or pair, `--call-mech`'s three values,
+`--lang`'s two, the known `--emit-ir` stages (joined with `=`, the one
+spelling the parser reads), one `--fno-<pass>` per optimizer pass, file
+arguments filtered to the extension the subcommand actually reads, and
+`build`'s target names, read from the nearest manifest at completion time.
+A flag already on the line is not offered again unless it is repeatable.
+
+The bash script runs on bash 3.2 and later and needs no `bash-completion`
+package: it carries its own helpers, and it re-reads the command line itself
+so that `--emit-ir=after:inline` completes as one word even though bash
+breaks words at `=` and `:` (the one cost: a path with a space or a quote in
+it is not completed). The fish script is a plain list of `complete`
+statements, so fish evaluates the conditions itself. Directories are always
+offered where a file is, in both shells, which is why `lint` and `fmt` need
+no special case there.
+
+## `tmt man`
+
+```
+USAGE: tmt man
+
+Emits the tmt(1) manual page as man(7) roff to stdout.
+
+  tmt man > tmt.1
+  man ./tmt.1
+```
+
+The page is built from the same in-crate registry the completion scripts
+read — the subcommand list with its one-line glosses — and from every
+subcommand's `--help` text, reproduced verbatim in a section of its own, so
+the page cannot say anything `--help` does not. It opens with NAME, SYNOPSIS
+and DESCRIPTION, lists the subcommands, quotes each one's usage, and closes
+with EXIT STATUS and a SEE ALSO naming `pmt(1)` and the reference pages under
+`docs/tmt/`. Where the page is installed is the packager's choice; `man
+./tmt.1` reads it in place, and `mandoc -T lint` accepts it.

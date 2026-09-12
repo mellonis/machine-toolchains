@@ -15,7 +15,7 @@ use crate::ir::IrProgram;
 
 use super::{Args, CliOutput, Delimit, parse_keyed, render_tape};
 
-const DIS_USAGE: &str = "\
+pub(super) const DIS_USAGE: &str = "\
 USAGE: pmt dis FILE.pmo|FILE.pmx [--listing] [--map FILE.pmx.map]
 
 Objects disassemble with real names from the symbol table. Executables
@@ -98,7 +98,7 @@ fn load_map(exe_path: &Path, explicit: Option<String>) -> Result<Option<MapFile>
     Ok(sidecar_map(exe_path))
 }
 
-const TAPE_USAGE: &str = "\
+pub(super) const TAPE_USAGE: &str = "\
 USAGE: pmt tape-block build \" * * *\" [--head N] [-o OUT.pmt]
        pmt tape-block new [--from APP.pmx] [-o OUT.pmt] [EDITS]
        pmt tape-block set IN.pmt (-o OUT.pmt | --in-place) [EDITS]
@@ -459,7 +459,7 @@ fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
     Ok(CliOutput::ok(out, String::new()))
 }
 
-const IR_USAGE: &str = "\
+pub(super) const IR_USAGE: &str = "\
 USAGE: pmt ir graph FILE.ir.json|FILE.pmc [--function NAME]
                     [--variant normal|volatile] [-O0|-O1]
 

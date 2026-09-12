@@ -8,13 +8,15 @@ use crate::completions::{parse_shell, render};
 
 use super::{Args, CliOutput};
 
-const COMPLETIONS_USAGE: &str = "\
+pub(super) const COMPLETIONS_USAGE: &str = "\
 USAGE: tmt completions <SHELL>
 
-Emits a shell completion script to stdout for the given SHELL (zsh; bash
-and fish are recognized but not yet implemented).
+Emits a shell completion script to stdout for the given SHELL: zsh, bash,
+or fish.
 
-  tmt completions zsh > ~/.zfunc/_tmt
+  tmt completions zsh  > ~/.zfunc/_tmt
+  tmt completions bash > ~/.local/share/bash-completion/completions/tmt
+  tmt completions fish > ~/.config/fish/completions/tmt.fish
 ";
 
 pub(super) fn completions(raw: &[String]) -> Result<CliOutput, String> {

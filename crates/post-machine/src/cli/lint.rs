@@ -13,7 +13,7 @@ use crate::lint::{LintError, LintOptions, apply_fixes, lint as lint_source};
 
 use super::{Args, CliOutput};
 
-const LINT_USAGE: &str = "\
+pub(super) const LINT_USAGE: &str = "\
 USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]] [--no-config]
 
 PATH is a .pmc or .pma file, or a directory; directories are walked

@@ -7,13 +7,15 @@ use crate::completions::{parse_shell, render};
 
 use super::{Args, CliOutput};
 
-const COMPLETIONS_USAGE: &str = "\
+pub(super) const COMPLETIONS_USAGE: &str = "\
 USAGE: pmt completions <SHELL>
 
-Emits a shell completion script to stdout for the given SHELL (zsh; bash
-and fish are recognized but not yet implemented).
+Emits a shell completion script to stdout for the given SHELL: zsh, bash,
+or fish.
 
-  pmt completions zsh > ~/.zfunc/_pmt
+  pmt completions zsh  > ~/.zfunc/_pmt
+  pmt completions bash > ~/.local/share/bash-completion/completions/pmt
+  pmt completions fish > ~/.config/fish/completions/pmt.fish
 ";
 
 pub(super) fn completions(raw: &[String]) -> Result<CliOutput, String> {

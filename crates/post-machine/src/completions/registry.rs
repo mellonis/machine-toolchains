@@ -617,9 +617,19 @@ fn completions_spec() -> CommandSpec {
         path: strings(&["completions"]),
         positional: Positional::One(PositionalHint::Choices(vec![
             choice("zsh", "Z shell completion script"),
-            choice("bash", "Bash completion script (not yet implemented)"),
-            choice("fish", "fish completion script (not yet implemented)"),
+            choice("bash", "Bash completion script"),
+            choice("fish", "fish completion script"),
         ])),
+        flags: vec![FlagSpec::boolean("--help", "show subcommand help")],
+    }
+}
+
+/// `pmt man` takes nothing: the page goes to stdout, like a completion
+/// script.
+fn man_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["man"]),
+        positional: Positional::None,
         flags: vec![FlagSpec::boolean("--help", "show subcommand help")],
     }
 }
@@ -642,7 +652,8 @@ fn top_level_help(name: &str) -> &'static str {
         "ir" => "render --emit-ir JSON (ir graph -> Mermaid)",
         "lsp" => "run the LSP server on stdio",
         "dap" => "run the DAP debug-adapter server on stdio",
-        "completions" => "emit a shell completion script (zsh; bash/fish follow-on)",
+        "completions" => "emit a shell completion script (zsh, bash, fish)",
+        "man" => "emit the pmt(1) manual page (roff) to stdout",
         _ => "",
     }
 }
@@ -712,6 +723,7 @@ pub fn registry() -> Registry {
         lsp_spec(),
         dap_spec(),
         completions_spec(),
+        man_spec(),
     ];
     let root = root_spec(&commands);
 
@@ -781,7 +793,8 @@ mod tests {
                 "ir",
                 "lsp",
                 "dap",
-                "completions"
+                "completions",
+                "man"
             ]
         );
     }

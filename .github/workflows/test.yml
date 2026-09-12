@@ -57,6 +57,11 @@ jobs:
         run: scripts/build-wasm-bundle.sh
       - name: Smoke-test the wasm bundle under Node
         run: node scripts/wasm-smoke.mjs target/wasm-bundle/dist
+      - name: Install fish
+        # The fish completion tests query a real fish and skip with a note
+        # when none is on PATH; the runner image ships bash and zsh but not
+        # fish, so without this step those tests would never run anywhere.
+        run: sudo apt-get update && sudo apt-get install -y fish
       - uses: taiki-e/install-action@nextest
       - name: Run the workspace test suite
         run: cargo nextest run --workspace

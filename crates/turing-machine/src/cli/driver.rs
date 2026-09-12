@@ -24,7 +24,7 @@ use super::build::{
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
 
-const BUILD_USAGE: &str = "\
+pub(super) const BUILD_USAGE: &str = "\
 USAGE: tmt build [INPUT.tmc|.tma|.tmo ...] [-o OUT.tmx] [FLAGS]   (argv mode)
        tmt build [TARGET ...] [FLAGS]                             (manifest mode)
 

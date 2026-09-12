@@ -17,15 +17,15 @@
 //! cross-checks the `--fno-<pass>` / `--emit-ir=after:<pass>` choices
 //! against the optimizer's own pass-name list rather than a retyped copy.
 
+mod bash;
+mod fish;
 pub mod registry;
 mod zsh;
 
-/// A shell `tmt completions` can target. All three are *recognized* (so
-/// `tmt completions <TAB>` lists them and an unknown name is a clear
-/// error rather than "unknown shell"), but only zsh renders today; bash
-/// and fish are a documented follow-on once zsh has proven the registry.
-/// This mirrors the PM-1 `pmt` precedent exactly, including which shells
-/// ship first.
+/// A shell `tmt completions` can target. Each has its own renderer over
+/// the one registry (`zsh.rs`, `bash.rs`, `fish.rs`); zsh shipped first
+/// and proved the registry, bash and fish followed. This mirrors the
+/// PM-1 `pmt` precedent exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
     Zsh,
@@ -49,16 +49,8 @@ pub fn parse_shell(name: &str) -> Result<Shell, String> {
 pub fn render(shell: Shell) -> Result<String, String> {
     match shell {
         Shell::Zsh => Ok(zsh::render(&registry::registry())),
-        Shell::Bash => Err(
-            "bash completion is not implemented yet (zsh shipped first; \
-             bash and fish are tracked as follow-ons)"
-                .to_string(),
-        ),
-        Shell::Fish => Err(
-            "fish completion is not implemented yet (zsh shipped first; \
-             bash and fish are tracked as follow-ons)"
-                .to_string(),
-        ),
+        Shell::Bash => Ok(bash::render(&registry::registry())),
+        Shell::Fish => Ok(fish::render(&registry::registry())),
     }
 }
 
@@ -67,12 +59,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_shell_name_is_recognized_and_only_zsh_renders() {
-        assert!(render(parse_shell("zsh").unwrap()).is_ok());
-        for name in ["bash", "fish"] {
+    fn every_shell_name_is_recognized_and_renders() {
+        for name in ["zsh", "bash", "fish"] {
             let shell = parse_shell(name).expect("recognized shell name");
-            let message = render(shell).expect_err("not implemented yet");
-            assert!(message.contains("not implemented yet"), "{name}: {message}");
+            let script = render(shell).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                script.contains(&format!("tmt completions {name}")),
+                "{name}: the script names how to regenerate itself"
+            );
         }
         let unknown = parse_shell("nushell").expect_err("unknown shell name");
         assert!(unknown.contains("unknown shell"), "{unknown}");

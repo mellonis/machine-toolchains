@@ -14,7 +14,7 @@ use crate::stdlib;
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
 
-const COMPILE_USAGE: &str = "\
+pub(super) const COMPILE_USAGE: &str = "\
 USAGE: pmt compile INPUT.pmc [-o OUT.pmo] [FLAGS]
 
 FLAGS:
@@ -221,7 +221,7 @@ pub(super) fn take_disabled_passes(args: &mut Args, disabled: &mut Vec<String>) 
     }
 }
 
-const ASM_USAGE: &str = "\
+pub(super) const ASM_USAGE: &str = "\
 USAGE: pmt asm INPUT.pma [-o OUT.pmo] [-g]
 ";
 
@@ -250,7 +250,7 @@ pub(super) fn asm(raw: &[String]) -> Result<CliOutput, String> {
     Ok(CliOutput::ok(String::new(), String::new()))
 }
 
-const LINK_USAGE: &str = "\
+pub(super) const LINK_USAGE: &str = "\
 USAGE: pmt link INPUT.pmo... [-o OUT.pmx] [FLAGS]
 
 FLAGS:

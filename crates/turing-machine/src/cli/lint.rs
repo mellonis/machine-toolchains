@@ -20,7 +20,7 @@ use crate::lint::{LintError, LintOptions, lint as lint_source};
 
 use super::{Args, CliOutput};
 
-const LINT_USAGE: &str = "\
+pub(super) const LINT_USAGE: &str = "\
 USAGE: tmt lint PATH... [--exclude PATH]... [--allow CODE]... [--warn CODE]... [--no-config]
 
 PATH is a .tmc or .tma file, or a directory; directories are walked

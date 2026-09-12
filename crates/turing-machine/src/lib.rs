@@ -19,6 +19,7 @@ pub mod ir;
 pub mod lexer;
 pub mod lint;
 mod lsp;
+pub mod man;
 pub mod optimizer;
 pub mod parser;
 mod project;

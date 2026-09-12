@@ -20,7 +20,7 @@ use crate::arch::Tm1;
 
 use super::{Args, CliOutput, Delimit, render_tape};
 
-const RUN_USAGE: &str = "\
+pub(super) const RUN_USAGE: &str = "\
 USAGE: tmt run APP.tmx --tape-block TAPES.tmt [FLAGS]
 
 TAPE:

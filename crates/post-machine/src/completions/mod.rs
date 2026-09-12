@@ -18,14 +18,15 @@
 //! choices against the optimizer's own pass-name list rather than a
 //! retyped copy.
 
+mod bash;
+mod fish;
 pub mod registry;
 mod zsh;
 
-/// A shell `pmt completions` can target. All three are *recognized* (so
-/// `pmt completions <TAB>` lists them and an unknown name is a clear
-/// error rather than "unknown shell"), but only zsh renders today; bash
-/// and fish are a documented follow-on once zsh has proven the registry
-/// (docs/pmt/cli.md (pmt completions)).
+/// A shell `pmt completions` can target. Each has its own renderer over
+/// the one registry (`zsh.rs`, `bash.rs`, `fish.rs`); zsh shipped first
+/// and proved the registry, bash and fish followed (docs/pmt/cli.md (pmt
+/// completions)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
     Zsh,
@@ -49,15 +50,7 @@ pub fn parse_shell(name: &str) -> Result<Shell, String> {
 pub fn render(shell: Shell) -> Result<String, String> {
     match shell {
         Shell::Zsh => Ok(zsh::render(&registry::registry())),
-        Shell::Bash => Err(
-            "bash completion is not implemented yet (zsh shipped first; \
-             bash and fish are tracked as follow-ons)"
-                .to_string(),
-        ),
-        Shell::Fish => Err(
-            "fish completion is not implemented yet (zsh shipped first; \
-             bash and fish are tracked as follow-ons)"
-                .to_string(),
-        ),
+        Shell::Bash => Ok(bash::render(&registry::registry())),
+        Shell::Fish => Ok(fish::render(&registry::registry())),
     }
 }

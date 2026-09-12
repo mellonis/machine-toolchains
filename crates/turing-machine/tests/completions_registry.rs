@@ -101,6 +101,7 @@ const EXPECTED_TOP_LEVEL: &[&str] = &[
     "lsp",
     "dap",
     "completions",
+    "man",
 ];
 
 #[test]

@@ -6,7 +6,7 @@
 
 use super::{Args, CliOutput};
 
-const LSP_USAGE: &str = "USAGE: pmt lsp\n\nRun the LSP server for .pmc and .pma on stdio until the client exits.\nExit code: 0 after shutdown/exit, 1 on exit without shutdown.\n";
+pub(super) const LSP_USAGE: &str = "USAGE: pmt lsp\n\nRun the LSP server for .pmc and .pma on stdio until the client exits.\nExit code: 0 after shutdown/exit, 1 on exit without shutdown.\n";
 
 pub(super) fn lsp(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);

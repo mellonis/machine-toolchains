@@ -26,7 +26,8 @@ SUBCOMMANDS:
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
   dap          run the DAP debug-adapter server on stdio
-  completions  emit a shell completion script (zsh; bash/fish follow-on)
+  completions  emit a shell completion script (zsh, bash, fish)
+  man          emit the pmt(1) manual page (roff) to stdout
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 ```
@@ -825,21 +826,54 @@ writable-state contract, and the degradation rules.
 ```
 USAGE: pmt completions <SHELL>
 
-Emits a shell completion script to stdout for the given SHELL (zsh; bash
-and fish are recognized but not yet implemented).
+Emits a shell completion script to stdout for the given SHELL: zsh, bash,
+or fish.
 
-  pmt completions zsh > ~/.zfunc/_pmt
+  pmt completions zsh  > ~/.zfunc/_pmt
+  pmt completions bash > ~/.local/share/bash-completion/completions/pmt
+  pmt completions fish > ~/.config/fish/completions/pmt.fish
 ```
 
 The subcommand's own flag/positional surface, and every other
 subcommand's flags and file-extension-filtered positionals, are driven
 from one in-crate registry rather than hand-written per shell — this is
-what keeps the generated script from drifting out of sync with the
+what keeps every generated script from drifting out of sync with the
 flags the parser actually accepts as subcommands and flags change over
-time. `zsh` completes subcommand names (including the nested `tape
-build`/`tape show` and `ir graph`), each subcommand's flags (long and
-short forms, `-O0`/`-O1` as an either/or pair, `--emit-ir`'s known
-stages), and file arguments filtered to the extension the subcommand
-actually reads. `bash` and `fish` are recognized shell names so the
-error names them explicitly rather than rejecting them as unknown, but
-neither renders yet.
+time. All three shells complete subcommand names (including the nested
+`tape-block build` / `new` / `set` / `show` and `ir graph`), each
+subcommand's flags (long and short forms, `-O0`/`-O1` as an either/or
+pair, `--emit-ir`'s known stages joined with `=`, one `--fno-<pass>` per
+optimizer pass), file arguments filtered to the extension the subcommand
+actually reads, and `build`'s target names, read from the nearest
+manifest at completion time. A flag already on the line is not offered
+again unless it is repeatable.
+
+The bash script runs on bash 3.2 and later and needs no
+`bash-completion` package: it carries its own helpers, and it re-reads
+the command line itself so that `--emit-ir=after:inline` completes as
+one word even though bash breaks words at `=` and `:` (the one cost: a
+path with a space or a quote in it is not completed). The fish script
+is a plain list of `complete` statements, so fish evaluates the
+conditions itself. Directories are always offered where a file is, in
+both shells, which is why `lint` and `fmt` need no special case there.
+
+## `pmt man`
+
+```
+USAGE: pmt man
+
+Emits the pmt(1) manual page as man(7) roff to stdout.
+
+  pmt man > pmt.1
+  man ./pmt.1
+```
+
+The page is built from the same in-crate registry the completion
+scripts read — the subcommand list with its one-line glosses — and from
+every subcommand's `--help` text, reproduced verbatim in a section of
+its own, so the page cannot say anything `--help` does not. It opens
+with NAME, SYNOPSIS and DESCRIPTION, lists the subcommands, quotes each
+one's usage, and closes with EXIT STATUS and a SEE ALSO naming `tmt(1)`
+and the reference pages under `docs/pmt/`. Where the page is installed
+is the packager's choice; `man ./pmt.1` reads it in place, and `mandoc
+-T lint` accepts it.

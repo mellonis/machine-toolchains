@@ -27,7 +27,7 @@ use crate::asm::tm1_syntax;
 use super::lint::{collect_sources, render_fatal};
 use super::{Args, CliOutput};
 
-const FMT_USAGE: &str = "\
+pub(super) const FMT_USAGE: &str = "\
 USAGE: tmt fmt PATH... [--exclude PATH]... [--check]
        tmt fmt - [--check] [--lang tmc|tma]
 

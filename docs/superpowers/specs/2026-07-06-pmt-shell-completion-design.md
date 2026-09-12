@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-06
 **Repo:** `mellonis-workspace/machines/toolchains`
-**Status:** implemented (zsh); bash/fish are a documented follow-on
+**Status:** implemented (zsh 2026-07-06; bash and fish 2026-09-12, mellonis/machine-toolchains#119 — the §5 follow-on landed as `completions::bash`/`completions::fish` in both crates, with headless candidate tests against real shells)
 
 ## 1. Problem
 

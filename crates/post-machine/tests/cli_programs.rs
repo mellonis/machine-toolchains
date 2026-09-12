@@ -1282,11 +1282,16 @@ fn completions_zsh_emits_a_compdef_script() {
 }
 
 #[test]
-fn completions_bash_and_fish_are_recognized_but_not_yet_implemented() {
-    let bash_err = execute(&args(&["completions", "bash"])).unwrap_err();
-    assert!(bash_err.contains("not implemented"), "{bash_err}");
-    let fish_err = execute(&args(&["completions", "fish"])).unwrap_err();
-    assert!(fish_err.contains("not implemented"), "{fish_err}");
+fn completions_render_a_script_for_every_recognized_shell() {
+    for (shell, mark) in [
+        ("zsh", "#compdef pmt"),
+        ("bash", "complete -o filenames -F _pmt pmt"),
+        ("fish", "complete -c pmt -f"),
+    ] {
+        let out = execute(&args(&["completions", shell]))
+            .unwrap_or_else(|e| panic!("pmt completions {shell}: {e}"));
+        assert!(out.stdout.contains(mark), "{shell}: {}", out.stdout);
+    }
 }
 
 #[test]

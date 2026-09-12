@@ -23,7 +23,7 @@ use crate::fmt::format as format_source;
 use super::lint::{collect_sources, render_fatal};
 use super::{Args, CliOutput};
 
-const FMT_USAGE: &str = "\
+pub(super) const FMT_USAGE: &str = "\
 USAGE: pmt fmt PATH... [--exclude PATH]... [--check]
        pmt fmt - [--check] [--lang pmc|pma]
 

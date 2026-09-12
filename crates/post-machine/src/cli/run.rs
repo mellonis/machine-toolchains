@@ -16,7 +16,7 @@ use crate::arch::{DEFAULT_GLYPHS, Pm1};
 
 use super::{Args, CliOutput, Delimit, render_tape};
 
-const RUN_USAGE: &str = "\
+pub(super) const RUN_USAGE: &str = "\
 USAGE: pmt run APP.pmx [FLAGS]
 
 TAPE (default: empty, head 0):

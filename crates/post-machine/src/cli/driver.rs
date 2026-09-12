@@ -24,7 +24,7 @@ use super::build::{
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
 
-const BUILD_USAGE: &str = "\
+pub(super) const BUILD_USAGE: &str = "\
 USAGE: pmt build [INPUT.pmc|.pma|.pmo ...] [-o OUT.pmx] [FLAGS]   (argv mode)
        pmt build [TARGET ...] [FLAGS]                             (manifest mode)
 

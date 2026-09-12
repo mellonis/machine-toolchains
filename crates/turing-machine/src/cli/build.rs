@@ -17,7 +17,7 @@ use crate::optimizer::OptLevel;
 
 use super::{Args, CliOutput};
 
-const COMPILE_USAGE: &str = "\
+pub(super) const COMPILE_USAGE: &str = "\
 USAGE: tmt compile INPUT.tmc [-o OUT.tmo] [FLAGS]
 
 FLAGS:
@@ -219,7 +219,7 @@ pub(super) fn out_path(input: &Path, explicit: Option<String>, extension: &str) 
     }
 }
 
-const ASM_USAGE: &str = "\
+pub(super) const ASM_USAGE: &str = "\
 USAGE: tmt asm INPUT.tma [-o OUT.tmo] [-g]
 ";
 
@@ -253,7 +253,7 @@ pub(super) fn asm(raw: &[String]) -> Result<CliOutput, String> {
     Ok(CliOutput::ok(String::new(), String::new()))
 }
 
-const LINK_USAGE: &str = "\
+pub(super) const LINK_USAGE: &str = "\
 USAGE: tmt link INPUT.tmo... [-o OUT.tmx] [FLAGS]
 
 FLAGS:

@@ -8,7 +8,7 @@
 
 use super::{Args, CliOutput};
 
-const DAP_USAGE: &str = "USAGE: tmt dap\n\nRun the DAP debug-adapter server for a .tmx program on stdio until the client disconnects.\nExit code: 0 after a clean disconnect, 1 on transport EOF before one.\n";
+pub(super) const DAP_USAGE: &str = "USAGE: tmt dap\n\nRun the DAP debug-adapter server for a .tmx program on stdio until the client disconnects.\nExit code: 0 after a clean disconnect, 1 on transport EOF before one.\n";
 
 pub(super) fn dap(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);

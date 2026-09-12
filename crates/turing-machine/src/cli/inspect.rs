@@ -19,7 +19,7 @@ use crate::ir::IrProgram;
 
 use super::{Args, CliOutput, Delimit, parse_keyed, render_tape};
 
-const DIS_USAGE: &str = "\
+pub(super) const DIS_USAGE: &str = "\
 USAGE: tmt dis FILE.tmo|FILE.tmx [--listing] [--map FILE.tmx.map]
 
 Objects disassemble with real names from the symbol table. Executables
@@ -102,7 +102,7 @@ fn load_map(exe_path: &Path, explicit: Option<String>) -> Result<Option<MapFile>
     Ok(sidecar_map(exe_path))
 }
 
-const TAPE_USAGE: &str = "\
+pub(super) const TAPE_USAGE: &str = "\
 USAGE: tmt tape-block new [--from APP.tmx | --from APP.tmc] [-o OUT.tmt] [EDITS]
        tmt tape-block set IN.tmt (-o OUT.tmt | --in-place)
                     [--from APP.tmc] [SHAPE] [EDITS]
@@ -635,7 +635,7 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     Ok(CliOutput::ok(String::new(), String::new()))
 }
 
-const IR_USAGE: &str = "\
+pub(super) const IR_USAGE: &str = "\
 USAGE: tmt ir graph FILE.ir.json [--function NAME]
        tmt ir footprints FILE.ir.json [--function NAME]
 

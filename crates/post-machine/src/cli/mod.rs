@@ -16,6 +16,7 @@ mod fmt;
 mod inspect;
 mod lint;
 mod lsp;
+mod man;
 mod run;
 
 use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -55,10 +56,38 @@ SUBCOMMANDS:
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
   dap          run the DAP debug-adapter server on stdio
-  completions  emit a shell completion script (zsh; bash/fish follow-on)
+  completions  emit a shell completion script (zsh, bash, fish)
+  man          emit the pmt(1) manual page (roff) to stdout
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 ";
+
+/// Every `--help` text the CLI renders, by subcommand path — the empty
+/// path is the root usage, and a group (`tape-block`, `ir`) has one text
+/// shared by its actions. The manual page (`crate::man`) is built from
+/// this table, so a subcommand dispatched below but missing here would
+/// have no manual section; the man module's tests hold the table against
+/// the completion registry's subcommand list to keep that from happening.
+pub(crate) fn usage_text(path: &[&str]) -> Option<&'static str> {
+    Some(match path {
+        [] => USAGE,
+        ["compile"] => build::COMPILE_USAGE,
+        ["asm"] => build::ASM_USAGE,
+        ["link"] => build::LINK_USAGE,
+        ["build"] => driver::BUILD_USAGE,
+        ["lint"] => lint::LINT_USAGE,
+        ["fmt"] => fmt::FMT_USAGE,
+        ["dis"] => inspect::DIS_USAGE,
+        ["tape-block"] => inspect::TAPE_USAGE,
+        ["ir"] => inspect::IR_USAGE,
+        ["run"] => run::RUN_USAGE,
+        ["lsp"] => lsp::LSP_USAGE,
+        ["dap"] => dap::DAP_USAGE,
+        ["completions"] => completions::COMPLETIONS_USAGE,
+        ["man"] => man::MAN_USAGE,
+        _ => return None,
+    })
+}
 
 pub fn execute(args: &[String]) -> Result<CliOutput, String> {
     execute_with(args, &mut std::io::stderr().lock())
@@ -94,6 +123,7 @@ pub fn execute_with(
         Some("lsp") => lsp::lsp(&args[1..]),
         Some("dap") => dap::dap(&args[1..]),
         Some("completions") => completions::completions(&args[1..]),
+        Some("man") => man::man(&args[1..]),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }
 }
