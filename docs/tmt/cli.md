@@ -1166,9 +1166,12 @@ package: it carries its own helpers, and it re-reads the command line itself
 so that `--emit-ir=after:inline` completes as one word even though bash
 breaks words at `=` and `:` (the one cost: a path with a space or a quote in
 it is not completed). The fish script is a plain list of `complete`
-statements, so fish evaluates the conditions itself. Directories are always
-offered where a file is, in both shells, which is why `lint` and `fmt` need
-no special case there.
+statements, so fish evaluates the conditions itself; file arguments go
+through fish's own suffix helper, which ranks the files with the expected
+extension first and still lists the rest after them, as fish completions
+conventionally do, where bash offers only the matching ones. Directories are
+always offered where a file is, in both shells, which is why `lint` and
+`fmt` need no special case there.
 
 ## `tmt man`
 

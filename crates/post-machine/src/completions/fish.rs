@@ -28,15 +28,20 @@
 //!   token already starts with `name=` — never a space-separated value,
 //!   which the parser would not read;
 //! * a `SuffixFamily` is one long option per choice;
-//! * an exclusive group adds `and not __fish_seen_argument <mate>` for
-//!   each group-mate, so a flag disappears once a mate is on the line;
-//!   fish itself withholds an option already used, which is what
-//!   `repeatable` would otherwise have to express;
-//! * a file positional offers `__fish_complete_suffix` per extension
-//!   (that helper includes directories, so `FileHint::dirs` needs no
-//!   separate rendering); `build`'s positional adds the manifest's
-//!   target names by shelling out to `pmt build --list-targets` at
-//!   completion time (docs/pmt/cli.md (pmt build)).
+//! * fish offers an option again however often it is already on the
+//!   line, so every non-repeatable boolean flag (family members included)
+//!   carries `and not __fish_seen_argument <itself>`; a value flag does
+//!   not, since its entry is also what tells fish the option takes an
+//!   argument, and hiding it would make the value complete as a file. An
+//!   exclusive group adds the same guard for each group-mate, so a flag
+//!   disappears once a mate is on the line;
+//! * a file positional offers `__fish_complete_suffix` per extension.
+//!   That helper is fish's own convention: files with the extension come
+//!   first and every other file follows them, so it ranks rather than
+//!   filters (bash's script filters). It includes directories, so
+//!   `FileHint::dirs` needs no separate rendering. `build`'s positional
+//!   adds the manifest's target names by shelling out to `pmt build
+//!   --list-targets` at completion time (docs/pmt/cli.md (pmt build)).
 //!
 //! `FlagSpec::requires` is not rendered, matching the zsh renderer.
 
@@ -128,6 +133,24 @@ fn render_leaf(out: &mut String, spec: &CommandSpec, seen: &str) {
     out.push_str(&format!("# pmt {}\n", spec.path.join(" ")));
     for flag in &spec.flags {
         let mut condition = seen.to_string();
+        // fish offers an option again however many times it is already on
+        // the line, so a non-repeatable flag guards against itself (a
+        // family member is its own option and gets its own guard below).
+        // Not a value flag, though: its entry is also what tells fish the
+        // option takes an argument, and a guard that hides the entry once
+        // `--lang` is on the line would leave `--lang p` completing as a
+        // file name instead of a language.
+        if !flag.repeatable
+            && matches!(
+                flag.kind,
+                FlagKind::Boolean | FlagKind::OptionalEqualsValue(_)
+            )
+        {
+            condition.push_str(&format!(
+                "; and not __fish_seen_argument {}",
+                option(&flag.name)
+            ));
+        }
         if let Some(group) = &flag.exclusive_group {
             for mate in spec
                 .flags
@@ -171,7 +194,8 @@ fn render_leaf(out: &mut String, spec: &CommandSpec, seen: &str) {
             FlagKind::SuffixFamily(_) => {
                 for token in expand(flag) {
                     out.push_str(&format!(
-                        "complete -c pmt -n '{condition}' {} -d '{desc}'\n",
+                        "complete -c pmt -n '{condition}; and not __fish_seen_argument {}' {} -d '{desc}'\n",
+                        option(&token),
                         option(&token)
                     ));
                 }
@@ -298,15 +322,31 @@ mod tests {
     fn flags_are_classified_as_long_short_or_old_style() {
         let s = script();
         assert_eq!(
-            line_with(&s, "-l strip-debugger"),
-            "complete -c pmt -n '__fish_seen_subcommand_from compile' -l strip-debugger -d 'drop `brk` at codegen'"
+            line_with(&s, "-l strip-debugger -d"),
+            "complete -c pmt -n '__fish_seen_subcommand_from compile; and not __fish_seen_argument -l strip-debugger' -l strip-debugger -d 'drop `brk` at codegen'"
         );
         assert!(
-            s.contains("-n '__fish_seen_subcommand_from compile' -s g -d"),
+            s.contains("; and not __fish_seen_argument -s g' -s g -d"),
             "{s}"
         );
         assert!(
-            s.contains("-n '__fish_seen_subcommand_from compile' -o Werror -d"),
+            s.contains("; and not __fish_seen_argument -o Werror' -o Werror -d"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn a_used_flag_is_withheld_unless_repeatable() {
+        let s = script();
+        // fish never withholds a used option by itself: every non-repeatable
+        // flag guards against itself, family members included …
+        assert!(
+            s.contains("; and not __fish_seen_argument -l fno-inline' -l fno-inline -d"),
+            "{s}"
+        );
+        // … while a repeatable flag stays on offer.
+        assert!(
+            s.contains("complete -c pmt -n '__fish_seen_subcommand_from link' -s L -x -a"),
             "{s}"
         );
     }
@@ -316,11 +356,11 @@ mod tests {
         let s = script();
         assert_eq!(
             line_with(&s, "-o O0 -d 'optimization level O0 (default)'"),
-            "complete -c pmt -n '__fish_seen_subcommand_from compile; and not __fish_seen_argument -o O1' -o O0 -d 'optimization level O0 (default)'"
+            "complete -c pmt -n '__fish_seen_subcommand_from compile; and not __fish_seen_argument -o O0; and not __fish_seen_argument -o O1' -o O0 -d 'optimization level O0 (default)'"
         );
         assert!(
             s.contains(
-                "-n '__fish_seen_subcommand_from build; and not __fish_seen_argument -l release' -l debug"
+                "-n '__fish_seen_subcommand_from build; and not __fish_seen_argument -l debug; and not __fish_seen_argument -l release' -l debug"
             ),
             "{s}"
         );
@@ -341,7 +381,9 @@ mod tests {
     fn emit_ir_is_bare_or_equals_joined_only() {
         let s = script();
         assert!(
-            s.contains("-n '__fish_seen_subcommand_from compile' -l emit-ir -d"),
+            s.contains(
+                "-n '__fish_seen_subcommand_from compile; and not __fish_seen_argument -l emit-ir' -l emit-ir -d"
+            ),
             "{s}"
         );
         let joined = line_with(&s, "-a '--emit-ir=lowered --emit-ir=final");
@@ -364,6 +406,7 @@ mod tests {
             s.contains(" -s L -x -a '(__fish_complete_directories)' -d"),
             "{s}"
         );
+        // A value flag carries no self-guard (see the module doc).
         assert!(
             s.contains("-n '__fish_seen_subcommand_from compile' -s o -r -F -d"),
             "{s}"
@@ -413,10 +456,10 @@ mod tests {
             "complete -c pmt -n '__fish_seen_subcommand_from tape-block; and not __fish_seen_subcommand_from build new set show' -f -a new -d 'write a blank .pmt template sized to an executable'"
         );
         // The action's flags are guarded by the action, and `--in-place`
-        // additionally by its `-o` group-mate.
+        // additionally by itself and by its `-o` group-mate.
         assert!(
             s.contains(
-                "-n '__fish_seen_subcommand_from tape-block; and __fish_seen_subcommand_from set; and not __fish_seen_argument -s o' -l in-place"
+                "-n '__fish_seen_subcommand_from tape-block; and __fish_seen_subcommand_from set; and not __fish_seen_argument -l in-place; and not __fish_seen_argument -s o' -l in-place"
             ),
             "{s}"
         );

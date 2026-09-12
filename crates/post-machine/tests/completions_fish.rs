@@ -43,6 +43,15 @@ fn scratch(name: &str) -> PathBuf {
 /// deduplicated (fish prints `word<TAB>description` per line; the
 /// description is dropped). `cwd` is where file completion looks.
 fn candidates(cwd: &Path, line: &str) -> Vec<String> {
+    let mut out = ordered(cwd, line);
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The same words in the order fish offers them, which matters where
+/// fish ranks rather than filters.
+fn ordered(cwd: &Path, line: &str) -> Vec<String> {
     let script = cwd.join("pmt.fish");
     fs::write(&script, rendered_script()).unwrap();
     let program = format!("source '{}'; complete -C {line:?}", script.display());
@@ -58,14 +67,11 @@ fn candidates(cwd: &Path, line: &str) -> Vec<String> {
         "fish failed on {line:?}:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut out: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|l| !l.is_empty())
         .map(|l| l.split('\t').next().unwrap().to_string())
-        .collect();
-    out.sort();
-    out.dedup();
-    out
+        .collect()
 }
 
 #[test]
@@ -186,10 +192,15 @@ fn positionals_offer_matching_files_and_directories() {
     fs::write(dir.join("b.pma"), "").unwrap();
     fs::write(dir.join("c.txt"), "").unwrap();
     fs::create_dir_all(dir.join("sub")).unwrap();
-    assert_eq!(candidates(&dir, "pmt compile "), vec!["a.pmc", "sub/"]);
-    assert_eq!(
-        candidates(&dir, "pmt lint "),
-        vec!["a.pmc", "b.pma", "sub/"]
-    );
+    // fish's suffix helper ranks rather than filters: the matching files
+    // come first and the rest still follow, so the assertion is presence
+    // and order, not exclusivity (bash's script filters; fish's own
+    // convention is this).
+    let got = ordered(&dir, "pmt compile ");
+    assert_eq!(got.first().map(String::as_str), Some("a.pmc"), "{got:?}");
+    assert!(got.contains(&"sub/".to_string()), "{got:?}");
+    let got = ordered(&dir, "pmt lint ");
+    assert_eq!(&got[..2], ["a.pmc", "b.pma"], "{got:?}");
+    // Directories only, strictly.
     assert_eq!(candidates(&dir, "pmt link -L "), vec!["sub/"]);
 }
