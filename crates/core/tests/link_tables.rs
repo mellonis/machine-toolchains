@@ -128,6 +128,7 @@ fn fake_syntax() -> ArchSyntax {
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         },
     }
 }
@@ -756,6 +757,7 @@ fn dis_of_a_linked_image_is_fmt_clean() {
         rept: true,
         vectors: true,
         volatile: false,
+        interface: false,
     };
     assert_eq!(
         format_asm_with(&dis, caps).unwrap(),

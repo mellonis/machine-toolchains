@@ -1275,6 +1275,7 @@ X:      stop
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         s
     }

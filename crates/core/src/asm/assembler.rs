@@ -1469,6 +1469,7 @@ mod tests {
             rept: true,
             vectors: true,
             volatile: true,
+            interface: false,
         };
         let src = ".section tables\nT0: .row [1]\n    .row [*]\n.section code\n\
                    .func f\n.volatile\n        stop\n";
@@ -1809,6 +1810,7 @@ mod tests {
                 rept: true,
                 vectors: true,
                 volatile: false,
+                interface: false,
             },
         }
     }

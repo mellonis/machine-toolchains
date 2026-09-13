@@ -627,6 +627,7 @@ mod tests {
             rept: true,
             tables: true,
             volatile: false,
+            interface: false,
         };
         let toks = lex_for_test(".section tables", caps);
         assert!(matches!(&toks[0].kind, AsmTokenKind::Word(w) if w == ".section"));
@@ -766,6 +767,7 @@ mod tests {
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         let kinds = kinds_for_test("mov [-, >]", caps);
         assert!(kinds.contains(&AsmTokenKind::Dash));

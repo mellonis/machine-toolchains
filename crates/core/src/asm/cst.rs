@@ -1505,6 +1505,7 @@ pub(super) fn parse_binding(inner: &str, line_no: u32) -> Option<Vec<(u32, Vec<F
         rept: true,
         vectors: false,
         volatile: false,
+        interface: false,
     };
     let tokens: Vec<AsmToken> = lex_line(inner, line_no, caps)
         .into_iter()
@@ -2044,6 +2045,7 @@ L1:     rgt
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         }
     }
 
@@ -2478,6 +2480,7 @@ F0: .frame tapes=(3, 0)
                 rept: true,
                 vectors: true,
                 volatile: false,
+                interface: false,
             },
         ] {
             let cst = parse_asm_cst_with(src, caps);
@@ -2661,6 +2664,7 @@ F0: .frame tapes=(3, 0)
             rept: true,
             vectors: true,
             volatile: true,
+            interface: true,
         };
         let everything = recognized_directives(all_on);
         assert_eq!(everything.len(), 13, "the audited directive surface");
@@ -2676,6 +2680,10 @@ F0: .frame tapes=(3, 0)
             },
             AsmCaps {
                 volatile: true,
+                ..AsmCaps::default()
+            },
+            AsmCaps {
+                interface: true,
                 ..AsmCaps::default()
             },
             all_on,

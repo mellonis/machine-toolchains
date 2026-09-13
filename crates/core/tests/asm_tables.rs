@@ -53,6 +53,7 @@ fn fake_syntax() -> ArchSyntax {
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         },
     }
 }

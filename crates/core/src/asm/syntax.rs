@@ -55,6 +55,14 @@ pub struct AsmCaps {
     /// which turns each future addition into a compile-time decision
     /// there; `pm1_syntax()` names only what it enables.
     pub volatile: bool,
+    /// The interface surface (docs/formats.md (routine interfaces)): the
+    /// `.param` directive (parameter names, glyphs, `writes` sets), the
+    /// `exits=`/`noreturn` fields of `.routine`, the object-level
+    /// `.graph`/`.grafted` digest directives, quoted glyph labels and
+    /// named entries in a binding-call operand, and the `exits=(…)`
+    /// operand on `call`. Off by default like every capability; PM-1
+    /// never enables it (docs/pmt/asm.md).
+    pub interface: bool,
 }
 
 pub struct ArchSyntax {

@@ -1278,6 +1278,7 @@ START:  nop
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         }
     }
 

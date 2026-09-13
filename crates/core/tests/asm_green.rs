@@ -21,6 +21,7 @@ fn all_caps() -> AsmCaps {
         rept: true,
         vectors: true,
         volatile: true,
+        interface: true,
     }
 }
 

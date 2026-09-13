@@ -2113,6 +2113,7 @@ mod tests {
                 rept: true,
                 vectors: true,
                 volatile: false,
+                interface: false,
             },
         }
     }
@@ -2154,6 +2155,7 @@ T0:     .row    [1, 2]
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         // And it reassembles to the identical object — a full round trip.
@@ -2186,6 +2188,7 @@ B:  stp
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         // And the code section DEFINES the two names the table printed,
@@ -2454,6 +2457,7 @@ B:  stp
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_listed_names_are_defined(&dis);
@@ -2499,6 +2503,7 @@ B:  stp
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
@@ -2526,6 +2531,7 @@ B:  stp
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
@@ -2551,6 +2557,7 @@ B:  stp
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
@@ -2613,6 +2620,7 @@ L0001:  nop
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
@@ -2651,6 +2659,7 @@ F0:     .frame  tapes=(2, 0)
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         // Full object round trip (no exits here, so it round-trips at the
@@ -2683,6 +2692,7 @@ F0:     .frame  tapes=(2, 0)
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         // Full object round trip: the bound-call records — including every
@@ -2764,6 +2774,7 @@ other:  stp
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&text, caps).unwrap(), text);
         let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
@@ -2810,6 +2821,7 @@ done:   stp
             rept: true,
             vectors: true,
             volatile: false,
+            interface: false,
         };
         assert_eq!(format_asm_with(&text, caps).unwrap(), text);
         let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
