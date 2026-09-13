@@ -156,6 +156,55 @@ fn tma_shapes_round_trip_under_full_caps() {
     }
 }
 
+/// The interface directives really SHAPE under full caps — the laws above
+/// hold just as well for a line that silently degraded to a `Line`, so the
+/// fixtures that carry them need this second, structural assertion. Their
+/// tree nodes are named too: a shaped item whose emitter forgot its kind
+/// would still round-trip.
+#[test]
+fn interface_directives_shape_and_carry_their_own_nodes() {
+    use mtc_core::asm::kinds::kind_name;
+    let src = "\
+.routine r, tapes=1, alpha=(3), exits=2, noreturn
+.param num, ('_', '0', '1'), writes=('0'), enters=('1'), leaves=('0'), opaque
+.graph lib::g, 42
+.grafted other::h, 7
+";
+    let (cst, green) = parse_asm_green(src, all_caps());
+    let kinds: Vec<&AsmItemKind> = cst.items.iter().map(|item| &item.kind).collect();
+    assert!(
+        matches!(kinds[0], AsmItemKind::RoutineDirective(r) if r.exits.is_some()),
+        "{:?}",
+        kinds[0]
+    );
+    assert!(
+        matches!(kinds[1], AsmItemKind::ParamDirective(p) if p.opaque.is_some()),
+        "{:?}",
+        kinds[1]
+    );
+    assert!(
+        matches!(kinds[2], AsmItemKind::DigestDirective(d) if !d.grafted),
+        "{:?}",
+        kinds[2]
+    );
+    assert!(
+        matches!(kinds[3], AsmItemKind::DigestDirective(d) if d.grafted),
+        "{:?}",
+        kinds[3]
+    );
+    let root = SyntaxNode::new_root(green);
+    let node_kinds: Vec<&str> = root.children().map(|n| kind_name(n.kind())).collect();
+    assert_eq!(
+        node_kinds,
+        vec![
+            "ROUTINE_DIRECTIVE",
+            "PARAM_DIRECTIVE",
+            "DIGEST_DIRECTIVE",
+            "DIGEST_DIRECTIVE"
+        ]
+    );
+}
+
 /// Structure, not just bytes: the tree carries one node per CST item,
 /// kind-mapped, with comment-only items as pure trivia — the check a
 /// broken emitter (tokens without nodes) cannot pass.

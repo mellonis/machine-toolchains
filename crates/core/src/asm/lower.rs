@@ -439,13 +439,25 @@ pub(crate) fn lower_source(
     // file declares any interface content — a `.param` line, a `.graph`
     // or a `.grafted` digest — every function owes both a `.routine` and
     // its `.param` lines, or the object could not be written at all.
-    let declares_interface = ctx.func_ifaces.iter().any(Option::is_some)
-        || !ctx.graphs.is_empty()
-        || !ctx.grafts.is_empty();
+    let declares_params = ctx.func_ifaces.iter().any(Option::is_some);
+    let declares_digests = !ctx.graphs.is_empty() || !ctx.grafts.is_empty();
+    let declares_interface = declares_params || declares_digests;
+    // When a digest line is the ONLY reason a function owes an interface,
+    // the diagnostic says so: the file it points at otherwise looks
+    // perfectly legal, and nothing on the `.func` line hints at what
+    // obliged it.
+    const DIGEST_CAUSE: &str =
+        " — a `.graph`/`.grafted` line obliges an interface for every function";
+    let signs_any = ctx.func_sigs.iter().any(Option::is_some);
     // All or none: the MO signature section parallels the blobs
     // (docs/formats.md (MO)), so a file that signs any function must
     // sign every function.
-    let signatures = if declares_interface || ctx.func_sigs.iter().any(Option::is_some) {
+    let signatures = if declares_interface || signs_any {
+        let cause = if signs_any || declares_params {
+            ""
+        } else {
+            DIGEST_CAUSE
+        };
         let mut sigs = Vec::with_capacity(ctx.func_sigs.len());
         for (function, sig) in ctx.functions.iter().zip(ctx.func_sigs) {
             match sig {
@@ -454,7 +466,7 @@ pub(crate) fn lower_source(
                     return Err(err(
                         function.name_span,
                         AsmErrorKind::BadSignature(format!(
-                            "function `{}` lacks a `.routine` signature",
+                            "function `{}` lacks a `.routine` signature{cause}",
                             function.name
                         )),
                     ));
@@ -470,6 +482,7 @@ pub(crate) fn lower_source(
     // signature loop above has already answered an unsigned function.
     let mut routines = Vec::with_capacity(ctx.func_ifaces.len());
     if declares_interface {
+        let cause = if declares_params { "" } else { DIGEST_CAUSE };
         for (function, iface) in ctx.functions.iter().zip(ctx.func_ifaces) {
             match iface {
                 Some(iface) => routines.push(iface),
@@ -477,7 +490,7 @@ pub(crate) fn lower_source(
                     return Err(err(
                         function.name_span,
                         AsmErrorKind::BadSignature(format!(
-                            "function `{}` lacks `.param` lines",
+                            "function `{}` lacks `.param` lines{cause}",
                             function.name
                         )),
                     ));
@@ -1014,6 +1027,12 @@ fn lower_digest_directive(d: &DigestDirectiveCst, ctx: &mut LowerCtx) -> Result<
 /// the `.param` lines must cover every tape, and a routine that declares
 /// `exits=`/`noreturn` must describe its tapes at all — the wire record
 /// carries those fields inside the interface, with nowhere else to live.
+///
+/// That refusal is deliberately asymmetric: a written `exits=0` on an
+/// interface-less routine is accepted and dropped, while `exits=1` is an
+/// error. Zero IS the field's default, so the object the assembler would
+/// write is the same either way, and nothing is lost — the text itself
+/// survives in the CST, which is what `fmt` reprints.
 fn take_pending(
     ctx: &mut LowerCtx,
     name: &str,
@@ -2640,6 +2659,55 @@ stop
     }
 
     #[test]
+    fn exits_is_a_u8_field() {
+        // The wire record carries one byte, so the directive's u32 value
+        // is range-checked rather than truncated.
+        let src =
+            ".routine f, tapes=1, alpha=(2), exits=256\n.param t, ('_', 'a')\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m == "exits must be 0..=255"),
+            "{e}"
+        );
+        // The last value that fits comes through.
+        let src =
+            ".routine f, tapes=1, alpha=(2), exits=255\n.param t, ('_', 'a')\n.func f\nstop\n";
+        let r = &lower_with(iface_caps(), src)
+            .unwrap()
+            .interface
+            .unwrap()
+            .routines[0];
+        assert_eq!(r.exits, 255);
+    }
+
+    #[test]
+    fn interface_directives_are_code_section_only() {
+        for line in [".param t, ('_', 'a')", ".graph g, 1"] {
+            let src = format!(".section tables\n{line}\n.section code\n.func f\nstop\n");
+            let e = lower_with(iface_caps(), &src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadTable(m)
+                    if m == "only table directives are allowed in the tables section"),
+                "{line}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_param_after_its_func_precedes_no_routine() {
+        // The `.routine` it would describe was consumed when the function
+        // was defined, so a `.param` below the `.func` attaches to
+        // nothing — the must-precede rule, reported the same way as a
+        // `.param` with no `.routine` at all.
+        let src = ".routine f, tapes=1, alpha=(2)\n.func f\n.param t, ('_', 'a')\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m == "`.param` precedes no `.routine`"),
+            "{e}"
+        );
+    }
+
+    #[test]
     fn interface_is_all_or_none_per_object() {
         let src = "\
 .routine f, tapes=1, alpha=(2)
@@ -2687,12 +2755,15 @@ stop
     #[test]
     fn digest_directives_need_a_fully_described_object() {
         // An interface section parallels the blobs on the wire, so a
-        // digest directive obliges every function to be signed …
+        // digest directive obliges every function to be signed … and the
+        // message names the cause, since nothing on the `.func` line
+        // hints at what obliged it.
         let src = ".graph g, 1\n.func f\nstop\n";
         let e = lower_with(iface_caps(), src).unwrap_err();
         assert!(
             matches!(e.kind, AsmErrorKind::BadSignature(ref m)
-                if m == "function `f` lacks a `.routine` signature"),
+                if m == "function `f` lacks a `.routine` signature — a `.graph`/`.grafted` \
+                         line obliges an interface for every function"),
             "{e}"
         );
         // … and to carry its parameters.
@@ -2700,7 +2771,24 @@ stop
         let e = lower_with(iface_caps(), src).unwrap_err();
         assert!(
             matches!(e.kind, AsmErrorKind::BadSignature(ref m)
-                if m == "function `f` lacks `.param` lines"),
+                if m == "function `f` lacks `.param` lines — a `.graph`/`.grafted` \
+                         line obliges an interface for every function"),
+            "{e}"
+        );
+        // A file that signs and describes functions on its own gets the
+        // plain message: the digest line is not what obliged anything.
+        let src = "\
+.routine f, tapes=1, alpha=(2)
+.param t, ('_', 'a')
+.func f
+stop
+.func g
+stop
+";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m)
+                if m == "function `g` lacks a `.routine` signature"),
             "{e}"
         );
     }

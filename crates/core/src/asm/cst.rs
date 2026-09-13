@@ -2644,12 +2644,13 @@ L1:     rgt
     #[test]
     fn malformed_digest_directives_stay_lines() {
         for src in [
-            ".graph g",         // no digest
-            ".graph g 1",       // no comma
-            ".graph g, 007",    // non-canonical spelling
-            ".graph g, 0x2A",   // the asm lexer has no hex literal
-            ".grafted g, 1, 2", // one digest only
-            ".grafted 1, 2",    // the name is a word
+            ".graph g",             // no digest
+            ".graph g 1",           // no comma
+            ".graph g, 007",        // non-canonical spelling
+            ".graph g, 0x2A",       // the asm lexer has no hex literal
+            ".grafted g, 1, 2",     // one digest only
+            ".grafted 1, 2",        // the name is a word
+            ".graph g, 4294967296", // one past the u32 ceiling
         ] {
             let cst = parse_asm_cst_with(src, caps_interface());
             assert!(
@@ -2660,6 +2661,13 @@ L1:     rgt
                 cst.items[0].kind
             );
         }
+        // The ceiling itself is a digest like any other.
+        let cst = parse_asm_cst_with(".graph g, 4294967295\n", caps_interface());
+        assert!(
+            matches!(&cst.items[0].kind, AsmItemKind::DigestDirective(d) if d.digest == u32::MAX),
+            "{:?}",
+            cst.items[0].kind
+        );
     }
 
     #[test]
