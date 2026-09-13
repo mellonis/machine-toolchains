@@ -4,16 +4,20 @@
 //! every diagnostic. Replaces the old line-oriented parser.
 
 use super::cst::{
-    AsmCst, AsmItem, AsmItemKind, BYTE_WORD, FRAME_DIRECTIVE_WORDS, FUNC_WORD, FrameDirectiveCst,
-    FrameHeaderCst, FrameMapCst, FramePairCst, FuncCst, InstrCst, LabelCst, LineCst, OperandToken,
-    ROUTINE_WORD, ROW_WORD, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst,
-    TableDirectiveKind, VOLATILE_WORD, VolatileCst, parse_asm_cst_with, parse_binding,
+    AsmCst, AsmItem, AsmItemKind, BYTE_WORD, DigestDirectiveCst, FRAME_DIRECTIVE_WORDS, FUNC_WORD,
+    FrameDirectiveCst, FrameHeaderCst, FrameMapCst, FramePairCst, FuncCst, GRAFTED_WORD,
+    GRAPH_WORD, INTERFACE_DIRECTIVE_WORDS, InstrCst, LabelCst, LineCst, OperandToken, PARAM_WORD,
+    ParamDirectiveCst, ROUTINE_WORD, ROW_WORD, ReptCst, RoutineDirectiveCst, SectionCst,
+    TableDirectiveCst, TableDirectiveKind, VOLATILE_WORD, VolatileCst, parse_asm_cst_with,
+    parse_binding,
 };
 use super::subst::substitute;
 use super::syntax::{ArchSyntax, Flow, SyntaxEntry};
 use super::{AsmError, AsmErrorKind};
 use crate::diagnostics::Span;
-use crate::formats::object::RoutineSig;
+use crate::formats::object::{
+    ExportedGraph, GraftProvenance, Interface, RoutineInterface, RoutineSig,
+};
 use crate::vm::OperandKind;
 
 /// A name paired with the source span it occupies.
@@ -203,6 +207,24 @@ pub struct LoweredSource {
     /// function carries one (all or none: the MO signature section is
     /// parallel to the blobs, docs/formats.md (MO)).
     pub signatures: Option<Vec<RoutineSig>>,
+    /// The interface section (docs/formats.md (routine interfaces)):
+    /// `Some` iff the file declares any `.param` line or any `.graph`
+    /// digest, and then `routines` parallels `functions` exactly as
+    /// `signatures` does — the wire section repeats one routine record
+    /// per signature, so an interface obliges every function to carry
+    /// both a `.routine` and its `.param` lines.
+    ///
+    /// `alphabets` is always empty here: an exported alphabet is a
+    /// compiler fact (a source-language declaration), not something a
+    /// hand-written assembly file states, so the assembler authors none
+    /// and the compiler fills them in after assembly.
+    #[allow(dead_code)] // the assembler reads it once interface emission lands
+    pub interface: Option<Interface>,
+    /// The library graphs this unit spliced, from its `.grafted`
+    /// directives — an object-level list of its own, outside the
+    /// interface section (docs/formats.md (routine interfaces)).
+    #[allow(dead_code)] // the assembler reads it once interface emission lands
+    pub grafts: Vec<GraftProvenance>,
     /// The file declares a `.volatile` ahead of its first `.func`: this
     /// source builds a volatile program (docs/core.md (linking)).
     /// Independent of any per-function tag — it is a whole-object header
@@ -285,6 +307,32 @@ pub(crate) fn lower(
     lower_source(cst, syntax, source).map(|lowered| lowered.functions)
 }
 
+/// The interface fields a `.routine` gathers while it waits for its
+/// `.func` (docs/formats.md (routine interfaces)): the directive's own
+/// tail, then one record per `.param` line in tape order.
+#[derive(Debug)]
+struct PendingInterface {
+    exits: u8,
+    /// A `noreturn` routine sets this false.
+    returns: bool,
+    /// The tail's span, for the diagnostic that reports `exits=`/
+    /// `noreturn` on a routine with no `.param` lines under it.
+    tail_span: Option<Span>,
+    params: Vec<PendingParam>,
+}
+
+/// One `.param` line, validated against its tape's cardinality and
+/// alphabet at the moment it was read.
+#[derive(Debug)]
+struct PendingParam {
+    name: String,
+    glyphs: Vec<String>,
+    writes: Vec<String>,
+    enters: Option<Vec<String>>,
+    leaves: Option<Vec<String>>,
+    opaque: bool,
+}
+
 /// The lowering state threaded through every item: the accumulating
 /// output plus the two cursors — pending labels awaiting their
 /// instruction, and the section/table-run position.
@@ -302,9 +350,18 @@ struct LowerCtx {
     /// source order. A directive attaches when its function is defined
     /// (the must-precede rule); one still pending at end of input
     /// precedes no `.func` of its name — an error.
-    pending_sigs: Vec<(SpannedName, RoutineSig)>,
+    pending_sigs: Vec<(SpannedName, RoutineSig, PendingInterface)>,
     /// Per-function signature slots, parallel to `functions`.
     func_sigs: Vec<Option<RoutineSig>>,
+    /// Per-function interface slots, parallel to `functions`. `Some`
+    /// exactly when the function's `.routine` was followed by `.param`
+    /// lines (docs/formats.md (routine interfaces)).
+    func_ifaces: Vec<Option<RoutineInterface>>,
+    /// `.graph` digests, in source order — the interface section's
+    /// exported-graph list.
+    graphs: Vec<ExportedGraph>,
+    /// `.grafted` digests, in source order.
+    grafts: Vec<GraftProvenance>,
     /// While expanding a `.rept` block, the header's span. Each body line
     /// is recovered, substituted, and re-parsed as a standalone one-line
     /// source, so its labels come back carrying line-1 spans of that
@@ -344,6 +401,9 @@ pub(crate) fn lower_source(
         run_open: false,
         pending_sigs: Vec::new(),
         func_sigs: Vec::new(),
+        func_ifaces: Vec::new(),
+        graphs: Vec::new(),
+        grafts: Vec::new(),
         span_override: None,
         program_volatile: false,
         volatile_pending: false,
@@ -365,7 +425,7 @@ pub(crate) fn lower_source(
     // A `.routine` still pending precedes no `.func` of its name —
     // either the function does not exist or it was defined BEFORE the
     // directive (the must-precede rule).
-    if let Some((name, _)) = ctx.pending_sigs.first() {
+    if let Some((name, _, _)) = ctx.pending_sigs.first() {
         return Err(err(
             name.span,
             AsmErrorKind::BadSignature(format!(
@@ -374,10 +434,18 @@ pub(crate) fn lower_source(
             )),
         ));
     }
+    // The interface section parallels the signatures on the wire, which
+    // parallel the blobs (docs/formats.md (routine interfaces)): once a
+    // file declares any interface content — a `.param` line, a `.graph`
+    // or a `.grafted` digest — every function owes both a `.routine` and
+    // its `.param` lines, or the object could not be written at all.
+    let declares_interface = ctx.func_ifaces.iter().any(Option::is_some)
+        || !ctx.graphs.is_empty()
+        || !ctx.grafts.is_empty();
     // All or none: the MO signature section parallels the blobs
     // (docs/formats.md (MO)), so a file that signs any function must
     // sign every function.
-    let signatures = if ctx.func_sigs.iter().any(Option::is_some) {
+    let signatures = if declares_interface || ctx.func_sigs.iter().any(Option::is_some) {
         let mut sigs = Vec::with_capacity(ctx.func_sigs.len());
         for (function, sig) in ctx.functions.iter().zip(ctx.func_sigs) {
             match sig {
@@ -397,10 +465,39 @@ pub(crate) fn lower_source(
     } else {
         None
     };
+    // The same rule for the interface: every function carries one, or
+    // none does. `.param` lines can only follow a `.routine`, so the
+    // signature loop above has already answered an unsigned function.
+    let mut routines = Vec::with_capacity(ctx.func_ifaces.len());
+    if declares_interface {
+        for (function, iface) in ctx.functions.iter().zip(ctx.func_ifaces) {
+            match iface {
+                Some(iface) => routines.push(iface),
+                None => {
+                    return Err(err(
+                        function.name_span,
+                        AsmErrorKind::BadSignature(format!(
+                            "function `{}` lacks `.param` lines",
+                            function.name
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+    let interface = (!routines.is_empty() || !ctx.graphs.is_empty()).then(|| Interface {
+        routines,
+        // An exported alphabet has no assembly spelling — it is a
+        // source-language declaration the compiler fills in later.
+        alphabets: Vec::new(),
+        graphs: ctx.graphs,
+    });
     Ok(LoweredSource {
         functions: ctx.functions,
         tables: ctx.tables,
         signatures,
+        interface,
+        grafts: ctx.grafts,
         program_volatile: ctx.program_volatile,
     })
 }
@@ -436,6 +533,9 @@ fn lower_item(
         AsmItemKind::TableDirective(d) => lower_table_directive(d, ctx)?,
         AsmItemKind::Rept(r) => lower_rept(r, syntax, source, ctx)?,
         AsmItemKind::RoutineDirective(d) => lower_routine_directive(d, ctx)?,
+        // The interface directives shape only under `caps.interface`.
+        AsmItemKind::ParamDirective(p) => lower_param_directive(p, ctx)?,
+        AsmItemKind::DigestDirective(d) => lower_digest_directive(d, ctx)?,
         AsmItemKind::FrameDirective(d) => lower_frame_directive(d, ctx)?,
         AsmItemKind::Volatile(v) => lower_volatile(v, ctx)?,
     }
@@ -721,7 +821,19 @@ fn lower_routine_directive(d: &RoutineDirectiveCst, ctx: &mut LowerCtx) -> Resul
             AsmErrorKind::BadSignature("alphabet cardinalities are at least 1".to_string()),
         ));
     }
-    let already_pending = ctx.pending_sigs.iter().any(|(n, _)| n.name == d.name);
+    let exits = match d.exits {
+        Some((exits, span)) => match u8::try_from(exits) {
+            Ok(exits) => exits,
+            Err(_) => {
+                return Err(err(
+                    span,
+                    AsmErrorKind::BadSignature("exits must be 0..=255".to_string()),
+                ));
+            }
+        },
+        None => 0,
+    };
+    let already_pending = ctx.pending_sigs.iter().any(|(n, _, _)| n.name == d.name);
     let already_attached = ctx
         .functions
         .iter()
@@ -742,18 +854,212 @@ fn lower_routine_directive(d: &RoutineDirectiveCst, ctx: &mut LowerCtx) -> Resul
             arity: d.tapes as u8,
             cardinalities: d.alpha.clone(),
         },
+        PendingInterface {
+            exits,
+            returns: d.noreturn.is_none(),
+            tail_span: d.exits.map(|(_, span)| span).or(d.noreturn),
+            params: Vec::new(),
+        },
     ));
     Ok(())
 }
 
-/// Detaches the pending `.routine` signature for a function being
-/// defined, if one was declared. Called by BOTH `.func` lowering paths
-/// so the parallel `func_sigs` vector never falls out of step.
-fn take_pending_sig(ctx: &mut LowerCtx, name: &str) -> Option<RoutineSig> {
+/// `.param <name>, (<glyphs>)[, writes=(…)][, enters=(…)][, leaves=(…)]
+/// [, opaque]`: one tape of the most recent pending `.routine`'s
+/// interface, in tape order (docs/formats.md (routine interfaces)).
+/// Rules: code section only; a `.param` line follows the `.routine` it
+/// describes; its glyph count equals that tape's declared cardinality;
+/// every `writes`/`enters`/`leaves` glyph is one of the tape's own; a
+/// written `enters=()`/`leaves=()` is rejected — a clause lists at least
+/// one glyph, and no clause at all is the way to say nothing.
+fn lower_param_directive(p: &ParamDirectiveCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    // A pending label cannot bind across a directive (same rule as the
+    // `.func`, `.section` and `.routine` boundaries).
+    if let Some(first) = ctx.pending.first() {
+        return Err(err(
+            first.span,
+            AsmErrorKind::Syntax("label at end of function"),
+        ));
+    }
+    if ctx.section == Section::Tables {
+        return Err(err(
+            p.span,
+            AsmErrorKind::BadTable("only table directives are allowed in the tables section"),
+        ));
+    }
+    // The tape this line describes is the next one the pending routine
+    // has not named yet.
+    let Some((_, sig, iface)) = ctx.pending_sigs.last() else {
+        return Err(err(
+            p.span,
+            AsmErrorKind::BadSignature("`.param` precedes no `.routine`".to_string()),
+        ));
+    };
+    let k = iface.params.len();
+    let Some(&cardinality) = sig.cardinalities.get(k) else {
+        return Err(err(
+            p.span,
+            AsmErrorKind::BadSignature(format!("{} .param line(s) for tapes={}", k + 1, sig.arity)),
+        ));
+    };
+    if p.glyphs.len() as u64 != u64::from(cardinality) {
+        return Err(err(
+            p.glyphs_span,
+            AsmErrorKind::BadSignature(format!(
+                "`.param {}` lists {} glyphs for a cardinality of {}",
+                p.name,
+                p.glyphs.len(),
+                cardinality
+            )),
+        ));
+    }
+    // Every named glyph is one of this tape's own: the object's reader
+    // enforces the same membership, so a violation here would only
+    // surface as an unreadable object later.
+    let subset_of_alphabet = |list: &[String], clause: &str, span: Span| {
+        for glyph in list {
+            if !p.glyphs.contains(glyph) {
+                return Err(err(
+                    span,
+                    AsmErrorKind::BadSignature(format!(
+                        "`.param {}` {clause} names `{glyph}`, which is not in its alphabet",
+                        p.name
+                    )),
+                ));
+            }
+        }
+        Ok(())
+    };
+    let writes = p.writes.clone().unwrap_or_default();
+    if let Some(span) = p.writes_span {
+        subset_of_alphabet(&writes, "writes", span)?;
+    }
+    let clause = |list: &Option<Vec<String>>, span: Option<Span>, name: &str| {
+        let (Some(list), Some(span)) = (list, span) else {
+            return Ok(None);
+        };
+        if list.is_empty() {
+            return Err(err(
+                span,
+                AsmErrorKind::BadSignature(
+                    "`enters=`/`leaves=` list at least one glyph; omit the suffix for no clause"
+                        .to_string(),
+                ),
+            ));
+        }
+        subset_of_alphabet(list, name, span)?;
+        Ok(Some(list.clone()))
+    };
+    let enters = clause(&p.enters, p.enters_span, "enters")?;
+    let leaves = clause(&p.leaves, p.leaves_span, "leaves")?;
     ctx.pending_sigs
-        .iter()
-        .position(|(n, _)| n.name == name)
-        .map(|i| ctx.pending_sigs.remove(i).1)
+        .last_mut()
+        .expect("the pending routine was read just above")
+        .2
+        .params
+        .push(PendingParam {
+            name: p.name.clone(),
+            glyphs: p.glyphs.clone(),
+            writes,
+            enters,
+            leaves,
+            opaque: p.opaque.is_some(),
+        });
+    Ok(())
+}
+
+/// `.graph <name>, <digest>` / `.grafted <name>, <digest>`: the
+/// object-level graph digests (docs/formats.md (routine interfaces)).
+/// Both precede the first `.func` — they describe the unit, not a
+/// function — and neither belongs in the tables section.
+fn lower_digest_directive(d: &DigestDirectiveCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    if let Some(first) = ctx.pending.first() {
+        return Err(err(
+            first.span,
+            AsmErrorKind::Syntax("label at end of function"),
+        ));
+    }
+    if ctx.section == Section::Tables {
+        return Err(err(
+            d.span,
+            AsmErrorKind::BadTable("only table directives are allowed in the tables section"),
+        ));
+    }
+    if !ctx.functions.is_empty() {
+        return Err(err(
+            d.span,
+            AsmErrorKind::Syntax("`.graph`/`.grafted` precede the first `.func`"),
+        ));
+    }
+    if d.grafted {
+        ctx.grafts.push(GraftProvenance {
+            graph: d.name.clone(),
+            digest: d.digest,
+        });
+    } else {
+        ctx.graphs.push(ExportedGraph {
+            name: d.name.clone(),
+            digest: d.digest,
+        });
+    }
+    Ok(())
+}
+
+/// Detaches the pending `.routine` signature — and the interface its
+/// `.param` lines built — for a function being defined, if one was
+/// declared. Called by BOTH `.func` lowering paths so the parallel
+/// `func_sigs`/`func_ifaces` vectors never fall out of step.
+///
+/// This is where an interface is finally checked against its signature:
+/// the `.param` lines must cover every tape, and a routine that declares
+/// `exits=`/`noreturn` must describe its tapes at all — the wire record
+/// carries those fields inside the interface, with nowhere else to live.
+fn take_pending(
+    ctx: &mut LowerCtx,
+    name: &str,
+) -> Result<(Option<RoutineSig>, Option<RoutineInterface>), AsmError> {
+    let Some(i) = ctx.pending_sigs.iter().position(|(n, _, _)| n.name == name) else {
+        return Ok((None, None));
+    };
+    let (declared, sig, pending) = ctx.pending_sigs.remove(i);
+    if pending.params.is_empty() {
+        if pending.exits != 0 || !pending.returns {
+            return Err(err(
+                pending.tail_span.unwrap_or(declared.span),
+                AsmErrorKind::BadSignature("`exits=`/`noreturn` need `.param` lines".to_string()),
+            ));
+        }
+        return Ok((Some(sig), None));
+    }
+    if pending.params.len() != sig.arity as usize {
+        return Err(err(
+            declared.span,
+            AsmErrorKind::BadSignature(format!(
+                "{} .param line(s) for tapes={}",
+                pending.params.len(),
+                sig.arity
+            )),
+        ));
+    }
+    let mut iface = RoutineInterface {
+        params: Vec::with_capacity(pending.params.len()),
+        glyphs: Vec::with_capacity(pending.params.len()),
+        writes: Vec::with_capacity(pending.params.len()),
+        enters: Vec::with_capacity(pending.params.len()),
+        leaves: Vec::with_capacity(pending.params.len()),
+        opaque: Vec::with_capacity(pending.params.len()),
+        exits: pending.exits,
+        returns: pending.returns,
+    };
+    for param in pending.params {
+        iface.params.push(param.name);
+        iface.glyphs.push(param.glyphs);
+        iface.writes.push(param.writes);
+        iface.enters.push(param.enters);
+        iface.leaves.push(param.leaves);
+        iface.opaque.push(param.opaque);
+    }
+    Ok((Some(sig), Some(iface)))
 }
 
 /// `.section NAME`: switches the section cursor and closes any open
@@ -1102,6 +1408,8 @@ fn body_item_span(item: &AsmItem) -> Option<Span> {
         AsmItemKind::TableDirective(d) => Some(d.span),
         AsmItemKind::Rept(r) => Some(r.span),
         AsmItemKind::RoutineDirective(d) => Some(d.span),
+        AsmItemKind::ParamDirective(p) => Some(p.span),
+        AsmItemKind::DigestDirective(d) => Some(d.span),
         AsmItemKind::FrameDirective(d) => Some(d.span()),
         AsmItemKind::Volatile(v) => Some(v.span),
     }
@@ -1189,7 +1497,7 @@ fn open_function(
             AsmErrorKind::Syntax("a `.volatile` twin must match its function's visibility"),
         ));
     }
-    let sig = take_pending_sig(ctx, &name);
+    let (sig, iface) = take_pending(ctx, &name)?;
     ctx.functions.push(SourceFunction {
         name,
         name_span,
@@ -1198,6 +1506,7 @@ fn open_function(
         items: Vec::new(),
     });
     ctx.func_sigs.push(sig);
+    ctx.func_ifaces.push(iface);
     // The directive that tagged this block is still ahead of the cursor;
     // its own arm consumes the slot.
     ctx.volatile_pending = volatile;
@@ -1282,6 +1591,27 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
             instr.word_span,
             AsmErrorKind::Syntax("`.routine` takes `<name>, tapes=<int>, alpha=(<int>, …)`"),
         ));
+    }
+
+    // A malformed interface directive — the CST keeps it a Line when the
+    // directive is not structurally exact — gets its own grammar back
+    // instead of UnknownMnemonic, for dialects whose caps could shape one
+    // (mirror `.routine`).
+    if let Some(instr) = &line.instr
+        && INTERFACE_DIRECTIVE_WORDS.contains(&instr.word.as_str())
+        && line.labels.is_empty()
+        && syntax.caps.interface
+    {
+        let grammar = match instr.word.as_str() {
+            PARAM_WORD => {
+                "`.param` takes `<name>, (<glyphs>)` and the \
+                 `writes=`/`enters=`/`leaves=`/`opaque` suffixes in that order"
+            }
+            GRAPH_WORD => "`.graph` takes `<name>, <digest>`",
+            GRAFTED_WORD => "`.grafted` takes `<name>, <digest>`",
+            _ => unreachable!("the guard matched an interface directive word"),
+        };
+        return Err(err(instr.word_span, AsmErrorKind::Syntax(grammar)));
     }
 
     // A malformed `.volatile` — the CST keeps it a Line when the bare
@@ -2131,6 +2461,305 @@ L1:     nop
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    // -- The interface surface (caps.interface) ------------------------
+
+    /// The interface tier's caps. `tables` carries `.routine` and `=`,
+    /// `rept` the `(..)` groups every glyph list is written in — the same
+    /// pairing `.routine`'s alpha list already needs.
+    fn iface_caps() -> AsmCaps {
+        AsmCaps {
+            tables: true,
+            rept: true,
+            interface: true,
+            ..AsmCaps::default()
+        }
+    }
+
+    /// Lower to the whole [`LoweredSource`] under `caps`, parsing the CST
+    /// with the same caps so the directives are shaped before lowering
+    /// reads them.
+    fn lower_with(caps: AsmCaps, src: &str) -> Result<LoweredSource, AsmError> {
+        let mut syntax = test_syntax();
+        syntax.caps = caps;
+        lower_source(&parse_asm_cst_with(src, caps), &syntax, src)
+    }
+
+    #[test]
+    fn param_lines_build_the_routine_interface() {
+        let src = "\
+.routine f, tapes=2, alpha=(3, 2), exits=1, noreturn
+.param  num, ('_', '0', '1'), writes=('0', '1')
+.param  flag, ('_', 'x')
+.func f
+stop
+";
+        let lowered = lower_with(iface_caps(), src).unwrap();
+        let iface = lowered.interface.expect("interface present");
+        assert_eq!(iface.routines.len(), 1);
+        assert!(iface.alphabets.is_empty(), "the assembler authors none");
+        let r = &iface.routines[0];
+        assert_eq!(r.params, vec!["num", "flag"]);
+        assert_eq!(r.glyphs[0], vec!["_", "0", "1"]);
+        assert_eq!(r.writes[0], vec!["0", "1"]);
+        assert!(r.writes[1].is_empty());
+        assert_eq!(r.enters, vec![None, None]);
+        assert_eq!(r.leaves, vec![None, None]);
+        assert_eq!(r.opaque, vec![false, false]);
+        assert_eq!(r.exits, 1);
+        assert!(!r.returns);
+    }
+
+    #[test]
+    fn param_contract_suffixes_and_opaque() {
+        let src = "\
+.routine f, tapes=1, alpha=(3)
+.param  num, ('_', '0', '1'), writes=('0', '1'), enters=('1'), leaves=('0', '1'), opaque
+.func f
+stop
+";
+        let r = &lower_with(iface_caps(), src)
+            .unwrap()
+            .interface
+            .unwrap()
+            .routines[0];
+        assert_eq!(r.enters[0].as_deref(), Some(&["1".to_string()][..]));
+        assert_eq!(
+            r.leaves[0].as_deref(),
+            Some(&["0".to_string(), "1".to_string()][..])
+        );
+        assert!(r.opaque[0]);
+        // A routine with no tail returns and takes no exits.
+        assert_eq!(r.exits, 0);
+        assert!(r.returns);
+    }
+
+    #[test]
+    fn param_count_must_equal_tapes() {
+        let src = ".routine f, tapes=2, alpha=(3, 2)\n.param num, ('_', '0', '1')\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m.contains("1 .param line(s) for tapes=2")),
+            "{e}"
+        );
+        // One too many is reported the same way, at the extra line.
+        let src = ".routine f, tapes=1, alpha=(2)\n.param a, ('_', 'x')\n.param b, ('_', 'x')\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m.contains("2 .param line(s) for tapes=1")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn param_glyph_count_must_equal_cardinality() {
+        let src = ".routine f, tapes=1, alpha=(3)\n.param num, ('_', '0')\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m.contains("2 glyphs for a cardinality of 3")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn writes_must_be_a_subset_of_the_alphabet() {
+        let src =
+            ".routine f, tapes=1, alpha=(2)\n.param num, ('_', 'a'), writes=('b')\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m.contains("writes names `b`")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn head_clauses_must_be_a_subset_of_the_alphabet() {
+        for (suffix, clause) in [("enters=('b')", "enters"), ("leaves=('b')", "leaves")] {
+            let src = format!(
+                ".routine f, tapes=1, alpha=(2)\n.param num, ('_', 'a'), {suffix}\n.func f\nstop\n"
+            );
+            let e = lower_with(iface_caps(), &src).unwrap_err();
+            let wanted = format!("{clause} names `b`");
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m.contains(&wanted)),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_head_clause_is_rejected() {
+        for suffix in ["enters=()", "leaves=()"] {
+            let src = format!(
+                ".routine f, tapes=1, alpha=(2)\n.param n, ('_', 'a'), {suffix}\n.func f\nstop\n"
+            );
+            let e = lower_with(iface_caps(), &src).unwrap_err();
+            assert!(
+                matches!(
+                    e.kind,
+                    AsmErrorKind::BadSignature(ref m)
+                        if m == "`enters=`/`leaves=` list at least one glyph; omit the suffix for no clause"
+                ),
+                "{e}"
+            );
+        }
+        // An empty `writes=()` is not the same thing: a routine that
+        // writes nothing is well-formed and says so.
+        let src =
+            ".routine f, tapes=1, alpha=(2)\n.param n, ('_', 'a'), writes=()\n.func f\nstop\n";
+        let r = &lower_with(iface_caps(), src)
+            .unwrap()
+            .interface
+            .unwrap()
+            .routines[0];
+        assert!(r.writes[0].is_empty());
+    }
+
+    #[test]
+    fn a_param_needs_a_pending_routine() {
+        let src = ".param n, ('_', 'a')\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m == "`.param` precedes no `.routine`"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn the_routine_tail_needs_param_lines() {
+        for tail in ["exits=1", "noreturn"] {
+            let src = format!(".routine f, tapes=1, alpha=(2), {tail}\n.func f\nstop\n");
+            let e = lower_with(iface_caps(), &src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadSignature(ref m)
+                    if m == "`exits=`/`noreturn` need `.param` lines"),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn interface_is_all_or_none_per_object() {
+        let src = "\
+.routine f, tapes=1, alpha=(2)
+.param t, ('_', 'a')
+.func f
+stop
+.routine g, tapes=1, alpha=(2)
+.func g
+stop
+";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m.contains("function `g` lacks `.param` lines")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn graph_and_grafted_directives_collect_at_object_level() {
+        let src = "\
+.graph lib::g, 3735928559
+.grafted other::h, 42
+.routine f, tapes=1, alpha=(2)
+.param t, ('_', 'a')
+.func f
+stop
+";
+        let lowered = lower_with(iface_caps(), src).unwrap();
+        assert_eq!(
+            lowered.interface.as_ref().unwrap().graphs,
+            vec![ExportedGraph {
+                name: "lib::g".into(),
+                digest: 3_735_928_559
+            }]
+        );
+        assert_eq!(
+            lowered.grafts,
+            vec![GraftProvenance {
+                graph: "other::h".into(),
+                digest: 42
+            }]
+        );
+    }
+
+    #[test]
+    fn digest_directives_need_a_fully_described_object() {
+        // An interface section parallels the blobs on the wire, so a
+        // digest directive obliges every function to be signed …
+        let src = ".graph g, 1\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m)
+                if m == "function `f` lacks a `.routine` signature"),
+            "{e}"
+        );
+        // … and to carry its parameters.
+        let src = ".graph g, 1\n.routine f, tapes=1, alpha=(2)\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m)
+                if m == "function `f` lacks `.param` lines"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn digest_directives_must_precede_the_first_func() {
+        let src = ".func f\nstop\n.graph g, 1\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(
+                e.kind,
+                AsmErrorKind::Syntax("`.graph`/`.grafted` precede the first `.func`")
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn interface_directives_are_unknown_without_the_cap() {
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            ..AsmCaps::default()
+        };
+        for word in [".param", ".graph", ".grafted"] {
+            let src = format!(".func f\n{word}\nstop\n");
+            let e = lower_with(caps, &src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::UnknownMnemonic(ref w) if w == word),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_interface_directives_get_their_own_complaint() {
+        // Structurally inexact lines degrade to Lines in the CST; lowering
+        // answers with the directive's own grammar, never "unknown
+        // mnemonic" (mirror the malformed `.routine` path).
+        for (src, word) in [
+            (".func f\n.param n\nstop\n", ".param"),
+            (".graph g\n.func f\nstop\n", ".graph"),
+            (".grafted g\n.func f\nstop\n", ".grafted"),
+        ] {
+            let e = lower_with(iface_caps(), src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::Syntax(m) if m.contains(word)),
+                "{src:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_object_without_interface_content_carries_none() {
+        let src = ".routine f, tapes=1, alpha=(2)\n.func f\nstop\n";
+        let lowered = lower_with(iface_caps(), src).unwrap();
+        assert!(lowered.interface.is_none());
+        assert!(lowered.grafts.is_empty());
+        assert!(lowered.signatures.is_some());
     }
 
     #[test]

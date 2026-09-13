@@ -8,6 +8,7 @@
     { "include": "#sectionDirective" },
     { "include": "#funcDirective" },
     { "include": "#routineDirective" },
+    { "include": "#interfaceDirective" },
     { "include": "#repeatDirective" },
     { "include": "#tableDirective" },
     { "include": "#frameDirective" },
@@ -44,6 +45,13 @@
       "captures": {
         "1": { "name": "keyword.control.tma" },
         "2": { "name": "entity.name.function.tma" }
+      }
+    },
+    "interfaceDirective": {
+      "match": "(\\.(param|graph|grafted))\\b\\s*([A-Za-z_][A-Za-z0-9_.:]*)?",
+      "captures": {
+        "1": { "name": "keyword.control.tma" },
+        "3": { "name": "entity.name.function.tma" }
       }
     },
     "repeatDirective": {

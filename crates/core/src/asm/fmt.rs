@@ -229,6 +229,12 @@ fn render_pieces(cst: &AsmCst, source: &str) -> Vec<Piece> {
                 AsmItemKind::TableDirective(d) => render_table_directive(d),
                 AsmItemKind::Rept(r) => render_rept(r, source),
                 AsmItemKind::RoutineDirective(r) => render_routine(r),
+                AsmItemKind::ParamDirective(p) => {
+                    render_verbatim_directive(p.span, &p.trailing, source)
+                }
+                AsmItemKind::DigestDirective(d) => {
+                    render_verbatim_directive(d.span, &d.trailing, source)
+                }
                 AsmItemKind::FrameDirective(d) => render_frame_directive(d),
                 AsmItemKind::Volatile(v) => render_volatile(v),
             };
@@ -488,9 +494,51 @@ fn render_routine(r: &RoutineDirectiveCst) -> Piece {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(", ");
+    let mut code = format!(".routine {}, tapes={}, alpha=({})", r.name, r.tapes, alpha);
+    // The interface tail, in its one legal order (docs/formats.md
+    // (routine interfaces)); absent fields print nothing.
+    if let Some((exits, _)) = r.exits {
+        code.push_str(&format!(", exits={exits}"));
+    }
+    if r.noreturn.is_some() {
+        code.push_str(", noreturn");
+    }
     Piece {
-        code: format!(".routine {}, tapes={}, alpha=({})", r.name, r.tapes, alpha),
+        code,
         comment: r.trailing.as_ref().map(|tc| tc.text.clone()),
+        header_comment: None,
+        kind: PieceKind::Structural,
+        blank_before: false,
+    }
+}
+
+/// The interface directives (`.param`, `.graph`, `.grafted`) — column-0
+/// directives printed from the source text their span covers, with the
+/// trailing comment held back like every other piece's.
+///
+/// Verbatim, not reconstructed, because a glyph group's spelling is not
+/// recoverable from the decoded list: `('a'..'z')` decodes to 26 glyphs,
+/// and reprinting those would rewrite the author's tokens — which this
+/// printer never does (docs/formats.md (assembly text)). The cost is
+/// that interior spacing is not normalized to the `, ` convention the
+/// reconstructed directives get; the line's own indentation still is,
+/// since the span starts at the first token.
+fn render_verbatim_directive(
+    span: crate::diagnostics::Span,
+    trailing: &Option<TrailingComment>,
+    source: &str,
+) -> Piece {
+    let code = source
+        .lines()
+        .nth(span.start.line as usize - 1)
+        .unwrap_or_default()
+        .chars()
+        .skip(span.start.col as usize - 1)
+        .take((span.end.col - span.start.col) as usize)
+        .collect::<String>();
+    Piece {
+        code: code.trim_end().to_string(),
+        comment: trailing.as_ref().map(|tc| tc.text.clone()),
         header_comment: None,
         kind: PieceKind::Structural,
         blank_before: false,
@@ -1371,6 +1419,43 @@ loop:   nop
     fn routine_directive_already_canonical_is_verbatim() {
         let src = ".routine main, tapes=2, alpha=(3, 5)\n.func main\n        stp\n";
         assert_eq!(format_asm_with(src, caps_all()).unwrap(), src);
+    }
+
+    /// [`caps_all`] plus the interface cap — the tier the `.param` and
+    /// digest directives shape under.
+    fn caps_interface() -> AsmCaps {
+        AsmCaps {
+            interface: true,
+            ..caps_all()
+        }
+    }
+
+    #[test]
+    fn the_routine_tail_survives_formatting() {
+        let src = ".routine main,tapes=1,alpha=(2),exits=2,noreturn\n";
+        let once = format_asm_with(src, caps_interface()).unwrap();
+        assert_eq!(
+            once,
+            ".routine main, tapes=1, alpha=(2), exits=2, noreturn\n"
+        );
+        assert_eq!(format_asm_with(&once, caps_interface()).unwrap(), once);
+    }
+
+    #[test]
+    fn interface_directives_keep_their_glyph_spelling() {
+        // These two print from the source text their span covers: a glyph
+        // group's spelling is not recoverable from the decoded list, and
+        // expanding `('0'..'9')` to ten literals would rewrite the
+        // author's tokens — which this printer never does. Indentation
+        // still normalizes to column 0, and the trailing comment pads to
+        // its group's column like any other piece's.
+        let src = "  .param wide, ('0'..'9'), opaque   ; ten\n  .graph lib::g, 42\n";
+        let once = format_asm_with(src, caps_interface()).unwrap();
+        assert_eq!(
+            once,
+            ".param wide, ('0'..'9'), opaque ; ten\n.graph lib::g, 42\n"
+        );
+        assert_eq!(format_asm_with(&once, caps_interface()).unwrap(), once);
     }
 
     #[test]

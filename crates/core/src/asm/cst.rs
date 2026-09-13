@@ -62,6 +62,14 @@ pub(crate) const FRAME_WORD: &str = ".frame";
 pub(crate) const MAP_WORD: &str = ".map";
 pub(crate) const EXITS_WORD: &str = ".exits";
 pub(crate) const VOLATILE_WORD: &str = ".volatile";
+pub(crate) const PARAM_WORD: &str = ".param";
+pub(crate) const GRAPH_WORD: &str = ".graph";
+pub(crate) const GRAFTED_WORD: &str = ".grafted";
+
+/// The interface-tier directive family, shaped under
+/// [`AsmCaps::interface`] and reported precisely by lower when malformed
+/// (docs/formats.md (routine interfaces)).
+pub(crate) const INTERFACE_DIRECTIVE_WORDS: [&str; 3] = [PARAM_WORD, GRAPH_WORD, GRAFTED_WORD];
 
 /// The frame-descriptor directive family, shaped under
 /// [`AsmCaps::tables`] and reported precisely by lower when malformed.
@@ -86,8 +94,9 @@ const CONTINUABLE_WORDS: [&str; 3] = [TARGETS_WORD, EXITS_WORD, MAP_WORD];
 /// `.byte` are the caps-independent classic surface; the
 /// section/table/signature/frame family rides [`AsmCaps::tables`];
 /// `.rept`/`.endr` ride [`AsmCaps::rept`]; `.volatile` rides
-/// [`AsmCaps::volatile`]; the vectors cap adds operand tokens, never
-/// directives.
+/// [`AsmCaps::volatile`]; the `.param`/`.graph`/`.grafted` interface
+/// family rides [`AsmCaps::interface`]; the vectors cap adds operand
+/// tokens, never directives.
 ///
 /// This is the drift-guard authority: the editor-grammar suites
 /// set-compare the directive words each dialect's grammar paints
@@ -111,6 +120,9 @@ pub fn recognized_directives(caps: AsmCaps) -> Vec<&'static str> {
     }
     if caps.volatile {
         words.push(VOLATILE_WORD);
+    }
+    if caps.interface {
+        words.extend(INTERFACE_DIRECTIVE_WORDS);
     }
     words.sort_unstable();
     words
@@ -210,6 +222,17 @@ pub enum AsmItemKind {
     /// starting `.volatile` stays a Line for lower to report precisely
     /// (mirror `.func`).
     Volatile(VolatileCst),
+    /// `.param <name>, (<glyphs>)[, …]` — one tape of the pending
+    /// `.routine`'s interface (docs/formats.md (routine interfaces)),
+    /// shaped under [`AsmCaps::interface`] (+ `rept` for the `(..)`
+    /// groups) and only when structurally exact; anything else starting
+    /// `.param` stays a Line (mirror `.func`).
+    ParamDirective(ParamDirectiveCst),
+    /// `.graph <name>, <digest>` / `.grafted <name>, <digest>` — the
+    /// object-level graph digests (docs/formats.md (routine
+    /// interfaces)), shaped under [`AsmCaps::interface`] and only when
+    /// structurally exact (mirror `.func`).
+    DigestDirective(DigestDirectiveCst),
     /// `.frame`/`.map`/`.exits` — the frame-descriptor directive family
     /// (docs/formats.md (frame descriptors)), shaped under
     /// [`AsmCaps::tables`] (+ `rept` for the `(..)` groups, + the arrow
@@ -356,6 +379,60 @@ pub struct RoutineDirectiveCst {
     pub tapes_span: Span,
     pub alpha: Vec<u32>,
     pub alpha_span: Span,
+    /// `, exits=<int>` — the state parameters a caller supplies
+    /// (docs/formats.md (routine interfaces)). `None` = the field is
+    /// absent, which lowering reads as zero exits. Rides
+    /// [`AsmCaps::interface`]; without the cap the tail is not part of
+    /// the directive and the line degrades to a Line.
+    pub exits: Option<(u32, Span)>,
+    /// `, noreturn` — control never returns to the caller. The span
+    /// covers the keyword; `None` = the routine returns.
+    pub noreturn: Option<Span>,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
+/// `.param <name>, (<glyphs>)[, writes=(…)][, enters=(…)][, leaves=(…)]
+/// [, opaque]` — one tape of the pending `.routine`'s interface, in tape
+/// order (docs/formats.md (routine interfaces)). The four suffixes are
+/// optional, come in that fixed order, and appear at most once each; an
+/// absent one is `None` (for `opaque`, no span), which is a different
+/// thing from a written empty list. Glyph groups are decoded by
+/// [`crate::formats::glyphs::parse_glyph_list`] from the text between
+/// their parens, so `'a'..'z'` ranges and the two escapes come along for
+/// free; each group's span covers the whole `(..)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamDirectiveCst {
+    pub name: String,
+    pub name_span: Span,
+    pub glyphs: Vec<String>,
+    pub glyphs_span: Span,
+    pub writes: Option<Vec<String>>,
+    pub writes_span: Option<Span>,
+    pub enters: Option<Vec<String>>,
+    pub enters_span: Option<Span>,
+    pub leaves: Option<Vec<String>>,
+    pub leaves_span: Option<Span>,
+    /// The `opaque` keyword's span when the suffix is present.
+    pub opaque: Option<Span>,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
+/// `.graph <name>, <digest>` (an exported graph's digest) and
+/// `.grafted <name>, <digest>` (a library graph this unit spliced) —
+/// object-level directives, ahead of the first `.func`
+/// (docs/formats.md (routine interfaces)). The digest is a canonically
+/// spelled u32: the assembly lexer has no hex literal, so it is written
+/// in decimal like every other number in this grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigestDirectiveCst {
+    /// `.grafted` (true) versus `.graph` (false).
+    pub grafted: bool,
+    pub name: String,
+    pub name_span: Span,
+    pub digest: u32,
+    pub digest_span: Span,
     pub span: Span,
     pub trailing: Option<TrailingComment>,
 }
@@ -532,6 +609,8 @@ impl GreenEmit for Emit {
             AsmItemKind::TableDirective(_) => Some(AsmKind::TableDirective),
             AsmItemKind::Rept(_) => Some(AsmKind::Rept),
             AsmItemKind::RoutineDirective(_) => Some(AsmKind::RoutineDirective),
+            AsmItemKind::ParamDirective(_) => Some(AsmKind::ParamDirective),
+            AsmItemKind::DigestDirective(_) => Some(AsmKind::DigestDirective),
             AsmItemKind::Volatile(_) => Some(AsmKind::Volatile),
             AsmItemKind::FrameDirective(_) => Some(AsmKind::FrameDirective),
         };
@@ -1069,9 +1148,35 @@ fn shape_line(src: &ItemText<'_>, tokens: &[AsmToken], caps: AsmCaps) -> AsmItem
     // before this branch is ever reached.
     if caps.tables
         && word_text(&body[0]) == Some(ROUTINE_WORD)
-        && let Some(directive) = routine_directive(body, span, &trailing)
+        && let Some(directive) = routine_directive(body, span, &trailing, caps.interface)
     {
         return AsmItemKind::RoutineDirective(directive);
+    }
+
+    // The interface family (caps.interface): `.param` names one tape of
+    // the pending `.routine`; `.graph`/`.grafted` carry an object-level
+    // graph digest. Unlabeled and structurally exact only — anything
+    // else starting one of these words stays a Line for lower to report
+    // precisely (mirror `.func`/`.routine`). `.param`'s glyph groups
+    // need the rept cap's parens as well, exactly as `.routine`'s alpha
+    // list does; without it the parens stay Junk and the line is Raw
+    // before this branch is reached.
+    if caps.interface {
+        match word_text(&body[0]) {
+            Some(PARAM_WORD) => {
+                if let Some(directive) = param_directive(src, body, span, &trailing) {
+                    return AsmItemKind::ParamDirective(directive);
+                }
+            }
+            Some(word @ (GRAPH_WORD | GRAFTED_WORD)) => {
+                if let Some(directive) =
+                    digest_directive(word == GRAFTED_WORD, body, span, &trailing)
+                {
+                    return AsmItemKind::DigestDirective(directive);
+                }
+            }
+            _ => {}
+        }
     }
 
     // Labels: leading repeated `Word Colon` pairs, regardless of the
@@ -1216,6 +1321,7 @@ fn routine_directive(
     body: &[AsmToken],
     span: Span,
     trailing: &Option<TrailingComment>,
+    interface: bool,
 ) -> Option<RoutineDirectiveCst> {
     let is = |t: &AsmToken, k: &AsmTokenKind| &t.kind == k;
     let [
@@ -1245,12 +1351,16 @@ fn routine_directive(
         return None;
     }
     let (tapes, tapes_span) = canonical_u32(tapes_tok)?;
-    let [inner @ .., rparen] = rest else {
-        return None;
-    };
-    if !is(rparen, &AsmTokenKind::RParen) || inner.len().is_multiple_of(2) {
+    // The alpha list ends at the first `)`; what follows it is the
+    // optional interface tail.
+    let close = rest
+        .iter()
+        .position(|t| matches!(t.kind, AsmTokenKind::RParen))?;
+    let (inner, rparen) = (&rest[..close], &rest[close]);
+    if inner.len().is_multiple_of(2) {
         return None; // `()`, a trailing comma, or a doubled one
     }
+    let (exits, noreturn) = routine_tail(&rest[close + 1..], interface)?;
     let mut alpha = Vec::with_capacity(inner.len() / 2 + 1);
     for (i, tok) in inner.iter().enumerate() {
         if i % 2 == 0 {
@@ -1271,6 +1381,185 @@ fn routine_directive(
             rparen.line,
             rparen.col + rparen.len,
         ),
+        exits,
+        noreturn,
+        span,
+        trailing: trailing.clone(),
+    })
+}
+
+/// A `.routine`'s parsed interface tail: the `exits=` value with its
+/// span, and the `noreturn` keyword's span.
+type RoutineTail = (Option<(u32, Span)>, Option<Span>);
+
+/// The `.routine` line's optional interface tail: `[, exits=<int>]
+/// [, noreturn]`, in that fixed order and each at most once
+/// (docs/formats.md (routine interfaces)). An empty tail is the
+/// signature-only form every dialect writes. `None` = anything else,
+/// which degrades the whole directive to a Line — including any tail at
+/// all without [`AsmCaps::interface`], where the fields are not part of
+/// the grammar.
+fn routine_tail(tail: &[AsmToken], interface: bool) -> Option<RoutineTail> {
+    if tail.is_empty() {
+        return Some((None, None));
+    }
+    if !interface {
+        return None;
+    }
+    let mut rest = tail;
+    let mut exits = None;
+    if let [comma, kw, eq, value, after @ ..] = rest
+        && matches!(comma.kind, AsmTokenKind::Comma)
+        && word_text(kw) == Some("exits")
+        && matches!(eq.kind, AsmTokenKind::Eq)
+    {
+        exits = Some(canonical_u32(value)?);
+        rest = after;
+    }
+    let noreturn = match rest {
+        [] => None,
+        [comma, kw]
+            if matches!(comma.kind, AsmTokenKind::Comma) && word_text(kw) == Some("noreturn") =>
+        {
+            Some(kw.span())
+        }
+        _ => return None,
+    };
+    Some((exits, noreturn))
+}
+
+/// `.param <name>, (<glyphs>)[, writes=(…)][, enters=(…)][, leaves=(…)]
+/// [, opaque]` (docs/formats.md (routine interfaces)). The three glyph
+/// suffixes come in that fixed order and appear at most once each;
+/// `opaque` is last. Every group is captured verbatim between its
+/// parens and decoded by [`crate::formats::glyphs::parse_glyph_list`],
+/// so ranges and the two escapes come along for free. `None` = not
+/// structurally exact; the caller degrades the line to a plain Line
+/// (mirror `.func`).
+fn param_directive(
+    src: &ItemText<'_>,
+    body: &[AsmToken],
+    span: Span,
+    trailing: &Option<TrailingComment>,
+) -> Option<ParamDirectiveCst> {
+    let [name_tok, comma, rest @ ..] = &body[1..] else {
+        return None;
+    };
+    let name = word_text(name_tok)?;
+    if !matches!(comma.kind, AsmTokenKind::Comma) {
+        return None;
+    }
+    // The tape's own alphabet: never empty — a tape has at least one
+    // glyph, and `()` there is a malformed line, not the empty set.
+    let (glyphs, glyphs_span, mut tail) = glyph_group(src, rest, false)?;
+    let mut suffixes: [Option<(Vec<String>, Span)>; 3] = [None, None, None];
+    for (slot, key) in suffixes.iter_mut().zip(["writes", "enters", "leaves"]) {
+        let [comma, kw, after @ ..] = tail else {
+            continue;
+        };
+        if !matches!(comma.kind, AsmTokenKind::Comma) || word_text(kw) != Some(key) {
+            continue;
+        }
+        // Past the keyword the suffix is committed: a malformed one
+        // degrades the line rather than falling through to the next key.
+        let [eq, group @ ..] = after else {
+            return None;
+        };
+        if !matches!(eq.kind, AsmTokenKind::Eq) {
+            return None;
+        }
+        let (list, list_span, rest) = glyph_group(src, group, true)?;
+        *slot = Some((list, list_span));
+        tail = rest;
+    }
+    let opaque = match tail {
+        [] => None,
+        [comma, kw]
+            if matches!(comma.kind, AsmTokenKind::Comma) && word_text(kw) == Some("opaque") =>
+        {
+            Some(kw.span())
+        }
+        _ => return None,
+    };
+    let [writes, enters, leaves] = suffixes;
+    Some(ParamDirectiveCst {
+        name: name.to_string(),
+        name_span: name_tok.span(),
+        glyphs,
+        glyphs_span,
+        writes: writes.as_ref().map(|(list, _)| list.clone()),
+        writes_span: writes.map(|(_, span)| span),
+        enters: enters.as_ref().map(|(list, _)| list.clone()),
+        enters_span: enters.map(|(_, span)| span),
+        leaves: leaves.as_ref().map(|(list, _)| list.clone()),
+        leaves_span: leaves.map(|(_, span)| span),
+        opaque,
+        span,
+        trailing: trailing.clone(),
+    })
+}
+
+/// A parenthesized glyph list at the head of `tokens`: its decoded
+/// glyphs, the whole `(..)` span, and the tokens after it.
+/// `allow_empty` admits `()` as the written empty list — the shape
+/// `writes=()` needs and `enters=()`/`leaves=()` are rejected in
+/// lowering, not here (shaping stays structural). `None` = no group
+/// here, or interior text that is not a glyph list.
+fn glyph_group<'a>(
+    src: &ItemText<'_>,
+    tokens: &'a [AsmToken],
+    allow_empty: bool,
+) -> Option<(Vec<String>, Span, &'a [AsmToken])> {
+    let [lparen, rest @ ..] = tokens else {
+        return None;
+    };
+    if !matches!(lparen.kind, AsmTokenKind::LParen) {
+        return None;
+    }
+    let close = rest
+        .iter()
+        .position(|t| matches!(t.kind, AsmTokenKind::RParen))?;
+    let rparen = &rest[close];
+    let glyphs = if close == 0 && allow_empty {
+        Vec::new()
+    } else {
+        let text = src.slice(lparen.line, lparen.col + 1, rparen.col);
+        crate::formats::glyphs::parse_glyph_list(&text).ok()?
+    };
+    let span = Span::new(
+        lparen.line,
+        lparen.col,
+        rparen.line,
+        rparen.col + rparen.len,
+    );
+    Some((glyphs, span, &rest[close + 1..]))
+}
+
+/// `.graph <name>, <digest>` / `.grafted <name>, <digest>`
+/// (docs/formats.md (routine interfaces)). The digest is a canonically
+/// spelled u32 — decimal, the only integer literal this grammar has, so
+/// reprinting the parsed value alters no token's text. `None` = not
+/// structurally exact; the caller degrades the line to a plain Line.
+fn digest_directive(
+    grafted: bool,
+    body: &[AsmToken],
+    span: Span,
+    trailing: &Option<TrailingComment>,
+) -> Option<DigestDirectiveCst> {
+    let [name_tok, comma, digest_tok] = &body[1..] else {
+        return None;
+    };
+    let name = word_text(name_tok)?;
+    if !matches!(comma.kind, AsmTokenKind::Comma) {
+        return None;
+    }
+    let (digest, digest_span) = canonical_u32(digest_tok)?;
+    Some(DigestDirectiveCst {
+        grafted,
+        name: name.to_string(),
+        name_span: name_tok.span(),
+        digest,
+        digest_span,
         span,
         trailing: trailing.clone(),
     })
@@ -2185,6 +2474,206 @@ L1:     rgt
         assert!(matches!(&cst.items[0].kind, AsmItemKind::Raw(_)));
     }
 
+    // -- Interface directives (caps.interface) -------------------------
+
+    /// [`caps_all`] plus the interface cap — the tier the `.param` and
+    /// digest directives shape under. The glyph groups ride the rept
+    /// cap's parens, exactly as `.routine`'s alpha list does.
+    fn caps_interface() -> AsmCaps {
+        AsmCaps {
+            interface: true,
+            ..caps_all()
+        }
+    }
+
+    #[test]
+    fn shapes_the_routine_tail() {
+        let src = ".routine main, tapes=1, alpha=(2), exits=3, noreturn ; sig\n";
+        let cst = parse_asm_cst_with(src, caps_interface());
+        let AsmItemKind::RoutineDirective(r) = &cst.items[0].kind else {
+            panic!("not a routine directive: {:?}", cst.items[0].kind)
+        };
+        assert_eq!(r.exits, Some((3, Span::new(1, 42, 1, 43))));
+        assert_eq!(r.noreturn, Some(Span::new(1, 45, 1, 53)));
+        assert_eq!(r.span, Span::new(1, 1, 1, 53)); // excludes the comment
+        assert_eq!(trailing_text(&r.trailing), Some("; sig"));
+
+        // Each half on its own, and the tail-less form.
+        for (src, exits, noreturn) in [
+            (".routine m, tapes=1, alpha=(2), exits=0\n", Some(0), false),
+            (".routine m, tapes=1, alpha=(2), noreturn\n", None, true),
+            (".routine m, tapes=1, alpha=(2)\n", None, false),
+        ] {
+            let cst = parse_asm_cst_with(src, caps_interface());
+            let AsmItemKind::RoutineDirective(r) = &cst.items[0].kind else {
+                panic!("not a routine directive: {src:?}")
+            };
+            assert_eq!(r.exits.map(|(v, _)| v), exits, "{src:?}");
+            assert_eq!(r.noreturn.is_some(), noreturn, "{src:?}");
+        }
+    }
+
+    #[test]
+    fn the_routine_tail_needs_the_interface_cap() {
+        // Without the cap the fields are not part of the directive at
+        // all: the line degrades to a Line, exactly as any other tail.
+        for src in [
+            ".routine m, tapes=1, alpha=(2), exits=1\n",
+            ".routine m, tapes=1, alpha=(2), noreturn\n",
+        ] {
+            let cst = parse_asm_cst_with(src, caps_all());
+            assert!(
+                matches!(&cst.items[0].kind, AsmItemKind::Line(l)
+                    if l.instr.as_ref().unwrap().word == ".routine"),
+                "{src:?} must degrade without the interface cap: {:?}",
+                cst.items[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_routine_tails_stay_lines() {
+        for src in [
+            ".routine m, tapes=1, alpha=(2), noreturn, exits=1", // wrong order
+            ".routine m, tapes=1, alpha=(2), exits=1, exits=2",  // twice
+            ".routine m, tapes=1, alpha=(2), noreturn, noreturn",
+            ".routine m, tapes=1, alpha=(2), exits=01", // non-canonical
+            ".routine m, tapes=1, alpha=(2), exits",    // no value
+            ".routine m, tapes=1, alpha=(2) noreturn",  // no comma
+        ] {
+            let cst = parse_asm_cst_with(src, caps_interface());
+            assert!(
+                matches!(&cst.items[0].kind, AsmItemKind::Line(l)
+                    if l.instr.as_ref().unwrap().word == ".routine"),
+                "{src:?} must degrade to a Line: {:?}",
+                cst.items[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn shapes_param_directive_with_every_suffix() {
+        let src = ".param num, ('0'..'2'), writes=('1'), enters=('0'), leaves=('2'), opaque ; p\n";
+        let cst = parse_asm_cst_with(src, caps_interface());
+        let AsmItemKind::ParamDirective(p) = &cst.items[0].kind else {
+            panic!("not a param directive: {:?}", cst.items[0].kind)
+        };
+        assert_eq!(p.name, "num");
+        assert_eq!(p.name_span, Span::new(1, 8, 1, 11));
+        // The glyph group is decoded, so a range comes along for free.
+        assert_eq!(p.glyphs, vec!["0", "1", "2"]);
+        assert_eq!(p.glyphs_span, Span::new(1, 13, 1, 23));
+        assert_eq!(p.writes.as_deref(), Some(&["1".to_string()][..]));
+        assert_eq!(p.enters.as_deref(), Some(&["0".to_string()][..]));
+        assert_eq!(p.leaves.as_deref(), Some(&["2".to_string()][..]));
+        assert!(p.opaque.is_some());
+        assert_eq!(p.span, Span::new(1, 1, 1, 73)); // excludes the comment
+        assert_eq!(trailing_text(&p.trailing), Some("; p"));
+    }
+
+    #[test]
+    fn shapes_param_directive_without_suffixes() {
+        let cst = parse_asm_cst_with(".param t, ('_', 'a')\n", caps_interface());
+        let AsmItemKind::ParamDirective(p) = &cst.items[0].kind else {
+            panic!("not a param directive: {:?}", cst.items[0].kind)
+        };
+        assert_eq!(p.glyphs, vec!["_", "a"]);
+        // An absent suffix is `None` — distinct from a written empty one.
+        assert_eq!(p.writes, None);
+        assert_eq!(p.enters, None);
+        assert_eq!(p.leaves, None);
+        assert!(p.opaque.is_none());
+        // A written empty list IS shaped; lowering rules on each kind.
+        let cst = parse_asm_cst_with(".param t, ('_'), writes=(), enters=()\n", caps_interface());
+        let AsmItemKind::ParamDirective(p) = &cst.items[0].kind else {
+            panic!("not a param directive: {:?}", cst.items[0].kind)
+        };
+        assert_eq!(p.writes.as_deref(), Some(&[][..]));
+        assert_eq!(p.enters.as_deref(), Some(&[][..]));
+    }
+
+    #[test]
+    fn malformed_param_directives_stay_lines() {
+        for src in [
+            ".param num",                                 // no glyph group
+            ".param num, '_'",                            // group unparenthesized
+            ".param num ('_')",                           // no comma
+            ".param num, ('_', '_')",                     // a duplicate glyph
+            ".param num, ()",                             // an empty alphabet
+            ".param num, ('_'), bogus=('a')",             // unknown suffix
+            ".param num, ('_'), enters=('_'), writes=()", // wrong order
+            ".param num, ('_'), writes=('_'), writes=()", // twice
+            ".param num, ('_'), opaque, opaque",          // twice
+            ".param num, ('_'), opaque, leaves=('_')",    // `opaque` is last
+            ".param num, ('_') writes=('_')",             // no comma
+        ] {
+            let cst = parse_asm_cst_with(src, caps_interface());
+            assert!(
+                matches!(&cst.items[0].kind, AsmItemKind::Line(l)
+                    if l.instr.as_ref().unwrap().word == ".param"),
+                "{src:?} must degrade to a Line: {:?}",
+                cst.items[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn shapes_digest_directives() {
+        for (src, grafted) in [
+            (".graph lib::g, 42 ; d\n", false),
+            (".grafted h, 7\n", true),
+        ] {
+            let cst = parse_asm_cst_with(src, caps_interface());
+            let AsmItemKind::DigestDirective(d) = &cst.items[0].kind else {
+                panic!("not a digest directive: {:?}", cst.items[0].kind)
+            };
+            assert_eq!(d.grafted, grafted, "{src:?}");
+        }
+        let cst = parse_asm_cst_with(".graph lib::g, 42 ; d\n", caps_interface());
+        let AsmItemKind::DigestDirective(d) = &cst.items[0].kind else {
+            panic!("not a digest directive")
+        };
+        assert_eq!(d.name, "lib::g");
+        assert_eq!(d.name_span, Span::new(1, 8, 1, 14));
+        assert_eq!(d.digest, 42);
+        assert_eq!(d.digest_span, Span::new(1, 16, 1, 18));
+        assert_eq!(d.span, Span::new(1, 1, 1, 18)); // excludes the comment
+        assert_eq!(trailing_text(&d.trailing), Some("; d"));
+    }
+
+    #[test]
+    fn malformed_digest_directives_stay_lines() {
+        for src in [
+            ".graph g",         // no digest
+            ".graph g 1",       // no comma
+            ".graph g, 007",    // non-canonical spelling
+            ".graph g, 0x2A",   // the asm lexer has no hex literal
+            ".grafted g, 1, 2", // one digest only
+            ".grafted 1, 2",    // the name is a word
+        ] {
+            let cst = parse_asm_cst_with(src, caps_interface());
+            assert!(
+                matches!(&cst.items[0].kind, AsmItemKind::Line(l)
+                    if l.instr.as_ref().unwrap().word.starts_with(".graf")
+                        || l.instr.as_ref().unwrap().word == ".graph"),
+                "{src:?} must degrade to a Line: {:?}",
+                cst.items[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn interface_directives_need_their_cap() {
+        // Without the cap the words are ordinary instruction words: the
+        // `.param` line's quotes stay Junk (so it is Raw), and a digest
+        // line shapes as a plain Line for mnemonic lookup to reject.
+        let cst = parse_asm_cst_with(".param t, ('_', 'a')\n", caps_all());
+        assert!(matches!(&cst.items[0].kind, AsmItemKind::Raw(_)));
+        let cst = parse_asm_cst_with(".graph g, 1\n", caps_all());
+        assert!(matches!(&cst.items[0].kind, AsmItemKind::Line(l)
+            if l.instr.as_ref().unwrap().word == ".graph"));
+    }
+
     // -- Frame-descriptor directives (caps.tables + rept + arrows) ------
 
     fn as_frame(item: &AsmItem) -> &FrameDirectiveCst {
@@ -2645,6 +3134,16 @@ F0: .frame tapes=(3, 0)
             ROW_WORD | TARGETS_WORD | TARGET_WORD => {
                 format!(".section tables\nT: {word}\n.section code\n.func probe\nstop\n")
             }
+            // The interface tier. `.param` rides its `.routine`; the two
+            // digest directives stand on their own ahead of the first
+            // `.func`, answered — when a tier lacks the caps the glyph
+            // group needs — by lowering's own interface complaints.
+            PARAM_WORD => {
+                ".routine probe, tapes=1, alpha=(2)\n.param t, ('_', 'a')\n.func probe\nstop\n"
+                    .to_string()
+            }
+            GRAPH_WORD => ".graph g, 1\n.func probe\nstop\n".to_string(),
+            GRAFTED_WORD => ".grafted g, 1\n.func probe\nstop\n".to_string(),
             _ => panic!("no probe for `{word}`"),
         }
     }
@@ -2667,7 +3166,7 @@ F0: .frame tapes=(3, 0)
             interface: true,
         };
         let everything = recognized_directives(all_on);
-        assert_eq!(everything.len(), 13, "the audited directive surface");
+        assert_eq!(everything.len(), 16, "the audited directive surface");
         let tiers = [
             AsmCaps::default(),
             AsmCaps {

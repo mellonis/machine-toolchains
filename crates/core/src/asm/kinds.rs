@@ -61,6 +61,8 @@ pub enum AsmKind {
     RoutineDirective = 39,
     Volatile = 40,
     FrameDirective = 41,
+    ParamDirective = 42,
+    DigestDirective = 43,
 }
 
 impl From<AsmKind> for SyntaxKind {
@@ -109,6 +111,8 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
         k if k == AsmKind::RoutineDirective.into() => "ROUTINE_DIRECTIVE",
         k if k == AsmKind::Volatile.into() => "VOLATILE",
         k if k == AsmKind::FrameDirective.into() => "FRAME_DIRECTIVE",
+        k if k == AsmKind::ParamDirective.into() => "PARAM_DIRECTIVE",
+        k if k == AsmKind::DigestDirective.into() => "DIGEST_DIRECTIVE",
         _ => "?",
     }
 }
@@ -197,6 +201,8 @@ mod tests {
             AsmKind::RoutineDirective,
             AsmKind::Volatile,
             AsmKind::FrameDirective,
+            AsmKind::ParamDirective,
+            AsmKind::DigestDirective,
         ];
         let mut vals: Vec<u16> = all.iter().map(|k| *k as u16).collect();
         vals.sort_unstable();

@@ -495,6 +495,8 @@ fn item_end_pos(item: &AsmItem, line: u32) -> Pos {
         AsmItemKind::TableDirective(d) => d.span.end,
         AsmItemKind::Rept(r) => r.span.end,
         AsmItemKind::RoutineDirective(r) => r.span.end,
+        AsmItemKind::ParamDirective(p) => p.span.end,
+        AsmItemKind::DigestDirective(d) => d.span.end,
         AsmItemKind::FrameDirective(d) => d.span().end,
         AsmItemKind::Comment(c) => Pos {
             line,

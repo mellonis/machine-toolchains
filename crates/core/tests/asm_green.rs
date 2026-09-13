@@ -93,6 +93,12 @@ fn holds_location_laws(src: &str, cst: &AsmCst, root: &SyntaxNode) {
             AsmItemKind::RoutineDirective(x) => {
                 assert_eq!((line, col), (x.span.start.line, x.span.start.col))
             }
+            AsmItemKind::ParamDirective(x) => {
+                assert_eq!((line, col), (x.span.start.line, x.span.start.col))
+            }
+            AsmItemKind::DigestDirective(x) => {
+                assert_eq!((line, col), (x.span.start.line, x.span.start.col))
+            }
             AsmItemKind::Volatile(x) => {
                 assert_eq!((line, col), (x.span.start.line, x.span.start.col))
             }
@@ -138,6 +144,10 @@ fn tma_shapes_round_trip_under_full_caps() {
         ".section tables\n.row [1, 2, 3]\n.targets L1, L2,\n        L3\n",
         ".rept v, 0, 7\n        wr [{v}]\n.endr ; done\n",
         ".routine r, tapes=2, alpha=(3, 5)\n",
+        ".routine r, tapes=1, alpha=(3), exits=2, noreturn\n",
+        ".param num, ('_', '0', '1'), writes=('0'), enters=('1'), leaves=('0'), opaque\n",
+        ".param wide, ('0'..'9') ; a range\n",
+        ".graph lib::g, 42\n.grafted other::h, 7\n",
         ".volatile\n",
         ".frame F\n.map 1 -> 2, 3 => 4\n.exits L1, L2\n",
         ".rept v, 0, 1\n; unterminated block degrades\n",
@@ -197,6 +207,9 @@ fn asm_fragment() -> impl Strategy<Value = &'static str> {
         ".section code",
         ".row [1, *, -]",
         ".volatile",
+        ".param t, ('_', 'a'), opaque",
+        ".graph g, 1",
+        ".grafted h, 2",
         "F: .frame tapes=(0, 1)",
         ".map 0, rmap=(1 -> 2)",
         "",

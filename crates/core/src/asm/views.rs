@@ -36,8 +36,10 @@ ast_node!(pub struct ReptView: AsmKind::Rept.into());
 ast_node!(pub struct RoutineDirectiveView: AsmKind::RoutineDirective.into());
 ast_node!(pub struct VolatileView: AsmKind::Volatile.into());
 ast_node!(pub struct FrameDirectiveView: AsmKind::FrameDirective.into());
+ast_node!(pub struct ParamDirectiveView: AsmKind::ParamDirective.into());
+ast_node!(pub struct DigestDirectiveView: AsmKind::DigestDirective.into());
 
-/// One item node, in whichever of the nine shapes the emitter gave it —
+/// One item node, in whichever of the eleven shapes the emitter gave it —
 /// the same set as [`AsmItemKind`] minus `Comment`, which is trivia in
 /// the tree, not a node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,8 @@ pub enum ItemView {
     RoutineDirective(RoutineDirectiveView),
     Volatile(VolatileView),
     FrameDirective(FrameDirectiveView),
+    ParamDirective(ParamDirectiveView),
+    DigestDirective(DigestDirectiveView),
 }
 
 impl ItemView {
@@ -77,6 +81,10 @@ impl ItemView {
             ItemView::Volatile(VolatileView::cast(node)?)
         } else if kind == AsmKind::FrameDirective.into() {
             ItemView::FrameDirective(FrameDirectiveView::cast(node)?)
+        } else if kind == AsmKind::ParamDirective.into() {
+            ItemView::ParamDirective(ParamDirectiveView::cast(node)?)
+        } else if kind == AsmKind::DigestDirective.into() {
+            ItemView::DigestDirective(DigestDirectiveView::cast(node)?)
         } else {
             return None;
         })
@@ -93,6 +101,8 @@ impl ItemView {
             ItemView::RoutineDirective(v) => v.syntax(),
             ItemView::Volatile(v) => v.syntax(),
             ItemView::FrameDirective(v) => v.syntax(),
+            ItemView::ParamDirective(v) => v.syntax(),
+            ItemView::DigestDirective(v) => v.syntax(),
         }
     }
 }

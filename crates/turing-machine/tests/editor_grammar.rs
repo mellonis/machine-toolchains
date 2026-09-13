@@ -265,6 +265,16 @@ fn tma_grammar_directives_match_the_recognized_inventory() {
                 format!(".section tables\nT:      {directive}\n.section code\n.func probe\nstp\n")
             }
             ".section" => ".section code\n.func probe\nstp\n".to_string(),
+            // The interface directives: `.param` describes a tape of the
+            // `.routine` it follows, and a digest directive obliges every
+            // function to carry its whole interface.
+            ".param" => {
+                ".routine probe, tapes=1, alpha=(2)\n.param t, ('_', 'a')\n.func probe\nstp\n"
+                    .to_string()
+            }
+            ".graph" | ".grafted" => format!(
+                "{directive} g, 1\n.routine probe, tapes=1, alpha=(2)\n.param t, ('_', 'a')\n.func probe\nstp\n"
+            ),
             _ => format!(".func probe\n{directive}\nstp\n"),
         };
         if let Err(e) = mtc_turing_machine::asm::assemble(&source, false)

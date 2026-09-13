@@ -39,6 +39,8 @@ pub(super) fn semantic_tokens(state: &PmaDocState) -> Vec<SemToken> {
             | AsmItemKind::TableDirective(_)
             | AsmItemKind::Rept(_)
             | AsmItemKind::RoutineDirective(_)
+            | AsmItemKind::ParamDirective(_)
+            | AsmItemKind::DigestDirective(_)
             | AsmItemKind::FrameDirective(_) => {}
         }
     }
