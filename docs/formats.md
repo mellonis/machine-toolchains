@@ -600,7 +600,9 @@ Fh: .frame  tapes=(2, 0)                 ; arity = list length; virtual k → ph
     .exits  done, alt                     ; optional, once; labels in the owning function
 ```
 
-- `.frame <name> tapes=(<p0>, …, <pk>)` opens a labeled group. The list
+- `<label>: .frame tapes=(<p0>, …, <pk>)` opens a labeled group — the
+  descriptor's name is the label in front of the directive, never an
+  operand of it. The list
   length is the **arity** (the callee's tape count, 1..=16); virtual tape
   `k` projects onto physical tape `<pk>`.
 - `.map <k>[, rmap=(…)][, wmap=(…)]` continues the group, giving virtual

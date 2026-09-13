@@ -90,8 +90,12 @@ The dialect accepts twenty mnemonics. The opcode table — each mnemonic's
 byte, operand shape, and semantics — is `docs/tmt/isa.md (instruction
 set)`. What belongs here is how they are *spelled*:
 
-- **Jump and call targets are labels**; `call` additionally accepts a
-  routine symbol. `call.s` exists in the mnemonic table for disassembly
+- **`call` targets are routine symbols, written bare** — `call @name` is
+  rejected ("call operands are already symbols; drop the `@`"). **Jump
+  targets are labels**, and `jmp` alone also takes a symbol as `jmp @name`,
+  a tail jump resolved by the linker like a call (a far `jmp` plus a
+  relocation); `jm @name`/`jnm @name` are errors — conditional branches
+  take labels only, and TM-1 has no short jump. `call.s` exists in the mnemonic table for disassembly
   display and link-time relaxation only: the assembler always emits far
   `call` and rejects `call.s <target>` in source, because the width is
   linker-selected. The linker's relaxation fixpoint narrows a far `call`

@@ -122,9 +122,7 @@ the current set of `after:` stages by naming an unknown one:
 
 ```
 $ tmt compile prog.tmc --emit-ir=after:bogus
-tmt: unknown IR stage `after:bogus` (lowered | final | after:inline |
-after:outline | after:jump-threading | after:tail-call | after:tail-merge |
-after:dce | after:dead-rows | after:dispatch-select)
+tmt: unknown IR stage `after:bogus` (lowered | final | after:inline | after:outline | after:jump-threading | after:tail-call | after:tail-merge | after:dce | after:dead-rows | after:dispatch-select)
 ```
 
 ### `--fno-<pass>` and `--foutline`

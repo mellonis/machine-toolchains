@@ -92,7 +92,7 @@ patching.
 | `0x03` | `hlt` | | halt, abnormal termination |
 | `0x04` | `lft` | | head left (latches MF) |
 | `0x05` | `rgt` | | head right (latches MF) |
-| `0x06` | `wr` | symbol vector | write symbol index to the cell (latches MF). In PM-1 always one element: `wr 1` = mark, `wr 0` = blank |
+| `0x06` | `wr` | symbol vector | write symbol index to the cell (latches MF). PM-1 defines exactly one element: `wr 1` = mark, `wr 0` = blank. The shared assembler accepts and round-trips a longer vector (`wr 1, 0`), but PM-1's lowering rejects it at run time with a `BadOperand` trap — the same holds for `wrl` and `wrr` |
 | `0x07` | `wrl` | symbol vector | write symbol index, then head left (latches MF after the move) — a fused `wr`+`lft` |
 | `0x08` | `jmp` | rel i32 | unconditional jump |
 | `0x09` | `jm` | rel i32 | jump if match (MF = 1) |
