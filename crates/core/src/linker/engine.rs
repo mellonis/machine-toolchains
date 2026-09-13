@@ -1158,8 +1158,12 @@ mod tests {
             symbol: 0,
             binding: vec![TapeBinding {
                 caller_tape: 0,
+                param: None,
+                map_written: false,
+                open: false,
                 pairs,
             }],
+            exits: Vec::new(),
         }
     }
 
@@ -1176,6 +1180,7 @@ mod tests {
         let record = one_tape(vec![MapPair {
             src: 2,
             dst: 1,
+            dst_label: None,
             one_way: true,
         }]);
         let composite = validate_binding(&caller, &callee, "callee", &record)
@@ -1220,6 +1225,7 @@ mod tests {
         let record = one_tape(vec![MapPair {
             src: 2,
             dst: 1,
+            dst_label: None,
             one_way: false,
         }]);
         let err = validate_binding(&caller, &callee, "callee", &record).unwrap_err();

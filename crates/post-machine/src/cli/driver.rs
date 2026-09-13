@@ -761,7 +761,9 @@ enum Unit {
         scan: SourceScan,
     },
     Object {
-        object: ObjectFile,
+        /// Boxed: an `ObjectFile` dwarfs a `Source` unit's fields, and an
+        /// unboxed variant would size every unit in the vector by it.
+        object: Box<ObjectFile>,
         /// The input's source file, for map-sidecar provenance
         /// (docs/formats.md (map sidecar)): the `.pma` path for an
         /// assembled input, `None` for a prebuilt `.pmo` — an object
@@ -862,12 +864,12 @@ fn load_units(
                     write_object(path, &object)?;
                 }
                 units.push(Unit::Object {
-                    object,
+                    object: Box::new(object),
                     source: Some(path.clone()),
                 });
             }
             _ => units.push(Unit::Object {
-                object: read_object(path)?,
+                object: Box::new(read_object(path)?),
                 source: None,
             }),
         }
@@ -891,7 +893,7 @@ fn compile_units(
         match unit {
             Unit::Object { object, source } => {
                 unit_sources.push(source);
-                objects.push(object);
+                objects.push(*object);
             }
             Unit::Source { path, text, .. } => {
                 let out = compile_source(&text, options.clone()).map_err(|e| {
@@ -1016,7 +1018,7 @@ mod tests {
 
     fn object(pma: &str) -> Unit {
         Unit::Object {
-            object: crate::asm::assemble(pma, false).expect("the fixture assembles"),
+            object: Box::new(crate::asm::assemble(pma, false).expect("the fixture assembles")),
             source: None,
         }
     }

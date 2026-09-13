@@ -14,6 +14,11 @@ pub const OBJECT_FORMAT_VERSION_V2: u16 = 2;
 /// program-volatile header bit. An object with any of those present
 /// serializes as v3 (see `is_v2_shape`); the reader accepts both v2 and v3.
 pub const OBJECT_FORMAT_VERSION_V3: u16 = 3;
+/// Version 4 appends the interface section (flags bit 5), the
+/// graft-provenance list, and widens bound-call records with parameter
+/// names, glyph labels, the written-empty-map flag and exit vectors
+/// (docs/formats.md (.pmo)).
+pub const OBJECT_FORMAT_VERSION_V4: u16 = 4;
 const CRC_OFFSET: usize = 7;
 const EXTERNAL_BLOB: u32 = 0xFFFF_FFFF;
 const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
@@ -27,6 +32,13 @@ const FLAG_HAS_VARIANTS: u8 = 0b0000_1000;
 /// entry symbol; carried here rather than derived so a tag-free legacy
 /// object still links unambiguously as non-volatile).
 const FLAG_PROGRAM_VOLATILE: u8 = 0b0001_0000;
+/// v4: the interface section is present (docs/formats.md (routine interfaces)).
+#[allow(dead_code)] // used by the v4 writer/reader, which lands with the wire format
+const FLAG_HAS_INTERFACE: u8 = 0b0010_0000;
+/// "No string" in a string-index field (the sentinel `EXTERNAL_BLOB` already
+/// uses for "no blob").
+#[allow(dead_code)] // used by the v4 writer/reader, which lands with the wire format
+const NO_STRING: u32 = 0xFFFF_FFFF;
 
 /// In-memory object: symbols + code blobs + call relocations (+ optional
 /// per-blob debug info).
@@ -44,13 +56,19 @@ const FLAG_PROGRAM_VOLATILE: u8 = 0b0001_0000;
 /// - `debug`, when present, parallels `blobs` one-to-one, with label and
 ///   line offsets on instruction boundaries;
 /// - `variants`, when present, parallels `blobs` one-to-one — one tag per
-///   blob, same indexing as `debug`/`signatures`/`table_blobs`.
+///   blob, same indexing as `debug`/`signatures`/`table_blobs`;
+/// - a tape binding marked `open` also has `map_written` set — an open map
+///   is a written map whose listed pairs are not the whole of it.
 ///
 /// The six v3 fields (`signatures`, `table_blobs`, `table_fixups`,
 /// `bound_calls`, `variants`, `program_volatile`) are absent/default in a
 /// v2-shape object — the shape PM-1's compiler emitted before volatile
 /// builds, serialized byte-for-byte as v2. When any is present/set the
 /// object serializes as v3 (see `is_v2_shape`).
+///
+/// The two v4 fields (`interface`, `grafts`) and the v4-only parts of a
+/// bound call are likewise absent/default in a v2- or v3-shape object;
+/// `is_v4_shape` reports when any of them is present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectFile {
     pub arch: u8,
@@ -81,6 +99,12 @@ pub struct ObjectFile {
     /// independent of `variants` — an object can set this without carrying
     /// variant tags of its own.
     pub program_volatile: bool,
+    /// The interface section, present iff flags bit 5 (v4). Requires
+    /// `signatures` to be present too: an interface describes a signed routine.
+    pub interface: Option<Interface>,
+    /// Library graphs this unit spliced, with the digest of each body it
+    /// spliced (v4; the linker compares against the exporter's `Interface::graphs`).
+    pub grafts: Vec<GraftProvenance>,
 }
 
 /// A code blob's build variant under volatile builds: which lowering(s) of
@@ -147,10 +171,16 @@ pub struct TableFixup {
 /// One caller-symbol → callee-symbol map entry. `one_way` = read-only
 /// (collapse allowed, excluded from write-back; the `=>` pairs of a tape
 /// binding).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapPair {
     pub src: u32,
+    /// The callee-side index. Ignored when `dst_label` is `Some` — the
+    /// linker resolves the label against the callee's declared glyphs and
+    /// fills this in.
     pub dst: u32,
+    /// A glyph label the linker resolves against the callee's interface
+    /// (v4 only); `None` is the positional form.
+    pub dst_label: Option<String>,
     pub one_way: bool,
 }
 
@@ -159,6 +189,17 @@ pub struct MapPair {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TapeBinding {
     pub caller_tape: u8, // < 16
+    /// The callee parameter this entry binds (v4 only); `None` is the
+    /// positional form, where the entry's position is the callee tape.
+    pub param: Option<String>,
+    /// The map was written out — `1{}` (true) versus `1` (false). A
+    /// distinction only v4 carries: an omitted map is index identity,
+    /// a written empty one is the empty map.
+    pub map_written: bool,
+    /// The map ends in `*`: the pairs listed are not the whole map, and
+    /// the rest stays open for the linker to fill (v4 only). Implies
+    /// `map_written` — an open map is a written one.
+    pub open: bool,
     pub pairs: Vec<MapPair>,
 }
 
@@ -172,6 +213,67 @@ pub struct BoundCall {
     pub offset: u32,
     pub symbol: u32,
     pub binding: Vec<TapeBinding>,
+    /// Where the callee's exits land: blob-relative code offsets in the
+    /// calling blob, one per state parameter (v4 only).
+    pub exits: Vec<u32>,
+}
+
+/// One routine's interface, parallel to `blobs`
+/// (docs/formats.md (routine interfaces)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineInterface {
+    /// Parameter names, one per virtual tape; len == the signature's arity.
+    pub params: Vec<String>,
+    /// Per-tape glyph labels; `glyphs[k].len()` == the signature's
+    /// `cardinalities[k]`.
+    pub glyphs: Vec<Vec<String>>,
+    /// Per-tape written set: each element a subset of `glyphs[k]`.
+    pub writes: Vec<Vec<String>>,
+    /// Per-tape entry contract: the glyphs the head may stand on when the
+    /// routine is entered. len == arity; `None` = no clause, and a `Some`
+    /// list is never empty.
+    pub enters: Vec<Option<Vec<String>>>,
+    /// Per-tape exit contract, same shape as `enters`.
+    pub leaves: Vec<Option<Vec<String>>>,
+    /// Per-tape opacity: every state that reads this tape reads it as `*`,
+    /// so the routine never discriminates its glyphs. len == arity.
+    pub opaque: Vec<bool>,
+    /// Number of state parameters — the exits a caller must supply.
+    pub exits: u8,
+    /// False for a `noreturn` routine: control never returns to the caller.
+    pub returns: bool,
+}
+
+/// An alphabet the unit exports by name, with its glyphs in band order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedAlphabet {
+    pub name: String,
+    pub glyphs: Vec<String>,
+}
+
+/// A graph the unit exports, with the digest of the body a grafting unit
+/// must have spliced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedGraph {
+    pub name: String,
+    pub digest: u32,
+}
+
+/// The object's interface section (flags bit 5).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Interface {
+    /// Parallel to `blobs`, like `signatures`.
+    pub routines: Vec<RoutineInterface>,
+    pub alphabets: Vec<ExportedAlphabet>,
+    pub graphs: Vec<ExportedGraph>,
+}
+
+/// A library graph this unit spliced, with the digest of the body it
+/// spliced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraftProvenance {
+    pub graph: String,
+    pub digest: u32,
 }
 
 /// Build-time string pool: dedups names, hands out u32 indices.
@@ -197,8 +299,9 @@ impl StringPool {
 
 impl ObjectFile {
     /// Construct a v2-shape object: the six v3 fields absent
-    /// (`None`/`None`/empty/empty/`None`/`false`). This is what PM-1's compiler and the
-    /// assembler emit — `is_v2_shape` holds for the result.
+    /// (`None`/`None`/empty/empty/`None`/`false`), and the two v4 fields
+    /// absent too. This is what PM-1's compiler and the assembler emit —
+    /// `is_v2_shape` holds for the result.
     pub fn v2(
         arch: u8,
         symbols: Vec<Symbol>,
@@ -218,6 +321,8 @@ impl ObjectFile {
             bound_calls: Vec::new(),
             variants: None,
             program_volatile: false,
+            interface: None,
+            grafts: Vec::new(),
         }
     }
 
@@ -230,6 +335,24 @@ impl ObjectFile {
             && self.bound_calls.is_empty()
             && self.variants.is_none()
             && !self.program_volatile
+    }
+
+    /// True when any v4-only content is present: an interface section, a
+    /// graft-provenance record, or a bound call carrying a parameter name,
+    /// a glyph label, a written-empty or open map, or an exit vector. Such
+    /// an object serializes as v4; anything else keeps its v2/v3 bytes.
+    pub fn is_v4_shape(&self) -> bool {
+        self.interface.is_some()
+            || !self.grafts.is_empty()
+            || self.bound_calls.iter().any(|bc| {
+                !bc.exits.is_empty()
+                    || bc.binding.iter().any(|tb| {
+                        tb.param.is_some()
+                            || tb.map_written
+                            || tb.open
+                            || tb.pairs.iter().any(|p| p.dst_label.is_some())
+                    })
+            })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -764,16 +887,24 @@ impl ObjectFile {
                             pairs.push(MapPair {
                                 src,
                                 dst,
+                                dst_label: None,
                                 one_way: flags_byte & 1 != 0,
                             });
                         }
-                        binding.push(TapeBinding { caller_tape, pairs });
+                        binding.push(TapeBinding {
+                            caller_tape,
+                            param: None,
+                            map_written: false,
+                            open: false,
+                            pairs,
+                        });
                     }
                     bound_calls.push(BoundCall {
                         blob,
                         offset,
                         symbol,
                         binding,
+                        exits: Vec::new(),
                     });
                 }
 
@@ -846,6 +977,8 @@ impl ObjectFile {
             bound_calls,
             variants,
             program_volatile: flags & FLAG_PROGRAM_VOLATILE != 0,
+            interface: None,
+            grafts: Vec::new(),
         })
     }
 }
@@ -1075,19 +1208,25 @@ mod tests {
             symbol: 0,
             binding: vec![TapeBinding {
                 caller_tape: 2,
+                param: None,
+                map_written: false,
+                open: false,
                 pairs: vec![
                     MapPair {
                         src: 1,
                         dst: 3,
+                        dst_label: None,
                         one_way: false,
                     },
                     MapPair {
                         src: 4,
                         dst: 0,
+                        dst_label: None,
                         one_way: true,
                     }, // '^' => blank
                 ],
             }],
+            exits: Vec::new(),
         }];
         obj
     }
@@ -1332,5 +1471,146 @@ mod tests {
             ObjectFile::from_bytes(&bytes),
             Err(FormatError::Malformed("v3 flags in pre-v3 object"))
         ));
+    }
+
+    fn v4_sample() -> ObjectFile {
+        let mut obj = sample();
+        obj.signatures = Some(vec![RoutineSig {
+            arity: 1,
+            cardinalities: vec![3],
+        }]);
+        obj.interface = Some(Interface {
+            routines: vec![RoutineInterface {
+                params: vec!["num".into()],
+                glyphs: vec![vec!["_".into(), "0".into(), "1".into()]],
+                writes: vec![vec!["0".into(), "1".into()]],
+                enters: vec![None],
+                leaves: vec![None],
+                opaque: vec![false],
+                exits: 0,
+                returns: true,
+            }],
+            alphabets: vec![ExportedAlphabet {
+                name: "bits".into(),
+                glyphs: vec!["_".into(), "0".into(), "1".into()],
+            }],
+            graphs: vec![ExportedGraph {
+                name: "lib::findA".into(),
+                digest: 0xDEAD_BEEF,
+            }],
+        });
+        obj.grafts = vec![GraftProvenance {
+            graph: "other::g".into(),
+            digest: 0x1234_5678,
+        }];
+        obj
+    }
+
+    #[test]
+    fn v4_shape_is_detected_and_v3_shape_stays_v3() {
+        assert!(!sample().is_v4_shape());
+        assert!(v4_sample().is_v4_shape());
+        let mut symbolic = sample();
+        symbolic.bound_calls.push(BoundCall {
+            blob: 0,
+            offset: 1,
+            symbol: 0,
+            binding: vec![TapeBinding {
+                caller_tape: 0,
+                param: Some("num".into()),
+                map_written: false,
+                open: false,
+                pairs: Vec::new(),
+            }],
+            exits: Vec::new(),
+        });
+        assert!(symbolic.is_v4_shape(), "a named binding entry needs v4");
+    }
+
+    /// The v4 flag bit is its own: overlapping an existing one would change
+    /// how a v2/v3 object reads back, and `NO_STRING` reuses the all-ones
+    /// sentinel the blob index already spells.
+    #[test]
+    fn v4_wire_constants_do_not_collide() {
+        let taken = FLAG_HAS_DEBUG
+            | FLAG_HAS_SIGNATURES
+            | FLAG_HAS_TABLES
+            | FLAG_HAS_VARIANTS
+            | FLAG_PROGRAM_VOLATILE;
+        assert_eq!(FLAG_HAS_INTERFACE & taken, 0);
+        assert_eq!(NO_STRING, EXTERNAL_BLOB);
+        assert_eq!(OBJECT_FORMAT_VERSION_V4, OBJECT_FORMAT_VERSION_V3 + 1);
+    }
+
+    /// One object per remaining `is_v4_shape` trigger: each field alone is
+    /// enough, so dropping any one disjunct from the predicate turns a case
+    /// red. The `interface`, `grafts` and `param` triggers are covered by
+    /// `v4_shape_is_detected_and_v3_shape_stays_v3`.
+    #[test]
+    fn every_v4_only_field_alone_forces_v4_shape() {
+        // A v3-shape bound call: positional, no labels, no exits.
+        let v3_call = || BoundCall {
+            blob: 0,
+            offset: 1,
+            symbol: 0,
+            binding: vec![TapeBinding {
+                caller_tape: 0,
+                param: None,
+                map_written: false,
+                open: false,
+                pairs: vec![MapPair {
+                    src: 1,
+                    dst: 2,
+                    dst_label: None,
+                    one_way: false,
+                }],
+            }],
+            exits: Vec::new(),
+        };
+        let mut plain = sample();
+        plain.bound_calls.push(v3_call());
+        assert!(!plain.is_v4_shape(), "a positional bound call stays v3");
+
+        let mut exits = sample();
+        let mut call = v3_call();
+        call.exits = vec![6]; // inside the sample blob, like any code offset
+        exits.bound_calls.push(call);
+        assert!(exits.is_v4_shape(), "an exit vector needs v4");
+
+        let mut written = sample();
+        let mut call = v3_call();
+        call.binding[0].map_written = true;
+        written.bound_calls.push(call);
+        assert!(written.is_v4_shape(), "a written-empty map needs v4");
+
+        // `open` alone, deliberately without the `map_written` it implies:
+        // setting both would let the `map_written` trigger carry this case
+        // and leave a dropped `open` disjunct undetected.
+        let mut open = sample();
+        let mut call = v3_call();
+        call.binding[0].open = true;
+        open.bound_calls.push(call);
+        assert!(open.is_v4_shape(), "an open map needs v4");
+
+        let mut labelled = sample();
+        let mut call = v3_call();
+        call.binding[0].pairs[0].dst_label = Some("1".into());
+        labelled.bound_calls.push(call);
+        assert!(labelled.is_v4_shape(), "a glyph label needs v4");
+
+        let mut grafts = sample();
+        grafts.grafts = vec![GraftProvenance {
+            graph: "other::g".into(),
+            digest: 1,
+        }];
+        assert!(grafts.is_v4_shape(), "graft provenance needs v4");
+
+        let mut interface = sample();
+        interface.signatures = Some(vec![RoutineSig {
+            arity: 1,
+            cardinalities: vec![3],
+        }]); // an interface describes a signed routine
+        interface.interface = Some(Interface::default());
+        assert!(interface.is_v4_shape(), "an interface section needs v4");
     }
 }

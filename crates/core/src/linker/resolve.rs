@@ -1032,6 +1032,7 @@ mod tests {
             offset,
             symbol,
             binding: Vec::new(),
+            exits: Vec::new(),
         });
     }
 

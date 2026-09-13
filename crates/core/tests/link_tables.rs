@@ -885,6 +885,7 @@ fn a_reachable_bound_call_without_a_signed_entry_is_missing_signature() {
         offset: 1,
         symbol: 1, // "sub"
         binding: Vec::new(),
+        exits: Vec::new(),
     });
     let e = link(
         &fake_syntax(),
@@ -907,6 +908,7 @@ fn a_bound_call_in_a_dropped_function_does_not_poison_the_link() {
         offset: 1,
         symbol: 1, // "sub"
         binding: Vec::new(),
+        exits: Vec::new(),
     });
     let out = link(
         &fake_syntax(),
@@ -936,6 +938,7 @@ fn an_unresolved_bound_callee_is_an_unresolved_error() {
         offset: 1,
         symbol: 1, // "ghost"
         binding: Vec::new(),
+        exits: Vec::new(),
     });
     let e = link(
         &fake_syntax(),

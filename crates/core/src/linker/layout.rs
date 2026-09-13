@@ -1307,6 +1307,7 @@ B:      stop
             offset: 2,
             symbol: 1, // `go`
             binding: vec![],
+            exits: Vec::new(),
         });
         let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
         assert_eq!(e, crate::linker::LinkError::MissingSignature("main".into()));

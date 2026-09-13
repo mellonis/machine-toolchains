@@ -913,6 +913,7 @@ fn assemble_function(
                             offset: blob.len() as u32,
                             symbol: sym_idx,
                             binding: binding.clone(),
+                            exits: Vec::new(),
                         });
                         blob.extend([0u8; 4]);
                     }
@@ -943,10 +944,18 @@ fn assemble_function(
 fn source_binding_to_object(b: &SourceTapeBinding) -> TapeBinding {
     TapeBinding {
         caller_tape: b.caller_tape,
+        param: None,
+        map_written: false,
+        open: false,
         pairs: b
             .pairs
             .iter()
-            .map(|&(src, dst, one_way)| MapPair { src, dst, one_way })
+            .map(|&(src, dst, one_way)| MapPair {
+                src,
+                dst,
+                dst_label: None,
+                one_way,
+            })
             .collect(),
     }
 }
@@ -2370,11 +2379,13 @@ F0: .frame tapes=(0, 1)
                 MapPair {
                     src: 1,
                     dst: 3,
+                    dst_label: None,
                     one_way: false
                 },
                 MapPair {
                     src: 2,
                     dst: 0,
+                    dst_label: None,
                     one_way: true
                 },
             ]

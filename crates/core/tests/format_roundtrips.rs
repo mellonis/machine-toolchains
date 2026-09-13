@@ -98,11 +98,17 @@ proptest! {
                 symbol: 0,
                 binding: vec![TapeBinding {
                     caller_tape,
-                    pairs: vec![MapPair { src, dst, one_way }],
+                    param: None,
+                    map_written: false,
+                    open: false,
+                    pairs: vec![MapPair { src, dst, dst_label: None, one_way }],
                 }],
+                exits: Vec::new(),
             }],
             variants: None,
             program_volatile: false,
+            interface: None,
+            grafts: Vec::new(),
         };
         prop_assert_eq!(ObjectFile::from_bytes(&obj.to_bytes()).unwrap(), obj);
     }
@@ -133,6 +139,8 @@ proptest! {
             bound_calls: vec![],
             variants: Some(variants),
             program_volatile,
+            interface: None,
+            grafts: Vec::new(),
         };
         prop_assert_eq!(ObjectFile::from_bytes(&obj.to_bytes()).unwrap(), obj);
     }

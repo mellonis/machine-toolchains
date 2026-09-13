@@ -651,11 +651,22 @@ mod tests {
     }
 
     fn pair(src: u32, dst: u32, one_way: bool) -> MapPair {
-        MapPair { src, dst, one_way }
+        MapPair {
+            src,
+            dst,
+            dst_label: None,
+            one_way,
+        }
     }
 
     fn tape(caller_tape: u8, pairs: Vec<MapPair>) -> TapeBinding {
-        TapeBinding { caller_tape, pairs }
+        TapeBinding {
+            caller_tape,
+            param: None,
+            map_written: false,
+            open: false,
+            pairs,
+        }
     }
 
     /// A composite tape built directly from explicit pairs and holes, so

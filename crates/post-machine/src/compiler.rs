@@ -978,6 +978,8 @@ fn merge_columns<'a>(
         bound_calls: Vec::new(),
         variants: Some(variants),
         program_volatile,
+        interface: None,
+        grafts: Vec::new(),
     })
 }
 
