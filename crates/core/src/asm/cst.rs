@@ -62,6 +62,10 @@ pub(crate) const FRAME_WORD: &str = ".frame";
 pub(crate) const MAP_WORD: &str = ".map";
 pub(crate) const EXITS_WORD: &str = ".exits";
 pub(crate) const VOLATILE_WORD: &str = ".volatile";
+/// The `exits=( … )` operand's leading word — an operand, not a
+/// directive, so it carries no leading dot and never collides with the
+/// `.exits` frame directive.
+pub(crate) const EXITS_OPERAND_WORD: &str = "exits";
 pub(crate) const PARAM_WORD: &str = ".param";
 pub(crate) const GRAPH_WORD: &str = ".graph";
 pub(crate) const GRAFTED_WORD: &str = ".grafted";
@@ -476,6 +480,57 @@ pub struct FramePairCst {
     pub from: u32,
     pub to: u32,
     pub one_way: bool,
+}
+
+/// A binding pair's destination: a symbol index, or a glyph label naming
+/// a symbol in the callee's own alphabet (`caps.interface`). The `.map`
+/// directive keeps the numeric-only [`FramePairCst`]; only a binding-call
+/// operand spells destinations symbolically (docs/formats.md (bound
+/// calls)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairDst {
+    Index(u32),
+    Label(String),
+}
+
+/// One `<from> -> <to>` (or `=>`) pair of a binding-call map, with the
+/// `.map` grammar's `one_way` distinction and a possibly symbolic
+/// destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingPairCst {
+    pub from: u32,
+    pub to: PairDst,
+    pub one_way: bool,
+}
+
+/// One entry of a binding-call operand: `[param:] <physIdx> [{ <pairs>[,
+/// *] }]` (docs/formats.md (bound calls)). `param` names the callee
+/// parameter this entry binds — absent is the positional form, where the
+/// entry's list position is the callee virtual tape. `map_written`
+/// distinguishes a written-out map (`1{}`, the empty map) from an omitted
+/// one (`1`, index identity); `open` is the trailing `*` marker, which
+/// leaves the rest of the map for the linker to fill and implies
+/// `map_written` — `*` can only be written inside a map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingEntryCst {
+    pub param: Option<String>,
+    pub phys: u32,
+    pub map_written: bool,
+    pub open: bool,
+    pub pairs: Vec<BindingPairCst>,
+}
+
+/// Why a binding-call operand's interior did not shape. Both outcomes are
+/// total — neither panics on hand-written input — and lowering turns each
+/// into its own typed complaint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindingShapeError {
+    /// Any structural violation: a non-canonical index, an unbalanced
+    /// brace, an empty entry, trailing junk.
+    Malformed,
+    /// A `*` open marker written somewhere other than last inside a map,
+    /// or written more than once.
+    StarNotLast,
 }
 
 /// `.map <k>[, rmap=(…)][, wmap=(…)]`. Each map group is `Some` iff its
@@ -1274,8 +1329,18 @@ fn shape_line(src: &ItemText<'_>, tokens: &[AsmToken], caps: AsmCaps) -> AsmItem
     // `[` comma-split as usual (the name half of a binding call). Under
     // default caps `LBracket` tokens never exist, so this is dead and the
     // comma-split below is byte-identical to before.
+    //
+    // A trailing `exits=( … )` run (caps.interface) is split off first
+    // and captured the same way — one verbatim operand, its interior
+    // commas intact — so what remains is the plain binding shape above
+    // (docs/formats.md (bound calls)). Without the cap the run is not
+    // recognized and the region comma-splits exactly as before.
     let region = &body[at + 1..];
-    let operands = match caps
+    let (region, exits) = match caps.interface {
+        true => split_exit_vector(src, region),
+        false => (region, None),
+    };
+    let mut operands = match caps
         .vectors
         .then(|| {
             region
@@ -1296,6 +1361,7 @@ fn shape_line(src: &ItemText<'_>, tokens: &[AsmToken], caps: AsmCaps) -> AsmItem
         },
         None => operand_region(src, region, after_word),
     };
+    operands.extend(exits);
     AsmItemKind::Line(LineCst {
         labels,
         instr: Some(InstrCst {
@@ -1771,30 +1837,40 @@ pub(super) fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
 }
 
 /// Shapes a declarative binding-call operand's interior (the text
-/// between the operand's `[` and `]`) into per-entry `(physIdx, pairs)`
-/// tuples — list position is the callee virtual tape (docs/formats.md
-/// (bound calls)). An entry is a canonical `<physIdx>`, optionally
-/// followed by a `{ <pair>, … }` symbol map reusing the `.map` pair
-/// grammar (`->` bidirectional, `=>` one-way). Total shaping: `None` on
-/// any structural violation (bad number, unbalanced braces, empty entry,
-/// trailing junk); an empty/whitespace interior shapes as `Some(vec![])`
-/// so the caller distinguishes `[]` (rejected there) from malformed.
+/// between the operand's `[` and `]`) into per-entry [`BindingEntryCst`]s
+/// — list position is the callee virtual tape unless the entries name
+/// their parameters (docs/formats.md (bound calls)). An entry is an
+/// optional `<param>:` prefix, a canonical `<physIdx>`, and an optional
+/// `{ <pair>, … }` symbol map reusing the `.map` pair grammar (`->`
+/// bidirectional, `=>` one-way) with glyph labels allowed as
+/// destinations, optionally closed by a `*` open marker. Total shaping:
+/// [`BindingShapeError`] on any violation; an empty/whitespace interior
+/// shapes as `Ok(vec![])` so the caller distinguishes `[]` from
+/// malformed.
 ///
 /// The interior is re-lexed at bracket depth 0 (no `vectors` cap) so the
 /// `->`/`=>` arrows lex as arrows rather than the in-bracket move markers
 /// — the binding lives in `[..]` at source level, but its pairs read like
-/// a `.map` clause's `(..)` pairs.
-pub(super) fn parse_binding(inner: &str, line_no: u32) -> Option<Vec<(u32, Vec<FramePairCst>)>> {
+/// a `.map` clause's `(..)` pairs. `interface` rides in from the caller's
+/// caps, which is what makes glyph labels lex at all; the `*` marker is
+/// the `Star` the `rept` cap already emits at brace depth ≥ 1, so no
+/// second lexing mode is needed (the arrows and the star are pinned
+/// together by the lexer's own test).
+pub(super) fn parse_binding(
+    inner: &str,
+    line_no: u32,
+    caps: AsmCaps,
+) -> Result<Vec<BindingEntryCst>, BindingShapeError> {
     let inner = inner.trim();
     if inner.is_empty() {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
     let caps = AsmCaps {
         tables: true,
         rept: true,
         vectors: false,
         volatile: false,
-        interface: false,
+        interface: caps.interface,
     };
     let tokens: Vec<AsmToken> = lex_line(inner, line_no, caps)
         .into_iter()
@@ -1821,25 +1897,118 @@ pub(super) fn parse_binding(inner: &str, line_no: u32) -> Option<Vec<(u32, Vec<F
     for seg in segments {
         entries.push(parse_binding_entry(seg)?);
     }
-    Some(entries)
+    Ok(entries)
 }
 
-/// One binding entry: a canonical physical-tape index, then an optional
-/// `{ <pairs> }` group. `None` on any structural violation.
-fn parse_binding_entry(seg: &[AsmToken]) -> Option<(u32, Vec<FramePairCst>)> {
-    let (first, rest) = seg.split_first()?;
-    let phys = canonical_u32(first)?.0;
+/// One binding entry: an optional `<param>:` prefix, a canonical
+/// physical-tape index, then an optional `{ <pairs>[, *] }` group.
+fn parse_binding_entry(seg: &[AsmToken]) -> Result<BindingEntryCst, BindingShapeError> {
+    use BindingShapeError::{Malformed, StarNotLast};
+    let (param, seg) = match seg {
+        [w, colon, rest @ ..] if matches!(colon.kind, AsmTokenKind::Colon) => match word_text(w) {
+            Some(name) => (Some(name.to_string()), rest),
+            // Not a name before the colon — leave the segment whole and
+            // let the index parse below complain.
+            None => (None, seg),
+        },
+        _ => (None, seg),
+    };
+    let (first, rest) = seg.split_first().ok_or(Malformed)?;
+    let phys = canonical_u32(first).ok_or(Malformed)?.0;
     if rest.is_empty() {
-        return Some((phys, Vec::new()));
+        return Ok(BindingEntryCst {
+            param,
+            phys,
+            map_written: false,
+            open: false,
+            pairs: Vec::new(),
+        });
     }
     let [lbrace, mid @ .., rbrace] = rest else {
-        return None;
+        return Err(Malformed);
     };
     if !matches!(lbrace.kind, AsmTokenKind::LBrace) || !matches!(rbrace.kind, AsmTokenKind::RBrace)
     {
-        return None;
+        return Err(Malformed);
     }
-    Some((phys, parse_pairs(mid)?))
+    // `*` closes the map: legal as the last token of the interior, and
+    // only there. A star anywhere else — including a second one — is its
+    // own complaint, so the diagnostic can name the rule rather than
+    // calling the whole operand malformed.
+    let is_star = |t: &AsmToken| matches!(t.kind, AsmTokenKind::Star);
+    let (mid, open) = match mid.split_last() {
+        Some((last, head)) if is_star(last) => {
+            if head.iter().any(is_star) {
+                return Err(StarNotLast);
+            }
+            match head.split_last() {
+                // `{*}` — an open map with no pairs.
+                None => (head, true),
+                // `{ <pairs>, * }` — the comma is the list separator, so
+                // something must precede it.
+                Some((comma, before)) if matches!(comma.kind, AsmTokenKind::Comma) => {
+                    if before.is_empty() {
+                        return Err(Malformed);
+                    }
+                    (before, true)
+                }
+                // A `*` that ends the interior without closing a list
+                // entry (`{3->*}`) is a misplaced marker, not junk.
+                _ => return Err(StarNotLast),
+            }
+        }
+        _ => {
+            if mid.iter().any(is_star) {
+                return Err(StarNotLast);
+            }
+            (mid, false)
+        }
+    };
+    Ok(BindingEntryCst {
+        param,
+        phys,
+        map_written: true,
+        open,
+        pairs: parse_binding_pairs(mid)?,
+    })
+}
+
+/// [`parse_pairs`] with a binding's wider destination: a canonical index
+/// or a glyph label (docs/formats.md (bound calls)). The source symbol
+/// stays numeric — it indexes the caller's own tape alphabet, which the
+/// call site knows by position.
+fn parse_binding_pairs(inner: &[AsmToken]) -> Result<Vec<BindingPairCst>, BindingShapeError> {
+    use BindingShapeError::Malformed;
+    let mut pairs = Vec::new();
+    let mut i = 0;
+    while i < inner.len() {
+        let from = canonical_u32(inner.get(i).ok_or(Malformed)?)
+            .ok_or(Malformed)?
+            .0;
+        let one_way = match inner.get(i + 1).ok_or(Malformed)?.kind {
+            AsmTokenKind::Arrow => false,
+            AsmTokenKind::FatArrow => true,
+            _ => return Err(Malformed),
+        };
+        let dst = inner.get(i + 2).ok_or(Malformed)?;
+        let to = match &dst.kind {
+            AsmTokenKind::Glyph(g) => PairDst::Label(g.clone()),
+            _ => PairDst::Index(canonical_u32(dst).ok_or(Malformed)?.0),
+        };
+        pairs.push(BindingPairCst { from, to, one_way });
+        i += 3;
+        if i < inner.len() {
+            if !matches!(inner[i].kind, AsmTokenKind::Comma) {
+                return Err(Malformed);
+            }
+            i += 1;
+            // A trailing comma with no pair after it is malformed.
+            if i == inner.len() {
+                return Err(Malformed);
+            }
+        }
+    }
+    Ok(pairs)
 }
 
 /// The [`TableDirectiveKind`] a leading directive word names, or `None`
@@ -1875,6 +2044,64 @@ fn vector_operand(src: &ItemText<'_>, region: &[AsmToken]) -> Option<OperandToke
         text: text.trim().to_string(),
         span: Span::new(first.line, start, last.line, end),
     })
+}
+
+/// Splits a trailing `exits=( … )` run off an instruction's operand
+/// region and captures it as ONE lossless [`OperandToken`], so its
+/// interior commas do not split the operand list (docs/formats.md (bound
+/// calls)). The run is recognized only at the very end of the region and
+/// only with its closing paren as the region's last token; anything else
+/// is left to the plain comma-split, where lowering reports it. Returns
+/// the region before the run and the captured token.
+fn split_exit_vector<'a>(
+    src: &ItemText<'_>,
+    region: &'a [AsmToken],
+) -> (&'a [AsmToken], Option<OperandToken>) {
+    let Some(last) = region.last() else {
+        return (region, None);
+    };
+    if !matches!(last.kind, AsmTokenKind::RParen) {
+        return (region, None);
+    }
+    let kind_at = |i: usize| region.get(i).map(|t: &AsmToken| &t.kind);
+    let start = region.iter().enumerate().rev().find_map(|(i, t)| {
+        (word_text(t) == Some(EXITS_OPERAND_WORD)
+            && matches!(kind_at(i + 1), Some(AsmTokenKind::Eq))
+            && matches!(kind_at(i + 2), Some(AsmTokenKind::LParen)))
+        .then_some(i)
+    });
+    let Some(start) = start else {
+        return (region, None);
+    };
+    // An exit vector does not nest: the `(` opened at `start + 2` is
+    // closed by the region's last token and by nothing in between.
+    if region[start + 3..region.len() - 1]
+        .iter()
+        .any(|t| matches!(t.kind, AsmTokenKind::LParen | AsmTokenKind::RParen))
+    {
+        return (region, None);
+    }
+    let first = &region[start];
+    let end = last.col + last.len;
+    (
+        &region[..start],
+        Some(OperandToken {
+            text: src.slice(first.line, first.col, end).trim().to_string(),
+            span: Span::new(first.line, first.col, last.line, end),
+        }),
+    )
+}
+
+/// The text between an exit vector's parens, or `None` when `text` is not
+/// an `exits=( … )` operand — the one place the operand's spelling is
+/// decided, shared by the capture above and lowering.
+pub(super) fn exit_vector_interior(text: &str) -> Option<&str> {
+    text.strip_prefix(EXITS_OPERAND_WORD)?
+        .trim_start()
+        .strip_prefix('=')?
+        .trim_start()
+        .strip_prefix('(')?
+        .strip_suffix(')')
 }
 
 /// The lossless fallback: verbatim line text; span = the line's
@@ -2680,6 +2907,111 @@ L1:     rgt
         let cst = parse_asm_cst_with(".graph g, 1\n", caps_all());
         assert!(matches!(&cst.items[0].kind, AsmItemKind::Line(l)
             if l.instr.as_ref().unwrap().word == ".graph"));
+    }
+
+    // -- Binding-call operands (caps.interface) -------------------------
+
+    #[test]
+    fn named_binding_entries_with_glyph_labels() {
+        let entries =
+            parse_binding("num: 1{3->'0', 4=>'1'}, flag: 0{}", 1, caps_interface()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].param.as_deref(), Some("num"));
+        assert_eq!(entries[0].phys, 1);
+        assert!(entries[0].map_written);
+        assert!(!entries[0].open);
+        assert_eq!(entries[0].pairs[0].from, 3);
+        assert_eq!(entries[0].pairs[0].to, PairDst::Label("0".into()));
+        assert!(!entries[0].pairs[0].one_way);
+        assert!(entries[0].pairs[1].one_way);
+        assert_eq!(entries[1].param.as_deref(), Some("flag"));
+        assert!(entries[1].map_written);
+        assert!(entries[1].pairs.is_empty());
+    }
+
+    #[test]
+    fn positional_entries_still_parse_and_report_no_written_map() {
+        let entries = parse_binding("2{1->3, 2=>0}, 0", 1, caps_interface()).unwrap();
+        assert_eq!(entries[0].param, None);
+        // A written `{..}` IS a written map; only the bare entry below is
+        // the "no map written" case (docs/formats.md (bound calls)).
+        assert!(entries[0].map_written);
+        assert_eq!(entries[0].pairs[0].to, PairDst::Index(3));
+        assert_eq!(entries[1].phys, 0);
+        assert!(!entries[1].map_written);
+        assert!(entries[1].pairs.is_empty());
+    }
+
+    #[test]
+    fn glyph_labels_need_the_interface_cap() {
+        let caps = AsmCaps {
+            tables: true,
+            ..AsmCaps::default()
+        };
+        assert!(parse_binding("1{3->'0'}", 1, caps).is_err());
+        // A parameter name and the `*` marker need no glyph lexing, so
+        // they still shape here — shaping is total, and lowering is where
+        // the capability check lives (pinned in `lower.rs`).
+        assert!(parse_binding("num: 1", 1, caps).is_ok());
+        assert!(parse_binding("1{*}", 1, caps).is_ok());
+    }
+
+    #[test]
+    fn an_open_marker_closes_a_map() {
+        for (src, pairs) in [("1{*}", 0usize), ("1{3->'0', *}", 1)] {
+            let entries = parse_binding(src, 1, caps_interface()).unwrap();
+            assert!(entries[0].open, "{src}");
+            // An open map is a written one.
+            assert!(entries[0].map_written, "{src}");
+            assert_eq!(entries[0].pairs.len(), pairs, "{src}");
+        }
+    }
+
+    #[test]
+    fn an_open_marker_elsewhere_is_its_own_shape_error() {
+        for src in ["1{*, 3->4}", "1{3->*}", "1{*, *}", "1{3->4, *, 5->6}"] {
+            assert_eq!(
+                parse_binding(src, 1, caps_interface()),
+                Err(BindingShapeError::StarNotLast),
+                "{src}"
+            );
+        }
+        // A stray `*` with no map at all is plain junk, not a misplaced
+        // open marker.
+        assert_eq!(
+            parse_binding("1, *", 1, caps_interface()),
+            Err(BindingShapeError::Malformed)
+        );
+        // `{,*}` has no pair before the comma.
+        assert_eq!(
+            parse_binding("1{,*}", 1, caps_interface()),
+            Err(BindingShapeError::Malformed)
+        );
+    }
+
+    #[test]
+    fn the_exit_vector_is_one_operand_after_the_binding() {
+        let cst = parse_asm_cst_with("call g [0] exits=(won, lost)\n", caps_interface());
+        let line = as_line(&cst.items[0]);
+        assert_eq!(operand_texts(line), vec!["g", "[0]", "exits=(won, lost)"]);
+        // With no binding the exit vector is still its own operand, so
+        // lowering can complain about the missing bracket precisely.
+        let cst = parse_asm_cst_with("call g exits=(won)\n", caps_interface());
+        assert_eq!(
+            operand_texts(as_line(&cst.items[0])),
+            vec!["g", "exits=(won)"]
+        );
+    }
+
+    #[test]
+    fn the_exit_vector_needs_the_interface_cap() {
+        // Without the cap the run comma-splits like any other operand
+        // region — the capture is inert, so PM-1 text is untouched.
+        let cst = parse_asm_cst_with("call g [0] exits=(won, lost)\n", caps_all());
+        assert_eq!(
+            operand_texts(as_line(&cst.items[0])),
+            vec!["g [0] exits=(won", "lost)"]
+        );
     }
 
     // -- Frame-descriptor directives (caps.tables + rept + arrows) ------

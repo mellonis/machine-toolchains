@@ -4,15 +4,15 @@
 //! every diagnostic. Replaces the old line-oriented parser.
 
 use super::cst::{
-    AsmCst, AsmItem, AsmItemKind, BYTE_WORD, DigestDirectiveCst, FRAME_DIRECTIVE_WORDS, FUNC_WORD,
-    FrameDirectiveCst, FrameHeaderCst, FrameMapCst, FramePairCst, FuncCst, GRAFTED_WORD,
-    GRAPH_WORD, INTERFACE_DIRECTIVE_WORDS, InstrCst, LabelCst, LineCst, OperandToken, PARAM_WORD,
-    ParamDirectiveCst, ROUTINE_WORD, ROW_WORD, ReptCst, RoutineDirectiveCst, SectionCst,
-    TableDirectiveCst, TableDirectiveKind, VOLATILE_WORD, VolatileCst, parse_asm_cst_with,
-    parse_binding,
+    AsmCst, AsmItem, AsmItemKind, BYTE_WORD, BindingShapeError, DigestDirectiveCst,
+    FRAME_DIRECTIVE_WORDS, FUNC_WORD, FrameDirectiveCst, FrameHeaderCst, FrameMapCst, FramePairCst,
+    FuncCst, GRAFTED_WORD, GRAPH_WORD, INTERFACE_DIRECTIVE_WORDS, InstrCst, LabelCst, LineCst,
+    OperandToken, PARAM_WORD, PairDst, ParamDirectiveCst, ROUTINE_WORD, ROW_WORD, ReptCst,
+    RoutineDirectiveCst, SectionCst, TableDirectiveCst, TableDirectiveKind, VOLATILE_WORD,
+    VolatileCst, exit_vector_interior, parse_asm_cst_with, parse_binding,
 };
 use super::subst::substitute;
-use super::syntax::{ArchSyntax, Flow, SyntaxEntry};
+use super::syntax::{ArchSyntax, AsmCaps, Flow, SyntaxEntry};
 use super::{AsmError, AsmErrorKind};
 use crate::diagnostics::Span;
 use crate::formats::object::{
@@ -87,14 +87,18 @@ pub enum SourceOperand {
         frame: SpannedName,
     },
     /// A declarative binding call operand (`call name [binding]`): the
-    /// call `target` (a symbol name, like a plain call's) and the tape
-    /// binding — one entry per callee virtual tape, in list order. The
-    /// assembler emits a plain far-call opcode with a zeroed hole (no
-    /// relocation) and records the binding as an MO bound-call for the
-    /// composition engine to lower (docs/formats.md (bound calls)).
+    /// call `target` (a symbol name, like a plain call's), the tape
+    /// binding — one entry per callee virtual tape, in list order unless
+    /// the entries name their parameters — and the `exits=(…)` vector,
+    /// the local labels the callee's declared exits return to (empty when
+    /// the operand is absent). The assembler emits a plain far-call
+    /// opcode with a zeroed hole (no relocation) and records the binding
+    /// as an MO bound-call for the composition engine to lower
+    /// (docs/formats.md (bound calls)).
     BoundCallOp {
         target: SpannedName,
         binding: Vec<SourceTapeBinding>,
+        exits: Vec<SpannedName>,
     },
     /// A `[w...], [m...]` two-vector operand ([`OperandKind::WriteMoveVec`]):
     /// the write elements then the move elements, carrying the operand
@@ -115,8 +119,28 @@ pub enum SourceOperand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceTapeBinding {
     pub caller_tape: u8,
+    /// The callee parameter this entry binds (`num: 1`); `None` is the
+    /// positional form, where the entry's position is the callee tape. A
+    /// binding names every entry or none.
+    pub param: Option<String>,
+    /// The map was written out — `1{}` (the empty map) versus `1` (index
+    /// identity).
+    pub map_written: bool,
+    /// The map ends in `*`: the listed pairs are not the whole map and
+    /// the linker completes the rest. Implies `map_written`.
+    pub open: bool,
     /// `(src, dst, one_way)` per authored pair, in source order.
-    pub pairs: Vec<(u32, u32, bool)>,
+    pub pairs: Vec<(u32, SourceDst, bool)>,
+}
+
+/// A binding pair's destination as authored: a symbol index, or a glyph
+/// label naming a symbol in the callee's alphabet (docs/formats.md (bound
+/// calls)). Resolving a label against the callee's declared glyphs is the
+/// linker's, at composition time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceDst {
+    Index(u32),
+    Label(String),
 }
 
 /// One element of a `[..]` vector operand.
@@ -908,6 +932,24 @@ fn lower_param_directive(p: &ParamDirectiveCst, ctx: &mut LowerCtx) -> Result<()
             AsmErrorKind::BadSignature("`.param` precedes no `.routine`".to_string()),
         ));
     };
+    // A parameter is named again at every call site that binds by name
+    // (`call g [num: 1]`), so its name takes the label grammar — no dots,
+    // no `::` — and must be unique within its routine, or a named entry
+    // would not say which tape it means.
+    if !is_label_name(&p.name) {
+        return Err(err(
+            p.name_span,
+            AsmErrorKind::BadSignature(
+                "`.param` names use letters, digits, underscore".to_string(),
+            ),
+        ));
+    }
+    if iface.params.iter().any(|prev| prev.name == p.name) {
+        return Err(err(
+            p.name_span,
+            AsmErrorKind::BadSignature(format!("`.param {}` is declared twice", p.name)),
+        ));
+    }
     let k = iface.params.len();
     let Some(&cardinality) = sig.cardinalities.get(k) else {
         return Err(err(
@@ -1674,7 +1716,7 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
             span: line.span,
             labels,
             opcode: entry.opcode,
-            operand: classify_operand(entry, instr)?,
+            operand: classify_operand(entry, instr, syntax.caps)?,
         }
     };
     ctx.functions
@@ -1750,8 +1792,29 @@ fn lower_byte(instr: &InstrCst) -> Result<u8, AsmError> {
     })
 }
 
-fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOperand, AsmError> {
-    let operands = &instr.operands;
+fn classify_operand(
+    entry: &SyntaxEntry,
+    instr: &InstrCst,
+    caps: AsmCaps,
+) -> Result<SourceOperand, AsmError> {
+    // An `exits=(…)` operand rides a binding call and nothing else: it
+    // names where the callee's declared exits return to (docs/formats.md
+    // (bound calls)). Split it off before the per-kind classification, so
+    // every other mnemonic answers with the same complaint rather than
+    // its own operand-shape one.
+    let (operands, exits) = match caps.interface {
+        true => split_exits_operand(&instr.operands),
+        false => (instr.operands.as_slice(), None),
+    };
+    if let Some(exits) = exits
+        && !(entry.flow == Flow::Call
+            && matches!(entry.operand, OperandKind::RelI8 | OperandKind::RelI32))
+    {
+        return Err(err(
+            exits.span,
+            AsmErrorKind::BadOperand("only a call takes an exit vector"),
+        ));
+    }
     match entry.operand {
         OperandKind::None => {
             if let Some(first) = operands.first() {
@@ -1767,12 +1830,20 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
             // a call target then a trailing bracket group. The bracket is
             // captured as one verbatim operand by the CST (docs/formats.md
             // (bound calls)); only a call takes a binding.
-            if let [target, bracket] = operands.as_slice()
+            if let [target, bracket] = operands
                 && bracket.text.starts_with('[')
             {
-                return classify_bound_call(entry, target, bracket);
+                return classify_bound_call(entry, target, bracket, exits, caps);
             }
-            let [one] = operands.as_slice() else {
+            if let Some(exits) = exits {
+                return Err(err(
+                    exits.span,
+                    AsmErrorKind::BadOperand(
+                        "an exit vector needs a binding; write `[…]` (empty is allowed) before it",
+                    ),
+                ));
+            }
+            let [one] = operands else {
                 return Err(err(
                     instr.word_span,
                     AsmErrorKind::BadOperand("takes one name"),
@@ -1806,7 +1877,7 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
             // A bracketed `[..]` region reaches here as ONE verbatim
             // token (caps.vectors CST rule) and classifies as a vector;
             // per-mnemonic encoding of vectors is the dialect's job.
-            if let [one] = operands.as_slice()
+            if let [one] = operands
                 && one.text.starts_with('[')
             {
                 return Ok(SourceOperand::Vector(parse_vector(one)?, one.span));
@@ -1832,7 +1903,7 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
             // A move vector is written in bracket form only (`[<, ., >]`),
             // routed exactly like SymbolVec's bracketed spelling; unlike
             // SymbolVec there is no legacy spelled-out-ints form to keep.
-            if let [one] = operands.as_slice()
+            if let [one] = operands
                 && one.text.starts_with('[')
             {
                 return Ok(SourceOperand::Vector(parse_vector(one)?, one.span));
@@ -1848,7 +1919,7 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
             // so both groups arrive in a single operand's text. Split at the
             // depth-0 comma between them into the write and move groups; the
             // per-group element vocabulary is enforced at emit.
-            let [one] = operands.as_slice() else {
+            let [one] = operands else {
                 return Err(err(
                     instr.word_span,
                     AsmErrorKind::BadOperand(
@@ -1869,7 +1940,7 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
         OperandKind::TableRef => {
             // A table reference is a file-scoped table LABEL (label
             // grammar, not the dotted/namespaced symbol grammar).
-            let [one] = operands.as_slice() else {
+            let [one] = operands else {
                 return Err(err(
                     instr.word_span,
                     AsmErrorKind::BadOperand("takes one table label"),
@@ -1888,7 +1959,7 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
         }
         OperandKind::Imm8 => {
             // Exactly one `#<int>` operand, range 0..=255.
-            let [one] = operands.as_slice() else {
+            let [one] = operands else {
                 return Err(err(
                     instr.word_span,
                     AsmErrorKind::BadOperand("takes one `#<n>` immediate"),
@@ -1911,7 +1982,7 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
         OperandKind::FramedCall => {
             // `<target>, <frame>`: a call target (symbol name, like a
             // plain call's) and a frame table LABEL (like a TableRef).
-            let [target, frame] = operands.as_slice() else {
+            let [target, frame] = operands else {
                 return Err(err(
                     instr.word_span,
                     AsmErrorKind::BadOperand("takes a call target and a frame table label"),
@@ -1954,18 +2025,75 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
     }
 }
 
-/// Classifies a declarative binding call (`call <name> [<binding>]`). The
-/// `target` is a plain call target and `bracket` the verbatim `[..]`
-/// operand. Only a `Flow::Call` mnemonic takes a binding; jumps/branches
-/// with a trailing bracket are rejected. Structural validation lives here
-/// (physical index `< 16`, canonical `u32` src/dst, no duplicate source
-/// in one entry, non-empty binding); mapping legality — the blank↔blank
-/// rule, bijection, write-back consistency — is the composition engine's,
-/// checked at link time (docs/formats.md (bound calls)).
+/// Splits a trailing `exits=(…)` operand off the operand list. The CST
+/// captures the run as one token under `caps.interface`, so this is a
+/// shape test on that token's text, never a second grammar.
+fn split_exits_operand(operands: &[OperandToken]) -> (&[OperandToken], Option<&OperandToken>) {
+    match operands.split_last() {
+        Some((last, head)) if exit_vector_interior(&last.text).is_some() => (head, Some(last)),
+        _ => (operands, None),
+    }
+}
+
+/// The labels of an `exits=(…)` operand, in source order, each spanned at
+/// its own text (docs/formats.md (bound calls)). Exit targets are local
+/// labels, like a frame descriptor's `.exits` list.
+fn parse_exit_vector(operand: &OperandToken) -> Result<Vec<SpannedName>, AsmError> {
+    let interior = exit_vector_interior(&operand.text).expect("the caller matched the shape");
+    if interior.trim().is_empty() {
+        return Err(err(
+            operand.span,
+            AsmErrorKind::BadOperand("an exit vector names at least one label"),
+        ));
+    }
+    // The operand's text is a verbatim single-line slice starting at its
+    // own span, so a char offset into it IS a column offset.
+    let at = operand.text.chars().count() - interior.chars().count() - 1;
+    let base = operand.span.start;
+    let mut names = Vec::new();
+    let mut col = u32::try_from(at).expect("an operand is one line long") + base.col;
+    for part in interior.split(',') {
+        let lead = part.chars().take_while(|c| c.is_whitespace()).count();
+        let name = part.trim();
+        let start = col + u32::try_from(lead).expect("an operand is one line long");
+        let span = Span::new(
+            base.line,
+            start,
+            base.line,
+            start + u32::try_from(name.chars().count()).expect("an operand is one line long"),
+        );
+        if !is_label_name(name) {
+            return Err(err(
+                span,
+                AsmErrorKind::BadOperand("exit targets are label names"),
+            ));
+        }
+        names.push(SpannedName {
+            name: name.to_string(),
+            span,
+        });
+        col += u32::try_from(part.chars().count() + 1).expect("an operand is one line long");
+    }
+    Ok(names)
+}
+
+/// Classifies a declarative binding call (`call <name> [<binding>]
+/// [exits=(…)]`). The `target` is a plain call target, `bracket` the
+/// verbatim `[..]` operand and `exits` the optional exit vector. Only a
+/// `Flow::Call` mnemonic takes a binding; jumps/branches with a trailing
+/// bracket are rejected. Structural validation lives here (physical index
+/// `< 16`, canonical `u32` sources, no duplicate source in one entry,
+/// named-or-positional but never both, the cap behind the symbolic
+/// forms); mapping legality — the blank↔blank rule, bijection, write-back
+/// consistency, resolving a glyph label against the callee's alphabet —
+/// is the composition engine's, checked at link time (docs/formats.md
+/// (bound calls)).
 fn classify_bound_call(
     entry: &SyntaxEntry,
     target: &OperandToken,
     bracket: &OperandToken,
+    exits: Option<&OperandToken>,
+    caps: AsmCaps,
 ) -> Result<SourceOperand, AsmError> {
     if entry.flow != Flow::Call {
         return Err(err(
@@ -1996,13 +2124,17 @@ fn classify_bound_call(
                 AsmErrorKind::BadFrame("malformed tape binding".into()),
             )
         })?;
-    let entries = parse_binding(inner, bracket.span.start.line).ok_or_else(|| {
-        err(
-            bracket.span,
-            AsmErrorKind::BadFrame("malformed tape binding".into()),
-        )
+    let entries = parse_binding(inner, bracket.span.start.line, caps).map_err(|e| {
+        let message = match e {
+            BindingShapeError::StarNotLast => "`*` closes a map: write it last, once",
+            BindingShapeError::Malformed => "malformed tape binding",
+        };
+        err(bracket.span, AsmErrorKind::BadFrame(message.into()))
     })?;
-    if entries.is_empty() {
+    // An empty binding is the zero-tape call an exit vector may ride on,
+    // and only the interface tier can write one: without the cap the
+    // form stays the error it has always been.
+    if entries.is_empty() && !caps.interface {
         return Err(err(
             bracket.span,
             AsmErrorKind::BadFrame(
@@ -2010,18 +2142,43 @@ fn classify_bound_call(
             ),
         ));
     }
+    // Named and positional entries answer two different questions — which
+    // parameter, versus which position — and a half-named binding answers
+    // neither for the entries it omits.
+    let named = entries.iter().filter(|e| e.param.is_some()).count();
+    if named != 0 && named != entries.len() {
+        return Err(err(
+            bracket.span,
+            AsmErrorKind::BadFrame("a binding names every entry or none".into()),
+        ));
+    }
     let mut binding = Vec::with_capacity(entries.len());
-    for (phys, pairs) in entries {
-        let caller_tape = u8::try_from(phys).ok().filter(|&p| p < 16).ok_or_else(|| {
-            err(
+    for e in entries {
+        // Defense in depth for the named form and the open marker: a
+        // glyph label cannot lex without the cap, but a parameter name
+        // and the `*` marker can (the `rept` cap already emits `Star`
+        // inside braces), so a capless dialect must refuse them here.
+        if !caps.interface && (e.param.is_some() || e.open) {
+            return Err(err(
                 bracket.span,
-                AsmErrorKind::BadFrame("binding physical tape index must be < 16".into()),
-            )
-        })?;
+                AsmErrorKind::BadFrame(
+                    "named entries and open maps need the interface capability".into(),
+                ),
+            ));
+        }
+        let caller_tape = u8::try_from(e.phys)
+            .ok()
+            .filter(|&p| p < 16)
+            .ok_or_else(|| {
+                err(
+                    bracket.span,
+                    AsmErrorKind::BadFrame("binding physical tape index must be < 16".into()),
+                )
+            })?;
         // A source symbol may bind at most once per tape — a repeated src
         // is an ambiguous map, rejected regardless of composition rules.
-        let mut seen = Vec::with_capacity(pairs.len());
-        for p in &pairs {
+        let mut seen = Vec::with_capacity(e.pairs.len());
+        for p in &e.pairs {
             if seen.contains(&p.from) {
                 return Err(err(
                     bracket.span,
@@ -2032,7 +2189,20 @@ fn classify_bound_call(
         }
         binding.push(SourceTapeBinding {
             caller_tape,
-            pairs: pairs.iter().map(|p| (p.from, p.to, p.one_way)).collect(),
+            param: e.param,
+            map_written: e.map_written,
+            open: e.open,
+            pairs: e
+                .pairs
+                .into_iter()
+                .map(|p| {
+                    let dst = match p.to {
+                        PairDst::Index(n) => SourceDst::Index(n),
+                        PairDst::Label(g) => SourceDst::Label(g),
+                    };
+                    (p.from, dst, p.one_way)
+                })
+                .collect(),
         });
     }
     Ok(SourceOperand::BoundCallOp {
@@ -2041,6 +2211,10 @@ fn classify_bound_call(
             span: target.span,
         },
         binding,
+        exits: exits
+            .map(parse_exit_vector)
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -2848,6 +3022,284 @@ stop
         assert!(lowered.interface.is_none());
         assert!(lowered.grafts.is_empty());
         assert!(lowered.signatures.is_some());
+    }
+
+    // -- Symbolic binding operands and `exits=(…)` (caps.interface) -----
+
+    /// The interface tier plus `vectors`: a binding call's `[..]` operand
+    /// is a bracket region, which only that cap lexes.
+    fn binding_caps() -> AsmCaps {
+        AsmCaps {
+            vectors: true,
+            ..iface_caps()
+        }
+    }
+
+    /// The `n`th item's classified operand in function `name`.
+    fn operand_of<'a>(lowered: &'a LoweredSource, name: &str, n: usize) -> &'a SourceOperand {
+        let f = lowered
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .expect("function defined");
+        match &f.items[n] {
+            SourceItem::Instr { operand, .. } => operand,
+            other => panic!("not an instruction: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bound_call_with_names_labels_and_exits_lowers() {
+        let src = "\
+.func f
+        call    g [num: 1{3->'0', 4=>'1'}, ctl: 0{}] exits=(won, lost)
+won:    stop
+lost:   stop
+";
+        let lowered = lower_with(binding_caps(), src).unwrap();
+        let SourceOperand::BoundCallOp {
+            target,
+            binding,
+            exits,
+        } = operand_of(&lowered, "f", 0)
+        else {
+            panic!("not a bound call")
+        };
+        assert_eq!(target.name, "g");
+        assert_eq!(binding.len(), 2);
+        assert_eq!(binding[0].param.as_deref(), Some("num"));
+        assert_eq!(binding[0].caller_tape, 1);
+        assert!(binding[0].map_written);
+        assert!(!binding[0].open);
+        assert_eq!(
+            binding[0].pairs,
+            vec![
+                (3, SourceDst::Label("0".into()), false),
+                (4, SourceDst::Label("1".into()), true),
+            ]
+        );
+        assert_eq!(binding[1].param.as_deref(), Some("ctl"));
+        assert!(binding[1].map_written);
+        assert!(binding[1].pairs.is_empty());
+        assert_eq!(
+            exits.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["won", "lost"]
+        );
+        // Each exit label carries its own span inside the operand, so a
+        // later resolution failure points at the label, not the vector.
+        assert_eq!(exits[0].span, Span::new(2, 61, 2, 64)); // `won`
+        assert_eq!(exits[1].span, Span::new(2, 66, 2, 70)); // `lost`
+    }
+
+    #[test]
+    fn exit_label_spans_survive_irregular_spacing() {
+        // The operand's text is verbatim, so the span arithmetic must
+        // hold for any spelling the grammar accepts, not just the
+        // canonical one space after each comma.
+        let src = ".func f\n        call g [0] exits=( won ,  lost )\nwon:    stop\nlost:   stop\n";
+        let lowered = lower_with(binding_caps(), src).unwrap();
+        let SourceOperand::BoundCallOp { exits, .. } = operand_of(&lowered, "f", 0) else {
+            panic!("not a bound call")
+        };
+        assert_eq!(
+            exits.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            vec!["won", "lost"]
+        );
+        assert_eq!(exits[0].span, Span::new(2, 28, 2, 31)); // `won`
+        assert_eq!(exits[1].span, Span::new(2, 35, 2, 39)); // `lost`
+    }
+
+    #[test]
+    fn positional_entries_and_numeric_destinations_still_lower() {
+        let src = ".func f\n        call g [2{1->3, 2=>0}, 0]\n        stop\n";
+        let lowered = lower_with(binding_caps(), src).unwrap();
+        let SourceOperand::BoundCallOp { binding, exits, .. } = operand_of(&lowered, "f", 0) else {
+            panic!("not a bound call")
+        };
+        assert!(binding.iter().all(|b| b.param.is_none()));
+        assert_eq!(
+            binding[0].pairs,
+            vec![
+                (1, SourceDst::Index(3), false),
+                (2, SourceDst::Index(0), true)
+            ]
+        );
+        assert!(binding[0].map_written);
+        assert!(!binding[1].map_written);
+        assert!(exits.is_empty());
+    }
+
+    #[test]
+    fn an_open_map_marks_the_entry_open() {
+        let src = ".func f\n        call g [ctl: 0{1->'a', *}]\n        stop\n";
+        let lowered = lower_with(binding_caps(), src).unwrap();
+        let SourceOperand::BoundCallOp { binding, .. } = operand_of(&lowered, "f", 0) else {
+            panic!("not a bound call")
+        };
+        assert!(binding[0].open);
+        assert!(binding[0].map_written, "an open map is a written one");
+        assert_eq!(binding[0].pairs.len(), 1);
+    }
+
+    #[test]
+    fn a_misplaced_open_marker_names_its_rule() {
+        let src = ".func f\n        call g [0{*, 1->2}]\n        stop\n";
+        let e = lower_with(binding_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(ref m)
+                if m == "`*` closes a map: write it last, once"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn mixed_named_and_positional_entries_are_rejected() {
+        let src = ".func f\n        call g [num: 1, 0]\n        stop\n";
+        let e = lower_with(binding_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(ref m)
+                if m == "a binding names every entry or none"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn the_symbolic_binding_forms_need_the_interface_cap() {
+        // Without the cap a glyph label never lexes, so only the two
+        // forms the rept/vectors caps alone can spell reach lowering:
+        // a named entry (`num:`) and an open map (`*` is the rept cap's
+        // own token). Both are refused.
+        let caps = AsmCaps {
+            interface: false,
+            ..binding_caps()
+        };
+        for src in [
+            ".func f\n        call g [num: 1]\n        stop\n",
+            ".func f\n        call g [0{*}]\n        stop\n",
+        ] {
+            let e = lower_with(caps, src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadFrame(ref m)
+                    if m == "named entries and open maps need the interface capability"),
+                "{src:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_binding_is_a_binding_only_under_the_interface_cap() {
+        // `[]` is the zero-tape binding an exit vector may ride on.
+        let lowered =
+            lower_with(binding_caps(), ".func f\n        call g []\n        stop\n").unwrap();
+        let SourceOperand::BoundCallOp { binding, .. } = operand_of(&lowered, "f", 0) else {
+            panic!("not a bound call")
+        };
+        assert!(binding.is_empty());
+        // Without the cap it stays the error it has always been.
+        let caps = AsmCaps {
+            interface: false,
+            ..binding_caps()
+        };
+        let e = lower_with(caps, ".func f\n        call g []\n        stop\n").unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(ref m) if m.contains("at least one")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn exits_operand_only_on_call() {
+        let src = ".func f\n        jmp L exits=(L)\nL:      stop\n";
+        let e = lower_with(binding_caps(), src).unwrap_err();
+        assert!(
+            matches!(
+                e.kind,
+                AsmErrorKind::BadOperand("only a call takes an exit vector")
+            ),
+            "{e}"
+        );
+        // Not a flow operand at all: the same complaint, not a vector one.
+        let src = ".func f\n        wr [1] exits=(L)\nL:      stop\n";
+        let e = lower_with(binding_caps(), src).unwrap_err();
+        assert!(
+            matches!(
+                e.kind,
+                AsmErrorKind::BadOperand("only a call takes an exit vector")
+            ),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn an_exit_vector_needs_a_binding() {
+        let src = ".func f\n        call g exits=(L)\nL:      stop\n";
+        let e = lower_with(binding_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("needs a binding")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn exit_vector_entries_are_label_names() {
+        for (src, needle) in [
+            (
+                ".func f\n        call g [0] exits=(1)\n        stop\n",
+                "label",
+            ),
+            (
+                ".func f\n        call g [0] exits=(a::b)\n        stop\n",
+                "label",
+            ),
+            (
+                ".func f\n        call g [0] exits=()\n        stop\n",
+                "at least one",
+            ),
+            (
+                ".func f\n        call g [0] exits=(a,)\n        stop\n",
+                "label",
+            ),
+        ] {
+            let e = lower_with(binding_caps(), src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains(needle)),
+                "{src:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn param_names_are_identifiers() {
+        // A parameter is named at a call site (`num: 1`), so its name
+        // takes the label grammar — no dots, no `::`.
+        for name in ["a::b", "a.b"] {
+            let src = format!(
+                ".routine f, tapes=1, alpha=(2)\n.param {name}, ('_', 'a')\n.func f\nstop\n"
+            );
+            let e = lower_with(iface_caps(), &src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadSignature(ref m)
+                    if m == "`.param` names use letters, digits, underscore"),
+                "{name}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_param_names_are_rejected() {
+        let src = "\
+.routine f, tapes=2, alpha=(2, 2)
+.param num, ('_', 'a')
+.param num, ('_', 'b')
+.func f
+stop
+";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadSignature(ref m)
+                if m == "`.param num` is declared twice"),
+            "{e}"
+        );
     }
 
     #[test]

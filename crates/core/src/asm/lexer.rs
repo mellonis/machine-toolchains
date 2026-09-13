@@ -834,6 +834,41 @@ mod tests {
     }
 
     #[test]
+    fn binding_interiors_lex_arrows_inside_braces_and_a_closing_star() {
+        // The caps a binding-call interior is re-lexed under (tables +
+        // rept + interface, brackets off — the operand's own `[..]` is
+        // already stripped): the map arrows must stay arrows at brace
+        // depth 1, where `-` would otherwise be the substitution minus,
+        // and `*` must be the `Star` the rept cap already emits there —
+        // the open-map marker (docs/formats.md (bound calls)).
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: false,
+            volatile: false,
+            interface: true,
+        };
+        let kinds = kinds_for_test("1{3->'0', 4=>'1', *}", caps);
+        assert_eq!(
+            kinds,
+            vec![
+                AsmTokenKind::Number("1".into()),
+                AsmTokenKind::LBrace,
+                AsmTokenKind::Number("3".into()),
+                AsmTokenKind::Arrow,
+                AsmTokenKind::Glyph("0".into()),
+                AsmTokenKind::Comma,
+                AsmTokenKind::Number("4".into()),
+                AsmTokenKind::FatArrow,
+                AsmTokenKind::Glyph("1".into()),
+                AsmTokenKind::Comma,
+                AsmTokenKind::Star,
+                AsmTokenKind::RBrace,
+            ]
+        );
+    }
+
+    #[test]
     fn glyph_literals_lex_under_the_interface_cap() {
         let caps = AsmCaps {
             interface: true,

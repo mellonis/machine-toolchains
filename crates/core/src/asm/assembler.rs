@@ -5,8 +5,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::lower::{
-    FrameTapeMap, LoweredSource, SourceFunction, SourceItem, SourceOperand, SourceRow, SourceTable,
-    SourceTapeBinding, SpannedName, VecElem, lower_source,
+    FrameTapeMap, LoweredSource, SourceDst, SourceFunction, SourceItem, SourceOperand, SourceRow,
+    SourceTable, SourceTapeBinding, SpannedName, VecElem, lower_source,
 };
 use super::syntax::{ArchSyntax, Flow};
 use super::{AsmError, AsmErrorKind};
@@ -590,7 +590,11 @@ fn assemble_function(
                     }
                     (
                         OperandKind::RelI8 | OperandKind::RelI32,
-                        SourceOperand::BoundCallOp { target, binding },
+                        SourceOperand::BoundCallOp {
+                            target,
+                            binding,
+                            exits: _,
+                        },
                     ) => {
                         slots.push(Slot::BoundCall {
                             symbol_span: target.span,
@@ -940,21 +944,29 @@ fn assemble_function(
 /// (docs/formats.md (bound calls)). The one-way bit is real data here —
 /// it distinguishes `->` (bidirectional) from `=>` (read-only) pairs for
 /// the composition engine, unlike a frame descriptor where the wire form
-/// drops it.
+/// drops it. A symbolic destination travels as the label, with `dst` 0:
+/// which index it means is the callee's alphabet's answer, which only the
+/// linker has.
 fn source_binding_to_object(b: &SourceTapeBinding) -> TapeBinding {
     TapeBinding {
         caller_tape: b.caller_tape,
-        param: None,
-        map_written: false,
-        open: false,
+        param: b.param.clone(),
+        map_written: b.map_written,
+        open: b.open,
         pairs: b
             .pairs
             .iter()
-            .map(|&(src, dst, one_way)| MapPair {
-                src,
-                dst,
-                dst_label: None,
-                one_way,
+            .map(|(src, dst, one_way)| {
+                let (dst, dst_label) = match dst {
+                    SourceDst::Index(n) => (*n, None),
+                    SourceDst::Label(g) => (0, Some(g.clone())),
+                };
+                MapPair {
+                    src: *src,
+                    dst,
+                    dst_label,
+                    one_way: *one_way,
+                }
             })
             .collect(),
     }

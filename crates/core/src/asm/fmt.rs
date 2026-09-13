@@ -720,12 +720,18 @@ fn render_rept(r: &ReptCst, source: &str) -> Piece {
 
 /// Operand text verbatim from the CST's `OperandToken`s (never
 /// retokenized/rewritten — leading zeros, sign, spelling all survive),
-/// comma-joined (docs/formats.md (assembly text)). A trailing `[..]`
-/// operand is the one exception: a declarative binding call
-/// (`call name [binding]`) space-separates the target from the bracket,
-/// so a leading operand before a final bracket is joined with a space,
-/// not a comma (docs/formats.md (bound calls)).
+/// comma-joined (docs/formats.md (assembly text)). The binding call's two
+/// tail operands are the exceptions: `call name [binding] exits=(…)`
+/// space-separates the target from the bracket and the bracket from the
+/// exit vector, so neither joins with a comma (docs/formats.md (bound
+/// calls)).
 fn join_operands(operands: &[OperandToken]) -> String {
+    if let [lead @ .., last] = operands
+        && !lead.is_empty()
+        && crate::asm::cst::exit_vector_interior(&last.text).is_some()
+    {
+        return format!("{} {}", join_operands(lead), last.text);
+    }
     if let [lead @ .., last] = operands
         && !lead.is_empty()
         && last.text.starts_with('[')
@@ -1454,6 +1460,20 @@ loop:   nop
         assert_eq!(
             once,
             ".param wide, ('0'..'9'), opaque ; ten\n.graph lib::g, 42\n"
+        );
+        assert_eq!(format_asm_with(&once, caps_interface()).unwrap(), once);
+    }
+
+    #[test]
+    fn a_binding_call_keeps_its_bracket_and_exit_vector_uncommaed() {
+        // The two tail operands of a binding call are space-separated in
+        // the grammar; a comma between them would not re-parse. The
+        // binding's own interior is verbatim, exit labels included.
+        let src = ".func f\ncall g [num: 1{3->'0'}] exits=(won, lost)\nwon:stop\nlost:stop\n";
+        let once = format_asm_with(src, caps_interface()).unwrap();
+        assert!(
+            once.contains("call    g [num: 1{3->'0'}] exits=(won, lost)"),
+            "{once}"
         );
         assert_eq!(format_asm_with(&once, caps_interface()).unwrap(), once);
     }
