@@ -354,8 +354,11 @@ impl ObjectFile {
         }
     }
 
-    /// True when no v3 data is present, so the object serializes byte-for-byte
-    /// as v2. v3 emit gates on the negation of this.
+    /// True when no v3 data is present; v3 emit gates on the negation of
+    /// this. NOT on its own a promise of v2 bytes: a v4-shape object can be
+    /// v2-shape too (graft provenance is the case — none of the v3 fields,
+    /// yet v4 content), which is why `to_bytes` asks `is_v4_shape` first and
+    /// only then falls to this one.
     pub fn is_v2_shape(&self) -> bool {
         self.signatures.is_none()
             && self.table_blobs.is_none()
@@ -795,7 +798,7 @@ impl ObjectFile {
                     self.blobs.len(),
                     "interface must parallel blobs"
                 );
-                for routine in &iface.routines {
+                for (blob_index, routine) in iface.routines.iter().enumerate() {
                     let arity = routine.params.len();
                     debug_assert!(
                         routine.glyphs.len() == arity
@@ -805,6 +808,18 @@ impl ObjectFile {
                             && routine.opaque.len() == arity,
                         "every per-tape list must have one entry per parameter"
                     );
+                    // The writer walks the parameters, the reader walks the
+                    // signature's cardinalities: a disagreement writes a
+                    // stream that cannot be read back. (A missing signatures
+                    // section is not asserted here — the reader rejects an
+                    // interface without one, and a value that ill-formed
+                    // must reach that rejection, not a panic.)
+                    if let Some(sig) = self.signatures.as_ref().and_then(|s| s.get(blob_index)) {
+                        debug_assert_eq!(
+                            arity, sig.arity as usize,
+                            "an interface's parameters must match its signature's arity"
+                        );
+                    }
                     for k in 0..arity {
                         put_u32(&mut out, pool.intern(&routine.params[k]));
                         put_glyphs(&mut out, &mut pool, &routine.glyphs[k]);
@@ -1141,6 +1156,19 @@ impl ObjectFile {
         // announces is not there to read, and reading it back as "no
         // interface" would silently accept a corrupted header.
         let (interface, grafts) = if version >= OBJECT_FORMAT_VERSION_V4 {
+            // Bits 6 and 7 are unassigned. A v4 stream setting one was
+            // written by something this reader does not understand, so it
+            // says so instead of decoding half a file; the pre-v4 arms keep
+            // their historical tolerance for bits they never defined.
+            const KNOWN_FLAGS: u8 = FLAG_HAS_DEBUG
+                | FLAG_HAS_SIGNATURES
+                | FLAG_HAS_TABLES
+                | FLAG_HAS_VARIANTS
+                | FLAG_PROGRAM_VOLATILE
+                | FLAG_HAS_INTERFACE;
+            if flags & !KNOWN_FLAGS != 0 {
+                return Err(FormatError::Malformed("reserved object flag bits set"));
+            }
             let interface = if flags & FLAG_HAS_INTERFACE != 0 {
                 let Some(sigs) = &signatures else {
                     return Err(FormatError::Malformed("interface without signatures"));
@@ -1825,8 +1853,11 @@ mod tests {
                 returns: true,
             }],
             alphabets: vec![ExportedAlphabet {
+                // `#` is in no routine's glyph list: an exported alphabet is
+                // its own list, so this is the one glyph that pins the
+                // writer's interning of THAT list.
                 name: "bits".into(),
-                glyphs: vec!["_".into(), "0".into(), "1".into()],
+                glyphs: vec!["_".into(), "0".into(), "1".into(), "#".into()],
             }],
             graphs: vec![ExportedGraph {
                 name: "lib::findA".into(),
@@ -2238,6 +2269,31 @@ mod tests {
         assert!(matches!(
             ObjectFile::from_bytes(&bytes),
             Err(FormatError::Malformed("reserved binding flags"))
+        ));
+    }
+
+    /// A v4 stream setting an unassigned header flag bit was written by
+    /// something this reader does not understand, so it refuses the file
+    /// rather than decoding the parts it recognizes.
+    #[test]
+    fn reserved_object_flag_bits_rejected_in_v4() {
+        let obj = minimal_v4_bound_call();
+        let mut bytes = obj.to_bytes();
+        assert_eq!(
+            u16::from_le_bytes([bytes[3], bytes[4]]),
+            OBJECT_FORMAT_VERSION_V4
+        );
+        assert_eq!(
+            ObjectFile::from_bytes(&bytes).unwrap(),
+            obj,
+            "the stream must be valid but for the patched bit"
+        );
+        assert_eq!(bytes[6], 0, "layout assumption: the flags byte, all clear");
+        bytes[6] = 0b0100_0000; // bit 6 is unassigned
+        crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+        assert!(matches!(
+            ObjectFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("reserved object flag bits set"))
         ));
     }
 
