@@ -192,9 +192,12 @@ pub struct TapeBinding {
     /// The callee parameter this entry binds (v4 only); `None` is the
     /// positional form, where the entry's position is the callee tape.
     pub param: Option<String>,
-    /// The map was written out — `1{}` (true) versus `1` (false). A
-    /// distinction only v4 carries: an omitted map is index identity,
-    /// a written empty one is the empty map.
+    /// The map was written out — `1{}` (true) versus `1` (false): an
+    /// omitted map is index identity, a written empty one is the empty
+    /// map. A map with pairs is written by definition, and v3 already
+    /// carries its pairs, so only the written-EMPTY map needs v4 to be
+    /// expressible; a v3 stream reads back `map_written` = "it has
+    /// pairs".
     pub map_written: bool,
     /// The map ends in `*`: the pairs listed are not the whole map, and
     /// the rest stays open for the linker to fill (v4 only). Implies
@@ -370,8 +373,14 @@ impl ObjectFile {
 
     /// True when any v4-only content is present: an interface section, a
     /// graft-provenance record, or a bound call carrying a parameter name,
-    /// a glyph label, a written-empty or open map, or an exit vector. Such
+    /// a glyph label, a written-EMPTY or open map, or an exit vector. Such
     /// an object serializes as v4; anything else keeps its v2/v3 bytes.
+    ///
+    /// A written map WITH pairs is deliberately NOT a v4 trigger: the
+    /// pairs express it completely and v3 already stores them, so
+    /// promoting it would break the "lowest version that carries the
+    /// content" rule. Only `1{}` — written and empty — says something v3
+    /// cannot, since there an omitted map means index identity.
     pub fn is_v4_shape(&self) -> bool {
         self.interface.is_some()
             || !self.grafts.is_empty()
@@ -379,7 +388,7 @@ impl ObjectFile {
                 !bc.exits.is_empty()
                     || bc.binding.iter().any(|tb| {
                         tb.param.is_some()
-                            || tb.map_written
+                            || (tb.map_written && tb.pairs.is_empty())
                             || tb.open
                             || tb.pairs.iter().any(|p| p.dst_label.is_some())
                     })
@@ -1061,8 +1070,9 @@ impl ObjectFile {
                         }
                         // v4 widens the entry with the callee parameter it
                         // binds and the binding flags; v3 entries are
-                        // positional, with an omitted map.
-                        let (param, map_written, open) = if version >= OBJECT_FORMAT_VERSION_V4 {
+                        // positional and never open, and their written-ness
+                        // is read off the pairs below.
+                        let (param, v4_map_written, open) = if version >= OBJECT_FORMAT_VERSION_V4 {
                             let param_idx = r.u32()?;
                             let param = if param_idx == NO_STRING {
                                 None
@@ -1105,6 +1115,15 @@ impl ObjectFile {
                                 one_way: flags_byte & 1 != 0,
                             });
                         }
+                        // v3 carries no flag, but it does carry the pairs,
+                        // and a map with pairs was written by definition —
+                        // which is exactly why only the written-EMPTY map
+                        // forces v4. v4 streams state the flag outright.
+                        let map_written = if version >= OBJECT_FORMAT_VERSION_V4 {
+                            v4_map_written
+                        } else {
+                            !pairs.is_empty()
+                        };
                         binding.push(TapeBinding {
                             caller_tape,
                             param,
@@ -1571,7 +1590,9 @@ mod tests {
             binding: vec![TapeBinding {
                 caller_tape: 2,
                 param: None,
-                map_written: false,
+                // A map with pairs is a written map — and one v3 stores
+                // completely, which is why it is not a v4 trigger.
+                map_written: true,
                 open: false,
                 pairs: vec![
                     MapPair {
@@ -1596,7 +1617,10 @@ mod tests {
     #[test]
     fn v3_full_round_trip_preserves_one_way() {
         let obj = sample_v3_full();
-        let back = ObjectFile::from_bytes(&obj.to_bytes()).unwrap();
+        assert!(!obj.is_v4_shape(), "a written map with pairs is v3 content");
+        let bytes = obj.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 3);
+        let back = ObjectFile::from_bytes(&bytes).unwrap();
         assert_eq!(back, obj);
         assert!(back.bound_calls[0].binding[0].pairs[1].one_way);
         assert!(!back.bound_calls[0].binding[0].pairs[0].one_way);
@@ -1945,9 +1969,21 @@ mod tests {
         exits.bound_calls.push(call);
         assert!(exits.is_v4_shape(), "an exit vector needs v4");
 
+        // A written map is a v4 trigger only when it is EMPTY: with pairs
+        // it says nothing the pairs do not, and v3 carries those.
+        let mut written_with_pairs = sample();
+        let mut call = v3_call();
+        call.binding[0].map_written = true;
+        written_with_pairs.bound_calls.push(call);
+        assert!(
+            !written_with_pairs.is_v4_shape(),
+            "a written map with pairs is v3 content"
+        );
+
         let mut written = sample();
         let mut call = v3_call();
         call.binding[0].map_written = true;
+        call.binding[0].pairs.clear();
         written.bound_calls.push(call);
         assert!(written.is_v4_shape(), "a written-empty map needs v4");
 
@@ -2302,6 +2338,9 @@ mod tests {
     #[test]
     fn v4_pair_reserved_flags_rejected() {
         let mut obj = minimal_v4_bound_call();
+        // Adding a pair takes the written-EMPTY map away as the v4
+        // trigger, so the open marker carries the object to v4 instead.
+        obj.bound_calls[0].binding[0].open = true;
         obj.bound_calls[0].binding[0].pairs.push(MapPair {
             src: 1,
             dst: 2,

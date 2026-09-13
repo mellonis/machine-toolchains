@@ -593,6 +593,13 @@ fn assemble_function(
                         SourceOperand::BoundCallOp {
                             target,
                             binding,
+                            // The exit labels are accepted and
+                            // structurally validated where the operand is
+                            // classified — they are label names, each with
+                            // its own span — but nothing resolves them to
+                            // wire targets yet, so an object carries no
+                            // exit vector until that resolution lands
+                            // (docs/formats.md (bound calls)).
                             exits: _,
                         },
                     ) => {
@@ -1470,7 +1477,7 @@ fn validate_match_discipline(name: &SpannedName, rows: &[SourceRow]) -> Result<(
 mod tests {
     use super::*;
     use crate::asm::syntax::fixture::test_syntax;
-    use crate::formats::object::SymbolDef;
+    use crate::formats::object::{OBJECT_FORMAT_VERSION_V3, OBJECT_FORMAT_VERSION_V4, SymbolDef};
 
     fn asm(src: &str) -> crate::formats::object::ObjectFile {
         assemble(&test_syntax(), 0x7E, src, false).unwrap()
@@ -2411,9 +2418,40 @@ F0: .frame tapes=(0, 1)
     #[test]
     fn binding_call_round_trips_through_object_bytes() {
         let obj = asm_fake(BINDING_PROGRAM).unwrap();
-        let back = ObjectFile::from_bytes(&obj.to_bytes()).unwrap();
+        let bytes = obj.to_bytes();
+        // A positional binding whose maps are written out with pairs is
+        // v3 content: the pairs express the map completely, and the
+        // writer takes the lowest version that carries what is there.
+        assert_eq!(
+            u16::from_le_bytes([bytes[3], bytes[4]]),
+            OBJECT_FORMAT_VERSION_V3,
+            "a pair-carrying binding must not promote the object"
+        );
+        let back = ObjectFile::from_bytes(&bytes).unwrap();
         assert_eq!(back.bound_calls, obj.bound_calls);
         assert_eq!(back, obj);
+    }
+
+    #[test]
+    fn a_written_empty_map_is_the_one_binding_form_that_needs_v4() {
+        // `2{}` says "the empty map", which v3 cannot spell — there an
+        // omitted map means index identity. The interface cap is what
+        // lets the assembler write `{}` at all.
+        let mut syntax = fake_syntax();
+        syntax.caps.interface = true;
+        let src = ".func main\n    call plusOne [2{}, 0]\n    stp\n.func plusOne\n    stp\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let bytes = obj.to_bytes();
+        assert_eq!(
+            u16::from_le_bytes([bytes[3], bytes[4]]),
+            OBJECT_FORMAT_VERSION_V4
+        );
+        let back = ObjectFile::from_bytes(&bytes).unwrap();
+        assert_eq!(back, obj);
+        assert!(back.bound_calls[0].binding[0].map_written);
+        assert!(back.bound_calls[0].binding[0].pairs.is_empty());
+        // The bare entry beside it keeps the omitted map.
+        assert!(!back.bound_calls[0].binding[1].map_written);
     }
 
     #[test]

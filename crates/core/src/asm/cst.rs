@@ -1806,10 +1806,16 @@ fn parse_named_pairs<'a>(
     Some((pairs, group_span, &tail[close + 1..]))
 }
 
-/// A comma-separated list of `<from> (-> | =>) <to>` pairs (canonically
-/// spelled values). An empty token slice is the empty list (`rmap=()` =
-/// identity). `None` on any structural violation.
-pub(super) fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
+/// The one `<from> (-> | =>) <to>` list walk, shared by the `.map`
+/// directive's pairs and a binding call's: sources are always canonically
+/// spelled indices, while `dst` reads one destination token — numeric for
+/// `.map`, numeric or a glyph label for a binding (docs/formats.md (bound
+/// calls)). An empty token slice is the empty list (`rmap=()` =
+/// identity). `None` on any structural violation, `dst`'s included.
+fn parse_pair_list<T>(
+    inner: &[AsmToken],
+    dst: impl Fn(&AsmToken) -> Option<T>,
+) -> Option<Vec<(u32, T, bool)>> {
     let mut pairs = Vec::new();
     let mut i = 0;
     while i < inner.len() {
@@ -1819,8 +1825,8 @@ pub(super) fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
             AsmTokenKind::FatArrow => true,
             _ => return None,
         };
-        let to = canonical_u32(inner.get(i + 2)?)?.0;
-        pairs.push(FramePairCst { from, to, one_way });
+        let to = dst(inner.get(i + 2)?)?;
+        pairs.push((from, to, one_way));
         i += 3;
         if i < inner.len() {
             if !matches!(inner[i].kind, AsmTokenKind::Comma) {
@@ -1834,6 +1840,19 @@ pub(super) fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
         }
     }
     Some(pairs)
+}
+
+/// A comma-separated list of `<from> (-> | =>) <to>` pairs (canonically
+/// spelled values). An empty token slice is the empty list (`rmap=()` =
+/// identity). `None` on any structural violation.
+pub(super) fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
+    let pairs = parse_pair_list(inner, |t| canonical_u32(t).map(|(n, _)| n))?;
+    Some(
+        pairs
+            .into_iter()
+            .map(|(from, to, one_way)| FramePairCst { from, to, one_way })
+            .collect(),
+    )
 }
 
 /// Shapes a declarative binding-call operand's interior (the text
@@ -1978,37 +1997,15 @@ fn parse_binding_entry(seg: &[AsmToken]) -> Result<BindingEntryCst, BindingShape
 /// stays numeric — it indexes the caller's own tape alphabet, which the
 /// call site knows by position.
 fn parse_binding_pairs(inner: &[AsmToken]) -> Result<Vec<BindingPairCst>, BindingShapeError> {
-    use BindingShapeError::Malformed;
-    let mut pairs = Vec::new();
-    let mut i = 0;
-    while i < inner.len() {
-        let from = canonical_u32(inner.get(i).ok_or(Malformed)?)
-            .ok_or(Malformed)?
-            .0;
-        let one_way = match inner.get(i + 1).ok_or(Malformed)?.kind {
-            AsmTokenKind::Arrow => false,
-            AsmTokenKind::FatArrow => true,
-            _ => return Err(Malformed),
-        };
-        let dst = inner.get(i + 2).ok_or(Malformed)?;
-        let to = match &dst.kind {
-            AsmTokenKind::Glyph(g) => PairDst::Label(g.clone()),
-            _ => PairDst::Index(canonical_u32(dst).ok_or(Malformed)?.0),
-        };
-        pairs.push(BindingPairCst { from, to, one_way });
-        i += 3;
-        if i < inner.len() {
-            if !matches!(inner[i].kind, AsmTokenKind::Comma) {
-                return Err(Malformed);
-            }
-            i += 1;
-            // A trailing comma with no pair after it is malformed.
-            if i == inner.len() {
-                return Err(Malformed);
-            }
-        }
-    }
-    Ok(pairs)
+    let pairs = parse_pair_list(inner, |t| match &t.kind {
+        AsmTokenKind::Glyph(g) => Some(PairDst::Label(g.clone())),
+        _ => canonical_u32(t).map(|(n, _)| PairDst::Index(n)),
+    })
+    .ok_or(BindingShapeError::Malformed)?;
+    Ok(pairs
+        .into_iter()
+        .map(|(from, to, one_way)| BindingPairCst { from, to, one_way })
+        .collect())
 }
 
 /// The [`TableDirectiveKind`] a leading directive word names, or `None`
@@ -2954,6 +2951,17 @@ L1:     rgt
         // the capability check lives (pinned in `lower.rs`).
         assert!(parse_binding("num: 1", 1, caps).is_ok());
         assert!(parse_binding("1{*}", 1, caps).is_ok());
+    }
+
+    #[test]
+    fn a_glyph_before_the_colon_is_not_a_parameter_name() {
+        // The named-entry prefix wants a WORD before the colon. A glyph
+        // is not one, so the entry falls back to "index first" — and a
+        // glyph is not an index either.
+        assert_eq!(
+            parse_binding("'a': 1", 1, caps_interface()),
+            Err(BindingShapeError::Malformed)
+        );
     }
 
     #[test]

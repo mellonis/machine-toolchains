@@ -940,7 +940,9 @@ fn lower_param_directive(p: &ParamDirectiveCst, ctx: &mut LowerCtx) -> Result<()
         return Err(err(
             p.name_span,
             AsmErrorKind::BadSignature(
-                "`.param` names use letters, digits, underscore".to_string(),
+                "`.param` names use letters, digits and underscore, and start with a letter \
+                 or underscore"
+                    .to_string(),
             ),
         ));
     }
@@ -2047,21 +2049,35 @@ fn parse_exit_vector(operand: &OperandToken) -> Result<Vec<SpannedName>, AsmErro
         ));
     }
     // The operand's text is a verbatim single-line slice starting at its
-    // own span, so a char offset into it IS a column offset.
-    let at = operand.text.chars().count() - interior.chars().count() - 1;
+    // own span, so a char offset into it IS a column offset. Every step of
+    // that arithmetic is input-derived, so none of it may panic: a line
+    // long enough to overflow a column is a typed complaint like any other
+    // malformed operand.
+    let oversized = || {
+        err(
+            operand.span,
+            AsmErrorKind::BadOperand("exit vector operand is too long to span"),
+        )
+    };
+    let width = |s: &str| u32::try_from(s.chars().count()).map_err(|_| oversized());
     let base = operand.span.start;
     let mut names = Vec::new();
-    let mut col = u32::try_from(at).expect("an operand is one line long") + base.col;
+    // The column just past the `(`.
+    let text_width = width(&operand.text)?;
+    let mut col = width(interior)?
+        .checked_add(1) // the `)` the interior excludes
+        .and_then(|tail| text_width.checked_sub(tail))
+        .and_then(|at| at.checked_add(base.col))
+        .ok_or_else(oversized)?;
     for part in interior.split(',') {
         let lead = part.chars().take_while(|c| c.is_whitespace()).count();
         let name = part.trim();
-        let start = col + u32::try_from(lead).expect("an operand is one line long");
-        let span = Span::new(
-            base.line,
-            start,
-            base.line,
-            start + u32::try_from(name.chars().count()).expect("an operand is one line long"),
-        );
+        let start = u32::try_from(lead)
+            .ok()
+            .and_then(|lead| col.checked_add(lead))
+            .ok_or_else(oversized)?;
+        let end = start.checked_add(width(name)?).ok_or_else(oversized)?;
+        let span = Span::new(base.line, start, base.line, end);
         if !is_label_name(name) {
             return Err(err(
                 span,
@@ -2072,7 +2088,10 @@ fn parse_exit_vector(operand: &OperandToken) -> Result<Vec<SpannedName>, AsmErro
             name: name.to_string(),
             span,
         });
-        col += u32::try_from(part.chars().count() + 1).expect("an operand is one line long");
+        col = width(part)?
+            .checked_add(1)
+            .and_then(|step| col.checked_add(step))
+            .ok_or_else(oversized)?;
     }
     Ok(names)
 }
@@ -2163,6 +2182,21 @@ fn classify_bound_call(
                 bracket.span,
                 AsmErrorKind::BadFrame(
                     "named entries and open maps need the interface capability".into(),
+                ),
+            ));
+        }
+        // A named entry names a `.param`, so it takes the same grammar
+        // the declaration does — the shaping layer accepts any word
+        // before the colon, dotted and namespaced ones included.
+        if let Some(param) = &e.param
+            && !is_label_name(param)
+        {
+            return Err(err(
+                bracket.span,
+                AsmErrorKind::BadFrame(
+                    "binding parameter names use letters, digits and underscore, and start \
+                     with a letter or underscore"
+                        .into(),
                 ),
             ));
         }
@@ -3153,6 +3187,36 @@ lost:   stop
     }
 
     #[test]
+    fn binding_parameter_names_are_identifiers() {
+        // Shaping accepts any word before the colon; the name grammar is
+        // lowering's, and it is the one the `.param` declaration uses.
+        for src in [
+            ".func f\n        call g [a.b: 1]\n        stop\n",
+            ".func f\n        call g [a::b: 1]\n        stop\n",
+        ] {
+            let e = lower_with(binding_caps(), src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadFrame(ref m)
+                    if m.starts_with("binding parameter names use letters")),
+                "{src:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_exit_vector_is_a_typed_complaint() {
+        // Only the last `exits=(…)` run is captured, so the first one
+        // stays inside the operand region and the binding bracket no
+        // longer closes it: the line is refused, and never panics.
+        let src = ".func f\n        call g [0] exits=(a) exits=(b)\na:      stop\nb:      stop\n";
+        let e = lower_with(binding_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("needs a binding")),
+            "{e}"
+        );
+    }
+
+    #[test]
     fn mixed_named_and_positional_entries_are_rejected() {
         let src = ".func f\n        call g [num: 1, 0]\n        stop\n";
         let e = lower_with(binding_caps(), src).unwrap_err();
@@ -3271,18 +3335,28 @@ lost:   stop
     #[test]
     fn param_names_are_identifiers() {
         // A parameter is named at a call site (`num: 1`), so its name
-        // takes the label grammar — no dots, no `::`.
-        for name in ["a::b", "a.b"] {
+        // takes the label grammar — no dots, no `::`, and a letter or
+        // underscore first.
+        for name in ["a::b", "a.b", "::a"] {
             let src = format!(
                 ".routine f, tapes=1, alpha=(2)\n.param {name}, ('_', 'a')\n.func f\nstop\n"
             );
             let e = lower_with(iface_caps(), &src).unwrap_err();
             assert!(
                 matches!(e.kind, AsmErrorKind::BadSignature(ref m)
-                    if m == "`.param` names use letters, digits, underscore"),
+                    if m.starts_with("`.param` names use letters")),
                 "{name}: {e}"
             );
         }
+        // A digit-leading name never reaches that check: it does not lex
+        // as one word, so the line degrades and lowering answers with the
+        // directive's own grammar instead.
+        let src = ".routine f, tapes=1, alpha=(2)\n.param 1st, ('_', 'a')\n.func f\nstop\n";
+        let e = lower_with(iface_caps(), src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::Syntax(m) if m.contains("`.param`")),
+            "{e}"
+        );
     }
 
     #[test]

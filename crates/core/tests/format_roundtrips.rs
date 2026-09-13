@@ -99,7 +99,10 @@ proptest! {
                 binding: vec![TapeBinding {
                     caller_tape,
                     param: None,
-                    map_written: false,
+                    // A map with pairs is a written map, and v3 carries
+                    // the pairs — so it reads back written, and the
+                    // object stays v3.
+                    map_written: true,
                     open: false,
                     pairs: vec![MapPair { src, dst, dst_label: None, one_way }],
                 }],
