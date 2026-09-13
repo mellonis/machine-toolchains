@@ -24,11 +24,13 @@ use crate::arch::opcodes::*;
 /// 0.3: the fused write+move `wrmv [w…], [m…]` — the write vector then the
 /// move vector in one instruction (all writes precede all moves), the
 /// `-O0` codegen canon for a rule's write+move action. 0.4: the interface
-/// directives — `.param`/`.graph`/`.grafted` — glyph-literal operands
-/// (`'x'`), and the symbolic binding operand's interface extensions on
-/// `call` (glyph-labelled `->`/`=>` pair destinations, named entries, an
-/// open `*` marker, an `exits=(…)` vector), for routine interface
-/// contracts and the link-time composition engine.
+/// directives — `.param`/`.graph`/`.grafted` — the `exits=`/`noreturn`
+/// fields on `.routine`, quoted glyph literals (`'x'`), and the
+/// binding-call operand's interface extensions: named entries,
+/// glyph-labelled pair destinations, a written-empty map `{}` (distinct
+/// from omitting the braces), the open marker `*`, and an `exits=(…)`
+/// vector — for routine interface contracts and the link-time
+/// composition engine.
 pub const TM1_TMA_DIALECT_VERSION: &str = "0.4";
 
 /// The TM-1 mnemonic table (the `.tma` dialect). Opcode/operand shapes
