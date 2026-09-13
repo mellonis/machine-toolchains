@@ -56,7 +56,10 @@ const NO_STRING: u32 = 0xFFFF_FFFF;
 /// - `variants`, when present, parallels `blobs` one-to-one — one tag per
 ///   blob, same indexing as `debug`/`signatures`/`table_blobs`;
 /// - a tape binding marked `open` also has `map_written` set — an open map
-///   is a written map whose listed pairs are not the whole of it.
+///   is a written map whose listed pairs are not the whole of it;
+/// - a tape binding that carries pairs also has `map_written` set — a map
+///   with pairs was written by definition, which is what lets a v3 stream
+///   derive the flag it does not store.
 ///
 /// The six v3 fields (`signatures`, `table_blobs`, `table_fixups`,
 /// `bound_calls`, `variants`, `program_volatile`) are absent/default in a

@@ -242,12 +242,10 @@ pub struct LoweredSource {
     /// compiler fact (a source-language declaration), not something a
     /// hand-written assembly file states, so the assembler authors none
     /// and the compiler fills them in after assembly.
-    #[allow(dead_code)] // the assembler reads it once interface emission lands
     pub interface: Option<Interface>,
     /// The library graphs this unit spliced, from its `.grafted`
     /// directives — an object-level list of its own, outside the
     /// interface section (docs/formats.md (routine interfaces)).
-    #[allow(dead_code)] // the assembler reads it once interface emission lands
     pub grafts: Vec<GraftProvenance>,
     /// The file declares a `.volatile` ahead of its first `.func`: this
     /// source builds a volatile program (docs/core.md (linking)).
@@ -2173,15 +2171,22 @@ fn classify_bound_call(
     }
     let mut binding = Vec::with_capacity(entries.len());
     for e in entries {
-        // Defense in depth for the named form and the open marker: a
-        // glyph label cannot lex without the cap, but a parameter name
-        // and the `*` marker can (the `rept` cap already emits `Star`
-        // inside braces), so a capless dialect must refuse them here.
-        if !caps.interface && (e.param.is_some() || e.open) {
+        // Defense in depth for every form that needs v4 to be written
+        // down: a glyph label cannot lex without the cap, but a parameter
+        // name, the `*` marker and an empty pair of braces all can (the
+        // `rept` cap already emits `Star` and braces), so a capless
+        // dialect must refuse them here. A written-EMPTY map is in that
+        // set because `1{}` says "the empty map", which only v4 can spell
+        // — with pairs, or omitted, the entry is v3 content
+        // (docs/formats.md (bound calls)).
+        if !caps.interface && (e.param.is_some() || e.open || (e.map_written && e.pairs.is_empty()))
+        {
             return Err(err(
                 bracket.span,
                 AsmErrorKind::BadFrame(
-                    "named entries and open maps need the interface capability".into(),
+                    "named entries, open maps and a written-empty map need the interface \
+                     capability"
+                        .into(),
                 ),
             ));
         }
@@ -3229,10 +3234,12 @@ lost:   stop
 
     #[test]
     fn the_symbolic_binding_forms_need_the_interface_cap() {
-        // Without the cap a glyph label never lexes, so only the two
-        // forms the rept/vectors caps alone can spell reach lowering:
-        // a named entry (`num:`) and an open map (`*` is the rept cap's
-        // own token). Both are refused.
+        // Without the cap a glyph label never lexes, so only the three
+        // forms the rept/vectors caps alone can spell reach lowering: a
+        // named entry (`num:`), an open map (`*` is the rept cap's own
+        // token) and a written-EMPTY map (`{}` — braces lex under rept,
+        // and the form is the one map state that needs v4). All three
+        // are refused.
         let caps = AsmCaps {
             interface: false,
             ..binding_caps()
@@ -3240,13 +3247,23 @@ lost:   stop
         for src in [
             ".func f\n        call g [num: 1]\n        stop\n",
             ".func f\n        call g [0{*}]\n        stop\n",
+            ".func f\n        call g [0{}]\n        stop\n",
         ] {
             let e = lower_with(caps, src).unwrap_err();
             assert!(
                 matches!(e.kind, AsmErrorKind::BadFrame(ref m)
-                    if m == "named entries and open maps need the interface capability"),
+                    if m == "named entries, open maps and a written-empty map need the \
+                             interface capability"),
                 "{src:?}: {e}"
             );
+        }
+        // A map WITH pairs, and an omitted map, are both v3 content and
+        // stay legal without the cap.
+        for src in [
+            ".func f\n        call g [0{1->2}]\n        stop\n",
+            ".func f\n        call g [0]\n        stop\n",
+        ] {
+            lower_with(caps, src).unwrap_or_else(|e| panic!("{src:?}: {e}"));
         }
     }
 

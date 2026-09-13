@@ -129,6 +129,10 @@ enum Slot {
         opcode: u8,
         target: String,
         binding: Vec<TapeBinding>,
+        /// Where the callee's exits land, as written: label names in THIS
+        /// function, resolved to blob-relative code offsets at emit time
+        /// through the same map a jump target uses.
+        exits: Vec<SpannedName>,
     },
 }
 
@@ -340,6 +344,19 @@ pub(crate) fn assemble_lowered(
     // Declarative binding calls force the v3 object shape (docs/formats.md
     // (bound calls)); an object with none keeps its v2 shape byte-for-byte.
     object.bound_calls = bound_calls;
+    // The v4 sections. The interface's routine records parallel the
+    // functions — and so the blobs — exactly as `signatures` do, which
+    // lowering's all-or-none rule guarantees (an interface obliges every
+    // function to carry both a `.routine` and its `.param` lines). Graft
+    // provenance is written OUTSIDE that section on the wire and obliges
+    // no signature of its own, so it is attached independently: a file
+    // that only grafts, and defines no function at all, carries grafts
+    // with no interface (docs/formats.md (routine interfaces)).
+    // Cloned (not moved) so the entry can keep borrowing `lowered`, like
+    // `signatures` above; both are `None`/empty for a file that declares
+    // no interface content, which keeps its v2/v3 bytes.
+    object.interface = lowered.interface.clone();
+    object.grafts = lowered.grafts.clone();
     Ok(object)
 }
 
@@ -593,14 +610,7 @@ fn assemble_function(
                         SourceOperand::BoundCallOp {
                             target,
                             binding,
-                            // The exit labels are accepted and
-                            // structurally validated where the operand is
-                            // classified — they are label names, each with
-                            // its own span — but nothing resolves them to
-                            // wire targets yet, so an object carries no
-                            // exit vector until that resolution lands
-                            // (docs/formats.md (bound calls)).
-                            exits: _,
+                            exits,
                         },
                     ) => {
                         slots.push(Slot::BoundCall {
@@ -608,6 +618,7 @@ fn assemble_function(
                             opcode: *opcode,
                             target: target.name.clone(),
                             binding: binding.iter().map(source_binding_to_object).collect(),
+                            exits: exits.clone(),
                         });
                     }
                     (OperandKind::SymbolVec, SourceOperand::Ints(ints)) => {
@@ -909,6 +920,7 @@ fn assemble_function(
                         opcode,
                         target,
                         binding,
+                        exits,
                         ..
                     } => {
                         blob.push(*opcode);
@@ -919,12 +931,21 @@ fn assemble_function(
                         // callee may be extern; interning it mirrors a plain
                         // call's external-symbol handling.
                         let sym_idx = symbol_index.bind(target, function.volatile, symbols);
+                        // The exit vector names labels in THIS function —
+                        // where control lands when the callee leaves by
+                        // each of its state parameters — so it resolves
+                        // through the same blob-local map a jump target
+                        // does, to the same blob-relative offsets.
+                        let exit_offsets = exits
+                            .iter()
+                            .map(|e| resolve(&e.name, e.span))
+                            .collect::<Result<Vec<u32>, AsmError>>()?;
                         bound_calls.push(BoundCall {
                             blob: blob_idx,
                             offset: blob.len() as u32,
                             symbol: sym_idx,
                             binding: binding.clone(),
-                            exits: Vec::new(),
+                            exits: exit_offsets,
                         });
                         blob.extend([0u8; 4]);
                     }
@@ -2435,8 +2456,11 @@ F0: .frame tapes=(0, 1)
     #[test]
     fn a_written_empty_map_is_the_one_binding_form_that_needs_v4() {
         // `2{}` says "the empty map", which v3 cannot spell — there an
-        // omitted map means index identity. The interface cap is what
-        // lets the assembler write `{}` at all.
+        // omitted map means index identity. The braces themselves lex
+        // under the rept cap, so the form SHAPES either way; what the
+        // interface cap decides is whether lowering accepts it, since it
+        // is the one map state that needs v4 (see
+        // `the_symbolic_binding_forms_need_the_interface_cap`).
         let mut syntax = fake_syntax();
         syntax.caps.interface = true;
         let src = ".func main\n    call plusOne [2{}, 0]\n    stp\n.func plusOne\n    stp\n";

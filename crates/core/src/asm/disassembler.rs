@@ -14,7 +14,9 @@ use super::decode::{Body, Decoded, DecodedOperand, decode_at, decode_stream};
 use super::fmt::wrap_operand_list;
 use super::syntax::{ArchSyntax, Flow};
 use crate::formats::executable::Executable;
-use crate::formats::object::{BlobVariant, BoundCall, ObjectFile, SymbolDef, TapeBinding};
+use crate::formats::object::{
+    BlobVariant, BoundCall, ObjectFile, RoutineInterface, SymbolDef, TapeBinding,
+};
 use crate::linker::MapFile;
 use crate::vm::OperandKind;
 
@@ -263,29 +265,91 @@ fn dense_map_pairs(dense: &[u16]) -> String {
         .join(", ")
 }
 
+/// One glyph as an assembly glyph literal — `'g'`, with the two escapes
+/// the lexer and `formats::glyphs` share (`'` → `\'`, `\` → `\\`)
+/// re-applied (docs/formats.md (glyph tables)).
+fn render_glyph(glyph: &str) -> String {
+    let mut out = String::with_capacity(glyph.len() + 2);
+    out.push('\'');
+    for c in glyph.chars() {
+        if c == '\'' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
+/// One element of a glyph LIST. A one-character glyph is a quoted
+/// literal; a longer one cannot be, because the assembly lexer's glyph
+/// token is exactly one character wide and an unlexable token makes the
+/// whole line unassemblable. The only multi-character label a glyph list
+/// can hold is a NUMBER's decimal label — a list element lexes as a
+/// glyph literal or as a number, and nothing else — so that label prints
+/// as the bare number it came from and reads back identical
+/// (docs/formats.md (glyph tables)).
+fn render_glyph_element(glyph: &str) -> String {
+    let multi_char = glyph.chars().count() != 1;
+    if multi_char && glyph.parse::<u32>().is_ok_and(|n| n.to_string() == glyph) {
+        return glyph.to_string();
+    }
+    render_glyph(glyph)
+}
+
+/// A glyph list as a directive writes it, `, `-joined. Always spelled
+/// out one element per glyph — a range (`'0'..'9'`) is a source spelling
+/// the decoded list does not remember, and expanding it re-parses to the
+/// identical list.
+fn render_glyph_list(glyphs: &[String]) -> String {
+    glyphs
+        .iter()
+        .map(|g| render_glyph_element(g))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Renders a declarative call's tape binding as `[<entry>, …]`
-/// (docs/formats.md (bound calls)). Each entry is the caller physical
-/// tape, optionally followed by a `{ <pairs> }` symbol map; `->` spells a
-/// bidirectional pair and `=>` a one-way one — the one-way bit IS wire
-/// data here, so it re-emits exactly. Passthrough entries (no pairs) drop
-/// the braces, which the assembler re-parses to the same empty pair list.
+/// (docs/formats.md (bound calls)). Each entry is the callee parameter it
+/// binds (`num: `, printed iff the entry carries a name — a binding names
+/// every entry or none) followed by the caller physical tape and, when
+/// the map was WRITTEN, its `{ <pairs> }` braces:
+///
+/// - `1` — no braces at all: the map was omitted, which is index identity;
+/// - `1{}` — written and empty: the empty map, which only v4 can spell;
+/// - `1{3->'0',4=>'1'}` — the listed pairs, `->` bidirectional and `=>`
+///   one-way (the one-way bit IS wire data here, so it re-emits exactly),
+///   each destination an index or, when the pair carries a label, that
+///   glyph as a literal — never the placeholder index beside it;
+/// - `1{*}` / `1{3->'0',*}` — open: `*` last inside the braces says the
+///   pairs listed are not the whole map.
 fn render_binding(binding: &[TapeBinding]) -> String {
     let entries = binding
         .iter()
         .map(|tb| {
-            if tb.pairs.is_empty() {
-                return tb.caller_tape.to_string();
+            let prefix = match &tb.param {
+                Some(param) => format!("{param}: "),
+                None => String::new(),
+            };
+            if !tb.map_written {
+                return format!("{prefix}{}", tb.caller_tape);
             }
-            let pairs = tb
+            let mut items: Vec<String> = tb
                 .pairs
                 .iter()
                 .map(|p| {
                     let arrow = if p.one_way { "=>" } else { "->" };
-                    format!("{}{arrow}{}", p.src, p.dst)
+                    let dst = match &p.dst_label {
+                        Some(glyph) => render_glyph(glyph),
+                        None => p.dst.to_string(),
+                    };
+                    format!("{}{arrow}{dst}", p.src)
                 })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{}{{{pairs}}}", tb.caller_tape)
+                .collect();
+            if tb.open {
+                items.push("*".to_string());
+            }
+            format!("{prefix}{}{{{}}}", tb.caller_tape, items.join(","))
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -661,13 +725,33 @@ fn render_dispatch_table(
 /// and a structural piece ends the group it starts —
 /// `comment_columns`'s doc), so the column is `max(COMMENT_COL, code
 /// width + 1)` with no other line's width to account for.
-fn routine_line(name: &str, tapes: u8, cardinalities: &[u32], comment: Option<&str>) -> String {
+///
+/// `exits`/`returns` come from the object's interface record when it has
+/// one; the tail prints only what it carries — `, exits={k}` for a
+/// non-zero count and `, noreturn` for a routine that never returns, in
+/// that one legal order (docs/formats.md (routine interfaces)). An
+/// object without an interface passes `0, true`, which prints nothing
+/// and keeps a signed-only listing byte-for-byte as it was.
+fn routine_line(
+    name: &str,
+    tapes: u8,
+    cardinalities: &[u32],
+    exits: u8,
+    returns: bool,
+    comment: Option<&str>,
+) -> String {
     let alpha = cardinalities
         .iter()
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let code = format!(".routine {name}, tapes={tapes}, alpha=({alpha})");
+    let mut code = format!(".routine {name}, tapes={tapes}, alpha=({alpha})");
+    if exits > 0 {
+        code.push_str(&format!(", exits={exits}"));
+    }
+    if !returns {
+        code.push_str(", noreturn");
+    }
     let Some(comment) = comment else {
         return format!("{code}\n");
     };
@@ -682,6 +766,41 @@ fn routine_line(name: &str, tapes: u8, cardinalities: &[u32], comment: Option<&s
     line.push_str(comment);
     line.push('\n');
     line
+}
+
+/// One `.param` line (newline included) for tape `k` of a routine
+/// interface (docs/formats.md (routine interfaces)): the parameter name,
+/// its glyphs, then the four suffixes in their one legal order.
+///
+/// A suffix prints only when it carries something. `writes=` is dropped
+/// for an empty write set on purpose — an absent `writes=` and a written
+/// `writes=()` decode to the same empty list, so there is nothing to
+/// choose between and the shorter spelling is canonical. `enters=`/
+/// `leaves=` print exactly when the clause is present (a present one is
+/// never empty), and `opaque` when the flag is set.
+fn param_line(routine: &RoutineInterface, k: usize) -> String {
+    let mut code = format!(
+        ".param  {}, ({})",
+        routine.params[k],
+        render_glyph_list(&routine.glyphs[k])
+    );
+    if !routine.writes[k].is_empty() {
+        code.push_str(&format!(
+            ", writes=({})",
+            render_glyph_list(&routine.writes[k])
+        ));
+    }
+    if let Some(clause) = &routine.enters[k] {
+        code.push_str(&format!(", enters=({})", render_glyph_list(clause)));
+    }
+    if let Some(clause) = &routine.leaves[k] {
+        code.push_str(&format!(", leaves=({})", render_glyph_list(clause)));
+    }
+    if routine.opaque[k] {
+        code.push_str(", opaque");
+    }
+    code.push('\n');
+    code
 }
 
 /// The entries of the dispatch table at `start` in a LINKED table
@@ -738,6 +857,38 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
         }
         None => (HashMap::new(), CodeLabels::new()),
     };
+    // The interface's object-level lines open the code section, before
+    // the first function — which is where lowering accepts them. Gated
+    // on the dialect's own capability, like `.volatile` above: a dialect
+    // that cannot parse the directive must never be handed text carrying
+    // it. The graph digests come from the interface section; the graft
+    // digests are a list of their own, written outside it on the wire
+    // and present even when a unit describes no routine at all
+    // (docs/formats.md (routine interfaces)).
+    if syntax.caps.interface {
+        if let Some(iface) = &obj.interface {
+            for graph in &iface.graphs {
+                text.push_str(&format!(".graph  {}, {}\n", graph.name, graph.digest));
+            }
+        }
+        for graft in &obj.grafts {
+            text.push_str(&format!(".grafted {}, {}\n", graft.graph, graft.digest));
+        }
+        // An exported alphabet has no directive to be written in — it is
+        // a source-language declaration the compiler fills in, which no
+        // assembly file states — so it prints as a comment block: the
+        // listing shows it, and the text still reassembles to the object
+        // the rest of the file describes.
+        if let Some(iface) = &obj.interface {
+            for alphabet in &iface.alphabets {
+                text.push_str(&format!(
+                    "; alphabet {}: ({})\n",
+                    alphabet.name,
+                    render_glyph_list(&alphabet.glyphs)
+                ));
+            }
+        }
+    }
     // reloc lookup: (blob, hole offset) -> symbol name
     let reloc_at: BTreeMap<(u32, u32), &str> = obj
         .relocations
@@ -794,6 +945,17 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                 }
             }
         }
+        // An exit vector names positions in the CALLING blob — where
+        // control lands when the callee leaves by each of its state
+        // parameters — so every exit offset defines a label here exactly
+        // as a jump target does. The operand can only reassemble if the
+        // code section defines the name it prints (docs/formats.md
+        // (bound calls)).
+        for bc in &obj.bound_calls {
+            if bc.blob == blob {
+                targets.extend(bc.exits.iter().copied());
+            }
+        }
 
         // Every label this blob defines: a jump target synthesizes its
         // `L<addr>` name, and a position the tables section names takes
@@ -845,11 +1007,33 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                                     // (.byte fallback below).
                                     .or_else(|| {
                                         bound_at.get(&(blob, d.addr + 1)).map(|bc| {
-                                            format!(
+                                            let mut rendered = format!(
                                                 "{} {}",
                                                 obj.symbols[bc.symbol as usize].name,
                                                 render_binding(&bc.binding),
-                                            )
+                                            );
+                                            // The exit vector rides after
+                                            // the bracket, space-separated
+                                            // from it — the grammar writes
+                                            // no comma there, and `fmt`'s
+                                            // operand joiner agrees.
+                                            if !bc.exits.is_empty() {
+                                                let names: Vec<String> = bc
+                                                    .exits
+                                                    .iter()
+                                                    .map(|&offset| {
+                                                        code_label(
+                                                            labels_at.get(&offset).cloned(),
+                                                            offset,
+                                                        )
+                                                    })
+                                                    .collect();
+                                                rendered.push_str(&format!(
+                                                    " exits=({})",
+                                                    names.join(", ")
+                                                ));
+                                            }
+                                            rendered
                                         })
                                     })
                             } else if let Some(name) = reloc_at.get(&(blob, d.addr + 1)) {
@@ -922,12 +1106,30 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
             // (they are all-or-none per object, parallel to blobs —
             // docs/formats.md (.pmo)).
             if let Some(sig) = obj.signatures.as_ref().and_then(|s| s.get(blob as usize)) {
+                // The interface record parallels the signature: its `.param`
+                // lines follow the `.routine` line and describe the same
+                // tapes, in the same order (docs/formats.md (routine
+                // interfaces)). Gated on the dialect's capability like the
+                // digest lines above.
+                let routine = syntax
+                    .caps
+                    .interface
+                    .then_some(obj.interface.as_ref())
+                    .flatten()
+                    .and_then(|iface| iface.routines.get(blob as usize));
                 text.push_str(&routine_line(
                     &symbol.name,
                     sig.arity,
                     &sig.cardinalities,
+                    routine.map_or(0, |r| r.exits),
+                    routine.is_none_or(|r| r.returns),
                     None,
                 ));
+                if let Some(routine) = routine {
+                    for k in 0..routine.params.len() {
+                        text.push_str(&param_line(routine, k));
+                    }
+                }
             }
             text.push_str(&format!(
                 ".func {}{}\n",
@@ -1516,6 +1718,10 @@ pub fn disassemble_executable(
             &func_name(exe.entry),
             exe.tape_count,
             &exe.alphabet_cardinalities,
+            // A linked image carries no interface section, so the
+            // directive's interface tail is always absent here.
+            0,
+            true,
             None,
         ));
     }
@@ -1626,7 +1832,14 @@ pub fn disassemble_executable(
                 Some((tapes, alpha)) => (*tapes, alpha.clone(), Some("derived")),
                 None => (exe.tape_count, exe.alphabet_cardinalities.clone(), None),
             };
-            out.push_str(&routine_line(&func_name(root), tapes, &alpha, comment));
+            out.push_str(&routine_line(
+                &func_name(root),
+                tapes,
+                &alpha,
+                0,
+                true,
+                comment,
+            ));
         }
         out.push_str(&format!(".func {}\n", func_name(root)));
 
@@ -2700,6 +2913,222 @@ F0:     .frame  tapes=(2, 0)
         let reasm = assemble(&syntax, 0x7E, &dis, false).unwrap();
         assert_eq!(reasm.bound_calls, obj.bound_calls);
         assert_eq!(reasm, obj);
+    }
+
+    /// The dialect above with the interface capability on — the shape a
+    /// TM-like dialect has, and the only one that can carry an exit
+    /// vector or a `.param` line.
+    fn iface_syntax() -> ArchSyntax {
+        let mut syntax = fake_syntax();
+        syntax.caps.interface = true;
+        syntax
+    }
+
+    fn iface_caps() -> crate::asm::AsmCaps {
+        crate::asm::AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+            volatile: false,
+            interface: true,
+        }
+    }
+
+    #[test]
+    fn an_exit_target_the_tables_section_also_names_keeps_that_one_name() {
+        // The failure `table_code_labels`' doc exists to prevent, now for
+        // a third naming surface: `A` is a dispatch entry AND an exit
+        // target. Re-synthesizing `L<addr>` for the exit vector would
+        // spell the same address two ways and the text would not
+        // reassemble, so the vector reads the one label map.
+        let syntax = iface_syntax();
+        let src = "\
+.section tables
+D0: .targets A
+.section code
+.routine main, tapes=1, alpha=(2)
+.param  ctl, ('_', '1')
+.func main
+        call    g [0] exits=(A)
+        tdispatch D0
+A:      stp
+";
+        // `-g` so the blob's debug labels name the position `A`, which is
+        // what makes the two spellings differ if they are chosen twice.
+        let obj = assemble(&syntax, 0x7E, src, true).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        assert!(dis.contains("call    g [0] exits=(A)"), "{dis}");
+        assert!(dis.contains("T0:     .targets A"), "{dis}");
+        assert!(dis.contains("\nA:      stp"), "{dis}");
+        assert_eq!(
+            crate::asm::format_asm_with(&dis, iface_caps()).unwrap(),
+            dis,
+            "{dis}"
+        );
+        let reasm = assemble(&syntax, 0x7E, &dis, true).unwrap();
+        assert_eq!(reasm.to_bytes(), obj.to_bytes(), "{dis}");
+    }
+
+    #[test]
+    fn glyph_labels_and_lists_re_escape_the_quote_and_the_backslash() {
+        // The two escapes `formats::glyphs` and the lexer share, in both
+        // places a glyph is printed: a `.param` list and a pair's
+        // destination label.
+        let syntax = iface_syntax();
+        let src = concat!(
+            ".routine main, tapes=1, alpha=(3)\n",
+            r".param  q, ('_', '\'', '\\')",
+            "\n.func main\n",
+            r"        call    g [q: 0{1->'\'',2->'\\'}]",
+            "\n        stp\n"
+        );
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let iface = obj.interface.as_ref().unwrap();
+        assert_eq!(
+            iface.routines[0].glyphs[0],
+            vec!["_".to_string(), "'".to_string(), "\\".to_string()]
+        );
+        let dis = disassemble_object(&syntax, &obj);
+        assert_eq!(dis, src, "{dis}");
+        assert_eq!(
+            assemble(&syntax, 0x7E, &dis, false).unwrap().to_bytes(),
+            obj.to_bytes()
+        );
+    }
+
+    #[test]
+    fn a_glyph_list_spells_out_ranges_and_keeps_wide_numbers_unquoted() {
+        // Neither source spelling survives decoding: a range is expanded
+        // by the time the object holds it, and a bare number's identity
+        // is its decimal label. Both reprint elementwise and re-parse to
+        // the identical list — so the object is unchanged even though
+        // the text is not the one that was written. `10` stays a bare
+        // number because `'10'` would not LEX (a glyph token is one
+        // character wide), and an unlexable token makes the whole line
+        // unassemblable.
+        let syntax = iface_syntax();
+        let src = concat!(
+            ".routine main, tapes=2, alpha=(4, 3)\n",
+            ".param  digits, ('0'..'3')\n",
+            ".param  nums, (0, 1, 10)\n",
+            ".func main\n        stp\n"
+        );
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        assert_eq!(
+            obj.interface.as_ref().unwrap().routines[0].glyphs[1],
+            vec!["0".to_string(), "1".to_string(), "10".to_string()]
+        );
+        let dis = disassemble_object(&syntax, &obj);
+        assert!(
+            dis.contains(".param  digits, ('0', '1', '2', '3')\n"),
+            "{dis}"
+        );
+        assert!(dis.contains(".param  nums, ('0', '1', 10)\n"), "{dis}");
+        assert_eq!(
+            crate::asm::format_asm_with(&dis, iface_caps()).unwrap(),
+            dis,
+            "{dis}"
+        );
+        assert_eq!(
+            assemble(&syntax, 0x7E, &dis, false).unwrap().to_bytes(),
+            obj.to_bytes(),
+            "{dis}"
+        );
+    }
+
+    #[test]
+    fn exported_alphabets_print_as_a_comment_block() {
+        // An exported alphabet has no assembly spelling, so it prints as
+        // a comment after the digest lines — visible in the listing, and
+        // still assembling to the object the rest of the file describes.
+        // Hand-built: the assembler authors none (a compiler fills them).
+        use crate::formats::object::{ExportedAlphabet, ExportedGraph};
+        let syntax = iface_syntax();
+        let src =
+            ".routine main, tapes=1, alpha=(2)\n.param  ctl, ('_', '1')\n.func main\n        stp\n";
+        let mut obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        {
+            let iface = obj.interface.as_mut().unwrap();
+            iface.alphabets.push(ExportedAlphabet {
+                name: "bits".to_string(),
+                glyphs: vec!["_".to_string(), "1".to_string()],
+            });
+            iface.graphs.push(ExportedGraph {
+                name: "lib::g".to_string(),
+                digest: 7,
+            });
+        }
+        let dis = disassemble_object(&syntax, &obj);
+        assert!(
+            dis.starts_with(".graph  lib::g, 7\n; alphabet bits: ('_', '1')\n"),
+            "{dis}"
+        );
+        // The comment block sits on the grid like every other own-line
+        // comment: fmt over the listing is the identity.
+        assert_eq!(
+            crate::asm::format_asm_with(&dis, iface_caps()).unwrap(),
+            dis,
+            "{dis}"
+        );
+        // The comment is trivia: the text reassembles to the object
+        // MINUS the alphabets, which no directive can state.
+        let reasm = assemble(&syntax, 0x7E, &dis, false).unwrap();
+        assert!(reasm.interface.as_ref().unwrap().alphabets.is_empty());
+        assert_eq!(
+            reasm.interface.as_ref().unwrap().graphs,
+            obj.interface.as_ref().unwrap().graphs
+        );
+    }
+
+    #[test]
+    fn a_capless_dialect_is_never_handed_an_interface_directive() {
+        // Same rule as `.volatile`: a dialect that cannot parse the
+        // directive must not be shown it. Such an object cannot arise
+        // from assembly under that dialect — this pins the gate, not a
+        // reachable listing. Every interface-only surface is covered:
+        // both digest directives, the `.param` lines, the exported
+        // alphabets' comment block, and the `.routine` line's own tail.
+        use crate::formats::object::{ExportedAlphabet, ExportedGraph};
+        let src = concat!(
+            ".grafted other::h, 42\n",
+            ".routine main, tapes=1, alpha=(2), exits=1, noreturn\n",
+            ".param  ctl, ('_', '1')\n.func main\n        stp\n"
+        );
+        let mut obj = assemble(&iface_syntax(), 0x7E, src, false).unwrap();
+        {
+            let iface = obj.interface.as_mut().unwrap();
+            iface.graphs.push(ExportedGraph {
+                name: "lib::g".to_string(),
+                digest: 7,
+            });
+            iface.alphabets.push(ExportedAlphabet {
+                name: "bits".to_string(),
+                glyphs: vec!["_".to_string()],
+            });
+        }
+        let dis = disassemble_object(&fake_syntax(), &obj);
+        for absent in [
+            ".param",
+            ".graph",
+            ".grafted",
+            "; alphabet",
+            "exits=",
+            "noreturn",
+        ] {
+            assert!(!dis.contains(absent), "{absent} in:\n{dis}");
+        }
+        assert!(dis.contains(".routine main, tapes=1, alpha=(2)\n"), "{dis}");
+        // And the same object under a capable dialect prints them all.
+        let full = disassemble_object(&iface_syntax(), &obj);
+        for present in [
+            ".graph  lib::g, 7\n",
+            ".grafted other::h, 42\n",
+            "; alphabet bits: ('_')\n",
+            ".routine main, tapes=1, alpha=(2), exits=1, noreturn\n",
+            ".param  ctl, ('_', '1')\n",
+        ] {
+            assert!(full.contains(present), "{present:?} missing from:\n{full}");
+        }
     }
 
     #[test]
