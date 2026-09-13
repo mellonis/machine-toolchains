@@ -10,6 +10,7 @@ use mtc_core::asm::{
     ArchSyntax, AsmCaps, AsmErrorKind, Flow, RelaxPair, SyntaxEntry, assemble, disassemble_object,
     format_asm_with,
 };
+use mtc_core::formats::object::ObjectFile;
 use mtc_core::vm::OperandKind;
 
 const ARCH: u8 = 0x7F;
@@ -83,15 +84,15 @@ fn caps() -> AsmCaps {
 /// all four map states, an empty binding, and exit vectors in the second
 /// blob.
 const SOURCE: &str = "\
-.graph  lib::findA, 3735928559
+.graph lib::findA, 3735928559
 .grafted other::h, 42
 .routine f, tapes=1, alpha=(2)
-.param  ctl, ('_', '1')
+.param ctl, ('_', '1')
 .func f
         stop
 .routine main, tapes=2, alpha=(5, 3), exits=2, noreturn
-.param  data, ('_', 'a', 'b', '0', '1'), writes=('0', '1'), enters=('a'), leaves=('0', '1'), opaque
-.param  ctl, ('_', '0', '1')
+.param data, ('_', 'a', 'b', '0', '1'), writes=('0', '1'), enters=('a'), leaves=('0', '1'), opaque
+.param ctl, ('_', '0', '1')
 .func main
         call    g [num: 1{3->'0',4=>'1'}, ctl: 0{}] exits=(won, lost)
         call    g [1, 0{*}]
@@ -106,15 +107,15 @@ lost:   stop
 /// labels: their names never reach the object (no `-g` here), so they
 /// come back synthesized from their offsets.
 const CANONICAL: &str = "\
-.graph  lib::findA, 3735928559
+.graph lib::findA, 3735928559
 .grafted other::h, 42
 .routine f, tapes=1, alpha=(2)
-.param  ctl, ('_', '1')
+.param ctl, ('_', '1')
 .func f
         stop
 .routine main, tapes=2, alpha=(5, 3), exits=2, noreturn
-.param  data, ('_', 'a', 'b', '0', '1'), writes=('0', '1'), enters=('a'), leaves=('0', '1'), opaque
-.param  ctl, ('_', '0', '1')
+.param data, ('_', 'a', 'b', '0', '1'), writes=('0', '1'), enters=('a'), leaves=('0', '1'), opaque
+.param ctl, ('_', '0', '1')
 .func main
         call    g [num: 1{3->'0',4=>'1'}, ctl: 0{}] exits=(L0015, L0016)
         call    g [1, 0{*}]
@@ -149,10 +150,29 @@ fn interface_surface_round_trips_byte_identically() {
     assert_eq!(bc.exits.len(), 2);
     assert_eq!(bc.binding[0].param.as_deref(), Some("num"));
     assert_eq!(bc.binding[0].pairs[0].dst_label.as_deref(), Some("0"));
+    // A labelled pair carries NO index: `dst` is a placeholder the linker
+    // fills once it can resolve the label against the callee's alphabet,
+    // and the wire carries the label in its place — so it must be built
+    // with 0 or it does not survive a round trip.
+    assert_eq!(
+        bc.binding[0].pairs[0].dst, 0,
+        "a labelled pair carries dst 0"
+    );
+    assert_eq!(bc.binding[0].pairs[1].dst_label.as_deref(), Some("1"));
+    assert_eq!(bc.binding[0].pairs[1].dst, 0);
     assert!(bc.binding[1].map_written && bc.binding[1].pairs.is_empty());
     assert!(obj.bound_calls[1].binding[1].open);
     assert!(obj.bound_calls[2].binding[0].open);
     assert!(obj.bound_calls[3].binding.is_empty());
+
+    // The serializer carries everything the in-memory value holds: a
+    // field dropped on the way out (or on the way back) shows up here,
+    // not only in the two-in-memory-objects comparison below.
+    assert_eq!(
+        ObjectFile::from_bytes(&obj.to_bytes()).expect("reads back"),
+        obj,
+        "the object survives its own bytes"
+    );
 
     let text = disassemble_object(&syntax(), &obj);
     assert_eq!(text, CANONICAL, "the interface listing's canonical grid");
@@ -191,12 +211,12 @@ fn param_suffixes_print_only_when_they_carry_something() {
     let text = disassemble_object(&syntax(), &obj);
     assert!(
         text.contains(
-            "\n.param  data, ('_', 'a', 'b', '0', '1'), writes=('0', '1'), \
+            "\n.param data, ('_', 'a', 'b', '0', '1'), writes=('0', '1'), \
              enters=('a'), leaves=('0', '1'), opaque\n"
         ),
         "{text}"
     );
-    assert!(text.contains("\n.param  ctl, ('_', '0', '1')\n"), "{text}");
+    assert!(text.contains("\n.param ctl, ('_', '0', '1')\n"), "{text}");
     assert!(!text.contains("writes=()"), "{text}");
     assert!(
         text.contains("\n.routine main, tapes=2, alpha=(5, 3), exits=2, noreturn\n"),
@@ -206,6 +226,46 @@ fn param_suffixes_print_only_when_they_carry_something() {
         text.contains("\n.routine f, tapes=1, alpha=(2)\n"),
         "{text}"
     );
+}
+
+/// `exits=` and `noreturn` are two independent fields of the tail, not a
+/// pair: each prints on its own, in its own slot, and neither implies the
+/// other. `exits=0` is the field's default and prints nothing at all.
+#[test]
+fn the_routine_tail_prints_its_two_fields_independently() {
+    for (tail, expected) in [
+        (", exits=1", ".routine f, tapes=1, alpha=(2), exits=1\n"),
+        (", noreturn", ".routine f, tapes=1, alpha=(2), noreturn\n"),
+        (
+            ", exits=1, noreturn",
+            ".routine f, tapes=1, alpha=(2), exits=1, noreturn\n",
+        ),
+        ("", ".routine f, tapes=1, alpha=(2)\n"),
+    ] {
+        let src = format!(
+            ".routine f, tapes=1, alpha=(2){tail}\n.param ctl, ('_', '1')\n.func f\n        stop\n"
+        );
+        let obj = assemble(&syntax(), ARCH, &src, false).expect("assembles");
+        let text = disassemble_object(&syntax(), &obj);
+        assert!(text.starts_with(expected), "{tail:?} gave:\n{text}");
+        // Exactly one field where only one was written.
+        assert_eq!(
+            text.contains("exits="),
+            tail.contains("exits="),
+            "{tail:?}:\n{text}"
+        );
+        assert_eq!(
+            text.contains("noreturn"),
+            tail.contains("noreturn"),
+            "{tail:?}:\n{text}"
+        );
+        assert_eq!(
+            assemble(&syntax(), ARCH, &text, false).unwrap().to_bytes(),
+            obj.to_bytes(),
+            "{tail:?}:\n{text}"
+        );
+        assert_eq!(format_asm_with(&text, caps()).unwrap(), text, "{text}");
+    }
 }
 
 /// Graft provenance lives OUTSIDE the interface section on the wire, so a
@@ -232,7 +292,7 @@ fn grafts_print_without_an_interface_section() {
 fn exit_labels_must_exist_in_the_function() {
     let src = "\
 .routine main, tapes=1, alpha=(2)
-.param  ctl, ('_', '1')
+.param ctl, ('_', '1')
 .func main
         call    g [0] exits=(NOWHERE)
         stop

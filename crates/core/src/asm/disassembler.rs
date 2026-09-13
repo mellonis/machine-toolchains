@@ -265,9 +265,10 @@ fn dense_map_pairs(dense: &[u16]) -> String {
         .join(", ")
 }
 
-/// One glyph as an assembly glyph literal — `'g'`, with the two escapes
-/// the lexer and `formats::glyphs` share (`'` → `\'`, `\` → `\\`)
-/// re-applied (docs/formats.md (glyph tables)).
+/// One glyph as an assembly glyph literal — `'g'`. The literal is
+/// quoted and the two escapes the assembly lexer and `formats::glyphs`
+/// share are re-applied: a quote becomes `\'` and a backslash `\\`, and
+/// nothing else is escapable (docs/formats.md (assembly text)).
 fn render_glyph(glyph: &str) -> String {
     let mut out = String::with_capacity(glyph.len() + 2);
     out.push('\'');
@@ -288,7 +289,7 @@ fn render_glyph(glyph: &str) -> String {
 /// can hold is a NUMBER's decimal label — a list element lexes as a
 /// glyph literal or as a number, and nothing else — so that label prints
 /// as the bare number it came from and reads back identical
-/// (docs/formats.md (glyph tables)).
+/// (docs/formats.md (assembly text)).
 fn render_glyph_element(glyph: &str) -> String {
     let multi_char = glyph.chars().count() != 1;
     if multi_char && glyph.parse::<u32>().is_ok_and(|n| n.to_string() == glyph) {
@@ -726,18 +727,18 @@ fn render_dispatch_table(
 /// `comment_columns`'s doc), so the column is `max(COMMENT_COL, code
 /// width + 1)` with no other line's width to account for.
 ///
-/// `exits`/`returns` come from the object's interface record when it has
-/// one; the tail prints only what it carries — `, exits={k}` for a
-/// non-zero count and `, noreturn` for a routine that never returns, in
-/// that one legal order (docs/formats.md (routine interfaces)). An
-/// object without an interface passes `0, true`, which prints nothing
-/// and keeps a signed-only listing byte-for-byte as it was.
+/// `interface` is the blob's routine record when the object has one; the
+/// tail prints only what it carries — `, exits={k}` for a non-zero count
+/// and `, noreturn` for a routine that never returns, in that one legal
+/// order, each independent of the other (docs/formats.md (routine
+/// interfaces)). `None` — an object with no interface, and every linked
+/// image — prints no tail at all and keeps a signed-only listing
+/// byte-for-byte as it was.
 fn routine_line(
     name: &str,
     tapes: u8,
     cardinalities: &[u32],
-    exits: u8,
-    returns: bool,
+    interface: Option<&RoutineInterface>,
     comment: Option<&str>,
 ) -> String {
     let alpha = cardinalities
@@ -746,11 +747,13 @@ fn routine_line(
         .collect::<Vec<_>>()
         .join(", ");
     let mut code = format!(".routine {name}, tapes={tapes}, alpha=({alpha})");
-    if exits > 0 {
-        code.push_str(&format!(", exits={exits}"));
-    }
-    if !returns {
-        code.push_str(", noreturn");
+    if let Some(routine) = interface {
+        if routine.exits > 0 {
+            code.push_str(&format!(", exits={}", routine.exits));
+        }
+        if !routine.returns {
+            code.push_str(", noreturn");
+        }
     }
     let Some(comment) = comment else {
         return format!("{code}\n");
@@ -780,7 +783,7 @@ fn routine_line(
 /// never empty), and `opaque` when the flag is set.
 fn param_line(routine: &RoutineInterface, k: usize) -> String {
     let mut code = format!(
-        ".param  {}, ({})",
+        ".param {}, ({})",
         routine.params[k],
         render_glyph_list(&routine.glyphs[k])
     );
@@ -868,7 +871,7 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
     if syntax.caps.interface {
         if let Some(iface) = &obj.interface {
             for graph in &iface.graphs {
-                text.push_str(&format!(".graph  {}, {}\n", graph.name, graph.digest));
+                text.push_str(&format!(".graph {}, {}\n", graph.name, graph.digest));
             }
         }
         for graft in &obj.grafts {
@@ -1017,6 +1020,18 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                                             // from it — the grammar writes
                                             // no comma there, and `fmt`'s
                                             // operand joiner agrees.
+                                            //
+                                            // Deliberately NOT gated on
+                                            // `caps.interface`, unlike the
+                                            // interface DIRECTIVES: a
+                                            // directive dropped from a
+                                            // listing still leaves valid
+                                            // text, but half an operand
+                                            // would misrepresent the
+                                            // instruction. A capless
+                                            // dialect cannot produce such
+                                            // a record from assembly in
+                                            // the first place.
                                             if !bc.exits.is_empty() {
                                                 let names: Vec<String> = bc
                                                     .exits
@@ -1121,8 +1136,7 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                     &symbol.name,
                     sig.arity,
                     &sig.cardinalities,
-                    routine.map_or(0, |r| r.exits),
-                    routine.is_none_or(|r| r.returns),
+                    routine,
                     None,
                 ));
                 if let Some(routine) = routine {
@@ -1720,8 +1734,7 @@ pub fn disassemble_executable(
             &exe.alphabet_cardinalities,
             // A linked image carries no interface section, so the
             // directive's interface tail is always absent here.
-            0,
-            true,
+            None,
             None,
         ));
     }
@@ -1836,8 +1849,7 @@ pub fn disassemble_executable(
                 &func_name(root),
                 tapes,
                 &alpha,
-                0,
-                true,
+                None,
                 comment,
             ));
         }
@@ -2941,13 +2953,18 @@ F0:     .frame  tapes=(2, 0)
         // target. Re-synthesizing `L<addr>` for the exit vector would
         // spell the same address two ways and the text would not
         // reassemble, so the vector reads the one label map.
+        //
+        // The digest directives ride along, which is the other thing a
+        // tables section changes: they belong to the CODE section, so
+        // they print after `.section code`, not before `.section tables`.
         let syntax = iface_syntax();
         let src = "\
 .section tables
 D0: .targets A
 .section code
+.grafted lib::k, 7
 .routine main, tapes=1, alpha=(2)
-.param  ctl, ('_', '1')
+.param ctl, ('_', '1')
 .func main
         call    g [0] exits=(A)
         tdispatch D0
@@ -2960,6 +2977,7 @@ A:      stp
         assert!(dis.contains("call    g [0] exits=(A)"), "{dis}");
         assert!(dis.contains("T0:     .targets A"), "{dis}");
         assert!(dis.contains("\nA:      stp"), "{dis}");
+        assert!(dis.contains(".section code\n.grafted lib::k, 7\n"), "{dis}");
         assert_eq!(
             crate::asm::format_asm_with(&dis, iface_caps()).unwrap(),
             dis,
@@ -2977,7 +2995,7 @@ A:      stp
         let syntax = iface_syntax();
         let src = concat!(
             ".routine main, tapes=1, alpha=(3)\n",
-            r".param  q, ('_', '\'', '\\')",
+            r".param q, ('_', '\'', '\\')",
             "\n.func main\n",
             r"        call    g [q: 0{1->'\'',2->'\\'}]",
             "\n        stp\n"
@@ -3009,8 +3027,8 @@ A:      stp
         let syntax = iface_syntax();
         let src = concat!(
             ".routine main, tapes=2, alpha=(4, 3)\n",
-            ".param  digits, ('0'..'3')\n",
-            ".param  nums, (0, 1, 10)\n",
+            ".param digits, ('0'..'3')\n",
+            ".param nums, (0, 1, 10)\n",
             ".func main\n        stp\n"
         );
         let obj = assemble(&syntax, 0x7E, src, false).unwrap();
@@ -3020,10 +3038,10 @@ A:      stp
         );
         let dis = disassemble_object(&syntax, &obj);
         assert!(
-            dis.contains(".param  digits, ('0', '1', '2', '3')\n"),
+            dis.contains(".param digits, ('0', '1', '2', '3')\n"),
             "{dis}"
         );
-        assert!(dis.contains(".param  nums, ('0', '1', 10)\n"), "{dis}");
+        assert!(dis.contains(".param nums, ('0', '1', 10)\n"), "{dis}");
         assert_eq!(
             crate::asm::format_asm_with(&dis, iface_caps()).unwrap(),
             dis,
@@ -3045,7 +3063,7 @@ A:      stp
         use crate::formats::object::{ExportedAlphabet, ExportedGraph};
         let syntax = iface_syntax();
         let src =
-            ".routine main, tapes=1, alpha=(2)\n.param  ctl, ('_', '1')\n.func main\n        stp\n";
+            ".routine main, tapes=1, alpha=(2)\n.param ctl, ('_', '1')\n.func main\n        stp\n";
         let mut obj = assemble(&syntax, 0x7E, src, false).unwrap();
         {
             let iface = obj.interface.as_mut().unwrap();
@@ -3060,7 +3078,7 @@ A:      stp
         }
         let dis = disassemble_object(&syntax, &obj);
         assert!(
-            dis.starts_with(".graph  lib::g, 7\n; alphabet bits: ('_', '1')\n"),
+            dis.starts_with(".graph lib::g, 7\n; alphabet bits: ('_', '1')\n"),
             "{dis}"
         );
         // The comment block sits on the grid like every other own-line
@@ -3081,18 +3099,27 @@ A:      stp
     }
 
     #[test]
-    fn a_capless_dialect_is_never_handed_an_interface_directive() {
+    fn only_the_interface_directives_are_gated_on_the_dialect_capability() {
         // Same rule as `.volatile`: a dialect that cannot parse the
         // directive must not be shown it. Such an object cannot arise
         // from assembly under that dialect — this pins the gate, not a
-        // reachable listing. Every interface-only surface is covered:
-        // both digest directives, the `.param` lines, the exported
-        // alphabets' comment block, and the `.routine` line's own tail.
+        // reachable listing. Every interface-only DIRECTIVE surface is
+        // covered: both digest directives, the `.param` lines, the
+        // exported alphabets' comment block, and the `.routine` line's
+        // own tail.
+        //
+        // The gate stops at directives. A bound call's `exits=(…)` and
+        // its named/labelled/open binding entries are NOT gated —
+        // dropping part of an operand would misrepresent the
+        // instruction, where a dropped directive still leaves valid text
+        // (the reason sits at the rendering site). Nothing here has a
+        // bound call, so the `exits=` row below is about the `.routine`
+        // tail, not an exit vector.
         use crate::formats::object::{ExportedAlphabet, ExportedGraph};
         let src = concat!(
             ".grafted other::h, 42\n",
             ".routine main, tapes=1, alpha=(2), exits=1, noreturn\n",
-            ".param  ctl, ('_', '1')\n.func main\n        stp\n"
+            ".param ctl, ('_', '1')\n.func main\n        stp\n"
         );
         let mut obj = assemble(&iface_syntax(), 0x7E, src, false).unwrap();
         {
@@ -3121,11 +3148,11 @@ A:      stp
         // And the same object under a capable dialect prints them all.
         let full = disassemble_object(&iface_syntax(), &obj);
         for present in [
-            ".graph  lib::g, 7\n",
+            ".graph lib::g, 7\n",
             ".grafted other::h, 42\n",
             "; alphabet bits: ('_')\n",
             ".routine main, tapes=1, alpha=(2), exits=1, noreturn\n",
-            ".param  ctl, ('_', '1')\n",
+            ".param ctl, ('_', '1')\n",
         ] {
             assert!(full.contains(present), "{present:?} missing from:\n{full}");
         }
