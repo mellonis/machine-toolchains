@@ -45,6 +45,8 @@ pub enum AsmKind {
     Gt = 20,
     Dot = 21,
     Junk = 22,
+    /// `'x'` (interface cap): a quoted glyph literal.
+    Glyph = 23,
     // Trivia tokens.
     Whitespace = 30,
     Comment = 31,
@@ -94,6 +96,7 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
         k if k == AsmKind::Gt.into() => "GT",
         k if k == AsmKind::Dot.into() => "DOT",
         k if k == AsmKind::Junk.into() => "JUNK",
+        k if k == AsmKind::Glyph.into() => "GLYPH",
         k if k == AsmKind::Whitespace.into() => "WHITESPACE",
         k if k == AsmKind::Comment.into() => "COMMENT",
         k if k == AsmKind::Root.into() => "ROOT",
@@ -137,6 +140,7 @@ pub(crate) fn token_green_kind(t: &AsmTokenKind) -> AsmKind {
         AsmTokenKind::Gt => AsmKind::Gt,
         AsmTokenKind::Dot => AsmKind::Dot,
         AsmTokenKind::Junk(_) => AsmKind::Junk,
+        AsmTokenKind::Glyph(_) => AsmKind::Glyph,
         AsmTokenKind::Comment(_) => {
             unreachable!("comments are trivia; the layout adapter never maps them here")
         }
@@ -180,6 +184,7 @@ mod tests {
             AsmKind::Gt,
             AsmKind::Dot,
             AsmKind::Junk,
+            AsmKind::Glyph,
             AsmKind::Whitespace,
             AsmKind::Comment,
             AsmKind::Root,

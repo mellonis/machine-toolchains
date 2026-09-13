@@ -43,6 +43,10 @@ pub(crate) enum AsmTokenKind {
     Arrow,
     /// `=>` (tables cap; a frame `.map` pair marked one-way). Two chars.
     FatArrow,
+    /// `'x'` (interface cap): a quoted glyph literal, decoded (`\'` and
+    /// `\\` are the only escapes, mirroring `formats::glyphs`). The span
+    /// covers the quotes.
+    Glyph(String),
     /// `*` inside `[…]` or `{…}` (vectors / rept caps).
     Star,
     /// `-` inside `[…]` or `{…}` (vectors / rept caps).
@@ -301,6 +305,37 @@ pub(crate) fn lex_line(text: &str, line_no: u32, caps: AsmCaps) -> Vec<AsmToken>
             let len = consumed as u32;
             tokens.push(AsmToken {
                 kind: AsmTokenKind::Number(num),
+                line: line_no,
+                col,
+                len,
+            });
+            pos += consumed;
+            col += len;
+            continue;
+        }
+
+        if c == '\'' && caps.interface {
+            // '<char>' or '\'' or '\\' — anything else stays Junk.
+            let rest = &chars[pos + 1..];
+            let (decoded, consumed) = match rest {
+                ['\\', '\'', '\'', ..] => ("'".to_string(), 4),
+                ['\\', '\\', '\'', ..] => ("\\".to_string(), 4),
+                [ch, '\'', ..] if *ch != '\\' && *ch != '\'' => (ch.to_string(), 3),
+                _ => {
+                    tokens.push(AsmToken {
+                        kind: AsmTokenKind::Junk('\''),
+                        line: line_no,
+                        col,
+                        len: 1,
+                    });
+                    pos += 1;
+                    col += 1;
+                    continue;
+                }
+            };
+            let len = consumed as u32;
+            tokens.push(AsmToken {
+                kind: AsmTokenKind::Glyph(decoded),
                 line: line_no,
                 col,
                 len,
@@ -592,6 +627,10 @@ mod tests {
             | AsmTokenKind::Hash
             | AsmTokenKind::Junk(_) => 1,
             AsmTokenKind::Arrow | AsmTokenKind::FatArrow => 2,
+            // The decoded glyph text is shorter than its quoted span (the
+            // quotes and any escape are stripped), so this stays a safe
+            // lower bound rather than joining the equal-width group above.
+            AsmTokenKind::Glyph(s) => s.chars().count(),
         }
     }
 
@@ -792,5 +831,104 @@ mod tests {
         let off = kinds_for_test("alpha=(3,5)", AsmCaps::default());
         assert!(off.contains(&AsmTokenKind::Junk('(')));
         assert!(off.contains(&AsmTokenKind::Junk(')')));
+    }
+
+    #[test]
+    fn glyph_literals_lex_under_the_interface_cap() {
+        let caps = AsmCaps {
+            interface: true,
+            ..AsmCaps::default()
+        };
+        let kinds = kinds_for_test("'_', 'a', '\\'', '\\\\'", caps);
+        assert_eq!(
+            kinds,
+            vec![
+                AsmTokenKind::Glyph("_".into()),
+                AsmTokenKind::Comma,
+                AsmTokenKind::Glyph("a".into()),
+                AsmTokenKind::Comma,
+                AsmTokenKind::Glyph("'".into()),
+                AsmTokenKind::Comma,
+                AsmTokenKind::Glyph("\\".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn glyph_span_covers_the_quotes() {
+        let caps = AsmCaps {
+            interface: true,
+            ..AsmCaps::default()
+        };
+        let toks = lex_for_test("  '\\''", caps);
+        assert_eq!(toks[0].col, 3);
+        assert_eq!(toks[0].len, 4);
+    }
+
+    #[test]
+    fn quote_is_junk_without_the_interface_cap() {
+        // Pins the whole kind vector, not just the first token: with the
+        // cap off, `'` stays `Junk('\'')` exactly as before the cap
+        // existed, for both a plain quoted char and the escape forms.
+        let kinds = kinds_for_test("'a'", AsmCaps::default());
+        assert_eq!(
+            kinds,
+            vec![
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Word("a".into()),
+                AsmTokenKind::Junk('\''),
+            ]
+        );
+
+        let kinds = kinds_for_test("'_', 'a', '\\'', '\\\\'", AsmCaps::default());
+        assert_eq!(
+            kinds,
+            vec![
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Word("_".into()),
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Comma,
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Word("a".into()),
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Comma,
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Junk('\\'),
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Comma,
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Junk('\\'),
+                AsmTokenKind::Junk('\\'),
+                AsmTokenKind::Junk('\''),
+            ]
+        );
+    }
+
+    #[test]
+    fn unterminated_glyph_is_junk() {
+        let caps = AsmCaps {
+            interface: true,
+            ..AsmCaps::default()
+        };
+        let toks = lex_for_test("'a", caps);
+        assert!(matches!(toks[0].kind, AsmTokenKind::Junk('\'')));
+    }
+
+    #[test]
+    fn glyph_rejects_multi_char_content() {
+        let caps = AsmCaps {
+            interface: true,
+            ..AsmCaps::default()
+        };
+        let kinds = kinds_for_test("'ab'", caps);
+        assert_eq!(
+            kinds,
+            vec![
+                AsmTokenKind::Junk('\''),
+                AsmTokenKind::Word("ab".into()),
+                AsmTokenKind::Junk('\''),
+            ]
+        );
     }
 }
