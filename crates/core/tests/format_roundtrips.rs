@@ -1,7 +1,7 @@
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::object::{
-    BlobVariant, BoundCall, MapPair, ObjectFile, Relocation, RoutineSig, Symbol, SymbolDef,
-    TapeBinding,
+    BlobVariant, BoundCall, ExportedAlphabet, ExportedGraph, GraftProvenance, Interface, MapPair,
+    ObjectFile, Relocation, RoutineInterface, RoutineSig, Symbol, SymbolDef, TapeBinding,
 };
 use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use proptest::prelude::*;
@@ -143,6 +143,70 @@ proptest! {
             grafts: Vec::new(),
         };
         prop_assert_eq!(ObjectFile::from_bytes(&obj.to_bytes()).unwrap(), obj);
+    }
+
+    /// A v4 object round-trips: symbolic bindings (parameter names, glyph
+    /// labels, a written and open map, an exit vector), the interface
+    /// section with per-tape head contracts and opacity, and graft
+    /// provenance. Head-contract glyphs come from the tape's own list — the
+    /// reader rejects any that do not.
+    #[test]
+    fn mo_v4_round_trip(
+        blob in proptest::collection::vec(any::<u8>(), 6..32),
+        params in proptest::collection::vec("[a-z]{1,6}", 1..4),
+        digest in any::<u32>(),
+        exit in 0u32..4,
+    ) {
+        let arity = params.len() as u8;
+        let glyphs: Vec<Vec<String>> = (0..arity)
+            .map(|k| vec!["_".to_string(), format!("g{k}"), "$".to_string()])
+            .collect();
+        let obj = ObjectFile {
+            arch: 0x7F,
+            symbols: vec![
+                Symbol { name: "f".into(), def: SymbolDef::Defined { blob: 0 } },
+                Symbol { name: "ext".into(), def: SymbolDef::External },
+            ],
+            blobs: vec![blob.clone()],
+            relocations: Vec::new(),
+            debug: None,
+            signatures: Some(vec![RoutineSig { arity, cardinalities: vec![3; arity as usize] }]),
+            table_blobs: None,
+            table_fixups: Vec::new(),
+            bound_calls: vec![BoundCall {
+                blob: 0,
+                offset: 1,
+                symbol: 1,
+                binding: (0..arity).map(|k| TapeBinding {
+                    caller_tape: k,
+                    param: Some(params[k as usize].clone()),
+                    // An open map is a written one, so both land on tape 0.
+                    map_written: k == 0,
+                    open: k == 0,
+                    pairs: vec![MapPair { src: 1, dst: 0, dst_label: Some(format!("g{k}")), one_way: false }],
+                }).collect(),
+                exits: vec![exit],
+            }],
+            variants: None,
+            program_volatile: false,
+            interface: Some(Interface {
+                routines: vec![RoutineInterface {
+                    params: params.clone(),
+                    glyphs: glyphs.clone(),
+                    writes: glyphs.iter().map(|g| vec![g[1].clone()]).collect(),
+                    enters: (0..arity).map(|k| (k == 0).then(|| vec!["$".to_string()])).collect(),
+                    leaves: (0..arity).map(|k| (k == 0).then(|| vec![glyphs[0][1].clone()])).collect(),
+                    opaque: (0..arity).map(|k| k == 0).collect(),
+                    exits: 1,
+                    returns: false,
+                }],
+                alphabets: vec![ExportedAlphabet { name: "ab".into(), glyphs: glyphs[0].clone() }],
+                graphs: vec![ExportedGraph { name: "g".into(), digest }],
+            }),
+            grafts: vec![GraftProvenance { graph: "lib::g".into(), digest }],
+        };
+        let bytes = obj.to_bytes();
+        prop_assert_eq!(ObjectFile::from_bytes(&bytes).unwrap(), obj);
     }
 
     #[test]
