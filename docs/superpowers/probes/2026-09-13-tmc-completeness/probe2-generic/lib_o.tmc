@@ -1,0 +1,26 @@
+// The "spare opaque symbol" variant for Part B.3: the library alphabet
+// reserves 'o' as "not mine"; callers collapse everything unlisted onto it.
+alphabet abo { '_', 'a', 'b', 'o' }
+
+namespace libo {
+  ? Swap 'a'<->'b', pass 'o' through by keeping it ('-' is not a write).
+  export routine swapABo(tape t: abo writes { 'a', 'b' }) {
+    entry state walk {
+      ['a'] -> write ['b'] move [>] goto walk;
+      ['b'] -> write ['a'] move [>] goto walk;
+      ['o'] -> move [>] goto walk;
+      ['_'] -> return;
+    }
+  }
+
+  ? Same walk, but WRITES 'o' back over every opaque cell — the write the
+  ? one-way collapse cannot carry back.
+  export routine stampO(tape t: abo writes { 'a', 'b', 'o' }) {
+    entry state walk {
+      ['a'] -> write ['b'] move [>] goto walk;
+      ['b'] -> write ['a'] move [>] goto walk;
+      ['o'] -> write ['o'] move [>] goto walk;
+      ['_'] -> return;
+    }
+  }
+}

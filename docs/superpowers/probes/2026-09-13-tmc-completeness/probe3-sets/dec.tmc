@@ -1,0 +1,63 @@
+? Variant S (spelled): decimal arithmetic over a rich alphabet: blank, the ten digits, '+', '='.
+? The digits are numeric literals so that a bound digit can be folded
+? (`{d+1}`); a glyph-literal range `'0'..'8' as d` is `char-arithmetic`
+? even though `'0'` and `0` name the same symbol (see dec-glyph.tmc).
+alphabet dec { '_', 0..9, '+', '=' }
+
+namespace decimal {
+  ? Add one to the decimal number under the head. On entry the head is on
+  ? any digit of the number; on exit it rests on the number's last digit.
+  ? A carry out of the leftmost digit grows the number one cell left.
+  export routine plusOne(tape num: dec writes { 0..9 }) {
+    entry state toEnd {
+      [0..9] -> move [>] goto toEnd;
+      [*]    -> move [<] goto inc;
+    }
+    state inc {
+      [0]         -> write [1] goto toLast;
+      [1]         -> write [2] goto toLast;
+      [2]         -> write [3] goto toLast;
+      [3]         -> write [4] goto toLast;
+      [4]         -> write [5] goto toLast;
+      [5]         -> write [6] goto toLast;
+      [6]         -> write [7] goto toLast;
+      [7]         -> write [8] goto toLast;
+      [8]         -> write [9] goto toLast;
+      [9]         -> write [0] move [<] goto inc;
+      [*]         -> write [1] goto toLast;
+    }
+    state toLast {
+      [0..9] -> move [>] goto toLast;
+      [*]    -> move [<] return;
+    }
+  }
+
+  ? Blank the leading zeros of the number under the head, keeping a lone
+  ? zero. On entry the head is on any digit; on exit it rests on the
+  ? first surviving digit.
+  export routine stripLeadingZeros(tape num: dec writes { '_' }) {
+    entry state toStart {
+      [0..9] -> move [<] goto toStart;
+      [*]    -> move [>] goto strip;
+    }
+    state strip {
+      [0]    -> move [>] goto check;
+      [*]    -> return;
+    }
+    state check {
+      [1..9] -> move [<] goto blank;          // a digit follows: the zero was leading
+      [0]    -> move [<] goto blank;
+      [*]    -> move [<] return;              // the zero is the whole number
+    }
+    state blank {
+      [0] -> write ['_'] move [>] goto strip;
+    }
+  }
+}
+
+machine {
+  tape num: dec;
+  entry state s     { [*] -> call decimal::plusOne(num = num) then strip; }
+  state strip       { [*] -> call decimal::stripLeadingZeros(num = num) then done; }
+  state done        { [*] -> stop; }
+}

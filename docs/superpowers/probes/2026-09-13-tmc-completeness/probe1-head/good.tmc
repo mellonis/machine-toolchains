@@ -1,0 +1,15 @@
+? The well-behaved caller: every call site meets the callee's head
+? precondition. Input `^1010$` with the head on '^'; expected `^0100$`
+? (10 + 1 = 11 = 1011, inverted) with the head on '$'.
+// headlib.tmc is a separate compilation unit: every call is transparent (binds
+// by index), and the alphabet is re-declared here with the SAME glyphs in the
+// SAME order (docs/tmt/stdlib.md (calling a library routine)).
+alphabet delSym { '_', '^', '$', '0', '1' }
+
+machine {
+  tape num: delSym;
+  entry state s1 { [*] -> call del::goToEnd()  then s2; }
+  state s2       { [*] -> call del::plusOne()  then s3; }
+  state s3       { [*] -> call del::goToStart() then s4; }
+  state s4       { [*] -> call del::invert()   then stop; }
+}

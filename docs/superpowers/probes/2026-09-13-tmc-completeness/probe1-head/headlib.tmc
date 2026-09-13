@@ -1,0 +1,74 @@
+? Probe 1 (issue 121, line 1): a two-representation library whose routines
+? carry head pre/postconditions that exist ONLY in these `?` lines.
+?
+? Delimited numbers are `^` digits `$`; bare numbers are a run of digits
+? with blanks on both sides. Every head convention below is prose today.
+
+alphabet delSym  { '_', '^', '$', '0', '1' }
+alphabet bareSym { '_', '0', '1' }
+
+namespace del {
+  ? Walk right to the number's '$'. ENTRY: head on the number — any of
+  ? '^', '0', '1', '$'. EXIT: head on that '$'. Tape unchanged.
+  ? (The body also accepts '_' without trapping: it just walks on.)
+  export routine goToEnd(tape num: delSym writes {}) {
+    entry state walk {
+      ['$'] -> return;
+      [*]   -> move [>] goto walk;
+    }
+  }
+
+  ? Walk left to the number's '^'. ENTRY: head on the number — any of
+  ? '^', '0', '1', '$'. EXIT: head on that '^'. Tape unchanged.
+  ? STRICT body: a head on '_' has no rule and traps (NoTransition).
+  export routine goToStart(tape num: delSym writes {}) {
+    entry state walk {
+      ['^'] -> return;
+      ['0'] -> move [<] goto walk;
+      ['1'] -> move [<] goto walk;
+      ['$'] -> move [<] goto walk;
+    }
+  }
+
+  ? Add one. ENTRY: head on the number's '$'. EXIT: head on that '$'.
+  ? TRUSTING body: the entry state steps left blindly, assuming it is on
+  ? '$' — a head one cell off is not detected.
+  export routine plusOne(tape num: delSym writes { '^', '0', '1' }) {
+    entry state step { [*] -> move [<] goto carry; }
+    state carry {
+      ['0'] -> write ['1'] move [>] goto toEnd;
+      ['1'] -> write ['0'] move [<] goto carry;
+      ['^'] -> write ['1'] move [<] goto grow;
+    }
+    state grow { ['_'] -> write ['^'] move [>] goto toEnd; }
+    state toEnd {
+      ['0'] -> move [>] goto toEnd;
+      ['1'] -> move [>] goto toEnd;
+      ['$'] -> return;
+    }
+  }
+
+  ? Flip every digit, across representations. ENTRY: head on the
+  ? number's '^'. EXIT: head on its '$'. Steps right onto the first digit
+  ? and calls bare::invert with both markers collapsed onto its blank.
+  export routine invert(tape num: delSym writes { '0', '1' }) {
+    entry state step { ['^'] -> move [>] goto go; }
+    state go {
+      [*] -> call bare::invert(
+               num = num with map { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+             ) then return;
+    }
+  }
+}
+
+namespace bare {
+  ? Flip every digit. ENTRY: head on the leftmost digit ('0' or '1').
+  ? EXIT: head on the trailing blank.
+  export routine invert(tape num: bareSym preserves { '_' }) {
+    entry state sweep {
+      ['0'] -> write ['1'] move [>] goto sweep;
+      ['1'] -> write ['0'] move [>] goto sweep;
+      ['_'] -> return;
+    }
+  }
+}

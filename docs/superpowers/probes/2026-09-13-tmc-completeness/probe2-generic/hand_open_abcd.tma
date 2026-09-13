@@ -1,0 +1,29 @@
+; Part B.1 experiment: swapABopen (alpha 3) called over an abcd tape (alpha 5)
+; through a HAND-AUTHORED descriptor whose rmap sends the unlisted symbols
+; 'c'(3) and 'd'(4) to virtual index 3 -- an index the callee never names --
+; instead of leaving them holes. wmap carries only the named pairs.
+.routine main, tapes=1, alpha=(5)
+.section tables
+T0:     .row    [0]
+        .row    [1]
+        .row    [2]
+        .row    [*]
+T1:     .targets done, swapA, swapB, pass
+F0:     .frame  tapes=(0)
+        .map    0, rmap=(1->1, 2->2, 3->3, 4->3), wmap=(1->1, 2->2)
+.section code
+.func main
+        call.m  swapABopen, F0
+        stp
+.routine swapABopen, tapes=1, alpha=(3)
+.func swapABopen
+walk:   rd
+        mtc     T0
+        djmp    T1
+swapA:  wrmv    [2], [>]
+        jmp     walk
+swapB:  wrmv    [1], [>]
+        jmp     walk
+done:   ret
+pass:   wrmv    [-], [>]
+        jmp     walk

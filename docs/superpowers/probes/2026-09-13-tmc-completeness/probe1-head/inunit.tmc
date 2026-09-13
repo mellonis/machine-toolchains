@@ -1,0 +1,63 @@
+? Part B's worked example: the SAME library and the bad2 caller in ONE
+? compilation unit, so every call is a bound call the compiler can see
+? through (footprint inference walks the callee bodies).
+
+alphabet delSym  { '_', '^', '$', '0', '1' }
+alphabet bareSym { '_', '0', '1' }
+
+namespace del {
+  export routine goToEnd(tape num: delSym writes {}) {
+    entry state walk {
+      ['$'] -> return;
+      [*]   -> move [>] goto walk;
+    }
+  }
+  export routine goToStart(tape num: delSym writes {}) {
+    entry state walk {
+      ['^'] -> return;
+      ['0'] -> move [<] goto walk;
+      ['1'] -> move [<] goto walk;
+      ['$'] -> move [<] goto walk;
+    }
+  }
+  export routine plusOne(tape num: delSym writes { '^', '0', '1' }) {
+    entry state step { [*] -> move [<] goto carry; }
+    state carry {
+      ['0'] -> write ['1'] move [>] goto toEnd;
+      ['1'] -> write ['0'] move [<] goto carry;
+      ['^'] -> write ['1'] move [<] goto grow;
+    }
+    state grow { ['_'] -> write ['^'] move [>] goto toEnd; }
+    state toEnd {
+      ['0'] -> move [>] goto toEnd;
+      ['1'] -> move [>] goto toEnd;
+      ['$'] -> return;
+    }
+  }
+  export routine invert(tape num: delSym writes { '0', '1' }) {
+    entry state step { ['^'] -> move [>] goto go; }
+    state go {
+      [*] -> call bare::invert(
+               num = num with map { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+             ) then return;
+    }
+  }
+}
+
+namespace bare {
+  export routine invert(tape num: bareSym preserves { '_' }) {
+    entry state sweep {
+      ['0'] -> write ['1'] move [>] goto sweep;
+      ['1'] -> write ['0'] move [>] goto sweep;
+      ['_'] -> return;
+    }
+  }
+}
+
+machine {
+  tape num: delSym;
+  entry state s1 { [*]   -> call del::goToEnd(num = num)   then s2; }
+  state s2       { ['$'] -> call del::plusOne(num = num)   then s3; }
+  state s3       { ['$'] -> move [>] call del::goToStart(num = num) then s4; }
+  state s4       { [*]   -> call del::invert(num = num)    then stop; }
+}

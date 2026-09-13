@@ -1,0 +1,27 @@
+? Variant A: the issue's spelling — glyph literals in the alphabet and a
+? glyph range bound with `as`, folded with `{d+1}`.
+alphabet dec { '_', '0'..'9', '+', '=' }
+
+namespace decimal {
+  export routine plusOne(tape num: dec) {
+    entry state toEnd {
+      ['0'..'9'] -> move [>] goto toEnd;
+      [*]        -> move [<] goto inc;
+    }
+    state inc {
+      ['0'..'8' as d] -> write [{d+1}] goto toLast;
+      ['9']           -> write ['0'] move [<] goto inc;
+      [*]             -> write ['1'] goto toLast;
+    }
+    state toLast {
+      ['0'..'9'] -> move [>] goto toLast;
+      [*]        -> move [<] return;
+    }
+  }
+}
+
+machine {
+  tape num: dec;
+  entry state s { [*] -> call decimal::plusOne(num = num) then done; }
+  state done    { [*] -> stop; }
+}

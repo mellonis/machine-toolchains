@@ -1,0 +1,28 @@
+; Part B.1 experiment, xyab {'_','x','y','a','b'}: plain identity for the
+; unlisted 'x'(1)/'y'(2) would COLLIDE with the callee's 'a'(1)/'b'(2), so
+; "open" must mean "opaque", not "identity": x,y -> virtual 3 (unnamed).
+.routine main, tapes=1, alpha=(5)
+.section tables
+T0:     .row    [0]
+        .row    [1]
+        .row    [2]
+        .row    [*]
+T1:     .targets done, swapA, swapB, pass
+F0:     .frame  tapes=(0)
+        .map    0, rmap=(1->3, 2->3, 3->1, 4->2), wmap=(1->3, 2->4)
+.section code
+.func main
+        call.m  swapABopen, F0
+        stp
+.routine swapABopen, tapes=1, alpha=(3)
+.func swapABopen
+walk:   rd
+        mtc     T0
+        djmp    T1
+swapA:  wrmv    [2], [>]
+        jmp     walk
+swapB:  wrmv    [1], [>]
+        jmp     walk
+done:   ret
+pass:   wrmv    [-], [>]
+        jmp     walk

@@ -1,0 +1,34 @@
+// probe2-generic: a "conceptually alphabet-independent" library, typed by
+// the one concrete alphabet the language lets it name.
+alphabet ab { '_', 'a', 'b' }
+
+namespace lib {
+  ? Move right until the blank; return on it. Needs only the blank.
+  export routine skipRight(tape t: ab writes {}) {
+    entry state walk {
+      ['_'] -> return;
+      [*]   -> move [>] goto walk;
+    }
+  }
+
+  ? Walk right swapping 'a'<->'b' until the blank. Closed rows: every
+  ? symbol of `ab` is named, there is no "anything else" row.
+  export routine swapAB(tape t: ab writes { 'a', 'b' }) {
+    entry state walk {
+      ['a'] -> write ['b'] move [>] goto walk;
+      ['b'] -> write ['a'] move [>] goto walk;
+      ['_'] -> return;
+    }
+  }
+
+  ? Same, plus a "pass everything else through" row. In `ab` that row is
+  ? dead by the type (a,b,_ already cover the alphabet).
+  export routine swapABopen(tape t: ab writes { 'a', 'b' }) {
+    entry state walk {
+      ['a'] -> write ['b'] move [>] goto walk;
+      ['b'] -> write ['a'] move [>] goto walk;
+      ['_'] -> return;
+      [*]   -> move [>] goto walk;
+    }
+  }
+}
