@@ -608,8 +608,11 @@ number of state parameters the routine leaves through (`0..=255`, default
 `0`), and `noreturn` states that control never comes back to the caller
 (the default is that it does). They are written in that fixed order, each
 at most once, and each is independent of the other. Both live *inside* the
-interface record on the wire, so a `.routine` line carrying either needs
-the `.param` lines below — there is nowhere else for the fields to go.
+interface record on the wire, so a `.routine` line carrying a non-zero
+`exits=` or `noreturn` needs the `.param` lines below — there is nowhere
+else for the fields to go. A written `exits=0` alone is the exception: it
+is accepted without them and, being the field's default, produces the
+same object either way and is never printed back.
 
 Disassembling a linked image recovers a non-entry callee's signature
 only when it is reached through a `.frame` descriptor: `tapes` comes
@@ -661,8 +664,10 @@ lines come **one per tape, in tape order** — the first `.param` after a
 `.routine` describes tape 0. A parameter name uses letters, digits and
 underscore and starts with a letter or underscore (it is named again at a
 call site, so it takes neither dots nor `::`), and is unique within its
-routine. Too few or too many `.param` lines for the declared `tapes=` is
-an error at the line that reveals it.
+routine. A `.param` count that disagrees with the declared `tapes=` is an
+error at whichever end reveals it: too many is reported at the offending
+`.param` line, too few at the `.routine` name, discovered when the `.func`
+arrives.
 
 **All-or-none, per object.** Interfaces are parallel to the functions, so
 any interface content in a file — a `.param` line, a `.graph`, a
@@ -942,7 +947,7 @@ counting positions, and an exit vector:
   **distinct from omitting the braces**: bare `0` is index identity,
   while `0{}` is the empty map. That distinction is the one binding form
   that cannot be said before object version 4.
-- **An open map** — `{*}`, or `{3->'0', *}` — says the listed pairs are
+- **An open map** — `{*}`, or `{3->'0',*}` — says the listed pairs are
   not the whole of it and the rest stays open for the linker to fill. The
   `*` goes **last, once, and only inside the braces**; anywhere else it
   is a shape error. An open map is a written map by construction.
@@ -955,10 +960,12 @@ counting positions, and an exit vector:
 Every one of these needs the dialect's interface capability; PM-1 never
 enables it, so `.pma` accepts none of them.
 
-**Canonical spelling.** The separators differ between the three levels on
-purpose, and a disassembly reproduces them exactly: binding **pairs** are
-joined by a bare `,` with no space (`1{3->'0',4=>'1'}`), binding
-**entries** by `, ` (`[num: 1{…}, ctl: 0{}]`), and the exit vector is
+**Canonical spelling.** The parser accepts any spacing on input — the
+first example above writes its pairs `1->3, 2=>0`, and that assembles —
+but the canonical form a disassembly prints distinguishes the three
+levels: binding **pairs** are joined by a bare `,` with **no** space
+(`1{3->'0',4=>'1'}`), binding **entries** by `, `
+(`[num: 1{…}, ctl: 0{}]`), and the exit vector is
 separated from the closing `]` by a **space**, never a comma, with its
 own entries `, `-joined. A disassembly also names exit targets by the
 label scheme it synthesizes for every code position (`L000C` and the

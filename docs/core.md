@@ -544,12 +544,11 @@ knowledge arrives via `ArchSyntax`, and the text grammar they accept is
   the `exits=`/`noreturn` fields on `.routine`, the `.graph`/`.grafted`
   digest directives, quoted glyph literals, and the binding-call
   operand's symbolic forms, `docs/formats.md (routine interfaces)`). The
-  struct's
-  default has every capability off, so one a dialect does not ask for is
-  off: adding a capability to the framework can never switch it on for a
-  dialect that predates it. TM-1 goes one further and spells every field
-  out, which turns each future addition into a compile-time decision
-  there rather than a silent opt-out.
+  struct's default has every capability off, so one a dialect does not
+  ask for is off: adding a capability to the framework can never switch
+  it on for a dialect that predates it. TM-1 goes one further and spells
+  every field out, which turns each future addition into a compile-time
+  decision there rather than a silent opt-out.
 
 ### Control flow
 

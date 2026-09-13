@@ -173,7 +173,9 @@ comment block —
 ```
 
 — after the digest lines, and are dropped when that text is reassembled.
-Everything else on the listing round-trips byte for byte.
+Everything else on this listing round-trips byte for byte;
+`docs/formats.md (routine interfaces)` records the three shapes that do
+not.
 
 ## What the `.tmc` compiler emits
 
