@@ -1,23 +1,26 @@
 # `.tma` — the TM-1 assembly dialect
 
-The TM-1 `.tma` dialect version is **0.3** (`TM1_TMA_DIALECT_VERSION`;
+The TM-1 `.tma` dialect version is **0.4** (`TM1_TMA_DIALECT_VERSION`;
 pre-1.0: the version is `0.N` and `N` bumps on any grammar change — the
 same acceptance-contract shape as the `.pma` dialect,
 `docs/pmt/asm.md`). Where PM-1 drives one two-symbol tape, TM-1 drives
 up to sixteen tapes, each with its own alphabet, and branches through
 match/dispatch tables rather than the mark register alone. The dialect
-turns on three grammar features the classic `.pma` grammar leaves off —
-a **tables** section, the `.rept` macro, and `[..]` **vector** operands
-— plus a per-routine signature directive. Version 0.3 adds the fused
-write+move mnemonic `wrmv` (a rule's whole write+move action in one
-instruction). Its full version history is at the end of this page.
+turns on four grammar features the classic `.pma` grammar leaves off —
+a **tables** section, the `.rept` macro, `[..]` **vector** operands, and
+the **interface** surface — plus a per-routine signature directive.
+Version 0.4 adds that interface surface: the routine-interface
+directives and the symbolic forms of the binding-call operand. Its full
+version history is at the end of this page.
 
 This page is the dialect's own surface: how a `.tma` file looks, what
 `tmt asm` and `tmt dis` guarantee about the round trip, how the twenty
-mnemonics are spelled, and what the `.tmc` compiler emits. The grammar
+mnemonics are spelled, what the interface directives look like in
+practice, and what the `.tmc` compiler emits. The grammar
 those spellings sit in is shared with every other dialect and lives in
 `docs/formats.md (assembly text)` — the lexical shape and canonical
-column grid, sections and the routine signature, vector operands, match
+column grid, sections and the routine signature, routine interfaces,
+vector operands, match
 and dispatch tables, the compact symbol family, the `.rept` macro, frame
 descriptors, and bound calls, each with the bytes it lowers to. The
 assembler framework behind both dialects, with the capability set a
@@ -117,6 +120,61 @@ set)`. What belongs here is how they are *spelled*:
   anywhere in a function body assembles cleanly as a harmless duplicate
   no-op. There is simply no reason to write it: `.func` already emits it.
 
+## Interface directives
+
+`.tma` is the dialect that enables the assembler framework's **interface**
+capability, so it is the one that accepts the whole routine-interface
+surface: the `.param` directive with its `writes=`/`enters=`/`leaves=`/
+`opaque` suffixes, the `exits=`/`noreturn` fields on `.routine`, the
+object-level `.graph` and `.grafted` digest directives, quoted glyph
+literals, and the binding-call operand's symbolic forms — named entries,
+glyph-labelled destinations, the written-empty map `{}`, the open marker
+`*`, and an `exits=(…)` vector. The grammar and the bytes behind each are
+`docs/formats.md (routine interfaces)` and
+`docs/formats.md (bound calls)`; what follows is every one of them in one
+file, in the spelling `tmt dis` prints:
+
+```asm
+.graph lib::findAGraph, 42
+.grafted std::binaryNumbers::plusOneGraph, 7
+.routine main, tapes=2, alpha=(3, 6), exits=1, noreturn
+.param ctl, ('_', '0', '1'), opaque
+.param data, ('_', 'a', 'b', '0', '1', '$'), writes=('0', '1'), enters=('$'), leaves=('$')
+.func main
+        rd
+        call    mylib::plusOne [num: 1{3->'0',4=>'1'}] exits=(L000C)
+        call    mylib::skip [ctl: 0{*}]
+L000C:  stp
+```
+
+That listing is a fixed point: assembling it and disassembling the object
+reproduces it character for character, and reassembling the result
+reproduces the object's bytes. Three details of it are worth naming,
+because each is a rule rather than a choice:
+
+- **The exit label is synthesized.** `exits=(L000C)` and the `L000C:`
+  line are both the disassembler's own name for that code offset. A
+  written name does not come back — `-g` does not restore it — unless
+  the tables section independently names the position.
+- **Digests are decimal.** The `.tma` lexer has no hexadecimal literal,
+  so a digest is written and printed as an unsigned decimal `u32`.
+- **Every `.func` carries a full interface or none does.** The
+  `.grafted` line above obliges it: with any interface content in the
+  file, each function needs both its `.routine` signature and one
+  `.param` line per tape.
+
+`tmt dis` prints the interface directives only for a dialect that could
+parse them back, which `.tma` always can. Exported alphabets are the one
+part of the section with no directive to be written in: they print as a
+comment block —
+
+```asm
+; alphabet bits: ('_', '1')
+```
+
+— after the digest lines, and are dropped when that text is reassembled.
+Everything else on the listing round-trips byte for byte.
+
 ## What the `.tmc` compiler emits
 
 The `.tmc` language front end (`tmt compile`) generates this dialect and
@@ -129,6 +187,14 @@ and a cross-alphabet `call` lowers to the **binding-call operand**
 compiled object always reaches the
 link stage as ordinary code plus bound-call records, and the choice of
 call mechanism stays a link-time decision independent of the source.
+
+The interface surface above is not part of that output yet. Today's
+compiler emits the **numeric** binding form — positional entries and
+index destinations — and no interface directives at all: `.param`,
+`.graph`, `.grafted`, the `.routine` tail and the symbolic binding
+spellings are hand-written, or emitted by a later compiler round. The
+dialect accepts them regardless of who wrote them, which is what lets
+the format and the front end land in separate steps.
 
 ## Dialect version history
 
@@ -143,6 +209,16 @@ call mechanism stays a link-time decision independent of the source.
   the write vector then the move vector in one instruction (all writes
   precede all moves). It is the `-O0` codegen canon for a rule's action;
   no earlier program changes meaning.
+- **0.4** — the **interface** family: the `.param` / `.graph` /
+  `.grafted` directives, the `exits=` and `noreturn` fields on
+  `.routine`, quoted glyph literals (`'x'`), and the binding-call
+  operand's interface extensions — named entries, glyph-labelled pair
+  destinations, a written-empty map `{}` (distinct from omitting the
+  braces), the open marker `*`, and an `exits=(…)` vector. Together they
+  let a routine publish its interface contract and let a call site bind
+  against it by name, which is what the link-time composition engine
+  reads. Additive: a program that assembled at 0.3 still assembles, to
+  the same bytes.
 
 0.3 also gained the trailing-comma list continuation on `.targets`,
 `.exits`, and `.map` (`docs/formats.md`, "match and dispatch tables" and
@@ -150,5 +226,5 @@ call mechanism stays a link-time decision independent of the source.
 is that `N` bumps on *any* grammar change once a version has shipped and
 so become a contract to preserve; this addition landed during 0.3's own
 development, before its first release, so it folded into 0.3 rather than
-opening 0.4. The dialect version is **0.3**; a grammar change proposed
-after that point bumps to 0.4 in the ordinary way.
+opening 0.4. The interface family above is the change that did open 0.4,
+in the ordinary way.

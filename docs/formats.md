@@ -34,7 +34,7 @@ Magics are toolchain-neutral: two ASCII letters plus a binary epoch byte —
 byte marks header-layout generations and doubles as a text-file guard; a
 `u16 format version` field inside each header covers evolution within an
 epoch. Each container dispatches on its own version field — MO reads
-`1..=3`, MX and MT read `1..=2` today, selecting the layout from that field
+`1..=4`, MX and MT read `1..=2` today, selecting the layout from that field
 and never from the extension. The containers are shared across the machine
 toolchains built on this codebase: the file *extension* carries the
 toolchain flavor — `.pmo`/`.pmx`/`.pmt` from `pmt`, `.tmo`/`.tmx`/`.tmt`
@@ -186,13 +186,15 @@ the symbol, signature, table, and binding records the linker consumes. A
 
 ```
 magic "MO" 0x01
-u16 format version (readers accept 1..=3; writers emit
-                OBJECT_FORMAT_VERSION_V2 = 2 unless v3 records are present,
-                then OBJECT_FORMAT_VERSION_V3 = 3)
+u16 format version (readers accept 1..=4; a writer emits the LOWEST
+                version that carries the object's content — 2 for a plain
+                object, 3 once a version-3 record is present, 4 once any
+                version-4 content is)
 u8 arch
 u8 flags (bit 0 = has debug section, bit 1 = has signatures,
                 bit 2 = has table blobs, bit 3 = has variant tags,
-                bit 4 = the program is a volatile build)
+                bit 4 = the program is a volatile build,
+                bit 5 = has interface section)
 u32 crc32
 string table:   u32 count, then per string: u16 length, UTF-8 bytes
 symbol table:   u32 count, then per symbol: u32 name (string index),
@@ -226,6 +228,31 @@ bound calls:    u32 count, then per bound call: u32 blob, u32 offset,
                 u32 symbol, u8 tape count, then per tape binding:
                 u8 caller tape (< 16), u16 pair count, then per pair:
                 u32 src, u32 dst, u8 flags (bit 0 = one-way)
+── version 4 widens the bound-call record and appends two sections ──
+bound calls (v4 shape): per tape binding, after the u8 caller tape and
+                before the u16 pair count: u32 parameter name (string
+                index, or 0xFFFFFFFF for a positional entry), u8 binding
+                flags (bit 0 = the map was written, bit 1 = the map is
+                open); per pair, the u8 flags gain bit 1 = the
+                destination is a glyph label, and the u32 dst field then
+                holds that label's string index instead of an index;
+                after a call's bindings: u8 exit count, count × u32 exit
+                offset (blob-relative, the caller-side labels the
+                callee's exits return to)
+interface (present iff flags bit 5 is set; requires flags bit 1), once
+                per blob, walking the blob's signature: per tape:
+                u32 parameter name, u8 glyph count, count × u32 glyph,
+                u8 writes count, count × u32 glyph, u8 tape flags
+                (bit 0 = enters present, bit 1 = leaves present,
+                bit 2 = opaque), then when bit 0: u8 count, count × u32
+                glyph, then when bit 1: the same;
+                then per blob: u8 exits (the state-parameter count),
+                u8 returns (0 = noreturn)
+                then once: u32 alphabet count, per alphabet: u32 name,
+                u8 glyph count, count × u32 glyph;
+                u32 graph count, per graph: u32 name, u32 digest
+graft provenance (unconditional at version 4):
+                u32 count, then per record: u32 graph name, u32 digest
 ```
 
 Symbol kind 2 (**Local**) was added in object format version 2: a local
@@ -249,11 +276,39 @@ throughout tags each blob `both`. The version-2 shape is what an
 assembler still produces from text that asks for none of the version-3
 records: a `.pma` file with no `.volatile` directive, or a `.tma` file
 with no `.routine` signature, table section, or bound call. A reader
-accepts 1..=3 and rejects a pre-version-3 object that sets any
-version-3 flag bit. The signature, table-blob, and variant-tag
+rejects a pre-version-3 object that sets any version-3 flag bit. The
+signature, table-blob, and variant-tag
 sections are gated by flags bits 1, 2, and 3; the table-fixup and
 bound-call sections are unconditional — a version-3 object always writes
 both counts, zero when the respective list is empty.
+
+Object format version 4 was added for **routine interfaces** — the named,
+glyph-level contract a composed routine publishes, and the symbolic call
+sites that bind against it. It adds two sections, the flag-gated
+**interface** section and the unconditional **graft-provenance** list,
+and widens the bound-call record with parameter names, glyph labels, an
+explicit written-map flag, an open-map flag, and a per-call exit vector.
+
+A writer emits the **lowest version that carries the content**, so an
+object with no version-4 content keeps its version-2 or version-3 bytes
+exactly. Seven things promote an object to version 4, and nothing else
+does: an interface section, a graft-provenance record, or a bound call
+carrying a non-empty exit vector, a parameter name on a binding entry, a
+glyph-labelled pair destination, an open map, or a WRITTEN-EMPTY map
+`{}`. The last is the subtle one — a written map *with* pairs stays
+version 3, because the pairs express it completely and version 3 already
+stores them; only `{}` says something version 3 cannot, since there an
+omitted map means index identity. The version-4 test runs **first**, not
+after the version-2 one: an object whose only version-4 content is graft
+provenance carries none of the version-3 records either, so a
+lowest-version dispatch that asked "is this version-2 shape?" first
+would write it as version 2 and silently drop the grafts.
+
+The two written-ness rules meet on the wire. A version-3 stream carries
+no flag for it, so a reader **derives** it — a binding with pairs had its
+map written by definition — and a version-4 stream states it outright in
+the binding flags byte. Both readings agree everywhere except the empty
+case, which is exactly the case that forces version 4.
 
 - **Routine signatures** state a generic routine's contract: the virtual
   tape arity — how many tapes the routine operates on, `1..=16` — and, per
@@ -274,7 +329,16 @@ both counts, zero when the respective list is empty.
   **injective**: two callee tapes may never name the same caller tape, so
   a callee can never declare more tapes than its caller has to bind them
   to. A map pair flagged **one-way** is read-only: collapse is allowed
-  and it is excluded from write-back.
+  and it is excluded from write-back. Version 4 widens the record so a
+  site can bind **by name** instead of by position (each entry carrying
+  the callee parameter it binds, or the sentinel `0xFFFFFFFF` for a
+  positional one), name a destination by **glyph label** instead of by
+  index (the label's string index riding in the `dst` field, which reads
+  back as `0` on the in-memory side — the label is the truth there, never
+  the number), state outright whether the map was **written** and whether
+  it is **open**, and carry an **exit vector**: the blob-relative offsets
+  of the caller-side labels the callee's exits return to, one per state
+  parameter.
 - **Variant tags** name each blob's **build column** — one `u8` per blob,
   parallel to the blobs like the debug section, and carrying its own
   explicit count so a length mismatch is a decode-time rejection rather
@@ -283,6 +347,35 @@ both counts, zero when the respective list is empty.
   two builds differ contributes two adjacent blobs tagged `normal` and
   `volatile`, and a name whose builds came out identical contributes one
   blob tagged `both`, serving either program kind.
+- **Routine interfaces** are the version-4 companion to a signature:
+  where the signature counts a routine's tapes and their cardinalities,
+  the interface **names** them. Per tape it carries the parameter name, the
+  tape's glyph labels in band order (as many as the signature's
+  cardinality for that tape), the subset of them the routine may
+  **write**, an optional **enters** clause and an optional **leaves**
+  clause (the glyphs the head may stand on when the routine is entered
+  and when it leaves), and an **opaque** bit saying that every state
+  reading this tape reads it as a wildcard, so the routine never
+  discriminates its glyphs. Per routine it then carries the number of
+  **exits** — the state parameters a caller must supply — and a
+  **returns** flag, false for a routine control never comes back from.
+  One record per code blob, parallel to the blobs like the signatures,
+  which is why the section is **all-or-none**: an object describes every
+  function's interface or none at all.
+- **Exported alphabets and graphs** close the interface section: an
+  alphabet is a name plus its glyphs in band order; a graph is a name
+  plus the `u32` **digest** of the body a grafting unit must have
+  spliced.
+- **Graft provenance** is its own version-4 section, written
+  unconditionally and outside the interface: one record per library graph
+  this unit spliced, naming the graph and the digest of the body it
+  spliced. The linker compares it against the exporter's graph digest.
+
+Digests are content addresses, not offsets: a `u32` CRC-32 — the same
+checksum the containers themselves use — of the graph body being
+addressed, matched like a short hash and never decoded. Assembly text
+spells one as an unsigned decimal number (the assembly lexer has no
+hexadecimal literal).
 
 **The program-volatile bit** (flags bit 4) is not a section: it records
 that this object's program is a volatile build, which the linker reads
@@ -314,7 +407,36 @@ The format layer validates **structure** only. It bounds-checks every
 field — arity in `1..=16`, cardinality non-zero, `caller_tape` below 16,
 every blob and symbol index in range, each hole's `offset..offset + 4`
 inside its blob, each table offset inside its table blob — and rejects
-reserved map-pair flag bits. Whether a binding's maps form the legal
+reserved map-pair flag bits. The version-4 records add their own
+structural rejections, each a clean decode error rather than a trap or a
+half-read file:
+
+| The stream says | The reader answers |
+|---|---|
+| flags bit 5 with no signatures section | `interface without signatures` |
+| a tape's glyph count differs from its signature's cardinality | `interface glyph count differs from cardinality` |
+| a `writes` glyph that is not in that tape's own glyph list | `writes glyph outside its alphabet` |
+| an `enters`/`leaves` glyph that is not in that tape's own glyph list | `contract glyph outside its alphabet` |
+| a present `enters`/`leaves` list with zero glyphs | `empty head clause` |
+| a `returns` byte that is neither 0 nor 1 | `returns byte` |
+| a reserved bit in a tape flags byte (bit 3 and up) | `reserved interface tape flags` |
+| a reserved bit in a binding flags byte (bit 2 and up) | `reserved binding flags` |
+| an exit offset at or past the calling blob's length | `bound-call exit outside blob` |
+| a reserved header flag bit (bit 6 or 7) on a version-4 stream | `reserved object flag bits set` |
+| flags bit 5 on a pre-version-4 stream | `v4 flags in pre-v4 object` |
+| map-pair flag bit 1 on a pre-version-4 stream | `reserved map-pair flags` |
+
+Two of those are worth reading twice. An **exit offset** is bounded by
+the blob's length alone, not by the `offset..offset + 4` rule a
+relocation hole obeys — it addresses an instruction boundary, not a
+4-byte hole. And a **pre-version-4 stream is rejected outright** for
+claiming the interface flag, rather than read back as "no interface": the
+section it announces is not there, and accepting the file would be
+accepting a corrupted header. Reserved header bits above bit 5 are
+rejected only on a version-4 stream; the earlier arms keep their
+historical tolerance for bits they never defined.
+
+Whether a binding's maps form the legal
 bijection the composition demands — completion, hole rules, write-back
 consistency, and injective placement (the `caller_tape` fields of one
 binding must be pairwise distinct) — is **mapping legality**, checked by
@@ -414,8 +536,8 @@ assembler framework offers behind capabilities a dialect opts into
 (`docs/core.md (the assembler framework)`), and the bytes that text
 lowers to. A dialect that leaves a capability off does not accept the
 directives riding it: the classic `.pma` grammar enables none of the
-sectioned, vector, and macro surface below, and `.tma` is today the only
-dialect that enables all of it.
+sectioned, vector, macro, and interface surface below, and `.tma` is
+today the only dialect that enables all of it.
 
 One instruction — or one table directive — per line, `;` line comments.
 The **canonical column grid** — labels at column 0, mnemonics at column
@@ -471,13 +593,23 @@ default section is `code`, so a file may omit `.section code`. Only table
 directives are legal in the tables section, and only functions/code in the
 code section.
 
-`.routine <name>, tapes=<N>, alpha=(<c1>, …, <cN>)` declares a function's
+`.routine <name>, tapes=<N>, alpha=(<c1>, …, <cN>)[, exits=<K>][, noreturn]`
+declares a function's
 generic-routine signature: `tapes` is the tape count (1..=16), and `alpha`
 lists one alphabet cardinality per tape (each at least 1; the list length
 equals `tapes`). The directive must **precede** the `.func` it names, any
 distance in the same file; it attaches when the function is defined. The
 entry routine's signature fixes the executable image's tape count and
 per-tape alphabets, which a run validates its tape band against.
+
+The two optional tail fields belong to the routine's **interface**, not to
+its signature, and ride the interface capability: `exits=<K>` is the
+number of state parameters the routine leaves through (`0..=255`, default
+`0`), and `noreturn` states that control never comes back to the caller
+(the default is that it does). They are written in that fixed order, each
+at most once, and each is independent of the other. Both live *inside* the
+interface record on the wire, so a `.routine` line carrying either needs
+the `.param` lines below — there is nowhere else for the fields to go.
 
 Disassembling a linked image recovers a non-entry callee's signature
 only when it is reached through a `.frame` descriptor: `tapes` comes
@@ -486,6 +618,109 @@ per-tape alphabet is consumed by the composition engine at link time
 and does not survive into the image, so `alpha` there is the
 **physical** tape each virtual one projects onto instead — a
 `; derived` trailing comment marks the line to say so.
+
+### Routine interfaces
+
+Under the interface capability a signed routine can publish the rest of
+its contract: what its tapes are *called*, what glyphs they carry, and
+what the routine promises about them.
+
+```asm
+.graph lib::findAGraph, 42
+.grafted std::binaryNumbers::plusOneGraph, 7
+.routine main, tapes=2, alpha=(3, 6), exits=1, noreturn
+.param ctl, ('_', '0', '1'), opaque
+.param data, ('_', 'a', 'b', '0', '1', '$'), writes=('0', '1'), enters=('$'), leaves=('$')
+```
+
+`.param <name>, (<glyphs>)[, writes=(<glyphs>)][, enters=(<glyphs>)][, leaves=(<glyphs>)][, opaque]`
+names one of the preceding `.routine`'s tapes and describes it. The four
+suffixes are optional, come in that **fixed order**, and each may appear
+at most once; an absent suffix means *no clause*, which is not the same
+as an empty one. What each says:
+
+- the **glyph list** is that tape's alphabet in band order — index 0 is
+  the blank by convention — and its length must equal the cardinality
+  `alpha` declares for the same tape;
+- `writes=(…)` lists the glyphs the routine may write on the tape, each
+  one of the tape's own. A *written* `writes=()` and an absent `writes=`
+  both mean "writes nothing", so the two are indistinguishable once
+  decoded and a disassembly prints neither;
+- `enters=(…)` and `leaves=(…)` are the head contracts: the glyphs the
+  head may stand on when the routine is entered, and when it leaves. A
+  written-but-empty `enters=()`/`leaves=()` is **rejected** — a clause
+  lists at least one glyph, and the way to say "no clause" is to omit the
+  suffix. Every glyph listed must be one of the tape's own;
+- `opaque` marks a tape every state reads as a wildcard: the routine
+  never discriminates its glyphs.
+
+Placement is strict, because the record it builds is per-function and
+positional. A `.param` is legal in the **code section only**, it follows
+the `.routine` it describes and precedes that routine's `.func`, and the
+lines come **one per tape, in tape order** — the first `.param` after a
+`.routine` describes tape 0. A parameter name uses letters, digits and
+underscore and starts with a letter or underscore (it is named again at a
+call site, so it takes neither dots nor `::`), and is unique within its
+routine. Too few or too many `.param` lines for the declared `tapes=` is
+an error at the line that reveals it.
+
+**All-or-none, per object.** Interfaces are parallel to the functions, so
+any interface content in a file — a `.param` line, a `.graph`, a
+`.grafted` — obliges *every* function in it to carry both a `.routine`
+signature and its full set of `.param` lines. A file with signatures and
+no interface content is unaffected: that is the ordinary version-3 shape.
+
+`.graph <name>, <digest>` records a graph this unit **exports** and the
+digest of the body a grafting unit must have spliced; `.grafted <name>,
+<digest>` records a library graph this unit **spliced** and the digest it
+spliced. Both stand in the code section before the first `.func`, and
+both write the digest as an unsigned decimal `u32`. They are
+object-level, not per-function, but they still oblige the all-or-none
+rule above — a digest is meaningless to the linker without the interface
+it checks against.
+
+**Glyph literals and glyph lists.** A glyph literal is a **single**
+character in single quotes — `'x'` — with exactly two escapes, `'\''`
+for the quote and `'\\'` for the backslash; nothing else is a glyph
+literal, and a multi-character one does not lex at all. The literal
+itself rides the interface capability: a dialect without it never sees a
+quote as anything but junk. A glyph **list** — the `(…)` group of a
+`.param` line — is the notation `tmt tape-block` uses
+(`docs/formats.md (glyph tables)`): comma-separated elements, each a
+glyph literal or a bare decimal number, with inclusive `..` ranges
+between two endpoints of the same kind (`'0'..'9'`, `1..4`), duplicates
+rejected and at most 127 glyphs. A bare number's identity is its value,
+so a wide numeric label is written — and printed back — without quotes,
+`10` rather than `'10'`, which is the one spelling that survives the
+one-character literal rule.
+
+**Canonical spelling.** These object-level directives print at column 0,
+outside the instruction grid, with exactly **one space** after the
+directive word and `, ` between fields. A disassembler prints a glyph
+list with its ranges expanded — the elements are data by then, not text
+— and omits `writes=()` entirely, so a formatter's verbatim reprint of a
+hand-written range and the disassembler's expansion of the same object
+are both canonical, each for its own input.
+
+**Text-expressibility caveats.** Three things the interface section can
+hold do not survive a full text round trip, and it is better to know
+which:
+
+- **Exported alphabets have no directive.** They are a compiler fact with
+  no assembly spelling, so a disassembly prints them as
+  `; alphabet <name>: (<glyphs>)` comment lines and reassembling that
+  text produces an object without them. They are the only part of the
+  section a listing can show but not put back.
+- **A glyph label must be one character to be written back as a
+  literal.** A multi-character label that is a canonical decimal prints
+  as the bare number and reads back identically; a multi-character label
+  that is not a number has no assembly spelling at all.
+- **An object with grafts but no interface has no text form.** That
+  combination — graft records *and* functions, with the interface section
+  absent — is representable on the wire, but its disassembly is text the
+  assembler refuses: the `.grafted` line obliges an interface for every
+  function, and there are no `.param` lines to print beside it. Nothing
+  the assembler itself produces can be in that state.
 
 ### Vector operands
 
@@ -684,6 +919,51 @@ time** by the composition engine (`docs/core.md (the composition
 engine)`; what the three mechanisms produce for a TM-1 image is
 `docs/tmt/isa.md (call mechanisms)`). Alongside the hand-authored
 `.frame` form, it is the source-level way to run a framed call.
+
+**The symbolic forms.** Under the interface capability the operand gains
+four spellings that name the callee's published interface instead of
+counting positions, and an exit vector:
+
+```asm
+        call    plusOne [num: 1{3->'0',4=>'1'}, ctl: 0{}] exits=(won, lost)
+        call    skip [ctl: 0{*}]
+```
+
+- **A named entry** — `num: 1` — binds the callee parameter `num` rather
+  than the entry's list position. A binding names **every** entry or
+  none; mixing the two is refused, because half a list gives the position
+  rule nothing to count from. A parameter name here obeys the same
+  identifier grammar `.param` uses.
+- **A glyph-labelled destination** — `3->'0'` — names the callee-side
+  symbol by its glyph instead of by index, and the linker resolves it
+  against the callee's interface. Only the destination may be symbolic;
+  a source is always a numeric index.
+- **A written-empty map** — `0{}` — is a deliberate identity, and is
+  **distinct from omitting the braces**: bare `0` is index identity,
+  while `0{}` is the empty map. That distinction is the one binding form
+  that cannot be said before object version 4.
+- **An open map** — `{*}`, or `{3->'0', *}` — says the listed pairs are
+  not the whole of it and the rest stays open for the linker to fill. The
+  `*` goes **last, once, and only inside the braces**; anywhere else it
+  is a shape error. An open map is a written map by construction.
+- **`exits=(<label>, …)`** after the bracket lists the caller-side labels
+  the callee's exits return to. It rides only on `call`, needs a binding
+  bracket in front of it (an empty `[]` is allowed), names at least one
+  label, and each entry is a label defined in the calling function — an
+  undefined one is an unknown-label error at the label's own span.
+
+Every one of these needs the dialect's interface capability; PM-1 never
+enables it, so `.pma` accepts none of them.
+
+**Canonical spelling.** The separators differ between the three levels on
+purpose, and a disassembly reproduces them exactly: binding **pairs** are
+joined by a bare `,` with no space (`1{3->'0',4=>'1'}`), binding
+**entries** by `, ` (`[num: 1{…}, ctl: 0{}]`), and the exit vector is
+separated from the closing `]` by a **space**, never a comma, with its
+own entries `, `-joined. A disassembly also names exit targets by the
+label scheme it synthesizes for every code position (`L000C` and the
+like); the written names do not come back, `-g` included, unless the
+tables section independently names that position.
 
 **Completing a binding.** How a binding's symbol maps complete depends on
 the two tapes' sizes.

@@ -56,12 +56,17 @@ pub struct AsmCaps {
     /// there; `pm1_syntax()` names only what it enables.
     pub volatile: bool,
     /// The interface surface (docs/formats.md (routine interfaces)): the
-    /// `.param` directive (parameter names, glyphs, `writes` sets), the
-    /// `exits=`/`noreturn` fields of `.routine`, the object-level
-    /// `.graph`/`.grafted` digest directives, quoted glyph labels and
-    /// named entries in a binding-call operand, and the `exits=(…)`
-    /// operand on `call`. Off by default like every capability; PM-1
-    /// never enables it (docs/pmt/asm.md).
+    /// `.param` directive — parameter names, glyph lists, and its
+    /// `writes=`, `enters=`, `leaves=` and `opaque` suffixes — the
+    /// `exits=`/`noreturn` fields of `.routine`, and the object-level
+    /// `.graph`/`.grafted` digest directives. It is also what makes a
+    /// quoted glyph literal (`'x'`) lex at all, and what opens the
+    /// binding-call operand's symbolic forms: named entries, quoted glyph
+    /// labels as pair destinations, a written-empty map `{}`, the open
+    /// marker `*`, an empty binding `[]`, and the `exits=(…)` operand on
+    /// `call`. Off by default like every capability; PM-1 never enables
+    /// it (docs/pmt/asm.md (the `.volatile` directive) names the one
+    /// capability that dialect does take).
     pub interface: bool,
 }
 

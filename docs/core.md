@@ -537,9 +537,14 @@ knowledge arrives via `ArchSyntax`, and the text grammar they accept is
   default so a classic dialect's acceptance is byte-for-byte unchanged:
   `tables` (`.section` regions with `.row`/`.targets`/`.target`),
   `rept` (`.rept v, lo, hi` … `.endr` with `{expr}` substitution),
-  `vectors` (`[a, *, -, <, >, .]` operand tokens), and `volatile` (the
+  `vectors` (`[a, *, -, <, >, .]` operand tokens), `volatile` (the
   `.volatile` build-column directive — selection metadata naming which
-  column a blob belongs to, never anything about the body). The struct's
+  column a blob belongs to, never anything about the body), and
+  `interface` (the routine-interface surface — the `.param` directive,
+  the `exits=`/`noreturn` fields on `.routine`, the `.graph`/`.grafted`
+  digest directives, quoted glyph literals, and the binding-call
+  operand's symbolic forms, `docs/formats.md (routine interfaces)`). The
+  struct's
   default has every capability off, so one a dialect does not ask for is
   off: adding a capability to the framework can never switch it on for a
   dialect that predates it. TM-1 goes one further and spells every field

@@ -13,9 +13,9 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 | crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.5.0 |
 | `mtc-wasm` crate / JS API | 0.5.0 |
 | `.pmc` language / PM-1 `.pma` dialect | 0.4 / 0.3 |
-| `.tmc` language / TM-1 `.tma` dialect | 0.1 / 0.3 |
+| `.tmc` language / TM-1 `.tma` dialect | 0.1 / 0.4 |
 | PM IR / TM IR | 4 / 3 |
-| containers MO / MX / MT | 3 / 2 / 2 |
+| containers MO / MX / MT | 4 / 2 / 2 |
 | `pmt.json` / `tmt.json` `project` schema | 0.2 / 0.2 |
 | editor plugins | VS Code pair 0.2.0, JetBrains pair 0.2.1; `MIN_TESTED_PMT`/`MIN_TESTED_TMT` floors at 0.4.0 |
 
