@@ -93,8 +93,32 @@ other:  hlt
 ";
 
 #[test]
-fn dialect_version_is_0_3() {
-    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.3");
+fn dialect_version_is_0_4() {
+    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.4");
+}
+
+/// Every interface form the TM-1 dialect spells, round-tripped at the
+/// object level (docs/tmt/asm.md (interface directives)).
+const INTERFACE_OBJECT: &str = "\
+.graph lib::findAGraph, 42
+.grafted std::binaryNumbers::plusOneGraph, 7
+.routine main, tapes=2, alpha=(3, 6), exits=1, noreturn
+.param ctl, ('_', '0', '1'), opaque
+.param data, ('_', 'a', 'b', '0', '1', '$'), writes=('0', '1'), enters=('$'), leaves=('$')
+.func main
+        rd
+        call    mylib::plusOne [num: 1{3->'0',4=>'1'}] exits=(L000C)
+        call    mylib::skip [ctl: 0{*}]
+L000C:  stp
+";
+
+#[test]
+fn interface_object_round_trips_byte_identically() {
+    let obj = assemble(INTERFACE_OBJECT, false).expect("assembles");
+    let text = disassemble_object(&obj);
+    let again = assemble(&text, false).expect("re-assembles");
+    assert_eq!(again.to_bytes(), obj.to_bytes(), "{text}");
+    assert_eq!(text, INTERFACE_OBJECT, "the fixture is already canonical");
 }
 
 /// The 0.3 fused write+move `wrmv [w…], [m…]`: the write vector then the
