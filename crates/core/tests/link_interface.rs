@@ -129,12 +129,18 @@ fn opts(mech: CallMech) -> LinkOptions {
 /// A two-function program whose `main` bound-calls `sub` once, with
 /// `binding` as the call's operand text. The two tapes have equal
 /// cardinalities, so a swap `[1, 0]` is a legal non-identity binding: it
-/// does not collapse to a plain call, and it needs no hole.
+/// does not collapse to a plain call, and it needs no hole. Both
+/// routines declare their interface, so a symbolic form has something to
+/// resolve against; `sub`'s parameters are `p` and `q`, in that order.
 fn program(binding: &str) -> String {
     format!(
         "\
 .routine main, tapes=2, alpha=(4, 4)
+.param a, ('_', 'x', 'y', 'z')
+.param b, ('_', 'x', 'y', 'z')
 .routine sub, tapes=2, alpha=(4, 4)
+.param p, ('_', '0', '1', '2')
+.param q, ('_', '0', '1', '2')
 .section code
 .func main
         call    sub {binding}
@@ -164,12 +170,32 @@ fn refused_under_every_mechanism(binding: &str, form: &str) {
     }
 }
 
-/// `num: 1` binds a callee PARAMETER. Nothing below the assembler reads
-/// `param`, so a link would take the entry positionally instead — a
-/// silently different image whenever the two disagree.
+/// `p: 1, q: 0` binds by callee PARAMETER. The linker looks each name up
+/// in the callee's interface, reorders the entries into the callee's own
+/// tape order, and hands the engine the very binding the positional
+/// spelling would have produced — so the image is byte-identical to the
+/// numeric form.
+///
+/// Mutation it catches: make the resolver take a named entry positionally
+/// (ignore `param`) and `[p: 1, q: 0]` links as `[1, 0]` while
+/// `[q: 0, p: 1]` links as `[0, 1]` — the second assertion below fails.
 #[test]
-fn a_named_entry_is_refused_under_every_mechanism() {
-    refused_under_every_mechanism("[num: 1, ctl: 0]", "a named entry");
+fn a_named_entry_resolves_to_the_numeric_form_under_every_mechanism() {
+    let numeric = program("[1, 0]");
+    for named in ["[p: 1, q: 0]", "[q: 0, p: 1]"] {
+        let src = program(named);
+        for mech in MECHS {
+            let a = link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
+                .unwrap_or_else(|e| panic!("`{named}` must link under {mech}: {e}"));
+            let b = link(&fake_syntax(), &[asm(&numeric)], &[], opts(mech))
+                .unwrap_or_else(|e| panic!("`[1, 0]` must link under {mech}: {e}"));
+            assert_eq!(
+                a.executable.to_bytes(),
+                b.executable.to_bytes(),
+                "`{named}` must link exactly like `[1, 0]` under {mech}"
+            );
+        }
+    }
 }
 
 /// `3=>'0'` names the callee symbol by GLYPH. A labelled pair is written

@@ -20,7 +20,7 @@
 
 use super::LinkError;
 use super::resolve::FuncRef;
-use crate::formats::object::BoundCall;
+use crate::formats::object::{BoundCall, RoutineInterface, TapeBinding};
 
 /// Resolve every reached bound call's binding against its callee's
 /// interface. Returns one `Vec<BoundCall>` per function, parallel to
@@ -45,10 +45,106 @@ pub(super) fn resolve_bindings(order: &[FuncRef]) -> Result<Vec<Vec<BoundCall>>,
         .collect()
 }
 
-/// One site. The identity for now; each later resolution rule is added
-/// here, one at a time.
-fn resolve_one(_callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkError> {
-    Ok(record.clone())
+/// One site's binding, resolved against the callee's interface.
+fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkError> {
+    let named = record
+        .binding
+        .iter()
+        .filter(|tb| tb.param.is_some())
+        .count();
+    if named == 0 {
+        return Ok(record.clone());
+    }
+    if named != record.binding.len() {
+        return Err(bad(
+            callee,
+            "the binding mixes named and positional entries; write every entry \
+             one way or the other"
+                .to_string(),
+        ));
+    }
+    let iface = require_interface(callee, "a named entry")?;
+    let binding = reorder_named(callee, iface, &record.binding)?;
+    Ok(BoundCall {
+        binding,
+        ..record.clone()
+    })
+}
+
+/// The callee's interface, or the refusal that replaces
+/// `external-binding-unsupported` for a callee that describes none
+/// (docs/core.md (symbolic resolution)).
+fn require_interface<'a>(
+    callee: &FuncRef<'a>,
+    form: &str,
+) -> Result<&'a RoutineInterface, LinkError> {
+    callee.interface.ok_or_else(|| {
+        bad(
+            callee,
+            format!(
+                "the call site uses {form}, but `{}` describes no interface; \
+                 only a transparent call can reach it",
+                callee.name
+            ),
+        )
+    })
+}
+
+/// Reorder a fully-named binding into the callee's own tape order,
+/// clearing `param` as it goes. Every parameter must be bound exactly
+/// once: a binding names every entry or none
+/// (docs/tmt/language.md (symbol maps)).
+fn reorder_named(
+    callee: &FuncRef,
+    iface: &RoutineInterface,
+    binding: &[TapeBinding],
+) -> Result<Vec<TapeBinding>, LinkError> {
+    let mut slots: Vec<Option<TapeBinding>> = vec![None; iface.params.len()];
+    for tb in binding {
+        let name = tb.param.as_deref().expect("checked fully named");
+        let Some(k) = iface.params.iter().position(|p| p == name) else {
+            return Err(bad(
+                callee,
+                format!(
+                    "the binding names parameter `{name}`, which `{}` does not declare",
+                    callee.name
+                ),
+            ));
+        };
+        if slots[k].is_some() {
+            return Err(bad(
+                callee,
+                format!("the binding names parameter `{name}` twice"),
+            ));
+        }
+        slots[k] = Some(TapeBinding {
+            param: None,
+            ..tb.clone()
+        });
+    }
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(k, slot)| {
+            slot.ok_or_else(|| {
+                bad(
+                    callee,
+                    format!(
+                        "the binding does not bind parameter `{}`; an argument list \
+                         is complete",
+                        iface.params[k]
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+fn bad(callee: &FuncRef, message: String) -> LinkError {
+    LinkError::BadBinding {
+        callee: callee.name.to_string(),
+        message,
+    }
 }
 
 /// Re-point every `FuncRef::bound` entry at its arena record, so the
@@ -61,6 +157,7 @@ pub(super) fn rebind<'a>(
     mut order: Vec<FuncRef<'a>>,
     arena: &'a [Vec<BoundCall>],
 ) -> Vec<FuncRef<'a>> {
+    debug_assert_eq!(order.len(), arena.len(), "the arena is parallel to `order`");
     for (f, resolved) in order.iter_mut().zip(arena) {
         debug_assert_eq!(
             f.bound.len(),

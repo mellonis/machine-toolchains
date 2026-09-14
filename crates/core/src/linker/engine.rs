@@ -631,7 +631,7 @@ pub(super) fn scan_sites<'a>(
 }
 
 /// Refuse a reached bound call written in the SYMBOLIC form
-/// (docs/formats.md (bound calls)): a named entry, a glyph-labelled
+/// (docs/formats.md (bound calls)): a glyph-labelled
 /// destination, an open map, or an exit vector. The object format and the
 /// assembler carry all four today; resolving them — matching a name to a
 /// parameter, a glyph to a callee symbol, completing what an open map
@@ -662,9 +662,7 @@ fn refuse_symbolic_binding(order: &[FuncRef]) -> Result<(), LinkError> {
                 .binding
                 .iter()
                 .find_map(|tb| {
-                    if tb.param.is_some() {
-                        Some("a named entry")
-                    } else if tb.open {
+                    if tb.open {
                         Some("an open map")
                     } else if tb.pairs.iter().any(|p| p.dst_label.is_some()) {
                         Some("a glyph-labelled destination")

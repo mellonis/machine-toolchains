@@ -674,8 +674,10 @@ fn mono_stamps<'a>(
             table: Cow::Owned(body.table),
             table_fixups: body.table_fixups,
             signature: None,
-            // A mono stamp is a specialized copy with no backing symbol,
-            // so it carries neither a signature nor an interface record.
+            // The composite permutes tape order and glyph indices, so the
+            // callee's interface record describes another coordinate
+            // system and must not be attached to the copy; stamps carry
+            // no bound sites, so nothing reads it.
             interface: None,
             origin: callee.origin,
         });

@@ -200,7 +200,7 @@ impl std::fmt::Display for CallMech {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkDiagnostic {
     /// The stable kebab-case code; joins the shared allow namespace
-    /// (docs/tmt/lint.md (the allow namespace)).
+    /// (docs/pmt/lint.md and docs/tmt/lint.md (the allow namespace)).
     pub code: &'static str,
     /// The rendered finding, one sentence, no trailing period.
     pub message: String,
