@@ -1,14 +1,16 @@
-//! An `#[ignore]`d measurement instrument, not a correctness test: it links
-//! every shipped program and reports what the planned plain-site size check
-//! WOULD say, so the check's blast radius is known before it becomes an
-//! error. Run it with
+//! An `#[ignore]`d measurement instrument, not a correctness test: it
+//! assembles or compiles every shipped program standalone, resolves each
+//! plain call site's callee itself (the linker's own first-wins order —
+//! unit then stdlib — without running the real linker), and reports what
+//! the planned plain-site size check WOULD say, so the check's blast
+//! radius is known before it becomes an error. Run it with
 //! `cargo test -p mtc-turing-machine --test plain_site_sweep -- --ignored --nocapture`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use mtc_core::formats::object::{ObjectFile, RoutineSig};
-use mtc_turing_machine::asm::assemble;
+use mtc_turing_machine::asm::{assemble, tm1_syntax};
 use mtc_turing_machine::compiler::{CompileOptions, compile};
 
 /// Every `.tmc` and `.tma` the repository ships, recursively, under the
@@ -57,7 +59,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 /// is the stdlib object (and, for a multi-unit target, its siblings),
 /// searched after the object itself — the linker's own first-wins order.
 /// Reported, never asserted.
-fn report(path: &Path, obj: &ObjectFile, extra: &[&ObjectFile]) {
+fn report(path: &Path, obj: &ObjectFile, extra: &[&ObjectFile], framed_call_opcode: Option<u8>) {
     let Some(sigs) = obj.signatures.as_ref() else {
         println!("{}: no signatures (nothing to compare)", path.display());
         return;
@@ -65,6 +67,16 @@ fn report(path: &Path, obj: &ObjectFile, extra: &[&ObjectFile]) {
     let mut resolved = 0usize;
     let mut unresolved = 0usize;
     for reloc in &obj.relocations {
+        // A framed call's displacement half is emitted as a relocation
+        // shaped exactly like a plain call's (docs/core.md (framed calls));
+        // the opcode byte sits one before the operand hole. Skip it, the
+        // same way a bound site with an explicit map is skipped — it goes
+        // through the composition algebra, not the plain-site check.
+        if reloc.offset > 0
+            && framed_call_opcode == Some(obj.blobs[reloc.blob as usize][reloc.offset as usize - 1])
+        {
+            continue;
+        }
         let caller: &RoutineSig = &sigs[reloc.blob as usize];
         let name = &obj.symbols[reloc.symbol as usize].name;
         let find = |o: &ObjectFile| -> Option<RoutineSig> {
@@ -132,6 +144,7 @@ fn sweep_the_shipped_corpus() {
     // The embedded stdlib is where every `call std::…` in the corpus
     // resolves, so it is part of the comparison, not a separate concern.
     let stdlib = mtc_turing_machine::stdlib::object().clone();
+    let framed_call_opcode = tm1_syntax().framed_call_opcode();
     let mut compiled: Vec<(PathBuf, ObjectFile)> = Vec::new();
     for path in corpus() {
         let src = fs::read_to_string(&path).expect("readable");
@@ -165,7 +178,7 @@ fn sweep_the_shipped_corpus() {
             .map(|(_, o)| o)
             .collect();
         extra.push(&stdlib);
-        report(path, obj, &extra);
+        report(path, obj, &extra, framed_call_opcode);
     }
     println!("--- sweep complete ---");
 }
