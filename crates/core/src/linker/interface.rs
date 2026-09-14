@@ -235,7 +235,9 @@ pub(super) fn rebind<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formats::object::{BoundCall, MapPair, ObjectFile, Symbol, SymbolDef, TapeBinding};
+    use crate::formats::object::{
+        BoundCall, Interface, MapPair, ObjectFile, Symbol, SymbolDef, TapeBinding,
+    };
 
     /// One object, `main` bound-calling `sub` through a purely NUMERIC
     /// binding: positional entry (`param: None`), a closed map, a
@@ -325,6 +327,103 @@ mod tests {
                 );
             }
         }
+        drop(objects);
+    }
+
+    /// A minimal one-tape `RoutineInterface`: one parameter over the given
+    /// glyphs, no writes/enters/leaves/exits contract.
+    fn one_param_interface(param: &str, glyphs: &[&str]) -> RoutineInterface {
+        RoutineInterface {
+            params: vec![param.to_string()],
+            glyphs: vec![glyphs.iter().map(|g| (*g).to_string()).collect()],
+            writes: vec![Vec::new()],
+            enters: vec![None],
+            leaves: vec![None],
+            opaque: vec![false],
+            exits: 0,
+            returns: true,
+        }
+    }
+
+    /// A zero-tape placeholder interface — `main` never plays callee in
+    /// this fixture, so its own entry only needs to exist so `sub`'s sits
+    /// at the right index in `Interface::routines` (parallel to `blobs`).
+    fn empty_interface() -> RoutineInterface {
+        RoutineInterface {
+            params: Vec::new(),
+            glyphs: Vec::new(),
+            writes: Vec::new(),
+            enters: Vec::new(),
+            leaves: Vec::new(),
+            opaque: Vec::new(),
+            exits: 0,
+            returns: true,
+        }
+    }
+
+    /// `main` bound-calling `sub` (one parameter `p` over `('_', 'a')`)
+    /// through a single labelled pair: `src: 0`, `dst_label: Some("a")`,
+    /// the `dst: 0` a labelled pair is written with.
+    fn labelled_fixture() -> Vec<ObjectFile> {
+        let symbols = ["main", "sub"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| Symbol {
+                name: (*n).into(),
+                def: SymbolDef::Defined { blob: i as u32 },
+            })
+            .collect();
+        let blobs = vec![vec![0x0E, 0x02], vec![0x0E, 0x02]];
+        let mut object = ObjectFile::v2(0x7F, symbols, blobs, Vec::new(), None);
+        object.interface = Some(Interface {
+            routines: vec![empty_interface(), one_param_interface("p", &["_", "a"])],
+            ..Default::default()
+        });
+        object.bound_calls.push(BoundCall {
+            blob: 0,
+            offset: 1,
+            symbol: 1, // "sub"
+            binding: vec![TapeBinding {
+                caller_tape: 0,
+                param: None,
+                map_written: true,
+                open: false,
+                pairs: vec![MapPair {
+                    src: 0,
+                    dst: 0,
+                    dst_label: Some("a".to_string()),
+                    one_way: false,
+                }],
+            }],
+            exits: Vec::new(),
+        });
+        vec![object]
+    }
+
+    /// `resolve_labels` CLEARS the label it consumes, not merely reads it:
+    /// nothing downstream re-checks `dst_label`, so a stale `Some` left
+    /// behind would be silently ignored rather than caught anywhere else.
+    ///
+    /// Mutation it catches: change `resolve_labels`'s
+    /// `pair.dst_label.take()` to `.clone()` — the resolved `dst` is still
+    /// correct (1), but the label stays attached instead of being
+    /// cleared, and this is the only test that reads the field to notice.
+    #[test]
+    fn resolve_labels_clears_the_label_it_consumes() {
+        let objects = labelled_fixture();
+        let order = crate::linker::resolve::resolve(&objects, &[], "main")
+            .expect("the fixture resolves")
+            .order;
+        let arena = resolve_bindings(&order).expect("a labelled binding resolves");
+        let resolved = &arena[0][0];
+        assert_eq!(
+            resolved.binding[0].pairs[0].dst, 1,
+            "glyph `a` is index 1 in sub's declared alphabet ('_', 'a')"
+        );
+        assert!(
+            resolved.binding[0].pairs[0].dst_label.is_none(),
+            "the label must be cleared once resolved"
+        );
         drop(objects);
     }
 }

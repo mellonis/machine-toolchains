@@ -191,6 +191,39 @@ fn a_missing_parameter_is_refused() {
     refused(&program("[p: 1]"), "does not bind parameter `q`");
 }
 
+/// A positional binding wider than the callee's declared arity, with a
+/// glyph label on the excess tape. `resolve_bindings` runs strictly
+/// before `validate_binding`'s own arity check, so an out-of-range
+/// labelled tape must be caught by `resolve_labels`'s own bounds check,
+/// not silently deferred to a later stage that never sees it (label
+/// resolution runs first in the link pipeline).
+///
+/// Mutation it catches: replace the `iface.glyphs.get(k)` bounds check
+/// with a bare index (`iface.glyphs[k]`) and the excess tape panics on
+/// an out-of-bounds index instead of refusing.
+#[test]
+fn a_labelled_tape_outside_the_callee_arity_is_refused() {
+    let src = "\
+.routine main, tapes=3, alpha=(4, 4, 4)
+.param a, ('_', 'x', 'y', 'z')
+.param b, ('_', 'x', 'y', 'z')
+.param c, ('_', 'x', 'y', 'z')
+.routine sub, tapes=2, alpha=(4, 4)
+.param p, ('_', '0', '1', '2')
+.param q, ('_', '1', '0', '2')
+.section code
+.func main
+        call    sub [0, 1, 2{1=>'0'}]
+L:      stp
+.func sub
+        ret
+";
+    refused(
+        src,
+        "binding tape 2 is outside `sub`'s declared interface (2 parameter(s))",
+    );
+}
+
 /// Mutation it catches: make `require_interface` fall back to positional
 /// resolution and a symbolic call into an interfaceless callee links
 /// silently — the exact hazard the refusal existed for.
