@@ -105,6 +105,8 @@ fn asm(src: &str) -> ObjectFile {
     assemble(&fake_syntax(), ARCH, src, false).expect("assembles")
 }
 
+const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid];
+
 fn opts(mech: CallMech) -> LinkOptions {
     LinkOptions {
         call_mech: mech,
@@ -113,7 +115,10 @@ fn opts(mech: CallMech) -> LinkOptions {
 }
 
 /// A caller/callee pair whose callee declares two parameters `p`, `q`
-/// over a 4-symbol alphabet each.
+/// over a 4-symbol alphabet each. `p` and `q` deliberately spell `'1'`
+/// at DIFFERENT indices (2 and 1) — resolving a label against the wrong
+/// tape's glyph list is a discriminating failure only when the two
+/// lists disagree on where the glyph sits.
 fn program(binding: &str) -> String {
     format!(
         "\
@@ -122,7 +127,7 @@ fn program(binding: &str) -> String {
 .param b, ('_', 'x', 'y', 'z')
 .routine sub, tapes=2, alpha=(4, 4)
 .param p, ('_', '0', '1', '2')
-.param q, ('_', '0', '1', '2')
+.param q, ('_', '1', '0', '2')
 .section code
 .func main
         call    sub {binding}
@@ -197,9 +202,11 @@ fn a_named_entry_into_an_interfaceless_callee_is_refused() {
     );
 }
 
-/// Mutation it catches: delete the mixed-form guard and the positional
-/// entry is taken at its LIST position while the named one is taken at
-/// its parameter position — two different orderings in one list.
+/// Mutation it catches: delete the mixed-form guard and the fully-named
+/// path runs over a partly-positional binding — `reorder_named` reads
+/// every entry's `param` unconditionally and panics
+/// (`expect("checked fully named")`) on the first positional one instead
+/// of the intended refusal.
 #[test]
 fn a_mixed_named_and_positional_list_is_refused() {
     // The assembler rejects a mixed list at parse time, so this fixture
@@ -218,4 +225,45 @@ fn a_mixed_named_and_positional_list_is_refused() {
             if message.contains("mixes named and positional entries")),
         "{err:?}"
     );
+}
+
+/// Mutation it catches: make the unknown-glyph arm fall back to `dst: 0`
+/// and a typo'd glyph silently binds blank.
+#[test]
+fn an_unknown_glyph_is_refused() {
+    refused(
+        &program("[1{3=>'9'}, 0]"),
+        "names glyph `9`, which is not in `sub`'s alphabet for parameter `p`",
+    );
+}
+
+/// Mutation it catches: make `require_interface` optional for labels and
+/// an interfaceless callee links with every labelled pair reading 0.
+#[test]
+fn a_glyph_label_into_an_interfaceless_callee_is_refused() {
+    refused(
+        &interfaceless("[1{3=>'1'}, 0]"),
+        "describes no interface; only a transparent call can reach it",
+    );
+}
+
+/// Names and labels in ONE binding: the reorder must run first, or the
+/// label is looked up in the wrong tape's glyph list. Mutation it
+/// catches: resolve labels before reordering and `q: 1{3=>'1'}` resolves
+/// `'1'` against parameter `p`'s glyphs instead of `q`'s.
+#[test]
+fn a_named_entry_carrying_a_glyph_label_resolves_in_callee_tape_order() {
+    let mixed = program("[q: 1{3=>'1'}, p: 0]");
+    let indexed = program("[0, 1{3=>1}]");
+    for mech in MECHS {
+        let a = link(&fake_syntax(), &[asm(&mixed)], &[], opts(mech))
+            .unwrap_or_else(|e| panic!("under {mech}: {e}"));
+        let b = link(&fake_syntax(), &[asm(&indexed)], &[], opts(mech))
+            .unwrap_or_else(|e| panic!("under {mech}: {e}"));
+        assert_eq!(
+            a.executable.to_bytes(),
+            b.executable.to_bytes(),
+            "under {mech}"
+        );
+    }
 }

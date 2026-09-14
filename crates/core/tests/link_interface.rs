@@ -198,12 +198,30 @@ fn a_named_entry_resolves_to_the_numeric_form_under_every_mechanism() {
     }
 }
 
-/// `3=>'0'` names the callee symbol by GLYPH. A labelled pair is written
-/// with `dst: 0` — the field the wire gives to the label — so linking one
-/// unresolved would map onto symbol 0 whatever the glyph meant.
+/// `3=>'1'` names the callee symbol by GLYPH. The linker looks the label
+/// up in the callee's declared glyph list for that tape and fills in the
+/// index, so the image is byte-identical to the spelling that wrote the
+/// index directly. `sub`'s tapes are `('_', '0', '1', '2')`, so `'1'` is
+/// index 2 and `'2'` is index 3.
+///
+/// Mutation it catches: leave `dst_label` unresolved and the pair reads
+/// the `dst: 0` a labelled pair is written with — `'1'` would bind blank.
+/// The two spellings below then diverge.
 #[test]
-fn a_glyph_labelled_destination_is_refused_under_every_mechanism() {
-    refused_under_every_mechanism("[1{3=>'0'}, 0]", "a glyph-labelled destination");
+fn a_glyph_labelled_destination_resolves_under_every_mechanism() {
+    let labelled = program("[1{3=>'1'}, 0]");
+    let indexed = program("[1{3=>2}, 0]");
+    for mech in MECHS {
+        let a = link(&fake_syntax(), &[asm(&labelled)], &[], opts(mech))
+            .unwrap_or_else(|e| panic!("the labelled form must link under {mech}: {e}"));
+        let b = link(&fake_syntax(), &[asm(&indexed)], &[], opts(mech))
+            .unwrap_or_else(|e| panic!("the indexed form must link under {mech}: {e}"));
+        assert_eq!(
+            a.executable.to_bytes(),
+            b.executable.to_bytes(),
+            "`3=>'1'` must link exactly like `3=>2` under {mech}"
+        );
+    }
 }
 
 /// `{*}` says the listed pairs are not the whole map. Ignoring the flag

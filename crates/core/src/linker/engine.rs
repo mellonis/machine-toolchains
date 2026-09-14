@@ -631,17 +631,17 @@ pub(super) fn scan_sites<'a>(
 }
 
 /// Refuse a reached bound call written in the SYMBOLIC form
-/// (docs/formats.md (bound calls)): a glyph-labelled
-/// destination, an open map, or an exit vector. The object format and the
-/// assembler carry all four today; resolving them — matching a name to a
-/// parameter, a glyph to a callee symbol, completing what an open map
-/// leaves out, wiring exits to their targets — is the link stage's own
-/// step, and nothing below reads `param`, `dst_label`, `open` or `exits`.
-/// Every one of them would therefore link to a silently wrong image:
-/// `param` would be ignored and the entry taken positionally, `dst_label`
-/// would read the `dst: 0` a labelled pair is written with, an open map
+/// (docs/formats.md (bound calls)) that the link stage still does not
+/// resolve: an open map, or an exit vector. The object format and the
+/// assembler carry both; resolving them — completing what an open map
+/// leaves out, wiring exits to their targets — is future link-stage
+/// work, and nothing below reads `open` or `exits`. Linking either
+/// through would therefore produce a silently wrong image: an open map
 /// would link as a closed one, and exits would vanish. A refusal is the
-/// only honest answer until the interface-aware link stage lands.
+/// only honest answer until that work lands. A named entry and a
+/// glyph-labelled destination are no longer symbolic by the time this
+/// guard runs — the pre-pass ahead of it resolves both against the
+/// callee's interface (docs/core.md (symbolic resolution)).
 ///
 /// A written-EMPTY map is deliberately NOT refused: `1{}` is a deliberate
 /// identity, and an empty pair list is exactly what the linker already
@@ -661,15 +661,7 @@ fn refuse_symbolic_binding(order: &[FuncRef]) -> Result<(), LinkError> {
             let form = record
                 .binding
                 .iter()
-                .find_map(|tb| {
-                    if tb.open {
-                        Some("an open map")
-                    } else if tb.pairs.iter().any(|p| p.dst_label.is_some()) {
-                        Some("a glyph-labelled destination")
-                    } else {
-                        None
-                    }
-                })
+                .find_map(|tb| tb.open.then_some("an open map"))
                 .or_else(|| (!record.exits.is_empty()).then_some("an exit vector"));
             if let Some(form) = form {
                 return Err(LinkError::BadBinding {

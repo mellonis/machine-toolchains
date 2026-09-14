@@ -52,10 +52,7 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
         .iter()
         .filter(|tb| tb.param.is_some())
         .count();
-    if named == 0 {
-        return Ok(record.clone());
-    }
-    if named != record.binding.len() {
+    if named != 0 && named != record.binding.len() {
         return Err(bad(
             callee,
             "the binding mixes named and positional entries; write every entry \
@@ -63,12 +60,76 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
                 .to_string(),
         ));
     }
-    let iface = require_interface(callee, "a named entry")?;
-    let binding = reorder_named(callee, iface, &record.binding)?;
+    let labelled = record
+        .binding
+        .iter()
+        .any(|tb| tb.pairs.iter().any(|p| p.dst_label.is_some()));
+    if named == 0 && !labelled {
+        return Ok(record.clone());
+    }
+
+    // Names first: after the reorder, entry `k` IS callee tape `k`, which
+    // is what makes the per-tape glyph list the right one to look a label
+    // up in.
+    let mut binding = if named == 0 {
+        record.binding.clone()
+    } else {
+        let iface = require_interface(callee, "a named entry")?;
+        reorder_named(callee, iface, &record.binding)?
+    };
+    if labelled {
+        let iface = require_interface(callee, "a glyph-labelled destination")?;
+        resolve_labels(callee, iface, &mut binding)?;
+    }
     Ok(BoundCall {
         binding,
         ..record.clone()
     })
+}
+
+/// Turn every `dst_label` into the glyph's position in the callee's
+/// declared alphabet for that tape (docs/formats.md (bound calls)). The
+/// label is cleared as it is consumed, so nothing downstream can read a
+/// stale one.
+fn resolve_labels(
+    callee: &FuncRef,
+    iface: &RoutineInterface,
+    binding: &mut [TapeBinding],
+) -> Result<(), LinkError> {
+    for (k, tb) in binding.iter_mut().enumerate() {
+        let Some(glyphs) = iface.glyphs.get(k) else {
+            return Err(bad(
+                callee,
+                format!(
+                    "binding tape {k} is outside `{}`'s declared interface \
+                     ({} parameter(s))",
+                    callee.name,
+                    iface.glyphs.len()
+                ),
+            ));
+        };
+        for pair in tb.pairs.iter_mut() {
+            let Some(label) = pair.dst_label.take() else {
+                continue;
+            };
+            let Some(idx) = glyphs.iter().position(|g| *g == label) else {
+                return Err(bad(
+                    callee,
+                    format!(
+                        "binding tape {k} names glyph `{label}`, which is not in \
+                         `{}`'s alphabet for parameter `{}`",
+                        callee.name,
+                        iface
+                            .params
+                            .get(k)
+                            .map_or_else(|| k.to_string(), String::clone)
+                    ),
+                ));
+            };
+            pair.dst = u32::try_from(idx).expect("a glyph index fits u32");
+        }
+    }
+    Ok(())
 }
 
 /// The callee's interface, or the refusal that replaces
