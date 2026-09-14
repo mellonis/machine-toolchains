@@ -107,6 +107,7 @@ fn fake_syntax() -> ArchSyntax {
         entry_opcode: 0x0E,
         break_opcode: None,
         trap_opcode: Some(0x18),
+        return_opcode: Some(0x0B),
         caps: AsmCaps {
             tables: true,
             rept: true,
@@ -280,7 +281,7 @@ const RET_ONLY_CALLEE: &str = "\
 .section code
 .func main
         call    sub [0] exits=(won)
-        stp
+back:   stp
 won:    wr      [1]
         stp
 .func sub
@@ -357,6 +358,190 @@ won:    wr      [1]
         retx    #0
 ";
 
+/// Two sites into the SAME routine under the same (identity) composite,
+/// naming DIFFERENT exits. They must not share a copy: each copy's `retx`
+/// jumps to its own site's exit.
+const TWO_SITES: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    sub [0] exits=(a)
+        call    sub [0] exits=(b)
+        stp
+a:      wr      [1]
+        stp
+b:      wr      [2]
+        stp
+.func sub
+        retx    #0
+";
+
+/// Two sites into the same routine naming the SAME exit label — so the
+/// exit vectors are equal and only the CONTINUATION differs. `sub` comes
+/// back through a plain `ret`, which lands on the instruction after its
+/// own call, so the two copies must still be distinct.
+const TWO_SITES_SAME_EXIT: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    sub [0] exits=(won)
+        call    sub [0] exits=(won)
+        stp
+won:    wr      [1]
+        stp
+.func sub
+        ret
+";
+
+/// A splice whose caller's own index MOVES when the prune runs. `main`
+/// stamps `dead` (a swap binding, so never a collapse) and thereby orphans
+/// it; `mid` — the splice's caller — then slides down past the hole.
+/// `sub` is orphaned too, the moment its only site is retargeted.
+///
+/// Both of `main`'s sites are BOUND, and `mid`'s is the identity
+/// pass-through that collapses to a plain call: name resolution walks
+/// relocations before bound calls, so this is what puts the orphan-to-be
+/// at a LOWER index than the splice's caller. With the two swapped, or
+/// with `mid` reached by a plain call, `mid` lands at index 1 and the
+/// reindex is a no-op — the fixture would pin nothing.
+const ORPHANS: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine dead, tapes=1, alpha=(3)
+.param d, ('_', '0', '1')
+.routine mid, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    dead [0{1->2, 2->1}]
+        call    mid [0]
+        stp
+.func dead
+        ret
+.func mid
+        call    sub [0] exits=(won)
+        stp
+won:    wr      [1]
+        stp
+.func sub
+        retx    #0
+";
+
+/// One caller holding BOTH a framed holey site and a spliced exit-bearing
+/// one, in that order — so the frames path's 5 → 9 widening of the first
+/// shifts every offset the splice names. `holey`'s alphabet is narrower
+/// than the machine's, which is what keeps it off the mono path.
+const MIXED_SPLICE_AND_FRAME: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', 'c', 'd')
+.routine holey, tapes=1, alpha=(3)
+.param m, ('_', 'a', 'b')
+.routine pick, tapes=1, alpha=(5), exits=1
+.param n, ('_', 'a', 'b', 'c', 'd')
+.section code
+.func main
+        call    holey [0{1->1, 2->2}]
+        call    pick [0] exits=(won)
+        stp
+won:    wr      [1]
+        stp
+.func holey
+        ret
+.func pick
+        retx    #0
+";
+
+/// A nested exit-bearing site whose composite is the full identity: `main`
+/// swaps into `outer`, `outer` swaps back into `inner`, so the composed
+/// binding is a genuine pass-through of the machine's own tapes. Without
+/// P3's conjunct at the stamp closure this site collapses to a plain call
+/// into the GENERIC `inner` and its exits vanish.
+const NESTED_PASSTHROUGH_WITH_EXITS: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine outer, tapes=1, alpha=(3)
+.param o, ('_', '0', '1')
+.routine inner, tapes=1, alpha=(3), exits=1
+.param i, ('_', '0', '1')
+.section code
+.func main
+        call    outer [0{1->2, 2->1}]
+        stp
+.func outer
+        call    inner [0{1->2, 2->1}] exits=(k)
+        ret
+k:      wr      [1]
+        ret
+.func inner
+        retx    #0
+";
+
+/// The absolute targets of every far `jmp` in `[start, end)` of the
+/// image's code. The sweep is linear, so it can read an operand byte as an
+/// opcode and add a spurious entry — harmless, because every assertion
+/// below asks whether a WANTED address is among the targets, never that it
+/// is the only one.
+fn jump_targets(code: &[u8], start: u32, end: u32) -> Vec<u32> {
+    let jmp = fake_syntax()
+        .jump_opcode()
+        .expect("the fake dialect has exactly one far jump");
+    let mut landed = Vec::new();
+    let mut at = start as usize;
+    while at + 5 <= end as usize {
+        if code[at] == jmp {
+            let disp = i32::from_le_bytes(code[at + 1..at + 5].try_into().unwrap());
+            landed.push((at as i64 + 5 + i64::from(disp)) as u32);
+            at += 5;
+        } else {
+            at += 1;
+        }
+    }
+    landed
+}
+
+/// One sidecar function, by name.
+fn func<'a>(
+    out: &'a mtc_core::linker::LinkOutput,
+    name: &str,
+) -> &'a mtc_core::linker::MapFunction {
+    out.map
+        .functions
+        .iter()
+        .find(|f| f.name == name)
+        .unwrap_or_else(|| panic!("no `{name}` in the sidecar"))
+}
+
+/// The one splice copy of `routine` — the sidecar function whose name is
+/// `<routine>.<digest8>`, possibly numbered.
+fn copy_of<'a>(
+    out: &'a mtc_core::linker::LinkOutput,
+    routine: &str,
+) -> &'a mtc_core::linker::MapFunction {
+    let prefix = format!("{routine}.");
+    out.map
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("no copy of `{routine}` in the sidecar"))
+}
+
+/// A label's absolute address, from the sidecar.
+fn label_addr(f: &mtc_core::linker::MapFunction, name: &str) -> u32 {
+    f.labels
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, a)| *a)
+        .unwrap_or_else(|| panic!("no `{name}` in `{}`'s labels", f.name))
+}
+
 /// Mutation it catches: drop the `exits.is_empty()` conjunct at
 /// `scan_sites` and this site collapses to a plain call — the image then
 /// carries no frames region at all and `composites` is 0.
@@ -417,19 +602,12 @@ fn a_site_supplying_no_exits_into_an_exit_bearing_callee_is_refused() {
     }
 }
 
-/// Until the jump-entered copies land, an exit vector under MONO (and
-/// under hybrid, which delegates a bijection wholesale to mono) is
-/// refused explicitly — never carried, and never silently dropped. Both
-/// fixtures are bijections, so hybrid classifies them to the mono path.
-///
-/// `RET_ONLY_CALLEE` is the case that needs the site check: mono's other
-/// refusals (`MonoRawFrame` on a multi-exit return, on a raw `call.m`)
-/// all fire on an instruction in the copied body, and a `ret`-only body
-/// has none of them — without this check that program links with its
-/// exits gone.
-///
-/// The jump-entered copies flip this: when mono can splice a per-site
-/// copy, these two links succeed and this test becomes a value test.
+/// An exit vector under MONO (and under hybrid, which delegates a
+/// bijection wholesale to mono) is CARRIED: the site is lowered as a jump
+/// into a per-site copy whose returns are jumps back into the caller. Each
+/// fixture must link, and a copy of the exit-bearing callee must appear in
+/// the image — a plain call into the generic would mean the exits were
+/// dropped.
 ///
 /// Each fixture reaches a DIFFERENT one of the three places a mono path
 /// commits to copying a site, which is why all four are here:
@@ -438,17 +616,18 @@ fn a_site_supplying_no_exits_into_an_exit_bearing_callee_is_refused() {
 /// its `!any_frames` fast path and delegates wholesale to `lower_mono`);
 /// `MIXED_WITH_EXITS` is the only one that reaches hybrid's OWN
 /// classifier; `NESTED_WITH_EXITS` is the only one that reaches the stamp
-/// closure's bound arm.
+/// closure's bound arm, where the caller is itself a copy.
 ///
-/// Mutation it catches: drop the `refuse_exits_under_mono` call from the
-/// mono seed loop and `RET_ONLY_CALLEE` links under `Mono`; drop it from
-/// hybrid's classifier and `MIXED_WITH_EXITS` links under `Hybrid`; drop
-/// it from the stamp closure and `NESTED_WITH_EXITS` links under both.
-/// Dropping the `exits.is_empty()` conjunct in `scan_sites` also fires it
-/// — the site then collapses to a plain call and the seed loop, which
-/// only sees non-collapsing sites, never gets to refuse.
+/// `RET_ONLY_CALLEE` is the shape with no `retx` anywhere: only the `ret`
+/// rewrite carries its exit-bearing site, so a splice that rewrote just
+/// `retx` would leave it returning through an address nobody pushed.
+///
+/// Mutation it catches: leave the site out of the stamp key (or off the
+/// seed altogether) and the copy is an ordinary stamp again — under
+/// `NESTED_WITH_EXITS` it is not even minted, because the closure's bound
+/// arm would collapse or refuse instead.
 #[test]
-fn an_exit_vector_is_refused_under_mono_and_hybrid() {
+fn an_exit_vector_links_under_mono_and_hybrid() {
     let cases = [
         (IDENTITY_WITH_EXITS, "sub"),
         (RET_ONLY_CALLEE, "sub"),
@@ -457,14 +636,263 @@ fn an_exit_vector_is_refused_under_mono_and_hybrid() {
     ];
     for (src, name) in cases {
         for mech in [CallMech::Mono, CallMech::Hybrid] {
-            let err = link(&fake_syntax(), &[asm(src)], &[], opts(mech))
-                .expect_err("an exit vector must be refused on a mono path");
+            let out = link(&fake_syntax(), &[asm(src)], &[], opts(mech))
+                .unwrap_or_else(|e| panic!("under {mech} into `{name}`: {e}"));
             assert!(
-                matches!(&err, LinkError::BadBinding { callee, message }
-                    if callee == name
-                        && message.contains("carries an exit vector")
-                        && message.contains("--call-mech=frames")),
-                "under {mech} into `{name}`: {err:?}"
+                out.map
+                    .functions
+                    .iter()
+                    .any(|f| f.name.starts_with(&format!("{name}."))),
+                "under {mech}: no per-site copy of `{name}`: {:?}",
+                out.map
+                    .functions
+                    .iter()
+                    .map(|f| &f.name)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// Under MONO an exit-bearing site is a splice: the caller jumps into a
+/// per-site copy whose `retx #k` becomes a jump to exit `k` and whose
+/// `ret` becomes a jump to the instruction after the call. The image runs
+/// on the base profile — no frames region at all.
+///
+/// Mutation it catches: leave `build_stamp`'s `MonoRawFrame` refusal on
+/// `Imm8 + Flow::Stop` unconditional and this link fails; emit the frames
+/// region anyway and `composites` stops being 0.
+#[test]
+fn an_exit_bearing_site_splices_under_mono() {
+    let out = link(&fake_syntax(), &[asm(TWO_EXITS)], &[], opts(CallMech::Mono))
+        .expect("an exit-bearing site must splice under mono");
+    assert_eq!(
+        out.report.composites, 0,
+        "a mono image carries no frames region: {:?}",
+        out.report
+    );
+    assert!(
+        out.report.instantiations >= 1,
+        "the site must produce a copy: {:?}",
+        out.report
+    );
+}
+
+/// The `ret` rewrite, positionally: `sub` comes back through a plain
+/// `ret`, and the copy is entered by a jump, so that `ret` must become a
+/// jump to `back` — the instruction after the call site.
+///
+/// Mutation it catches: drop the `OperandKind::None` rewrite and the copy
+/// keeps its `ret`, returning through a return address nobody pushed —
+/// the copy then holds no far jump at all and `back` is nowhere among its
+/// targets.
+#[test]
+fn a_splice_returns_to_the_instruction_after_the_call() {
+    let obj = assemble(&fake_syntax(), ARCH, RET_ONLY_CALLEE, true).expect("assembles with -g");
+    let out = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        opts(CallMech::Mono),
+    )
+    .expect("links under mono");
+    let main = func(&out, "main");
+    let copy = copy_of(&out, "sub");
+    let landed = jump_targets(&out.executable.code, copy.start, copy.end);
+    assert!(
+        landed.contains(&label_addr(main, "back")),
+        "the splice returns to {landed:?}, not to `back` ({})",
+        label_addr(main, "back")
+    );
+    // And the site ENTERS the copy by a jump: a `call` would push a return
+    // address the rewritten `ret` above never consumes.
+    assert!(
+        jump_targets(&out.executable.code, main.start, main.end).contains(&copy.start),
+        "the caller must jump into the copy at {}",
+        copy.start
+    );
+}
+
+/// Two sites into the same routine with DIFFERENT exits must not share a
+/// copy: each copy's `retx` jumps to its own site's exit.
+///
+/// Mutation it catches: leave the SITE out of the stamp key entirely and
+/// the two sites dedup onto one copy, whose `retx` jumps to whichever
+/// site's exits interned first.
+///
+/// It does NOT isolate the `exits` component of that key, and no test
+/// can: `(caller, then)` already identifies a site uniquely — `then` is
+/// `addr + 5` — so the exits ride along as recorded-but-redundant. With
+/// `then` alone removed this program still splits (the exit labels
+/// differ); the companion test below is the one that pins `then`.
+#[test]
+fn two_sites_with_different_exits_get_different_copies() {
+    let out = link(&fake_syntax(), &[asm(TWO_SITES)], &[], opts(CallMech::Mono))
+        .expect("links under mono");
+    assert_eq!(
+        out.report.instantiations, 2,
+        "two exit vectors, two copies: {:?}",
+        out.report
+    );
+}
+
+/// Two sites naming the SAME exit still need two copies, because they
+/// return to different continuations.
+///
+/// Mutation it catches: leave `then` out of the stamp key and the two
+/// sites dedup onto one copy, whose `ret` jumps back to whichever site
+/// interned first.
+#[test]
+fn two_sites_with_the_same_exit_but_different_continuations_get_different_copies() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(TWO_SITES_SAME_EXIT)],
+        &[],
+        opts(CallMech::Mono),
+    )
+    .expect("links under mono");
+    assert_eq!(
+        out.report.instantiations, 2,
+        "same exits, different continuations — two copies: {:?}",
+        out.report
+    );
+}
+
+/// A splice whose caller's index MOVES when the prune runs: `dead` is
+/// orphaned by its own stamping, so `mid` slides from index 2 to 1, and
+/// `sub` is orphaned by the retarget too.
+///
+/// Mutation it catches: leave `site_fixups` out of `prune_unreachable`'s
+/// reindex and the splice's `retx` jump names whatever function slid into
+/// the dropped index — a wrong-target jump nothing about `dropped` or the
+/// function list would show. Decoding the jump is what exposes it.
+#[test]
+fn a_splice_survives_a_prune_that_reindexes_its_caller() {
+    let obj = assemble(&fake_syntax(), ARCH, ORPHANS, true).expect("assembles with -g");
+    let out = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        opts(CallMech::Mono),
+    )
+    .expect("links under mono");
+    for name in ["dead", "sub"] {
+        assert!(
+            out.report.dropped.contains(&name.to_string()),
+            "`{name}` must be pruned: {:?}",
+            out.report.dropped
+        );
+    }
+    let mid = func(&out, "mid");
+    let copy = copy_of(&out, "sub");
+    let want = label_addr(mid, "won");
+    let landed = jump_targets(&out.executable.code, copy.start, copy.end);
+    assert!(
+        landed.contains(&want),
+        "the splice's jump lands at {landed:?}, not at `won` ({want})"
+    );
+}
+
+/// A caller holding BOTH a spliced exit-bearing site and a framed holey
+/// one: under hybrid the frames path widens the framed site 5 → 9 bytes,
+/// shifting every later offset in that blob — including the splice's
+/// `then` and its exits.
+///
+/// Mutation it catches: leave `splice_shift` out (use the raw record
+/// offsets) and the fixup's lookup misses the post-rewrite instruction
+/// boundary entirely, so the link fails; make it shift the wrong way and
+/// the decoded jump lands somewhere other than `won`.
+#[test]
+fn a_spliced_site_and_a_framed_site_in_one_caller_agree_under_hybrid() {
+    for mech in MECHS {
+        link(
+            &fake_syntax(),
+            &[asm(MIXED_SPLICE_AND_FRAME)],
+            &[],
+            opts(mech),
+        )
+        .unwrap_or_else(|e| panic!("the mixed program must link under {mech}: {e}"));
+    }
+    let obj =
+        assemble(&fake_syntax(), ARCH, MIXED_SPLICE_AND_FRAME, true).expect("assembles with -g");
+    let out = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        opts(CallMech::Hybrid),
+    )
+    .expect("links under hybrid");
+    let main = func(&out, "main");
+    let copy = copy_of(&out, "pick");
+    let want = label_addr(main, "won");
+    let landed = jump_targets(&out.executable.code, copy.start, copy.end);
+    assert!(
+        landed.contains(&want),
+        "the splice's exit jump lands at {landed:?}, not at `won` ({want})"
+    );
+    // The hybrid promotion loop changes the site's opcode too.
+    assert!(
+        jump_targets(&out.executable.code, main.start, main.end).contains(&copy.start),
+        "the caller must jump into the copy at {}",
+        copy.start
+    );
+}
+
+/// A NESTED exit-bearing site whose composite is the full identity is
+/// still a splice — the one shape P3's conjunct at the stamp closure
+/// exists for.
+///
+/// Mutation it catches: drop `record.exits.is_empty() &&` from the
+/// closure's collapse condition and this site becomes a plain call into
+/// the GENERIC `inner`, so no copy of `inner` is minted at all and its
+/// exits are gone. (The same conjunct in `scan_sites` is pinned
+/// separately by `an_identity_binding_with_exits_does_not_collapse`;
+/// nothing else reaches this one, since the closure is the only place a
+/// nested site appears.)
+#[test]
+fn a_nested_pass_through_site_with_exits_still_splices() {
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let out = link(
+            &fake_syntax(),
+            &[asm(NESTED_PASSTHROUGH_WITH_EXITS)],
+            &[],
+            opts(mech),
+        )
+        .unwrap_or_else(|e| panic!("must link under {mech}: {e}"));
+        assert!(
+            out.map
+                .functions
+                .iter()
+                .any(|f| f.name.starts_with("inner.")),
+            "under {mech}: the nested site must splice, not collapse: {:?}",
+            out.map
+                .functions
+                .iter()
+                .map(|f| &f.name)
+                .collect::<Vec<_>>()
+        );
+        // The nested site is entered by a jump from the COPY of `outer`,
+        // never from the generic — the generic is orphaned the moment its
+        // own site is retargeted, so a splice returning into it would
+        // return into code the image does not carry.
+        let outer = copy_of(&out, "outer");
+        let inner = copy_of(&out, "inner");
+        assert!(
+            jump_targets(&out.executable.code, outer.start, outer.end).contains(&inner.start),
+            "under {mech}: `{}` must jump into `{}` at {}",
+            outer.name,
+            inner.name,
+            inner.start
+        );
+        // And the copy returns into the COPY of `outer`, at `outer`'s own
+        // continuation and exit — both inside that copy's range.
+        for target in jump_targets(&out.executable.code, inner.start, inner.end) {
+            assert!(
+                (outer.start..outer.end).contains(&target),
+                "under {mech}: the splice returns to {target}, outside `{}` ({}..{})",
+                outer.name,
+                outer.start,
+                outer.end
             );
         }
     }

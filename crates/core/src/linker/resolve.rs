@@ -197,6 +197,16 @@ pub(crate) struct FuncRef<'a> {
     /// offset into `table`); the layout pass rebases them into the final
     /// table section (docs/formats.md (executable image)).
     pub table_fixups: Vec<(u32, u32)>,
+    /// Code-offset fixups that reach INTO another function: `(hole offset
+    /// in this blob, target function index, post-rewrite blob offset
+    /// inside that function)`. A mono-stamped exit-bearing copy uses them
+    /// for its `ret → jmp <then>` and `retx #k → jmp <exit_k>` rewrites,
+    /// where the target is a position inside the CALLER rather than a
+    /// function start (docs/core.md (call mechanisms)). Layout patches
+    /// each to the reaching RelI32 displacement after the final converged
+    /// layout, like a table fixup. Empty for every function the engine
+    /// did not synthesize.
+    pub site_fixups: Vec<(u32, usize, u32)>,
     /// The function's generic-routine signature, when its object signs
     /// blobs (signatures are all-or-none per object, parallel to blobs).
     pub signature: Option<&'a RoutineSig>,
@@ -450,6 +460,7 @@ pub(crate) fn resolve<'a>(
                     .filter(|fx| fx.blob == site.1)
                     .map(|fx| (fx.offset, fx.table_offset))
                     .collect(),
+                site_fixups: Vec::new(),
                 signature: object
                     .signatures
                     .as_ref()

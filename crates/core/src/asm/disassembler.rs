@@ -2333,6 +2333,7 @@ mod tests {
             entry_opcode: 0x0E,
             break_opcode: None,
             trap_opcode: None,
+            return_opcode: None,
             caps: AsmCaps {
                 tables: true,
                 rept: true,
@@ -3777,6 +3778,7 @@ START:  nop
             entry_opcode: 0x0D,
             break_opcode: None,
             trap_opcode: None,
+            return_opcode: None,
             caps: crate::asm::AsmCaps::default(),
         }
     }

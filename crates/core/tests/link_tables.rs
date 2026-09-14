@@ -123,6 +123,7 @@ fn fake_syntax() -> ArchSyntax {
         break_opcode: None,
         // The unmapped-symbol trap the mono stamping engine synthesizes.
         trap_opcode: Some(0x18),
+        return_opcode: Some(0x0B),
         caps: AsmCaps {
             tables: true,
             rept: true,

@@ -1820,6 +1820,7 @@ F0:     .frame  tapes=(0, 1)
             entry_opcode: 0x0E,
             break_opcode: None,
             trap_opcode: None,
+            return_opcode: None,
             caps: caps_all(),
         }
     }

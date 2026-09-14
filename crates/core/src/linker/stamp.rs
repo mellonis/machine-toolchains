@@ -56,11 +56,65 @@ use crate::asm::{ArchSyntax, Flow, MatchRowClass, classify_match_row};
 use crate::formats::object::{BoundCall, RoutineSig};
 use crate::vm::OperandKind;
 
-/// One (routine, composite) pair to stamp, with its map-visible name.
+/// One (routine, composite) pair to stamp, with its map-visible name. An
+/// EXIT-BEARING node also carries the call site it splices (docs/core.md
+/// (call mechanisms)).
 struct StampNode {
     routine: usize,
     composite: Composite,
     name: String,
+    site: Option<PendingSite>,
+}
+
+/// Where a mono exit-bearing copy returns to (docs/core.md (call
+/// mechanisms)). TM-1 has no pop opcode, so such a copy is ENTERED by a
+/// jump and leaves through jumps too: a plain `ret` lands on `then` — the
+/// instruction after the call — and `retx #k` on exit `k`.
+#[derive(Clone, Debug)]
+struct SpliceSite {
+    /// The calling function's index in `order`.
+    caller: usize,
+    /// The blob offset of the instruction after the call — where `ret`
+    /// lands.
+    then: u32,
+    /// The blob offsets of the site's exits — where `retx #k` lands.
+    exits: Vec<u32>,
+}
+
+/// A splice site as the stamp closure records it. The offsets a fixup
+/// needs are offsets in the CALLER's final blob, and for a site nested
+/// inside another stamp that blob does not exist until the closure is
+/// done — so the coordinate system travels with the site and the
+/// translation happens at materialization (docs/core.md (call
+/// mechanisms)).
+#[derive(Clone, Debug)]
+enum PendingSite {
+    /// The caller is a hand-written routine, whose post-rewrite blob is
+    /// already determined: the offsets are final.
+    Resolved(SpliceSite),
+    /// The caller is another stamp, emitted later in the materialization
+    /// loop: the offsets are in the ORIGINAL routine's blob and are
+    /// translated through that stamp's own offset map once it is built.
+    InStamp {
+        slot: usize,
+        then: u32,
+        exits: Vec<u32>,
+    },
+}
+
+impl PendingSite {
+    /// The `(caller, then, exits)` triple that widens the stamp intern key
+    /// (docs/core.md (the composition engine)). Each variant reports it in
+    /// its OWN coordinate system, which is all the key needs: it must tell
+    /// two distinct splices apart, never compare across variants — a site
+    /// inside a stamp and a site inside a hand-written routine already
+    /// differ in the caller index.
+    fn key_parts(&self, order_len: usize) -> (usize, u32, &[u32]) {
+        match self {
+            PendingSite::Resolved(s) => (s.caller, s.then, &s.exits),
+            PendingSite::InStamp { slot, then, exits } => (order_len + slot, *then, exits),
+        }
+    }
 }
 
 /// The finished bytes of one stamped function, ready to wrap in a `FuncRef`.
@@ -69,6 +123,14 @@ struct StampBody {
     table: Vec<u8>,
     table_fixups: Vec<(u32, u32)>,
     calls: Vec<(u32, usize)>,
+    /// Cross-function jump fixups this copy's `ret`/`retx` rewrites left
+    /// for layout (docs/core.md (call mechanisms)); empty for an ordinary
+    /// stamp.
+    site_fixups: Vec<(u32, usize, u32)>,
+    /// This copy's offset map: the original routine's blob offsets to the
+    /// copy's own. A splice nested inside this copy is translated through
+    /// it.
+    offsets: HashMap<u32, u32>,
     /// Unmapped-read trap rows synthesized into this stamp's match tables.
     trap_rows: u32,
     /// Extra match rows this stamp gained from one-way collapse expansion.
@@ -160,13 +222,23 @@ pub(super) fn lower_mono<'a>(
                 collapse: false,
             } = site
             {
-                refuse_exits_under_mono(&order[*callee], record)?;
+                // An exit-bearing site is entered by a jump, not a call
+                // (docs/core.md (call mechanisms)) — resolve the opcode
+                // here, while the callee's name is still in hand for the
+                // message, so the retarget loop below cannot fail.
+                if !record.exits.is_empty() {
+                    enter_jump_opcode(syntax, &order[*callee].name)?;
+                }
                 seeds.push((fi, *addr, *callee, record));
             }
         }
     }
 
-    let (stamps, seed_target, stats) = mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
+    // Mono rewrites no blob, so nothing shifts: every splice offset is
+    // already in its caller's final coordinates.
+    let unshifted: Vec<HashSet<u32>> = vec![HashSet::new(); n];
+    let (stamps, seed_target, stats) =
+        mono_stamps(syntax, &order, sites, machine_sig, &seeds, &unshifted)?;
     // `dedup_savings`, `synthesized_trap_rows`, and `expanded_rows` are
     // summed over every stamp `mono_stamps` builds, before the prune below
     // runs. That is sound because `mono_stamps` closes "mono all the way
@@ -186,14 +258,21 @@ pub(super) fn lower_mono<'a>(
     // hit the stamp (or the original, for a collapse); a bound site in a
     // routine unreachable at the machine's frame never runs, so it points
     // harmlessly at the original callee.
+    // An exit-bearing site is ENTERED by `jmp`, not `call`: the copy never
+    // returns through a pushed address (docs/core.md (call mechanisms)).
+    // The site keeps its 5-byte shape and its relocation hole, so only the
+    // opcode byte changes and no offset moves — layout relocates the jump
+    // through the same call-site path it relocates a call through, which is
+    // why the `calls` entry below stays exactly as it was.
+    let jmp = syntax.jump_opcode();
     let mut out: Vec<FuncRef> = Vec::with_capacity(n + stamps.len());
     for (fi, mut f) in order.into_iter().enumerate() {
         for site in &sites[fi] {
             if let SiteKind::Bound {
                 addr,
                 callee,
+                record,
                 collapse,
-                ..
             } = site
             {
                 let target = if id_world[fi] && !collapse {
@@ -202,6 +281,10 @@ pub(super) fn lower_mono<'a>(
                     *callee
                 };
                 f.calls.push((*addr + 1, target));
+                if id_world[fi] && !collapse && !record.exits.is_empty() {
+                    let op = jmp.expect("an exit-bearing seed resolved the jump opcode above");
+                    f.blob.to_mut()[*addr as usize] = op;
+                }
             }
         }
         f.bound = Vec::new();
@@ -271,6 +354,10 @@ pub(super) fn lower_hybrid<'a>(
     // anything holey/one-way is a frames site.
     let mut seeds: Vec<(usize, u32, usize, &BoundCall)> = Vec::new();
     let mut mono_holes: Vec<HashSet<u32>> = vec![HashSet::new(); n];
+    // The subset of `mono_holes` that splices: those sites are entered by
+    // a jump, so their opcode byte changes (docs/core.md (call
+    // mechanisms)).
+    let mut mono_splices: Vec<HashSet<u32>> = vec![HashSet::new(); n];
     let mut any_frames = false;
     for (fi, in_world) in id_world.iter().enumerate() {
         if !in_world {
@@ -287,10 +374,12 @@ pub(super) fn lower_hybrid<'a>(
                 let callee_sig = routine_sig(&order, *callee)?;
                 let caller_sig = order[fi].signature.unwrap_or(machine_sig);
                 if is_bijection(caller_sig, callee_sig, record) {
-                    // Inside the bijection branch on purpose: a HOLEY
-                    // exit-bearing site is classified to frames, which
-                    // carries the vector, and must not be refused here.
-                    refuse_exits_under_mono(&order[*callee], record)?;
+                    if !record.exits.is_empty() {
+                        // Resolved here, while the callee's name is in
+                        // hand, so the promotion loop below cannot fail.
+                        enter_jump_opcode(syntax, &order[*callee].name)?;
+                        mono_splices[fi].insert(*addr);
+                    }
                     seeds.push((fi, *addr, *callee, record));
                     mono_holes[fi].insert(*addr);
                 } else {
@@ -322,15 +411,44 @@ pub(super) fn lower_hybrid<'a>(
     // `synthesized_trap_rows`, and `expanded_rows` are summed before the
     // prune below runs, for the same closure-invariant reason `lower_mono`
     // documents at its own `mono_stamps` call.
+    // The offsets the frames path will shift, per function: the bound
+    // sites that are still framed once the mono/frames split is decided.
+    // A splice fixup names an offset in the CALLER's blob and layout's
+    // map is keyed by POST-rewrite offsets, so `mono_stamps` must know
+    // which sites `lower_frames` is about to widen 5 → 9 bytes below.
+    let widened: Vec<HashSet<u32>> = (0..n)
+        .map(|fi| {
+            sites[fi]
+                .iter()
+                .filter_map(|s| match s {
+                    SiteKind::Bound {
+                        addr,
+                        collapse: false,
+                        ..
+                    } if !mono_holes[fi].contains(addr) => Some(*addr),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
     let (stamps, seed_target, mono_stats) =
-        mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
+        mono_stamps(syntax, &order, sites, machine_sig, &seeds, &widened)?;
     let stamp_names: HashSet<String> = stamps.iter().map(|f| f.name.to_string()).collect();
 
+    let jmp = syntax.jump_opcode();
     let mut new_order: Vec<FuncRef> = Vec::with_capacity(n + stamps.len());
     for (fi, mut f) in order.into_iter().enumerate() {
         if !mono_holes[fi].is_empty() {
             for &addr in &mono_holes[fi] {
                 f.calls.push((addr + 1, seed_target[&(fi, addr)]));
+            }
+            // An exit-bearing site is entered by `jmp`, exactly as under
+            // pure mono (docs/core.md (call mechanisms)); the rewrite
+            // below then treats it as a relocated tail jump and the site
+            // keeps its 5-byte shape.
+            for &addr in &mono_splices[fi] {
+                let op = jmp.expect("an exit-bearing seed resolved the jump opcode above");
+                f.blob.to_mut()[addr as usize] = op;
             }
             let monos = &mono_holes[fi];
             f.bound.retain(|&(hole, _, _)| !monos.contains(&(hole - 1)));
@@ -524,36 +642,82 @@ fn prune_unreachable(order: Vec<FuncRef>) -> (Vec<FuncRef>, Vec<String>) {
             for (_, c, _) in &mut f.bound {
                 *c = new_index[*c];
             }
+            // A splice's `ret`/`retx` jumps name a position inside another
+            // function by index, exactly as a call edge does, so they
+            // reindex alongside (docs/core.md (call mechanisms)). Mono
+            // stamping orphans generics as a matter of course — that is
+            // what this prune is for — so an un-remapped fixup would point
+            // at whichever function slid into the dropped index.
+            for (_, target, _) in &mut f.site_fixups {
+                debug_assert_ne!(
+                    new_index[*target],
+                    usize::MAX,
+                    "a splice's caller is reachable at the machine frame, so the prune keeps it"
+                );
+                *target = new_index[*target];
+            }
             f
         })
         .collect();
     (pruned, orphaned)
 }
 
-/// Refuse a bound site that carries an exit vector on a MONO path
-/// (docs/core.md (call mechanisms)). A mono stamp is entered by a plain
-/// call and left through the pushed return address, so it has nowhere to
-/// put the other exits: the jump-entered copies that will carry them are
-/// not built yet. Frames already carries the vector in the site's own
-/// descriptor, which is why the advice names that mechanism and not
-/// hybrid — hybrid delegates a bijection wholesale to mono, so advising
-/// it would be circular, exactly as `MonoRawFrame` and
-/// `MonoHoleyMatchBranch` already document.
-///
-/// Called at the three points a mono path first commits to copying a
-/// site: the seed loop, hybrid's classifier (inside its bijection
-/// branch, so a holey exit-bearing site still reaches the frames path),
-/// and the stamp closure's own bound arm. Without it an exit vector
-/// would simply vanish from a mono image.
-fn refuse_exits_under_mono(callee: &FuncRef, record: &BoundCall) -> Result<(), LinkError> {
-    if record.exits.is_empty() {
-        return Ok(());
-    }
-    Err(LinkError::BadBinding {
-        callee: callee.name.to_string(),
-        message: "the call site carries an exit vector, which mono lowering does \
-                  not carry yet; link with --call-mech=frames"
+/// The dialect's far unconditional jump, as the instruction an
+/// exit-bearing site is ENTERED by (docs/core.md (call mechanisms)): the
+/// copy never returns through a pushed address, so the site is a jump and
+/// not a call.
+fn enter_jump_opcode(syntax: &ArchSyntax, name: &str) -> Result<u8, LinkError> {
+    syntax.jump_opcode().ok_or_else(|| LinkError::BadBinding {
+        callee: name.to_string(),
+        message: "the dialect has no unconditional far jump to enter an exit-bearing copy with"
             .to_string(),
+    })
+}
+
+/// The same opcode, as the instruction a splice LEAVES through — its
+/// `ret → jmp <then>` and `retx #k → jmp <exit_k>` rewrites (docs/core.md
+/// (call mechanisms)).
+fn splice_jump_opcode(syntax: &ArchSyntax, name: &str) -> Result<u8, LinkError> {
+    syntax.jump_opcode().ok_or_else(|| LinkError::BadBinding {
+        callee: name.to_string(),
+        message: "the dialect has no unconditional far jump to splice an exit-bearing call site \
+                  into"
+            .to_string(),
+    })
+}
+
+/// The offsets the frames path shifts inside one function: the addresses
+/// of the bound sites that are still framed once the mono/frames split is
+/// decided, each widening 5 → 9 bytes. Empty for every function under pure
+/// mono, which rewrites no blob at all.
+fn splice_shift(widened: &HashSet<u32>, old: u32) -> u32 {
+    old + 4 * u32::try_from(widened.iter().filter(|&&a| a < old).count())
+        .expect("widened-site count fits u32")
+}
+
+/// The [`SpliceSite`] for one exit-bearing site in a hand-written routine,
+/// with its caller offsets shifted into the post-rewrite blob layout.
+/// `None` for an exit-free site, which splices nothing.
+///
+/// Under mono the site keeps its 5-byte shape (a `jmp` where the `call`
+/// was) and nothing else in the blob moves, so the shift is the identity.
+/// Under HYBRID it is not: `lower_frames` runs afterwards and widens every
+/// bound site that is still framed, shifting exactly the caller offsets
+/// these fixups name (docs/core.md (call mechanisms)).
+fn site_for(
+    caller: usize,
+    addr: u32,
+    record: &BoundCall,
+    widened: &[HashSet<u32>],
+) -> Option<SpliceSite> {
+    if record.exits.is_empty() {
+        return None;
+    }
+    let w = &widened[caller];
+    Some(SpliceSite {
+        caller,
+        then: splice_shift(w, addr + 5),
+        exits: record.exits.iter().map(|&e| splice_shift(w, e)).collect(),
     })
 }
 
@@ -561,6 +725,10 @@ fn refuse_exits_under_mono(callee: &FuncRef, record: &BoundCall) -> Result<(), L
 /// sites to specialize), closing over each stamp's own calls (mono all the
 /// way down). Returns the stamp `FuncRef`s (order indices `order.len()..`)
 /// and, per seed, its stamp order index.
+///
+/// `widened` is parallel to `order`: the bound-site addresses the frames
+/// path will widen in each function once the mono/frames split is decided
+/// (all empty under pure mono, which rewrites no blob).
 #[allow(clippy::type_complexity)]
 fn mono_stamps<'a>(
     syntax: &ArchSyntax,
@@ -568,6 +736,7 @@ fn mono_stamps<'a>(
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
     seeds: &[(usize, u32, usize, &'a BoundCall)],
+    widened: &[HashSet<u32>],
 ) -> Result<(Vec<FuncRef<'a>>, HashMap<(usize, u32), usize>, StampStats), LinkError> {
     let ma = machine_sig.arity as usize;
     let id = identity_composite(ma, 0);
@@ -602,6 +771,7 @@ fn mono_stamps<'a>(
             order,
             callee,
             child,
+            site_for(fi, addr, record, widened).map(PendingSite::Resolved),
         )?;
         if dup {
             stats.dedup_savings += 1;
@@ -613,11 +783,14 @@ fn mono_stamps<'a>(
     // composite (the callee runs under the same frame); a bound call composes
     // its binding onto it; both stay mono. A raw `call.m` is a frames
     // instruction — refused.
-    let mut stamp_targets: Vec<HashMap<u32, usize>> = Vec::new();
+    // Per stamp slot: the copy-blob address of each call site, its target
+    // order index, and whether the site is a SPLICE (entered by a jump
+    // rather than a call — docs/core.md (call mechanisms)).
+    let mut stamp_targets: Vec<HashMap<u32, (usize, bool)>> = Vec::new();
     while let Some(slot) = worklist.pop_front() {
         let routine = nodes[slot].routine;
         let comp = nodes[slot].composite.clone();
-        let mut targets: HashMap<u32, usize> = HashMap::new();
+        let mut targets: HashMap<u32, (usize, bool)> = HashMap::new();
         for site in &sites[routine] {
             match site {
                 SiteKind::RawCallM { .. } => {
@@ -634,11 +807,12 @@ fn mono_stamps<'a>(
                         order,
                         *callee,
                         child,
+                        None,
                     )?;
                     if dup {
                         stats.dedup_savings += 1;
                     }
-                    targets.insert(*addr, idx);
+                    targets.insert(*addr, (idx, false));
                 }
                 SiteKind::Bound {
                     addr,
@@ -646,9 +820,23 @@ fn mono_stamps<'a>(
                     record,
                     ..
                 } => {
-                    // A bound site NESTED inside a routine being copied is
-                    // as un-carryable as a top-level one.
-                    refuse_exits_under_mono(&order[*callee], record)?;
+                    // A bound site NESTED inside a routine being copied
+                    // splices exactly as a top-level one does, except that
+                    // the caller is this stamp: its offsets are the
+                    // ORIGINAL routine's, translated through the copy's own
+                    // offset map when it is built (docs/core.md (call
+                    // mechanisms)).
+                    let site = if record.exits.is_empty() {
+                        None
+                    } else {
+                        enter_jump_opcode(syntax, &order[*callee].name)?;
+                        Some(PendingSite::InStamp {
+                            slot,
+                            then: *addr + 5,
+                            exits: record.exits.clone(),
+                        })
+                    };
+                    let splice = site.is_some();
                     let callee_sig = routine_sig(order, *callee)?;
                     // The caller is this stamp's own routine; its declared
                     // cardinalities carry the closed-on-unequal binding rule.
@@ -667,10 +855,8 @@ fn mono_stamps<'a>(
                     // An EXIT-BEARING site never collapses either, whatever its
                     // binding: a plain call returns through the pushed return
                     // address and has nowhere to put the other exits
-                    // (docs/core.md (call mechanisms)). Defensive while the
-                    // refusal above stands — nothing exit-bearing reaches
-                    // here — and load-bearing again once the jump-entered
-                    // copies replace that refusal.
+                    // (docs/core.md (call mechanisms)) — it is a SPLICE, and
+                    // a splice is never a plain call into the generic.
                     let idx = if record.exits.is_empty()
                         && is_full_passthrough(&child, machine_sig, callee_sig)
                     {
@@ -684,13 +870,14 @@ fn mono_stamps<'a>(
                             order,
                             *callee,
                             child,
+                            site,
                         )?;
                         if dup {
                             stats.dedup_savings += 1;
                         }
                         idx
                     };
-                    targets.insert(*addr, idx);
+                    targets.insert(*addr, (idx, splice));
                 }
             }
         }
@@ -701,11 +888,18 @@ fn mono_stamps<'a>(
     }
     stamp_targets.resize_with(nodes.len(), HashMap::new);
 
-    // Materialize each stamp's body.
+    // Materialize each stamp's body, in slot order. A node nested inside
+    // another stamp always interns AFTER the stamp it sits in — its key
+    // names that stamp as its caller, so it can never dedup onto an
+    // earlier slot, and the worklist is FIFO — so by the time such a node
+    // is built, the caller copy's offset map is already in `stamp_offsets`
+    // (docs/core.md (call mechanisms)).
     let mut stamp_funcs = Vec::with_capacity(nodes.len());
+    let mut stamp_offsets: Vec<HashMap<u32, u32>> = Vec::with_capacity(nodes.len());
     for (slot, node) in nodes.iter().enumerate() {
         let callee = &order[node.routine];
         let callee_sig = routine_sig(order, node.routine)?;
+        let site = resolve_site(node, &nodes, &stamp_offsets, order.len())?;
         let body = build_stamp(
             syntax,
             callee,
@@ -713,9 +907,11 @@ fn mono_stamps<'a>(
             machine_sig,
             callee_sig,
             &stamp_targets[slot],
+            site.as_ref(),
         )?;
         stats.synthesized_trap_rows += body.trap_rows;
         stats.expanded_rows += body.expanded_rows;
+        stamp_offsets.push(body.offsets);
         stamp_funcs.push(FuncRef {
             name: Cow::Owned(node.name.clone()),
             blob: Cow::Owned(body.blob),
@@ -724,6 +920,7 @@ fn mono_stamps<'a>(
             bound: Vec::new(),
             table: Cow::Owned(body.table),
             table_fixups: body.table_fixups,
+            site_fixups: body.site_fixups,
             signature: None,
             // The composite permutes tape order and glyph indices, so the
             // callee's interface record describes another coordinate
@@ -737,9 +934,58 @@ fn mono_stamps<'a>(
     Ok((stamp_funcs, seed_target, stats))
 }
 
+/// One node's splice site in final coordinates, ready for `build_stamp`.
+/// A `Resolved` site passes straight through; an `InStamp` one names
+/// offsets in the ORIGINAL caller routine, which the caller COPY's offset
+/// map translates into the copy's own blob — and the copy is what the
+/// splice must return into, since the generic is orphaned the moment its
+/// last site is retargeted (docs/core.md (call mechanisms)).
+fn resolve_site(
+    node: &StampNode,
+    nodes: &[StampNode],
+    stamp_offsets: &[HashMap<u32, u32>],
+    order_len: usize,
+) -> Result<Option<SpliceSite>, LinkError> {
+    match &node.site {
+        None => Ok(None),
+        Some(PendingSite::Resolved(s)) => Ok(Some(s.clone())),
+        Some(PendingSite::InStamp { slot, then, exits }) => {
+            // `get` rather than an index: it doubles as the check that the
+            // caller copy really was built first, reporting a typed error
+            // instead of panicking if that ordering ever breaks.
+            let map = stamp_offsets
+                .get(*slot)
+                .ok_or_else(|| LinkError::MalformedBlob {
+                    symbol: node.name.clone(),
+                    at: *then,
+                })?;
+            let xlat = |off: u32| -> Result<u32, LinkError> {
+                map.get(&off).copied().ok_or(LinkError::MalformedBlob {
+                    symbol: nodes[*slot].name.clone(),
+                    at: off,
+                })
+            };
+            Ok(Some(SpliceSite {
+                caller: order_len + slot,
+                then: xlat(*then)?,
+                exits: exits.iter().map(|&e| xlat(e)).collect::<Result<_, _>>()?,
+            }))
+        }
+    }
+}
+
 /// Intern a (routine, composite) into the stamp set, deduped by canonical
 /// key. Returns its ORDER index (`order.len() + slot`) and whether it
 /// resolved to an ALREADY-built stamp (a stamp the dedup avoided).
+///
+/// An EXIT-BEARING node widens the KEY — never the digest — with its call
+/// site's `(caller, then, exits)`: two sites into the same routine under
+/// the same composite are different splices, returning to different
+/// places, and must not share a copy. The caller index is in the key
+/// because `then` and the exit offsets are caller-blob-relative and mean
+/// nothing without it. Widening the DIGEST instead would rename every
+/// existing stamp and move every existing mono image, so an exit-free
+/// node's key, and therefore its `<routine>.<digest8>` name, is unchanged.
 ///
 /// The map-visible name is `<routine>.<digest8>` — a period, not the `$`
 /// an earlier scheme used, because `.tma` identifiers cannot contain `$` at
@@ -753,6 +999,7 @@ fn mono_stamps<'a>(
 /// happens to match `<routine>.<digest8>` exactly, or two distinct
 /// composites whose 32-bit digests collide — docs/core.md (the composition
 /// engine)).
+#[allow(clippy::too_many_arguments)]
 fn intern(
     nodes: &mut Vec<StampNode>,
     key_to_slot: &mut HashMap<Vec<u8>, usize>,
@@ -761,14 +1008,34 @@ fn intern(
     order: &[FuncRef],
     routine: usize,
     mut composite: Composite,
+    site: Option<PendingSite>,
 ) -> Result<(usize, bool), LinkError> {
     composite.routine = routine;
-    let key = canonical_key(&composite);
+    let mut key = canonical_key(&composite);
+    if let Some(s) = &site {
+        let (caller, then, exits) = s.key_parts(order.len());
+        key.extend_from_slice(&(caller as u64).to_le_bytes());
+        key.extend_from_slice(&then.to_le_bytes());
+        for e in exits {
+            key.extend_from_slice(&e.to_le_bytes());
+        }
+    }
     if let Some(&slot) = key_to_slot.get(&key) {
         return Ok((order.len() + slot, true));
     }
     let slot = nodes.len();
-    let name = format!("{}.{:08x}", order[routine].name, digest(&composite));
+    let mut name = format!("{}.{:08x}", order[routine].name, digest(&composite));
+    if site.is_some() {
+        // Two exit-bearing splices of one (routine, composite) share a
+        // digest by construction — the exits are not in it. Number them
+        // rather than refuse (docs/core.md (the composition engine)).
+        let base = name.clone();
+        let mut n = 1u32;
+        while used_names.contains(&name) {
+            name = format!("{base}.{n}");
+            n += 1;
+        }
+    }
     if !used_names.insert(name.clone()) {
         return Err(LinkError::StampNameCollision(name));
     }
@@ -776,6 +1043,7 @@ fn intern(
         routine,
         composite,
         name,
+        site,
     });
     key_to_slot.insert(key, slot);
     worklist.push_back(slot);
@@ -815,16 +1083,43 @@ fn write_image(t: &CompositeTape, v: u16, phys_card: u32) -> Option<u16> {
     }
 }
 
+/// Emit `jmp <placeholder>` and record the cross-function fixup layout
+/// will patch (docs/core.md (call mechanisms)). The placeholder
+/// displacement is `-5` — a jump to ITSELF, always an instruction boundary
+/// of this blob — so layout's own decode of the copy resolves it cleanly
+/// before the patch lands. A displacement of 0 would name the byte after
+/// the jump, which is past the end of the blob whenever the rewritten
+/// return is the body's last instruction.
+fn emit_splice_jump(
+    blob: &mut Vec<u8>,
+    jmp: u8,
+    caller: usize,
+    target: u32,
+    fixups: &mut Vec<(u32, usize, u32)>,
+) {
+    blob.push(jmp);
+    let hole = blob.len() as u32;
+    blob.extend_from_slice(&(-5i32).to_le_bytes());
+    fixups.push((hole, caller, target));
+}
+
 /// Re-emit the callee's generic body at the machine width, projecting every
 /// tape op and match/dispatch table through the composite (docs/core.md (the
 /// composition engine)).
+///
+/// With a `site`, the copy is an exit-bearing SPLICE: it is entered by a
+/// jump rather than a call, so its `ret` becomes a jump to the site's
+/// continuation and its `retx #k` a jump to exit `k` — both recorded as
+/// cross-function fixups for layout (docs/core.md (call mechanisms)).
+#[allow(clippy::too_many_arguments)]
 fn build_stamp(
     syntax: &ArchSyntax,
     callee: &FuncRef,
     comp: &Composite,
     machine_sig: &RoutineSig,
     callee_sig: &RoutineSig,
-    targets: &HashMap<u32, usize>,
+    targets: &HashMap<u32, (usize, bool)>,
+    site: Option<&SpliceSite>,
 ) -> Result<StampBody, LinkError> {
     let ma = machine_sig.arity as usize;
 
@@ -867,6 +1162,7 @@ fn build_stamp(
     let mut table: Vec<u8> = Vec::new();
     let mut table_fixups: Vec<(u32, u32)> = Vec::new();
     let mut calls: Vec<(u32, usize)> = Vec::new();
+    let mut site_fixups: Vec<(u32, usize, u32)> = Vec::new();
     let mut old_to_new: HashMap<u32, u32> = HashMap::new();
     let mut jump_fixups: Vec<(u32, u32, u8)> = Vec::new();
     let mut dispatch_fixups: Vec<(usize, DispEntry)> = Vec::new();
@@ -891,9 +1187,17 @@ fn build_stamp(
             .by_mnemonic(mnemonic)
             .expect("mnemonic came from a successful decode");
 
-        // A call or tail jump to a child stamp / original: a plain far call.
-        if let Some(&target) = targets.get(&old_addr) {
-            blob.push(entry.opcode);
+        // A call or tail jump to a child stamp / original: a plain far
+        // call — except an exit-bearing site, which is ENTERED by a jump
+        // (docs/core.md (call mechanisms)). Either way the instruction
+        // keeps its 5-byte opcode + RelI32 shape and its relocation hole.
+        if let Some(&(target, splice)) = targets.get(&old_addr) {
+            let opcode = if splice {
+                enter_jump_opcode(syntax, &callee.name)?
+            } else {
+                entry.opcode
+            };
+            blob.push(opcode);
             let hole = blob.len() as u32;
             blob.extend_from_slice(&[0u8; 4]);
             calls.push((hole, target));
@@ -902,14 +1206,47 @@ fn build_stamp(
 
         match entry.operand {
             OperandKind::None => {
+                // Inside an exit-bearing splice the plain return becomes a
+                // jump to the call site's continuation: the copy is
+                // entered by `jmp`, so no return address was pushed
+                // (docs/core.md (call mechanisms)). `stp`/`hlt` are left
+                // alone — only the dialect's declared return is rewritten.
+                if let Some(s) = site
+                    && Some(entry.opcode) == syntax.return_opcode
+                {
+                    let jmp = splice_jump_opcode(syntax, &callee.name)?;
+                    emit_splice_jump(&mut blob, jmp, s.caller, s.then, &mut site_fixups);
+                    continue;
+                }
                 blob.extend_from_slice(&blob_bytes[old_addr as usize..(old_addr + d.len) as usize]);
             }
             OperandKind::Imm8 => {
-                // A multi-exit return is a frames instruction — refused under
-                // mono. A hand-authored `trap #k` passes through.
                 if entry.flow == Flow::Stop {
-                    return Err(LinkError::MonoRawFrame(callee.name.to_string()));
+                    // A multi-exit return. Inside an exit-bearing splice
+                    // it becomes a jump to exit `k` of the site's vector;
+                    // anywhere else it is a frames instruction the base
+                    // profile cannot run (docs/core.md (call mechanisms)).
+                    let Some(s) = site else {
+                        return Err(LinkError::MonoRawFrame(callee.name.to_string()));
+                    };
+                    let DecodedOperand::Imm(k) = operand else {
+                        unreachable!("Imm8 decodes to Imm")
+                    };
+                    let Some(&target) = s.exits.get(usize::from(*k)) else {
+                        return Err(LinkError::BadBinding {
+                            callee: callee.name.to_string(),
+                            message: format!(
+                                "the body returns through exit {k}, but the call site \
+                                 supplies {} exit(s)",
+                                s.exits.len()
+                            ),
+                        });
+                    };
+                    let jmp = splice_jump_opcode(syntax, &callee.name)?;
+                    emit_splice_jump(&mut blob, jmp, s.caller, target, &mut site_fixups);
+                    continue;
                 }
+                // A hand-authored `trap #k` passes through.
                 blob.extend_from_slice(&blob_bytes[old_addr as usize..(old_addr + d.len) as usize]);
             }
             OperandKind::SymbolVec => {
@@ -1094,6 +1431,8 @@ fn build_stamp(
         table,
         table_fixups,
         calls,
+        site_fixups,
+        offsets: old_to_new,
         trap_rows,
         expanded_rows,
     })
@@ -1413,6 +1752,7 @@ mod tests {
             bound: Vec::new(),
             table: Cow::Owned(Vec::new()),
             table_fixups: Vec::new(),
+            site_fixups: Vec::new(),
             signature: None,
             interface: None,
             origin: 0,
@@ -1440,6 +1780,7 @@ mod tests {
             &order,
             1,
             identity_composite(1, 1),
+            None,
         )
         .expect("a fresh name mints cleanly");
         assert!(!dup);
@@ -1484,6 +1825,7 @@ mod tests {
             &order,
             1,
             identity_composite(1, 1),
+            None,
         )
         .expect_err("the reserved name is already taken by a hand-written routine");
         assert_eq!(err, LinkError::StampNameCollision(expected_name));

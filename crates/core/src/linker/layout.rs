@@ -788,6 +788,47 @@ pub(super) fn build(
         });
     }
 
+    // Cross-function code fixups from mono's exit-bearing copies
+    // (docs/core.md (call mechanisms)): each hole is the RelI32 operand
+    // of a jump whose target is a position inside another function, so it
+    // is patched here, after the final converged layout, exactly as a
+    // table fixup is. The engine emitted a jump to ITSELF as the
+    // placeholder — an instruction boundary of the emitting blob, so the
+    // blob decodes cleanly during layout's own walk before the patch.
+    for (fi, f) in order.iter().enumerate() {
+        for &(hole, target_func, target_off) in &f.site_fixups {
+            let Some(&here) = abs_of[fi].get(&hole.saturating_sub(1)) else {
+                return Err(LinkError::MalformedBlob {
+                    symbol: f.name.to_string(),
+                    at: hole,
+                });
+            };
+            let Some(&there) = abs_of.get(target_func).and_then(|m| m.get(&target_off)) else {
+                return Err(LinkError::MalformedBlob {
+                    symbol: order
+                        .get(target_func)
+                        .map(|t| t.name.to_string())
+                        .unwrap_or_default(),
+                    at: target_off,
+                });
+            };
+            let operand_at = (bases[fi] + here + 1) as usize;
+            // The same typed refusal the two lookups above take: a fixup
+            // whose operand falls outside the emitted code is malformed
+            // blob data, never a slice panic.
+            if operand_at + 4 > code.len() {
+                return Err(LinkError::MalformedBlob {
+                    symbol: f.name.to_string(),
+                    at: hole,
+                });
+            }
+            let end = i64::from(bases[fi] + here + 5);
+            let off = i64::from(bases[target_func] + there) - end;
+            let off32 = i32::try_from(off).expect("a spliced jump reaches within i32");
+            code[operand_at..operand_at + 4].copy_from_slice(&off32.to_le_bytes());
+        }
+    }
+
     // The frames region (docs/formats.md (frames region)). Two paths:
     //  * with an engine plan, the composition engine already computed the
     //    directory (as sources) and the full compose matrix; layout resolves

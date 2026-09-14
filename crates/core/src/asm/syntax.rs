@@ -87,6 +87,15 @@ pub struct ArchSyntax {
     /// only if a reachable mono binding needs a trap synthesized
     /// (docs/core.md (the composition engine)).
     pub trap_opcode: Option<u8>,
+    /// The dialect's plain return instruction, when it has one — the
+    /// `ret` a mono-stamped exit-bearing copy rewrites into a jump to the
+    /// call site's continuation (docs/core.md (call mechanisms)). It
+    /// cannot be inferred from the syntax table: `ret`, `stp` and `hlt`
+    /// share `OperandKind::None` and `Flow::Stop`, so each dialect
+    /// declares it explicitly, exactly as it declares `trap_opcode`.
+    /// `None` when the dialect has no return, which is an error only if a
+    /// reachable mono exit-bearing site needs one rewritten.
+    pub return_opcode: Option<u8>,
     /// Opt-in lexer/parser surface for this dialect. Default (all off)
     /// keeps the classic assembly grammar byte-for-byte.
     pub caps: AsmCaps,
@@ -123,6 +132,24 @@ impl ArchSyntax {
             .iter()
             .find(|e| e.operand == OperandKind::FramedCall)
             .map(|e| e.opcode)
+    }
+
+    /// The opcode of this dialect's far unconditional jump, if it has one:
+    /// the single `Flow::Jump` entry whose operand is a 32-bit relative
+    /// target. The composition engine needs it to splice a mono
+    /// exit-bearing copy without naming any architecture's mnemonic (core
+    /// is arch-agnostic — docs/core.md (call mechanisms)).
+    pub fn jump_opcode(&self) -> Option<u8> {
+        let mut found = None;
+        for e in &self.entries {
+            if e.flow == Flow::Jump && e.operand == OperandKind::RelI32 {
+                if found.is_some() {
+                    return None; // ambiguous: the dialect must have exactly one
+                }
+                found = Some(e.opcode);
+            }
+        }
+        found
     }
 }
 
@@ -211,6 +238,7 @@ pub(crate) mod fixture {
             entry_opcode: 0x0E,
             break_opcode: None,
             trap_opcode: None,
+            return_opcode: Some(0x0B),
             caps: AsmCaps::default(),
         }
     }

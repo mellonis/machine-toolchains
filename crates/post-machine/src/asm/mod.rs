@@ -165,6 +165,12 @@ pub fn pm1_syntax() -> ArchSyntax {
         // PM-1 has no trap instruction — a one-tape two-symbol machine has
         // no symbol maps to cross, so it never needs a synthesized trap.
         trap_opcode: None,
+        // The plain return a mono exit-bearing copy would rewrite into a
+        // jump to the call site's continuation (docs/core.md (call
+        // mechanisms)). A table entry only: PM-1 objects carry no routine
+        // signatures, so a PM link never reaches the composition engine at
+        // all, and no PM-1 byte moves because of this line.
+        return_opcode: Some(RET),
         // PM-1 `.pma` uses the classic assembly grammar — no vector /
         // substitution / table surface — plus the `.volatile` directive,
         // the text form of the two build columns a `.pmc` compile emits.

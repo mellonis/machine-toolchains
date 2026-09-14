@@ -201,6 +201,9 @@ pub fn tm1_syntax() -> ArchSyntax {
         // synthesizes for a crossed map hole (`trap #0` read, `trap #1`
         // write) — docs/core.md (the composition engine).
         trap_opcode: Some(TRAP),
+        // The plain return a mono exit-bearing copy rewrites into a jump
+        // to the call site's continuation (docs/core.md (call mechanisms)).
+        return_opcode: Some(RET),
         // TM-1's multi-tape dispatch surface uses the whole sectioned
         // grammar: match/dispatch tables, `.rept` blocks, and `[..]`
         // vector operands.

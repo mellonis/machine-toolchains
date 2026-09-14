@@ -91,6 +91,7 @@ fn fake_syntax() -> ArchSyntax {
         entry_opcode: 0x0E,
         break_opcode: None,
         trap_opcode: Some(0x18),
+        return_opcode: Some(0x0B),
         caps: AsmCaps {
             tables: true,
             rept: true,

@@ -949,6 +949,14 @@ fn rewrite_blob<'a>(
         let framed = raw_framed_sites(&f, sites)?;
         return Ok((f, framed));
     }
+    // Only a mono-stamped copy carries cross-function code fixups, and a
+    // copy carries no bound call — so the widening walk below, which would
+    // have to shift their holes, is never handed one (docs/core.md (call
+    // mechanisms)).
+    debug_assert!(
+        f.site_fixups.is_empty(),
+        "a function with a bound call must carry no splice fixups"
+    );
 
     // `new(old) = old + 4 * (framed sites strictly before old)` — total on
     // every offset, boundary or not, since the shift depends only on how
@@ -1107,6 +1115,7 @@ fn rewrite_blob<'a>(
             bound: Vec::new(),
             table: Cow::Owned(new_table),
             table_fixups: new_fixups,
+            site_fixups: f.site_fixups,
             signature: f.signature,
             interface: f.interface,
             origin: f.origin,
