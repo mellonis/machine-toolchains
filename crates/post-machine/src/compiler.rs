@@ -817,9 +817,11 @@ fn merge_columns<'a>(
             || object.table_blobs.is_some()
             || !object.table_fixups.is_empty()
             || !object.bound_calls.is_empty()
+            || object.interface.is_some()
+            || !object.grafts.is_empty()
         {
             return Err(internal(format!(
-                "{which} column carries table or signature records PM-1 never emits"
+                "{which} column carries table, signature or interface records PM-1 never emits"
             )));
         }
     }

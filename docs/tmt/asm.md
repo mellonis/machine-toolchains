@@ -196,7 +196,10 @@ index destinations — and no interface directives at all: `.param`,
 `.graph`, `.grafted`, the `.routine` tail and the symbolic binding
 spellings are hand-written, or emitted by a later compiler round. The
 dialect accepts them regardless of who wrote them, which is what lets
-the format and the front end land in separate steps.
+the format and the front end land in separate steps. The link stage is
+in the same position: it does not resolve the symbolic binding spellings
+yet, and refuses a reached bound call that uses one rather than link it
+on a reading it cannot check (`docs/formats.md (bound calls)`).
 
 ## Dialect version history
 

@@ -1046,12 +1046,29 @@ fn lower_digest_directive(d: &DigestDirectiveCst, ctx: &mut LowerCtx) -> Result<
             AsmErrorKind::Syntax("`.graph`/`.grafted` precede the first `.func`"),
         ));
     }
+    // A graph name is the key both records are looked up by, so naming one
+    // twice in a unit leaves two digests for one graph and no rule saying
+    // which wins. Refused per directive kind, the same scope the `.param`
+    // name check uses: a unit may export `g` and record having spliced a
+    // DIFFERENT unit's `g`, and those are two independent statements.
     if d.grafted {
+        if ctx.grafts.iter().any(|prev| prev.graph == d.name) {
+            return Err(err(
+                d.span,
+                AsmErrorKind::BadSignature(format!("`.grafted {}` is declared twice", d.name)),
+            ));
+        }
         ctx.grafts.push(GraftProvenance {
             graph: d.name.clone(),
             digest: d.digest,
         });
     } else {
+        if ctx.graphs.iter().any(|prev| prev.name == d.name) {
+            return Err(err(
+                d.span,
+                AsmErrorKind::BadSignature(format!("`.graph {}` is declared twice", d.name)),
+            ));
+        }
         ctx.graphs.push(ExportedGraph {
             name: d.name.clone(),
             digest: d.digest,
@@ -3004,6 +3021,36 @@ stop
                 if m == "function `g` lacks a `.routine` signature"),
             "{e}"
         );
+    }
+
+    /// A graph name keys its digest, so a unit may state each name's
+    /// digest once per directive kind. The two kinds are independent
+    /// namespaces: exporting `g` and having spliced someone else's `g`
+    /// are two different statements about two different bodies.
+    #[test]
+    fn a_digest_directive_may_not_name_one_graph_twice() {
+        let head = ".routine f, tapes=1, alpha=(2)\n.param t, ('_', 'a')\n.func f\nstop\n";
+        for (dup, message) in [
+            (".graph g, 1\n.graph g, 2\n", "`.graph g` is declared twice"),
+            (
+                ".grafted g, 1\n.grafted g, 2\n",
+                "`.grafted g` is declared twice",
+            ),
+            // Same digest, same refusal: the rule is about the name, not
+            // about the two lines disagreeing.
+            (".graph g, 1\n.graph g, 1\n", "`.graph g` is declared twice"),
+        ] {
+            let e = lower_with(iface_caps(), &format!("{dup}{head}")).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m == message),
+                "{dup}: {e}"
+            );
+        }
+        // One name across the two kinds is fine, and both records land.
+        let src = format!(".graph g, 1\n.grafted g, 2\n{head}");
+        let lowered = lower_with(iface_caps(), &src).unwrap();
+        assert_eq!(lowered.interface.as_ref().unwrap().graphs.len(), 1);
+        assert_eq!(lowered.grafts.len(), 1);
     }
 
     #[test]

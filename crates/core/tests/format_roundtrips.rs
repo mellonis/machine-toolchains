@@ -183,8 +183,10 @@ proptest! {
                 binding: (0..arity).map(|k| TapeBinding {
                     caller_tape: k,
                     param: Some(params[k as usize].clone()),
-                    // An open map is a written one, so both land on tape 0.
-                    map_written: k == 0,
+                    // Every entry here carries a pair, and a map with
+                    // pairs is a written map by definition; `open` is the
+                    // flag that varies across the tapes.
+                    map_written: true,
                     open: k == 0,
                     pairs: vec![MapPair { src: 1, dst: 0, dst_label: Some(format!("g{k}")), one_way: false }],
                 }).collect(),

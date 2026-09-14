@@ -663,7 +663,9 @@ mod tests {
         TapeBinding {
             caller_tape,
             param: None,
-            map_written: false,
+            // A map with pairs is a written map by definition
+            // (docs/formats.md (bound calls)).
+            map_written: !pairs.is_empty(),
             open: false,
             pairs,
         }

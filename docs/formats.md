@@ -369,7 +369,8 @@ case, which is exactly the case that forces version 4.
 - **Graft provenance** is its own version-4 section, written
   unconditionally and outside the interface: one record per library graph
   this unit spliced, naming the graph and the digest of the body it
-  spliced. The linker compares it against the exporter's graph digest.
+  spliced. Checking it against the exporter's graph digest is the link
+  stage's own step, and lands with the interface-aware linker.
 
 Digests are content addresses, not offsets: a `u32` CRC-32 — the same
 checksum the containers themselves use — of the graph body being
@@ -681,8 +682,8 @@ digest of the body a grafting unit must have spliced; `.grafted <name>,
 spliced. Both stand in the code section before the first `.func`, and
 both write the digest as an unsigned decimal `u32`. They are
 object-level, not per-function, but they still oblige the all-or-none
-rule above — a digest is meaningless to the linker without the interface
-it checks against.
+rule above — a digest is meaningless without the interface it is checked
+against.
 
 **Glyph literals and glyph lists.** A glyph literal is a **single**
 character in single quotes — `'x'` — with exactly two escapes, `'\''`
@@ -940,15 +941,17 @@ counting positions, and an exit vector:
   rule nothing to count from. A parameter name here obeys the same
   identifier grammar `.param` uses.
 - **A glyph-labelled destination** — `3->'0'` — names the callee-side
-  symbol by its glyph instead of by index, and the linker resolves it
-  against the callee's interface. Only the destination may be symbolic;
-  a source is always a numeric index.
+  symbol by its glyph instead of by index, to be resolved against the
+  callee's interface. Only the destination may be symbolic; a source is
+  always a numeric index. A labelled pair's `dst` field carries the
+  label, so the index it reads back with is a placeholder, not a
+  fallback.
 - **A written-empty map** — `0{}` — is a deliberate identity, and is
   **distinct from omitting the braces**: bare `0` is index identity,
   while `0{}` is the empty map. That distinction is the one binding form
   that cannot be said before object version 4.
 - **An open map** — `{*}`, or `{3->'0',*}` — says the listed pairs are
-  not the whole of it and the rest stays open for the linker to fill. The
+  not the whole of it and the rest is left for the link stage to fill. The
   `*` goes **last, once, and only inside the braces**; anywhere else it
   is a shape error. An open map is a written map by construction.
 - **`exits=(<label>, …)`** after the bracket lists the caller-side labels
@@ -959,6 +962,21 @@ counting positions, and an exit vector:
 
 Every one of these needs the dialect's interface capability; PM-1 never
 enables it, so `.pma` accepts none of them.
+
+**What resolves them, and when.** The format and the assembler carry all
+four spellings today: a symbolic call site assembles, round-trips through
+the object, and disassembles back to the same text. Turning them into an
+image is a separate step — matching a name to a `.param`, a glyph to a
+callee symbol, completing what an open map leaves out, wiring exits to
+their targets — and it belongs to the link stage, which is where the
+callee's interface is in hand. Until the interface-aware linker lands,
+the link **refuses** a bound call carrying any of the four — a *reached*
+one, since the linker drops unreachable functions and those may reference
+anything — rather than link it on the numeric reading of fields it cannot
+resolve: a named entry would silently be taken positionally, a labelled
+destination would map onto the placeholder index, an open map would
+close, and exits would vanish. A written-empty map is not in that set —
+it needs nothing resolved, and links as the identity it is.
 
 **Canonical spelling.** The parser accepts any spacing on input — the
 first example above writes its pairs `1->3, 2=>0`, and that assembles —

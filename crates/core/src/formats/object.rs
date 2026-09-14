@@ -767,6 +767,13 @@ impl ObjectFile {
             put_u32(&mut out, call.symbol);
             out.push(u8::try_from(call.binding.len()).expect("tape count fits u8"));
             for tape in &call.binding {
+                // A map with pairs was written by definition — the flag is
+                // what a v3 stream derives from the pair count, so a value
+                // that disagrees reads back as a DIFFERENT binding.
+                debug_assert!(
+                    tape.pairs.is_empty() || tape.map_written,
+                    "a tape binding that carries pairs has `map_written` set"
+                );
                 out.push(tape.caller_tape);
                 if version >= OBJECT_FORMAT_VERSION_V4 {
                     put_u32(
@@ -782,6 +789,13 @@ impl ObjectFile {
                     u16::try_from(tape.pairs.len()).expect("pair count fits u16"),
                 );
                 for pair in &tape.pairs {
+                    // The wire carries the label in the `dst` field's place,
+                    // so a labelled pair's index is not written and comes
+                    // back 0: anything else is silently dropped here.
+                    debug_assert!(
+                        pair.dst_label.is_none() || pair.dst == 0,
+                        "a glyph-labelled pair carries `dst: 0`"
+                    );
                     put_u32(&mut out, pair.src);
                     // v3 has no glyph labels, and no v3-shape object carries
                     // one — `is_v4_shape` routes any that does to v4.
