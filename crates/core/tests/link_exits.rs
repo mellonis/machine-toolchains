@@ -121,6 +121,8 @@ fn asm(src: &str) -> ObjectFile {
     assemble(&fake_syntax(), ARCH, src, false).expect("assembles")
 }
 
+const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid];
+
 fn opts(mech: CallMech) -> LinkOptions {
     LinkOptions {
         call_mech: mech,
@@ -222,6 +224,122 @@ won:    wr      [1]
         retx    #0
 ";
 
+/// The same program whose site supplies NO exits at all against a callee
+/// that declares two — the arity hole a check gated on "the site spells a
+/// vector" would let through.
+const ZERO_EXITS: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=2
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    sub [0]
+        stp
+.func sub
+        retx    #0
+";
+
+/// Two bound sites in ONE function, composing to the very same composite
+/// (the same callee, the same identity binding) and differing ONLY in the
+/// exit labels they name. Without the exits in the engine's intern key the
+/// two sites dedup onto one directory entry, and the second site's exits
+/// are lost.
+const TWO_SITES_SAME_COMPOSITE: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine mid, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    mid
+        stp
+.func mid
+        call    sub [0] exits=(a)
+        call    sub [0] exits=(b)
+        stp
+a:      wr      [1]
+        stp
+b:      wr      [2]
+        stp
+.func sub
+        retx    #0
+";
+
+/// An exit-bearing site whose callee returns through a PLAIN `ret` — no
+/// `retx` anywhere. This is the silent-drop shape: mono's pre-existing
+/// refusals all fire on instructions in the copied body, and a body like
+/// this carries none of them, so only an explicit site check catches it.
+const RET_ONLY_CALLEE: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    sub [0] exits=(won)
+        stp
+won:    wr      [1]
+        stp
+.func sub
+        ret
+";
+
+/// A MIXED image for hybrid: one holey site (`narrow`'s alphabet is
+/// smaller, so the binding is not a bijection and stays on the frames
+/// path) plus one exit-bearing bijection site. The holey site is what
+/// makes `any_frames` true, so hybrid takes its mixed path instead of
+/// the `!any_frames` fast path that delegates wholesale to `lower_mono`
+/// — which is the only way the classifier's own check is reached.
+/// `sub`'s body is a plain `ret`, so nothing in the copied body would
+/// refuse it either.
+const MIXED_WITH_EXITS: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine narrow, tapes=1, alpha=(2)
+.param m, ('_', '0')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    narrow [0]
+        call    sub [0] exits=(won)
+        stp
+won:    wr      [1]
+        stp
+.func narrow
+        ret
+.func sub
+        ret
+";
+
+/// An exit-bearing site NESTED inside a routine that is itself being
+/// stamped: `main`'s swap into `outer` is a bijection and no exit vector,
+/// so the seed loop waves it through; `outer`'s own call into `inner`
+/// carries exits and is seen only by the stamp closure. `inner`'s body is
+/// a plain `ret`, so nothing in the copied body refuses it either.
+const NESTED_WITH_EXITS: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine outer, tapes=1, alpha=(3)
+.param o, ('_', '0', '1')
+.routine inner, tapes=1, alpha=(3), exits=1
+.param i, ('_', '0', '1')
+.section code
+.func main
+        call    outer [0{1->2, 2->1}]
+        stp
+.func outer
+        call    inner [0] exits=(k)
+        ret
+k:      wr      [1]
+        ret
+.func inner
+        ret
+";
+
 /// An exit-bearing site whose binding is the full identity — the exact
 /// shape that WOULD collapse to a plain call without P3.
 const IDENTITY_WITH_EXITS: &str = "\
@@ -258,22 +376,153 @@ fn an_identity_binding_with_exits_does_not_collapse() {
     );
 }
 
+/// The count check is the resolution pre-pass's, which runs ahead of the
+/// point the three mechanisms diverge — so it must refuse under every one
+/// of them, not only the mechanism that would have carried the vector.
+///
 /// Mutation it catches: skip the exit-count check and a site that
 /// supplies too few exits links, leaving `retx #1` to read past the
 /// vector at run time.
 #[test]
-fn a_wrong_exit_count_is_refused() {
-    let err = link(
+fn a_wrong_exit_count_is_refused_under_every_mechanism() {
+    for mech in MECHS {
+        let err = link(&fake_syntax(), &[asm(WRONG_COUNT)], &[], opts(mech))
+            .expect_err("a short exit vector must be refused");
+        assert!(
+            matches!(&err, LinkError::BadBinding { message, .. }
+                if message.contains("supplies 1 exit(s), but `sub` declares 2")),
+            "under {mech}: {err:?}"
+        );
+    }
+}
+
+/// A site supplying NO exits into a callee that declares some is the same
+/// arity error, and reads as one: the two arms share a format string. It
+/// is not a symbolic form at all, so the check cannot hang off "the site
+/// spells a vector" — the callee's declared count is what selects it.
+///
+/// Mutation it catches: gate the check on `!record.exits.is_empty()` (or
+/// leave `declared == 0` out of the early-out) and this program links,
+/// leaving `sub`'s `retx #0` to index a descriptor declaring no exits.
+#[test]
+fn a_site_supplying_no_exits_into_an_exit_bearing_callee_is_refused() {
+    for mech in MECHS {
+        let err = link(&fake_syntax(), &[asm(ZERO_EXITS)], &[], opts(mech))
+            .expect_err("a missing exit vector must be refused");
+        assert!(
+            matches!(&err, LinkError::BadBinding { message, .. }
+                if message.contains("supplies 0 exit(s), but `sub` declares 2")),
+            "under {mech}: {err:?}"
+        );
+    }
+}
+
+/// Until the jump-entered copies land, an exit vector under MONO (and
+/// under hybrid, which delegates a bijection wholesale to mono) is
+/// refused explicitly — never carried, and never silently dropped. Both
+/// fixtures are bijections, so hybrid classifies them to the mono path.
+///
+/// `RET_ONLY_CALLEE` is the case that needs the site check: mono's other
+/// refusals (`MonoRawFrame` on a multi-exit return, on a raw `call.m`)
+/// all fire on an instruction in the copied body, and a `ret`-only body
+/// has none of them — without this check that program links with its
+/// exits gone.
+///
+/// The jump-entered copies flip this: when mono can splice a per-site
+/// copy, these two links succeed and this test becomes a value test.
+///
+/// Each fixture reaches a DIFFERENT one of the three places a mono path
+/// commits to copying a site, which is why all four are here:
+/// `IDENTITY_WITH_EXITS` and `RET_ONLY_CALLEE` reach the seed loop (and
+/// hybrid reaches it too — with every site classified to mono it takes
+/// its `!any_frames` fast path and delegates wholesale to `lower_mono`);
+/// `MIXED_WITH_EXITS` is the only one that reaches hybrid's OWN
+/// classifier; `NESTED_WITH_EXITS` is the only one that reaches the stamp
+/// closure's bound arm.
+///
+/// Mutation it catches: drop the `refuse_exits_under_mono` call from the
+/// mono seed loop and `RET_ONLY_CALLEE` links under `Mono`; drop it from
+/// hybrid's classifier and `MIXED_WITH_EXITS` links under `Hybrid`; drop
+/// it from the stamp closure and `NESTED_WITH_EXITS` links under both.
+/// Dropping the `exits.is_empty()` conjunct in `scan_sites` also fires it
+/// — the site then collapses to a plain call and the seed loop, which
+/// only sees non-collapsing sites, never gets to refuse.
+#[test]
+fn an_exit_vector_is_refused_under_mono_and_hybrid() {
+    let cases = [
+        (IDENTITY_WITH_EXITS, "sub"),
+        (RET_ONLY_CALLEE, "sub"),
+        (MIXED_WITH_EXITS, "sub"),
+        (NESTED_WITH_EXITS, "inner"),
+    ];
+    for (src, name) in cases {
+        for mech in [CallMech::Mono, CallMech::Hybrid] {
+            let err = link(&fake_syntax(), &[asm(src)], &[], opts(mech))
+                .expect_err("an exit vector must be refused on a mono path");
+            assert!(
+                matches!(&err, LinkError::BadBinding { callee, message }
+                    if callee == name
+                        && message.contains("carries an exit vector")
+                        && message.contains("--call-mech=frames")),
+                "under {mech} into `{name}`: {err:?}"
+            );
+        }
+    }
+}
+
+/// Two sites composing to the SAME composite but naming different exits
+/// need two directory entries: the exit vector is part of the descriptor,
+/// so the engine's intern key must distinguish them even though their
+/// canonical composite keys are equal.
+///
+/// The expected addresses come from the sidecar, whose own agreement with
+/// the `+4`-per-widened-site shift is pinned independently by
+/// `the_frames_descriptor_exits_are_the_exact_absolute_addresses`.
+///
+/// Mutation it catches: revert the `key.extend_from_slice` block in
+/// `intern_composite` and the two sites dedup onto ONE entry — `K` drops
+/// to 1 and the second site's exits vanish from the image entirely.
+#[test]
+fn two_sites_with_the_same_composite_and_different_exits_do_not_dedup() {
+    // `-g`, so the sidecar carries `mid`'s label addresses.
+    let obj =
+        assemble(&fake_syntax(), ARCH, TWO_SITES_SAME_COMPOSITE, true).expect("assembles with -g");
+    let out = link(
         &fake_syntax(),
-        &[asm(WRONG_COUNT)],
+        std::slice::from_ref(&obj),
         &[],
         opts(CallMech::Frames),
     )
-    .expect_err("a short exit vector must be refused");
-    assert!(
-        matches!(&err, LinkError::BadBinding { message, .. }
-            if message.contains("supplies 1 exit(s), but `sub` declares 2")),
-        "{err:?}"
+    .expect("links under frames");
+    let mid = out
+        .map
+        .functions
+        .iter()
+        .find(|f| f.name == "mid")
+        .expect("`mid` is in the sidecar");
+    let addr_of = |name: &str| -> u32 {
+        mid.labels
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, a)| *a)
+            .unwrap_or_else(|| panic!("no `{name}` in the sidecar"))
+    };
+    let dir = directory(&out.executable);
+    assert_eq!(
+        dir.len(),
+        2,
+        "two sites, two descriptors — the exits are part of the key: {dir:?}"
+    );
+    // Directory order is intern order, which is the sites' own blob order.
+    assert_eq!(
+        descriptor_exits(&out.executable, dir[0]),
+        vec![addr_of("a")],
+        "the first site's exit vector"
+    );
+    assert_eq!(
+        descriptor_exits(&out.executable, dir[1]),
+        vec![addr_of("b")],
+        "the second site's exit vector"
     );
 }
 

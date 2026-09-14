@@ -716,14 +716,12 @@ pub(super) fn scan_sites<'a>(
 /// (docs/core.md (symbolic resolution)), after which `open` is read by
 /// the composition algebra itself.
 ///
-/// Placed at the head of [`lower`] — the ONE gate all three call
-/// mechanisms pass through (`lower` dispatches to mono, hybrid and frames
-/// below), and ahead of `scan_sites`, so a record whose hole does not
-/// decode as a bound call is refused too. The other two sites this could
-/// live at are both worse: `validate_binding` runs only on sites
-/// `scan_sites` classified, and `resolve` is shared with `resolve_names`,
-/// the standalone name-resolution query the editor overlays run against —
-/// which has no business failing over a binding.
+/// RETIRED, pending deletion: nothing calls it. It used to sit at the
+/// head of [`lower`] as the one gate all three call mechanisms pass
+/// through; the exit vector it guarded is now resolved — the frames path
+/// carries it in the site's descriptor, and the mono paths refuse it
+/// explicitly in `stamp.rs` — so the call was removed and the body is
+/// kept only until the reachability test that names it is re-pinned.
 #[allow(dead_code)]
 fn refuse_symbolic_binding(order: &[FuncRef]) -> Result<(), LinkError> {
     for f in order {

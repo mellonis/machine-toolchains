@@ -160,6 +160,7 @@ pub(super) fn lower_mono<'a>(
                 collapse: false,
             } = site
             {
+                refuse_exits_under_mono(&order[*callee], record)?;
                 seeds.push((fi, *addr, *callee, record));
             }
         }
@@ -286,6 +287,10 @@ pub(super) fn lower_hybrid<'a>(
                 let callee_sig = routine_sig(&order, *callee)?;
                 let caller_sig = order[fi].signature.unwrap_or(machine_sig);
                 if is_bijection(caller_sig, callee_sig, record) {
+                    // Inside the bijection branch on purpose: a HOLEY
+                    // exit-bearing site is classified to frames, which
+                    // carries the vector, and must not be refused here.
+                    refuse_exits_under_mono(&order[*callee], record)?;
                     seeds.push((fi, *addr, *callee, record));
                     mono_holes[fi].insert(*addr);
                 } else {
@@ -525,6 +530,33 @@ fn prune_unreachable(order: Vec<FuncRef>) -> (Vec<FuncRef>, Vec<String>) {
     (pruned, orphaned)
 }
 
+/// Refuse a bound site that carries an exit vector on a MONO path
+/// (docs/core.md (call mechanisms)). A mono stamp is entered by a plain
+/// call and left through the pushed return address, so it has nowhere to
+/// put the other exits: the jump-entered copies that will carry them are
+/// not built yet. Frames already carries the vector in the site's own
+/// descriptor, which is why the advice names that mechanism and not
+/// hybrid — hybrid delegates a bijection wholesale to mono, so advising
+/// it would be circular, exactly as `MonoRawFrame` and
+/// `MonoHoleyMatchBranch` already document.
+///
+/// Called at the three points a mono path first commits to copying a
+/// site: the seed loop, hybrid's classifier (inside its bijection
+/// branch, so a holey exit-bearing site still reaches the frames path),
+/// and the stamp closure's own bound arm. Without it an exit vector
+/// would simply vanish from a mono image.
+fn refuse_exits_under_mono(callee: &FuncRef, record: &BoundCall) -> Result<(), LinkError> {
+    if record.exits.is_empty() {
+        return Ok(());
+    }
+    Err(LinkError::BadBinding {
+        callee: callee.name.to_string(),
+        message: "the call site carries an exit vector, which mono lowering does \
+                  not carry yet; link with --call-mech=frames"
+            .to_string(),
+    })
+}
+
 /// Build the mono stamp set reachable from `seeds` (machine-frame bound
 /// sites to specialize), closing over each stamp's own calls (mono all the
 /// way down). Returns the stamp `FuncRef`s (order indices `order.len()..`)
@@ -614,6 +646,9 @@ fn mono_stamps<'a>(
                     record,
                     ..
                 } => {
+                    // A bound site NESTED inside a routine being copied is
+                    // as un-carryable as a top-level one.
+                    refuse_exits_under_mono(&order[*callee], record)?;
                     let callee_sig = routine_sig(order, *callee)?;
                     // The caller is this stamp's own routine; its declared
                     // cardinalities carry the closed-on-unequal binding rule.
@@ -632,7 +667,10 @@ fn mono_stamps<'a>(
                     // An EXIT-BEARING site never collapses either, whatever its
                     // binding: a plain call returns through the pushed return
                     // address and has nowhere to put the other exits
-                    // (docs/core.md (call mechanisms)).
+                    // (docs/core.md (call mechanisms)). Defensive while the
+                    // refusal above stands — nothing exit-bearing reaches
+                    // here — and load-bearing again once the jump-entered
+                    // copies replace that refusal.
                     let idx = if record.exits.is_empty()
                         && is_full_passthrough(&child, machine_sig, callee_sig)
                     {

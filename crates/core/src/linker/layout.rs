@@ -904,6 +904,14 @@ fn emit_planned_region(
     // exit off an instruction boundary is malformed blob data no rebase
     // can make sense of.
     let mut engine_offsets: Vec<u32> = Vec::with_capacity(plan.engine_descriptors.len());
+    // The two vectors are built together, one entry per engine composite;
+    // the zip below would silently emit the shorter prefix if they ever
+    // drifted, dropping descriptors out of the directory.
+    debug_assert_eq!(
+        plan.engine_descriptors.len(),
+        plan.engine_exits.len(),
+        "the frames plan's descriptors and exit vectors are parallel"
+    );
     for (desc, exits) in plan.engine_descriptors.iter().zip(&plan.engine_exits) {
         engine_offsets.push(u32::try_from(tables.len()).expect("table offset fits u32"));
         let start = tables.len();

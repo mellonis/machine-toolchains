@@ -65,7 +65,14 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
         .iter()
         .any(|tb| tb.pairs.iter().any(|p| p.dst_label.is_some()));
     let open = record.binding.iter().any(|tb| tb.open);
-    if named == 0 && !labelled && !open && record.exits.is_empty() {
+    // How many exits the callee DECLARES. A callee that describes no
+    // interface declares no state parameters at all, so 0 is its true
+    // count, not a missing value: an exit-FREE site into it is simply
+    // transparent, and an exit-BEARING one is refused a few lines below
+    // by `require_interface`, whose message names the missing interface
+    // rather than a count mismatch (docs/core.md (symbolic resolution)).
+    let declared = usize::from(callee.interface.map_or(0, |i| i.exits));
+    if named == 0 && !labelled && !open && record.exits.is_empty() && declared == 0 {
         return Ok(record.clone());
     }
 
@@ -85,24 +92,36 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     if open {
         check_opaque(callee, &binding)?;
     }
+    // The exit arity is checked on EVERY site into a callee that declares
+    // exits, not only on one that spells a vector: a site supplying none
+    // into an exit-bearing callee leaves the callee's `retx` indexing a
+    // vector that is not there (docs/core.md (call mechanisms)). The
+    // exit-bearing arm goes through `require_interface` first, so an
+    // interfaceless callee is named as such rather than as "declares 0".
     if !record.exits.is_empty() {
         let iface = require_interface(callee, "an exit vector")?;
         if record.exits.len() != usize::from(iface.exits) {
-            return Err(bad(
-                callee,
-                format!(
-                    "the call site supplies {} exit(s), but `{}` declares {}",
-                    record.exits.len(),
-                    callee.name,
-                    iface.exits
-                ),
-            ));
+            return Err(bad(callee, exit_count_mismatch(callee, record, declared)));
         }
+    } else if declared != 0 {
+        return Err(bad(callee, exit_count_mismatch(callee, record, declared)));
     }
     Ok(BoundCall {
         binding,
         ..record.clone()
     })
+}
+
+/// The exit-arity refusal's text, shared by both arms that raise it — a
+/// site that spells the wrong number of exits and one that spells none
+/// into a callee that declares some. One format string, so the two read
+/// identically ("supplies 0 exit(s), but `sub` declares 2").
+fn exit_count_mismatch(callee: &FuncRef, record: &BoundCall, declared: usize) -> String {
+    format!(
+        "the call site supplies {} exit(s), but `{}` declares {declared}",
+        record.exits.len(),
+        callee.name,
+    )
 }
 
 /// Turn every `dst_label` into the glyph's position in the callee's

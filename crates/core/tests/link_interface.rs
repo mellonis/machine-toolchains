@@ -3,7 +3,8 @@
 //! named entry and a glyph-labelled destination RESOLVE against the
 //! callee's interface, an open map is accepted against the callee's
 //! `opaque` bits (what it then means is `link_open.rs`), and an exit
-//! vector reaches the frames descriptor (what it then means is
+//! vector is ACCEPTED under frames rather than refused (what it then
+//! means, and what the other two mechanisms do with it, is
 //! `link_exits.rs`). The resolving cases are checked under all three call
 //! mechanisms, because the pre-pass sits ahead of the point where they
 //! diverge.
@@ -175,15 +176,18 @@ L:      stp
     )
 }
 
-/// `program`, but the callee declares one state parameter (`exits=1`),
-/// which is what makes a one-entry exit vector legal at the call site.
-fn exit_program(binding: &str) -> String {
+/// `program`, but `sub` declares `declared` state parameters — which is
+/// what makes an exit vector of that length legal at the call site. The
+/// count is a parameter because the exit arity is checked on EVERY site
+/// into an exit-bearing callee: an exit-FREE control must therefore call
+/// a callee declaring `exits=0`, not the same one.
+fn exit_program(declared: u8, binding: &str) -> String {
     format!(
         "\
 .routine main, tapes=2, alpha=(4, 4)
 .param a, ('_', 'x', 'y', 'z')
 .param b, ('_', 'x', 'y', 'z')
-.routine sub, tapes=2, alpha=(4, 4), exits=1
+.routine sub, tapes=2, alpha=(4, 4), exits={declared}
 .param p, ('_', '0', '1', '2')
 .param q, ('_', '0', '1', '2')
 .section code
@@ -274,18 +278,20 @@ fn an_open_map_no_longer_refuses() {
     }
 }
 
-/// `exits=(L)` names where the callee's exits land. Under FRAMES the
-/// site's descriptor carries the vector, so the linked image differs
-/// from the exit-free spelling and the exit target's address appears in
-/// the frames region.
+/// `exits=(L)` names where the callee's exits land. Under FRAMES it is
+/// ACCEPTED rather than refused — the site's descriptor carries the
+/// vector — which is the whole of what this file claims about the form.
 ///
-/// Mutation it catches: drop `record.exits` on the way into
-/// `materialize` and the image becomes byte-identical to the exit-free
-/// one — which the assertion forbids.
+/// The inequality below is a SMOKE CHECK, not an isolation claim: the
+/// two programs differ in their `.routine` line as well as in the
+/// binding, because the exit arity is checked on every site and an
+/// exit-free control must therefore call an `exits=0` callee. What the
+/// vector actually becomes — the exact absolute addresses, in order, in
+/// the descriptor's own exit field — is pinned in `link_exits.rs`.
 #[test]
-fn an_exit_vector_reaches_the_frames_descriptor() {
-    let with_exits = exit_program("[1, 0] exits=(L)");
-    let without = exit_program("[1, 0]");
+fn an_exit_vector_links_under_frames_instead_of_refusing() {
+    let with_exits = exit_program(1, "[1, 0] exits=(L)");
+    let without = exit_program(0, "[1, 0]");
     let a = link(
         &fake_syntax(),
         &[asm(&with_exits)],
