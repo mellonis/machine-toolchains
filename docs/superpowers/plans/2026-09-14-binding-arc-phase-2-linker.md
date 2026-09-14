@@ -108,7 +108,7 @@ Verified against the working tree on 2026-09-14. An implementer may rely on thes
 - Consumes: nothing.
 - Produces: a recorded finding pasted into this task's checkbox notes, and a STOP decision. Nothing in `src/`.
 
-- [ ] **Step 1: Write the sweep instrument**
+- [x] **Step 1: Write the sweep instrument**
 
 Create `crates/turing-machine/tests/plain_site_sweep.rs`:
 
@@ -286,7 +286,7 @@ fn sweep_the_shipped_corpus() {
 }
 ```
 
-- [ ] **Step 2: Run it and record the output**
+- [x] **Step 2: Run it and record the output**
 
 Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-turing-machine --test plain_site_sweep -- --ignored --nocapture`
 
@@ -296,7 +296,7 @@ Paste the full `ERROR-WOULD-FIRE` and `WARN-WOULD-FIRE` line count and the lines
 
 If `mtc_turing_machine::stdlib::object()` is not public, use whatever the crate exposes (`crates/turing-machine/src/stdlib/mod.rs:57` holds the `OnceLock`); if nothing is, make the sweep compile `crates/turing-machine/src/stdlib/std.tmc` itself and say so in the notes.
 
-- [ ] **Step 3: Audit core's own link fixtures by hand**
+- [x] **Step 3: Audit core's own link fixtures by hand**
 
 Grep the fixtures for plain sites whose callee is wider:
 
@@ -304,7 +304,7 @@ Run: `grep -n "^\.routine" crates/core/tests/link_tables.rs crates/core/tests/li
 
 Record in the notes every fixture where a `.routine` declared `alpha=(…)` is WIDER than the `.routine` that plainly calls it. Note explicitly that a *bound* site with an explicit map is not a candidate — the omitted-map check only fires on `map_written == false`.
 
-- [ ] **Step 4: The stop gate**
+- [x] **Step 4: The stop gate**
 
 **If any `ERROR-WOULD-FIRE` line appears in either sweep, STOP.** Do not start Task 12. Report to the controller: the offending file, the two signatures, and which of the two fallbacks the finding argues for —
 
@@ -312,6 +312,57 @@ Record in the notes every fixture where a `.routine` declared `alpha=(…)` is W
 - **(b) narrow the rule** — restrict the wider-callee ERROR to plain sites only and leave a bound site with an omitted map on its existing hole-and-trap behaviour, since `binding_to_composite` already gives that case a defined runtime meaning.
 
 If no `ERROR-WOULD-FIRE` line appears, record "clean" and continue. Record the `WARN-WOULD-FIRE` count either way: a corpus that would emit hundreds of new warnings is itself a controller decision (default-on versus shipped `--allow`), even though nothing breaks.
+
+**Sweep result (2026-09-14):**
+
+Ran `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-turing-machine --test plain_site_sweep -- --ignored --nocapture`. Full per-file output:
+
+```
+crates/turing-machine/src/stdlib/std.tmc: 0 call site(s) compared, 0 unresolved
+crates/turing-machine/tests/golden/a1_replace_b.tmc: 0 call site(s) compared, 0 unresolved
+crates/turing-machine/tests/golden/a2_binary_plus_one.tmc: 0 call site(s) compared, 0 unresolved
+crates/turing-machine/tests/golden/a3_two_tape_copy.tmc: 0 call site(s) compared, 0 unresolved
+crates/turing-machine/tests/golden/a4_byte_increment.tmc: 0 call site(s) compared, 0 unresolved
+crates/turing-machine/tests/golden/a5_call_across_alphabets.tmc: 0 call site(s) compared, 0 unresolved
+crates/turing-machine/tests/golden/a6_graph_graft_multi_exit.tmc: 0 call site(s) compared, 0 unresolved
+crates/turing-machine/tests/golden/nested_graft.tmc: 0 call site(s) compared, 0 unresolved
+docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma: 0 call site(s) compared, 0 unresolved
+docs/examples/brainfuck-utm/brainfuck-utm.tmc: 0 call site(s) compared, 0 unresolved
+docs/examples/pow2/pow2.tmc: 0 call site(s) compared, 0 unresolved
+docs/examples/rpn/rpn.tmc: 4 call site(s) compared, 0 unresolved
+docs/examples/rpnhex/rpnhex.tmc: 0 call site(s) compared, 0 unresolved
+docs/examples/rpnreg/rpnreg.tmc: 0 call site(s) compared, 0 unresolved
+docs/examples/rpnwide/rpnwide.tmc: 0 call site(s) compared, 0 unresolved
+--- sweep complete ---
+test sweep_the_shipped_corpus ... ok
+```
+
+No `ERROR-WOULD-FIRE` line and no `WARN-WOULD-FIRE` line anywhere — zero of each. Totals: **4 sites compared, 0 unresolved** across the whole corpus, all four on `docs/examples/rpn/rpn.tmc` (the four `call std::binaryNumbers::*` sites the stdlib lookup exists to resolve — confirming the lookup works, per the stop-gate check above). Confirms the prediction already on record above (item 4 in this file's own prior notes): the four shipped `call std::` sites are cardinality-equal to their callers.
+
+**Why every other file shows zero, and two scope caveats on this "clean":**
+
+- Measured under `CompileOptions::default()` (`opt_level: OptLevel::O0`, the `#[default]` variant) — the optimizer's `inline` pass never runs, so pass collapsing is not why the other files are empty; this is not each example's own manifest opt level, which may differ.
+- The instrument walks `obj.relocations` only. `rpnhex.tmc`, `rpnreg.tmc`, `rpnwide.tmc` and `a5_call_across_alphabets.tmc` all call other routines in source (`call pushToken(...)`, `call plusOne(...)`, …) — those are NOT absent from the object, they compile to declarative **bound calls** (explicit parameter/tape maps) and land in `obj.bound_calls`, a field this sweep never reads. The step-3 hand audit shows the same split independently: 82 of 92 `.tma`-fixture call sites carry an explicit `[…]` binding map and are excluded from the relocation-based check by the brief's own carve-out. So "zero plain-relocation sites" in most of the corpus reflects the corpus being bound-call-heavy, not an absence of cross-function control flow — and it is a real, not an assumed, zero for what this instrument measures (`SiteKind::Plain`: transparent calls, and any relocated tail jump/branch into another function).
+- **The `WARN-WOULD-FIRE` zero covers only the narrow-alphabet-on-plain-sites rule.** It says nothing about Task 12's other warn-tier rule, the omitted-map warning on a *bound* site with `map_written == false` — this instrument never inspects `obj.bound_calls` or `map_written`, so that rule's blast radius is unmeasured here. The "0, not hundreds" default-on-vs-`--allow` question in Step 4 is answered only for the plain-site narrow-alphabet warning, not for the omitted-map one.
+
+**Step 3 hand audit:** ran the `grep -n "^\.routine" …` command over all five files (`link_variants.rs` has no `.routine` declarations to audit — 0 matches). Parsed every `.func`/`call` pair across the five files programmatically to separate plain calls (no `[…]` binding brackets) from bound calls with an explicit map. Of 92 total `call`/`call.*` sites across the fixtures, 82 carry an explicit binding map (`[…]`) and are excluded per the brief's own note — not candidates, since the omitted-map check only fires on `map_written == false`. The remaining 10 plain sites, caller → callee cardinalities:
+
+| site | caller | callee |
+|---|---|---|
+| `link_tables.rs:205` | `main[2]` | `helper[2]` |
+| `link_tables.rs:247` | `main[2]` | `helper[2]` |
+| `link_tables.rs:446` | `main[2]` | `helper[2]` |
+| `link_tables.rs:484` | `main[2]` | `helper[2]` |
+| `link_tables.rs:1477` | `main[4, 4]` | `apiB[4, 4]` (cross-object, `link_tables.rs:1482`) |
+| `link_tables.rs:1561` | `sub[4, 4]` | `{stamp}[4, 4]` |
+| `link_tables.rs:2664` | `main[4]` | `A[4]` |
+| `link_tables.rs:2665` | `main[4]` | `B[4]` |
+| `mode_equivalence.rs:857` | `M[4]` | `P[4]` |
+| `composition_engine.rs:148` | `r[4]` | `leaf[4]` |
+
+None is wider — every plain callee is exactly as wide, in both arity and every cardinality, as its caller. The one apparent wider-callee pair in the whole grep output, `link_tables.rs:1183-1184` (`main, alpha=(4,4)` / `sub, alpha=(8,8)`, in `an_out_of_range_caller_symbol_is_a_link_error`), is a **bound** site with an explicit map (`call sub [0{5->1}, 1]`) — excluded per the brief's own carve-out, and in fact is itself a test that a too-narrow caller-side binding index is already a link error today, unrelated to Task 12's callee-width check.
+
+**Stop-gate verdict: clean.** Zero `ERROR-WOULD-FIRE` lines in the corpus sweep, zero widening plain sites in the hand audit. No `WARN-WOULD-FIRE` lines either (0, not "hundreds" — the shipped corpus has almost no plain-relocation sites at all outside the four `std::binaryNumbers` calls). Task 12 is clear to proceed once the controller reviews this record.
 
 - [ ] **Step 5: Commit**
 
