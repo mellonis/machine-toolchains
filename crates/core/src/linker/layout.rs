@@ -581,6 +581,11 @@ pub(super) fn build(
     // Each function's table-section base, for resolving raw directory
     // entries the engine plan names by (function, table offset).
     let mut func_table_bases: Vec<u32> = Vec::with_capacity(order.len());
+    // Each function's post-rewrite blob offset -> its offset within the
+    // emitted function, retained past the loop so the frames region can
+    // rebase an engine descriptor's exit vector (docs/formats.md (frames
+    // region)). `bases` is already in scope for the absolute part.
+    let mut abs_of: Vec<HashMap<u32, u32>> = Vec::with_capacity(order.len());
 
     for (fi, f) in order.iter().enumerate() {
         let pieces = &functions[fi];
@@ -601,6 +606,7 @@ pub(super) fn build(
             .enumerate()
             .map(|(pi, piece)| (piece.orig(), piece_offsets[pi]))
             .collect();
+        abs_of.push(orig_to_new.clone());
 
         for (pi, piece) in pieces.iter().enumerate() {
             match piece {
@@ -796,7 +802,10 @@ pub(super) fn build(
                 &mut tables,
                 &fcall_holes,
                 &func_table_bases,
-            );
+                &bases,
+                &abs_of,
+                order,
+            )?;
             let k = plan.directory.len() as u32;
             let s = fcall_holes.len() as u32;
             (frames_offset, k, (k + 1) * s * 2, plan.routines.clone())
@@ -869,25 +878,51 @@ pub(super) fn build(
 }
 
 /// Emit the engine-planned frames region (docs/formats.md (frames region)):
-/// append the synthesized descriptors, resolve the directory's
-/// address-dependent offsets, write each framed-call piece its dense site
-/// index (piece order matches the plan's compose columns), then emit the
-/// `K u16, S u16`, directory, and `(K+1) × S` compose matrix. Returns the
-/// region's offset into the table section.
+/// append the synthesized descriptors (rebasing each exit-bearing one's
+/// trailing exit vector to absolute code addresses), resolve the
+/// directory's address-dependent offsets, write each framed-call piece its
+/// dense site index (piece order matches the plan's compose columns), then
+/// emit the `K u16, S u16`, directory, and `(K+1) × S` compose matrix.
+/// Returns the region's offset into the table section.
+#[allow(clippy::too_many_arguments)]
 fn emit_planned_region(
     plan: &super::engine::FramesPlan,
     code: &mut [u8],
     tables: &mut Vec<u8>,
     fcall_holes: &[usize],
     func_table_bases: &[u32],
-) -> u32 {
+    bases: &[u32],
+    abs_of: &[HashMap<u32, u32>],
+    order: &[FuncRef],
+) -> Result<u32, LinkError> {
     use super::engine::DirSource;
 
-    // Append the synthesized (address-independent) descriptors.
+    // Append the synthesized descriptors, rebasing any exit vector: the
+    // engine wrote POST-REWRITE blob offsets in the calling function as
+    // placeholders, and the absolute address is that function's base plus
+    // its own offset map's image (docs/formats.md (frames region)). An
+    // exit off an instruction boundary is malformed blob data no rebase
+    // can make sense of.
     let mut engine_offsets: Vec<u32> = Vec::with_capacity(plan.engine_descriptors.len());
-    for desc in &plan.engine_descriptors {
+    for (desc, exits) in plan.engine_descriptors.iter().zip(&plan.engine_exits) {
         engine_offsets.push(u32::try_from(tables.len()).expect("table offset fits u32"));
+        let start = tables.len();
         tables.extend_from_slice(desc);
+        let Some((func, offsets)) = exits else {
+            continue;
+        };
+        let tail = start + desc.len() - 4 * offsets.len();
+        for (i, &off) in offsets.iter().enumerate() {
+            let Some(&within) = abs_of[*func].get(&off) else {
+                return Err(LinkError::MalformedBlob {
+                    symbol: order[*func].name.to_string(),
+                    at: off,
+                });
+            };
+            let abs = bases[*func] + within;
+            let at = tail + 4 * i;
+            tables[at..at + 4].copy_from_slice(&abs.to_le_bytes());
+        }
     }
     // Resolve the directory to absolute descriptor offsets.
     let directory: Vec<u32> = plan
@@ -916,7 +951,7 @@ fn emit_planned_region(
             tables.extend(v.to_le_bytes());
         }
     }
-    frames_offset
+    Ok(frames_offset)
 }
 
 #[cfg(test)]

@@ -2,18 +2,17 @@
 //! format and the assembler carry (docs/formats.md (bound calls)). A
 //! named entry and a glyph-labelled destination RESOLVE against the
 //! callee's interface, an open map is accepted against the callee's
-//! `opaque` bits (what it then means is `link_open.rs`), and the one
-//! remaining form — an exit vector — is still REFUSED, because nothing
-//! below reads it and a link would silently drop it. Each case is checked
-//! under all three call mechanisms, because both the pre-pass and the
-//! refusal guard sit ahead of the point where they diverge.
+//! `opaque` bits (what it then means is `link_open.rs`), and an exit
+//! vector reaches the frames descriptor (what it then means is
+//! `link_exits.rs`). The resolving cases are checked under all three call
+//! mechanisms, because the pre-pass sits ahead of the point where they
+//! diverge.
 //!
 //! Each fixture is otherwise well-formed: drop the symbolic field and
 //! what is left is the legal numeric binding `[1, 0]`, which the control
 //! test links. That is what makes these tests discriminate — a resolution
 //! test that links for some unrelated reason would match the numeric
-//! form's bytes only by accident, and the refusal test would link rather
-//! than fail differently.
+//! form's bytes only by accident.
 //!
 //! Everything runs on a neutral fake dialect (per-file-helper convention),
 //! so core stays provably arch-agnostic.
@@ -176,23 +175,25 @@ L:      stp
     )
 }
 
-/// The refusal every symbolic form takes, under every mechanism: a
-/// `BadBinding` naming the callee and the form that fired.
-#[track_caller]
-fn refused_under_every_mechanism(binding: &str, form: &str) {
-    let src = program(binding);
-    for mech in MECHS {
-        let err = link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
-            .expect_err("the symbolic form must be refused");
-        let LinkError::BadBinding { callee, message } = &err else {
-            panic!("expected a BadBinding under {mech}, got {err:?}");
-        };
-        assert_eq!(callee, "sub", "under {mech}");
-        assert!(
-            message.contains(form) && message.contains("does not resolve yet"),
-            "under {mech}: {message}"
-        );
-    }
+/// `program`, but the callee declares one state parameter (`exits=1`),
+/// which is what makes a one-entry exit vector legal at the call site.
+fn exit_program(binding: &str) -> String {
+    format!(
+        "\
+.routine main, tapes=2, alpha=(4, 4)
+.param a, ('_', 'x', 'y', 'z')
+.param b, ('_', 'x', 'y', 'z')
+.routine sub, tapes=2, alpha=(4, 4), exits=1
+.param p, ('_', '0', '1', '2')
+.param q, ('_', '0', '1', '2')
+.section code
+.func main
+        call    sub {binding}
+L:      stp
+.func sub
+        ret
+"
+    )
 }
 
 /// `p: 1, q: 0` binds by callee PARAMETER. The linker looks each name up
@@ -273,11 +274,37 @@ fn an_open_map_no_longer_refuses() {
     }
 }
 
-/// `exits=(L)` names where the callee's exits land. The linker wires no
-/// exits, so an unresolved vector would simply vanish from the image.
+/// `exits=(L)` names where the callee's exits land. Under FRAMES the
+/// site's descriptor carries the vector, so the linked image differs
+/// from the exit-free spelling and the exit target's address appears in
+/// the frames region.
+///
+/// Mutation it catches: drop `record.exits` on the way into
+/// `materialize` and the image becomes byte-identical to the exit-free
+/// one — which the assertion forbids.
 #[test]
-fn an_exit_vector_is_refused_under_every_mechanism() {
-    refused_under_every_mechanism("[1, 0] exits=(L)", "an exit vector");
+fn an_exit_vector_reaches_the_frames_descriptor() {
+    let with_exits = exit_program("[1, 0] exits=(L)");
+    let without = exit_program("[1, 0]");
+    let a = link(
+        &fake_syntax(),
+        &[asm(&with_exits)],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect("an exit-bearing site must link under frames");
+    let b = link(
+        &fake_syntax(),
+        &[asm(&without)],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect("the exit-free site links");
+    assert_ne!(
+        a.executable.to_bytes(),
+        b.executable.to_bytes(),
+        "an exit vector must reach the image"
+    );
 }
 
 /// The control, and the boundary of the refusal: a written-EMPTY map is

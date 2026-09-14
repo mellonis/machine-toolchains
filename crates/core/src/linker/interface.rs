@@ -65,7 +65,7 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
         .iter()
         .any(|tb| tb.pairs.iter().any(|p| p.dst_label.is_some()));
     let open = record.binding.iter().any(|tb| tb.open);
-    if named == 0 && !labelled && !open {
+    if named == 0 && !labelled && !open && record.exits.is_empty() {
         return Ok(record.clone());
     }
 
@@ -84,6 +84,20 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     }
     if open {
         check_opaque(callee, &binding)?;
+    }
+    if !record.exits.is_empty() {
+        let iface = require_interface(callee, "an exit vector")?;
+        if record.exits.len() != usize::from(iface.exits) {
+            return Err(bad(
+                callee,
+                format!(
+                    "the call site supplies {} exit(s), but `{}` declares {}",
+                    record.exits.len(),
+                    callee.name,
+                    iface.exits
+                ),
+            ));
+        }
     }
     Ok(BoundCall {
         binding,

@@ -629,7 +629,13 @@ fn mono_stamps<'a>(
                     // to the original routine. A narrower or wider callee keeps
                     // a cardinality hole, so it is stamped instead (its trap
                     // rows are synthesized from the alphabet gap in build_stamp).
-                    let idx = if is_full_passthrough(&child, machine_sig, callee_sig) {
+                    // An EXIT-BEARING site never collapses either, whatever its
+                    // binding: a plain call returns through the pushed return
+                    // address and has nowhere to put the other exits
+                    // (docs/core.md (call mechanisms)).
+                    let idx = if record.exits.is_empty()
+                        && is_full_passthrough(&child, machine_sig, callee_sig)
+                    {
                         *callee
                     } else {
                         let (idx, dup) = intern(

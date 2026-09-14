@@ -59,9 +59,10 @@ use crate::vm::OperandKind;
 use crate::vm::frame::descriptor_bytes;
 
 /// Where a directory entry's descriptor bytes come from. Engine composites
-/// are synthesized (address-independent — no exits); raw descriptors are
-/// authored inside a function's table blob and located once layout knows
-/// that function's table base.
+/// are synthesized (address-independent unless the site carries an exit
+/// vector, which layout rebases); raw descriptors are authored inside a
+/// function's table blob and located once layout knows that function's
+/// table base.
 pub(super) enum DirSource {
     /// `engine_descriptors[i]`, appended to the table section by layout.
     Engine(usize),
@@ -69,6 +70,12 @@ pub(super) enum DirSource {
     /// `func`'s table blob (docs/formats.md (frame descriptors)).
     Raw { func: usize, table_offset: u32 },
 }
+
+/// A framed bound site's exit vector as the engine carries it: the
+/// function whose POST-REWRITE blob the offsets are relative to, and
+/// those offsets. `None` for an exit-free site, whose descriptor is
+/// address-independent (docs/formats.md (frame descriptors)).
+type SiteExits = Option<(usize, Vec<u32>)>;
 
 /// Composition-engine counters surfaced in the link report (docs/core.md (the
 /// link report)). Frames lowering fills `dedup_savings` (descriptor
@@ -94,8 +101,15 @@ pub(super) struct EngineStats {
 /// verbatim (docs/formats.md (frames region)).
 pub(super) struct FramesPlan {
     /// One synthesized descriptor per engine composite, in engine-composite
-    /// (directory) order. No `retx` exits, so byte-content is address-free.
+    /// (directory) order. Exit-free descriptors are address-free; an
+    /// exit-bearing one carries placeholder offsets `engine_exits` names.
     pub engine_descriptors: Vec<Vec<u8>>,
+    /// Per engine descriptor, the function whose POST-REWRITE blob its
+    /// exit offsets are relative to, and those offsets. `None` for an
+    /// exit-free (address-independent) descriptor. Layout rebases each
+    /// to an absolute code address, like a raw `.frame` descriptor's
+    /// exits (docs/formats.md (frames region)).
+    pub engine_exits: Vec<SiteExits>,
     /// The directory in final composite-index order: entry `i` is runtime
     /// composite index `i + 1` (index 0 is the identity context, no
     /// descriptor). Engine composites come first, then raw descriptors.
@@ -158,10 +172,6 @@ pub(super) fn lower<'a>(
     machine_sig: &RoutineSig,
     call_mech: CallMech,
 ) -> Result<Lowered<'a>, LinkError> {
-    // The symbolic binding forms the object format carries are refused
-    // before anything reads a binding, so no mechanism can mis-lower one.
-    refuse_symbolic_binding(&order)?;
-
     // Scan every reached routine for its control sites. Bindingless links
     // (no bound call anywhere) skip the engine entirely.
     let sites: Vec<Vec<SiteKind>> = order
@@ -223,7 +233,7 @@ pub(super) fn lower_frames<'a>(
     let machine_arity = machine_sig.arity as usize;
 
     // --- closure over (routine, composite): engine composites + columns ---
-    let mut engine_comps: Vec<Composite> = Vec::new();
+    let mut engine_comps: Vec<(Composite, SiteExits)> = Vec::new();
     let mut comp_index: HashMap<Vec<u8>, u16> = HashMap::new();
     // Interning that resolved to an already-synthesized descriptor — each is
     // a descriptor emit avoided, reported as a dedup saving.
@@ -278,8 +288,23 @@ pub(super) fn lower_frames<'a>(
                     let callee_sig = routine_sig(&order, *callee)?;
                     let child = compose(&ctx, caller_cards, *callee, &record.binding, callee_sig)
                         .map_err(|e| bad_binding(&order[*callee].name, &e))?;
+                    // The record's exits are ORIGINAL blob offsets; the
+                    // rewrite widens every framed site by 4 bytes, so they
+                    // are shifted here into the post-rewrite blob layout
+                    // that layout will map to addresses
+                    // (docs/core.md (the composition engine)).
+                    let exits = (!record.exits.is_empty()).then(|| {
+                        (
+                            fi,
+                            record
+                                .exits
+                                .iter()
+                                .map(|&e| widen_shift(&sites[fi], e))
+                                .collect::<Vec<u32>>(),
+                        )
+                    });
                     let (idx, deduped) =
-                        intern_composite(&mut engine_comps, &mut comp_index, child.clone());
+                        intern_composite(&mut engine_comps, &mut comp_index, child.clone(), exits);
                     if deduped {
                         dedup_savings += 1;
                     }
@@ -306,7 +331,7 @@ pub(super) fn lower_frames<'a>(
     // (docs/formats.md (sidecar bindings)).
     let mut routines: Vec<String> = engine_comps
         .iter()
-        .map(|c| order[c.routine].name.to_string())
+        .map(|(c, _)| order[c.routine].name.to_string())
         .collect();
 
     // --- raw descriptors: directory entries + constant columns ---
@@ -408,8 +433,11 @@ pub(super) fn lower_frames<'a>(
 
     // --- directory + synthesized descriptors ---
     let mut engine_descriptors = Vec::with_capacity(engine_count);
-    for c in &engine_comps {
-        engine_descriptors.push(materialize(c, machine_sig, &new_order)?);
+    let mut engine_exits = Vec::with_capacity(engine_count);
+    for (c, exits) in &engine_comps {
+        let offsets: &[u32] = exits.as_ref().map_or(&[], |(_, o)| o.as_slice());
+        engine_descriptors.push(materialize(c, machine_sig, &new_order, offsets)?);
+        engine_exits.push(exits.clone());
     }
     let mut directory: Vec<DirSource> = (0..engine_count).map(DirSource::Engine).collect();
     for (func, table_offset) in raw_dir {
@@ -420,6 +448,7 @@ pub(super) fn lower_frames<'a>(
         new_order,
         Some(FramesPlan {
             engine_descriptors,
+            engine_exits,
             directory,
             compose: compose_rows,
             routines,
@@ -511,23 +540,61 @@ fn check_descriptor_phys(
     Ok(())
 }
 
-/// Intern a composite into the engine directory, deduped by canonical key.
-/// Returns its 1-based directory index (engine composites occupy 1..=E) and
-/// whether it resolved to an ALREADY-interned composite (a descriptor emit
-/// the dedup avoided).
+/// Intern a composite into the engine directory, deduped by canonical
+/// key. Returns its 1-based directory index (engine composites occupy
+/// 1..=E) and whether it resolved to an ALREADY-interned composite (a
+/// descriptor emit the dedup avoided).
+///
+/// An EXIT-BEARING site widens the key with the owning function and its
+/// exit offsets: two sites may compose to the same placement and still
+/// need different descriptors, because the exit vector is part of the
+/// descriptor (docs/formats.md (frame descriptors)). An exit-FREE site
+/// appends nothing, so its key is byte-for-byte what it always was and
+/// every existing image keeps its directory.
 fn intern_composite(
-    comps: &mut Vec<Composite>,
+    comps: &mut Vec<(Composite, SiteExits)>,
     index: &mut HashMap<Vec<u8>, u16>,
     c: Composite,
+    exits: SiteExits,
 ) -> (u16, bool) {
-    let key = canonical_key(&c);
+    let mut key = canonical_key(&c);
+    if let Some((func, offsets)) = &exits {
+        key.extend_from_slice(&(*func as u64).to_le_bytes());
+        for off in offsets {
+            key.extend_from_slice(&off.to_le_bytes());
+        }
+    }
     if let Some(&i) = index.get(&key) {
         return (i, true);
     }
-    comps.push(c);
+    comps.push((c, exits));
     let i = u16::try_from(comps.len()).expect("composite index fits u16");
     index.insert(key, i);
     (i, false)
+}
+
+/// The blob rewrite's offset map for one function, derived from its site
+/// list: `new(old) = old + 4 * (framed bound sites strictly before old)`
+/// — the same total `rewrite_blob` applies to every offset it carries
+/// forward (docs/core.md (the composition engine)). Exposed so the
+/// engine can shift a bound call's exit vector, which lives on the
+/// object record rather than inside the blob and so is not carried by
+/// the rewrite itself.
+pub(super) fn widen_shift(sites: &[SiteKind], old: u32) -> u32 {
+    let widened = sites
+        .iter()
+        .filter(|s| {
+            matches!(
+                s,
+                SiteKind::Bound {
+                    addr,
+                    collapse: false,
+                    ..
+                } if *addr < old
+            )
+        })
+        .count();
+    old + 4 * u32::try_from(widened).expect("widened-site count fits u32")
 }
 
 pub(super) fn routine_sig<'a>(
@@ -589,8 +656,13 @@ pub(super) fn scan_sites<'a>(
                     // maps, AND equal per-tape alphabets. A narrower or wider
                     // callee carries a cardinality hole that must trap, and a
                     // projecting identity (fewer tapes than the caller) fails
-                    // the arity check; both stay framed calls.
-                    let collapse = is_full_passthrough(&composite, caller_sig, callee_sig);
+                    // the arity check; both stay framed calls. An EXIT-BEARING
+                    // site never collapses either, whatever its binding: a
+                    // plain call returns through the pushed return address and
+                    // has nowhere to put the other exits
+                    // (docs/core.md (call mechanisms)).
+                    let collapse = record.exits.is_empty()
+                        && is_full_passthrough(&composite, caller_sig, callee_sig);
                     out.push(SiteKind::Bound {
                         addr: d.addr,
                         callee,
@@ -652,6 +724,7 @@ pub(super) fn scan_sites<'a>(
 /// `scan_sites` classified, and `resolve` is shared with `resolve_names`,
 /// the standalone name-resolution query the editor overlays run against —
 /// which has no business failing over a binding.
+#[allow(dead_code)]
 fn refuse_symbolic_binding(order: &[FuncRef]) -> Result<(), LinkError> {
     for f in order {
         for &(_, callee, record) in &f.bound {
@@ -740,14 +813,22 @@ fn validate_binding(
 
 /// Materialize a composite into frame-descriptor bytes (docs/formats.md
 /// (frame descriptors)): per virtual tape a physical index and dense
-/// read/write maps sized to the relevant alphabet — identity where it fits,
-/// `0xFFFF` holes where a symbol has no image in the target alphabet
-/// (unequal-size, hole-based). No exits (a declarative bound call is
-/// single-exit — it returns through the pushed return address).
+/// read/write maps sized to the relevant alphabet — identity where it
+/// fits, `0xFFFF` holes where a symbol has no image in the target
+/// alphabet (unequal-size, hole-based) — followed by the site's exit
+/// vector.
+///
+/// `exits` are POST-REWRITE blob offsets in the CALLING function, written
+/// here as placeholders: layout rebases each to an absolute code address
+/// once the function is placed, exactly as it rebases a raw `.frame`
+/// descriptor's exits (docs/formats.md (frames region)). An exit-free
+/// descriptor is address-independent, as every engine descriptor was
+/// before declarative exits existed.
 fn materialize(
     c: &Composite,
     machine_sig: &RoutineSig,
     order: &[FuncRef],
+    exits: &[u32],
 ) -> Result<Vec<u8>, LinkError> {
     let callee_sig = routine_sig(order, c.routine)?;
     let mut dense: Vec<(u8, Vec<u16>, Vec<u16>)> = Vec::with_capacity(c.tapes.len());
@@ -793,7 +874,7 @@ fn materialize(
         .iter()
         .map(|(p, r, w)| (*p, r.as_slice(), w.as_slice()))
         .collect();
-    Ok(descriptor_bytes(&entries, &[]))
+    Ok(descriptor_bytes(&entries, exits))
 }
 
 /// A dense symbol map over `domain_card` inputs whose images must lie in
