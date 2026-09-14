@@ -367,14 +367,32 @@ fn binding_to_composite(
 
         // Closed-on-unequal (docs/formats.md (bound calls)): identity
         // completion is only for equal-size alphabets. Across differently
-        // sized alphabets the map is closed — a non-blank source symbol the
-        // binding does not name is a hole. Computed from the explicit srcs
-        // still present in `pairs` (identity pairs are stored during
+        // sized alphabets the map is closed — a non-blank source symbol
+        // the binding does not name is a hole. Computed from the explicit
+        // srcs still present in `pairs` (identity pairs are stored during
         // ingestion and only dropped by `canonicalize` below), so an
-        // explicit `k->k` keeps `k` mapped while a truly absent `k` traps.
-        // Read holes are caller symbols with no pair; write holes are callee
-        // symbols with no bidirectional pair writing back.
-        if caller_card != card {
+        // explicit `k->k` keeps `k` mapped while a truly absent `k`
+        // traps. Read holes are caller symbols with no pair; write holes
+        // are callee symbols with no bidirectional pair writing back.
+        //
+        // An OPEN binding replaces the read half of that rule: the
+        // unlisted caller symbols are not absent, they are OPAQUE — they
+        // read as the index `card`, one past the callee's alphabet, which
+        // no callee row can name, so only a `*` cell matches them and
+        // only a keep preserves them (docs/formats.md (bound calls)). The
+        // WRITE half stays closed either way: an opaque symbol is
+        // read-only by construction, exactly like a one-way `=>` pair.
+        if tb.open {
+            if card > MAX_SYMBOL {
+                return Err(ComposeError::SymbolRange {
+                    tape: k,
+                    symbol: card,
+                    cardinality: MAX_SYMBOL + 1,
+                });
+            }
+            open_unlisted(&mut rmap, caller_card, card as u16);
+            close_unlisted(&mut wmap, card);
+        } else if caller_card != card {
             close_unlisted(&mut rmap, caller_card);
             close_unlisted(&mut wmap, card);
         }
@@ -433,6 +451,24 @@ fn close_unlisted(map: &mut SparseMap, domain_card: u32) {
         let s16 = s as u16;
         if !listed.contains(&s16) {
             map.holes.insert(s16);
+        }
+    }
+}
+
+/// Open a read map over its `domain_card` source symbols: every non-blank
+/// source index below `domain_card` that no explicit pair names maps
+/// ONE-WAY onto `opaque` — the index equal to the callee's cardinality,
+/// which no callee row names (docs/formats.md (bound calls) — the open
+/// rule). Blank stays pinned. Called before [`SparseMap::canonicalize`],
+/// like `close_unlisted`, so an explicit identity pair survives as
+/// identity and only a genuinely unnamed symbol becomes opaque.
+fn open_unlisted(map: &mut SparseMap, domain_card: u32, opaque: u16) {
+    let listed: BTreeSet<u16> = map.pairs.keys().copied().collect();
+    let upper = domain_card.min(MAX_SYMBOL + 1);
+    for s in 1..upper {
+        let s16 = s as u16;
+        if !listed.contains(&s16) {
+            map.pairs.insert(s16, opaque);
         }
     }
 }

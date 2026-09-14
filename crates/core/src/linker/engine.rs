@@ -630,22 +630,19 @@ pub(super) fn scan_sites<'a>(
     Ok(out)
 }
 
-/// Refuse a reached bound call written in the SYMBOLIC form
-/// (docs/formats.md (bound calls)) that the link stage still does not
-/// resolve: an open map, or an exit vector. The object format and the
-/// assembler carry both; resolving them — completing what an open map
-/// leaves out, wiring exits to their targets — is future link-stage
-/// work, and nothing below reads `open` or `exits`. Linking either
-/// through would therefore produce a silently wrong image: an open map
-/// would link as a closed one, and exits would vanish. A refusal is the
-/// only honest answer until that work lands. A named entry and a
-/// glyph-labelled destination are no longer symbolic by the time this
-/// guard runs — the pre-pass ahead of it resolves both against the
-/// callee's interface (docs/core.md (symbolic resolution)).
-///
-/// A written-EMPTY map is deliberately NOT refused: `1{}` is a deliberate
-/// identity, and an empty pair list is exactly what the linker already
-/// links — the flag says how the map was spelled, not what it means.
+/// Refuse a reached bound call carrying the ONE form
+/// (docs/formats.md (bound calls)) the link stage still does not
+/// resolve: an exit vector. The object format and the assembler carry
+/// it; wiring exits to their targets is future link-stage work, and
+/// nothing below reads `exits`. Linking one through would therefore
+/// produce a silently wrong image — the exits would simply vanish — so
+/// a refusal is the only honest answer until that work lands. A named
+/// entry, a glyph-labelled destination and an open map are all resolved
+/// by the time this guard runs: the pre-pass ahead of it turns the
+/// first two into numbers against the callee's interface and checks the
+/// third against the callee's `opaque` bits
+/// (docs/core.md (symbolic resolution)), after which `open` is read by
+/// the composition algebra itself.
 ///
 /// Placed at the head of [`lower`] — the ONE gate all three call
 /// mechanisms pass through (`lower` dispatches to mono, hybrid and frames
@@ -658,19 +655,13 @@ pub(super) fn scan_sites<'a>(
 fn refuse_symbolic_binding(order: &[FuncRef]) -> Result<(), LinkError> {
     for f in order {
         for &(_, callee, record) in &f.bound {
-            let form = record
-                .binding
-                .iter()
-                .find_map(|tb| tb.open.then_some("an open map"))
-                .or_else(|| (!record.exits.is_empty()).then_some("an exit vector"));
-            if let Some(form) = form {
+            if !record.exits.is_empty() {
                 return Err(LinkError::BadBinding {
                     callee: order[callee].name.to_string(),
-                    message: format!(
-                        "the call site uses {form}, a symbolic form the object carries but \
-                         the link stage does not resolve yet; write the binding with numeric \
-                         entries and index destinations"
-                    ),
+                    message: "the call site uses an exit vector, a symbolic form the \
+                              object carries but the link stage does not resolve yet; \
+                              write the binding without one"
+                        .to_string(),
                 });
             }
         }
@@ -815,7 +806,12 @@ fn dense_map(
                 return 0xFFFF;
             };
             match apply(s16) {
-                Some(v) if u32::from(v) < codomain_card => v,
+                // `codomain_card` itself is the OPAQUE index an open
+                // binding sends unlisted symbols to: a real image the
+                // callee can only match with `*`, not a hole
+                // (docs/formats.md (bound calls)). Anything beyond it is
+                // still a hole.
+                Some(v) if u32::from(v) <= codomain_card => v,
                 _ => 0xFFFF,
             }
         })

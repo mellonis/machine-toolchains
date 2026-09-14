@@ -64,7 +64,8 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
         .binding
         .iter()
         .any(|tb| tb.pairs.iter().any(|p| p.dst_label.is_some()));
-    if named == 0 && !labelled {
+    let open = record.binding.iter().any(|tb| tb.open);
+    if named == 0 && !labelled && !open {
         return Ok(record.clone());
     }
 
@@ -80,6 +81,9 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     if labelled {
         let iface = require_interface(callee, "a glyph-labelled destination")?;
         resolve_labels(callee, iface, &mut binding)?;
+    }
+    if open {
+        check_opaque(callee, &binding)?;
     }
     Ok(BoundCall {
         binding,
@@ -127,6 +131,30 @@ fn resolve_labels(
                 ));
             };
             pair.dst = u32::try_from(idx).expect("a glyph index fits u32");
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an open binding into a tape the callee does not declare
+/// opaque, and into a callee that describes no interface at all
+/// (docs/core.md (symbolic resolution)). Runs after the reorder, so
+/// entry `k` is callee tape `k`.
+fn check_opaque(callee: &FuncRef, binding: &[TapeBinding]) -> Result<(), LinkError> {
+    for (k, tb) in binding.iter().enumerate() {
+        if !tb.open {
+            continue;
+        }
+        let opaque = callee
+            .interface
+            .and_then(|i| i.opaque.get(k).copied())
+            .unwrap_or(false);
+        if !opaque {
+            return Err(LinkError::OpenBindingUnsupported {
+                callee: callee.name.to_string(),
+                tape: k,
+                param: callee.interface.and_then(|i| i.params.get(k)).cloned(),
+            });
         }
     }
     Ok(())

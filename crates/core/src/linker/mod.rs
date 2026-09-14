@@ -57,6 +57,19 @@ pub enum LinkError {
         callee: String,
         message: String,
     },
+    /// An open binding (`{…, *}`) names a callee tape the callee does not
+    /// declare `opaque`. An open map sends every unlisted caller symbol
+    /// onto one index no callee row names, which is sound only where
+    /// every state that reads the tape has a `*` row — the fact the
+    /// `opaque` bit records (docs/formats.md (routine interfaces)). A
+    /// callee that describes no interface cannot accept one at all.
+    /// `param` is the parameter's declared name when the interface names
+    /// it, `None` when there is no interface to ask.
+    OpenBindingUnsupported {
+        callee: String,
+        tape: usize,
+        param: Option<String>,
+    },
     /// A frame descriptor is inconsistent with the entry signature: a
     /// physical-tape index at or past the machine's arity, or an
     /// undecodable hand-authored descriptor. Carries the owning function's
@@ -134,6 +147,21 @@ impl std::fmt::Display for LinkError {
             }
             Self::BadBinding { callee, message } => {
                 write!(f, "bad binding to `{callee}`: {message}")
+            }
+            Self::OpenBindingUnsupported {
+                callee,
+                tape,
+                param,
+            } => {
+                let which = match param {
+                    Some(p) => format!("parameter `{p}`"),
+                    None => format!("tape {tape}"),
+                };
+                write!(
+                    f,
+                    "an open binding into `{callee}`'s {which}, which is not declared \
+                     opaque; every state that reads it must have a `*` row"
+                )
             }
             Self::BadFrameDescriptor { symbol, message } => {
                 write!(f, "bad frame descriptor in `{symbol}`: {message}")

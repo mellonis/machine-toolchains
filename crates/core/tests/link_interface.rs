@@ -1,15 +1,19 @@
-//! The link stage refuses the SYMBOLIC binding forms it does not resolve
-//! (docs/formats.md (bound calls)). The object format and the assembler
-//! carry a named entry, a glyph-labelled destination, an open map and an
-//! exit vector; nothing below the assembler reads them, so a link would
-//! silently produce a wrong image. Every refusal is checked under all
-//! three call mechanisms, because the guard sits ahead of the point where
-//! they diverge.
+//! What the link stage does with each SYMBOLIC binding form the object
+//! format and the assembler carry (docs/formats.md (bound calls)). A
+//! named entry and a glyph-labelled destination RESOLVE against the
+//! callee's interface, an open map is accepted against the callee's
+//! `opaque` bits (what it then means is `link_open.rs`), and the one
+//! remaining form — an exit vector — is still REFUSED, because nothing
+//! below reads it and a link would silently drop it. Each case is checked
+//! under all three call mechanisms, because both the pre-pass and the
+//! refusal guard sit ahead of the point where they diverge.
 //!
 //! Each fixture is otherwise well-formed: drop the symbolic field and
 //! what is left is the legal numeric binding `[1, 0]`, which the control
-//! test links. That is what makes these tests discriminate — neutralize
-//! the guard and they link instead of failing for some other reason.
+//! test links. That is what makes these tests discriminate — a resolution
+//! test that links for some unrelated reason would match the numeric
+//! form's bytes only by accident, and the refusal test would link rather
+//! than fail differently.
 //!
 //! Everything runs on a neutral fake dialect (per-file-helper convention),
 //! so core stays provably arch-agnostic.
@@ -151,6 +155,27 @@ L:      stp
     )
 }
 
+/// `program`, but `sub`'s first parameter is declared `opaque` — the
+/// precondition an open binding requires.
+fn open_program(binding: &str) -> String {
+    format!(
+        "\
+.routine main, tapes=2, alpha=(4, 4)
+.param a, ('_', 'x', 'y', 'z')
+.param b, ('_', 'x', 'y', 'z')
+.routine sub, tapes=2, alpha=(4, 4)
+.param p, ('_', '0', '1', '2'), opaque
+.param q, ('_', '0', '1', '2')
+.section code
+.func main
+        call    sub {binding}
+L:      stp
+.func sub
+        ret
+"
+    )
+}
+
 /// The refusal every symbolic form takes, under every mechanism: a
 /// `BadBinding` naming the callee and the form that fired.
 #[track_caller]
@@ -224,11 +249,28 @@ fn a_glyph_labelled_destination_resolves_under_every_mechanism() {
     }
 }
 
-/// `{*}` says the listed pairs are not the whole map. Ignoring the flag
-/// links it as a closed map — the one reading that is certainly wrong.
+/// `{*}` says the listed pairs are not the whole map: every unlisted
+/// caller symbol reads as the OPAQUE index — the callee's cardinality,
+/// an index no callee row names. `sub`'s tapes are 4 wide, so the opaque
+/// index is 4 and the binding is legal only because `sub` declares that
+/// tape `opaque`.
+///
+/// `{*}` no longer refuses. What an open map MEANS is pinned in
+/// `link_open.rs`, against its closed counterpart on the UNEQUAL
+/// alphabets where the two genuinely differ — on the equal
+/// cardinalities of this fixture the closed rule completes by identity
+/// and holes nothing, so an open/closed comparison here would prove
+/// nothing.
+///
+/// Mutation it catches: restore the `open` arm of the refusal guard and
+/// this link fails under every mechanism with a `BadBinding`.
 #[test]
-fn an_open_map_is_refused_under_every_mechanism() {
-    refused_under_every_mechanism("[1{*}, 0]", "an open map");
+fn an_open_map_no_longer_refuses() {
+    let src = open_program("[1{*}, 0]");
+    for mech in MECHS {
+        link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
+            .unwrap_or_else(|e| panic!("an open map must link under {mech}: {e}"));
+    }
 }
 
 /// `exits=(L)` names where the callee's exits land. The linker wires no
@@ -265,7 +307,15 @@ fn a_written_empty_map_still_links_exactly_like_the_bare_form() {
 /// function holds the symbolic call — `ghost`, which the BFS from `main`
 /// never reaches, or `main` itself — so the contrast pins the gating and
 /// nothing else. Both carry a REACHED bound call (`main`'s numeric one),
-/// so the guard's loop really walks a binding in each.
+/// so the pre-pass really walks a binding in each.
+///
+/// WHICH check refuses the reached one: `SYMBOLIC` is fully NAMED
+/// (`num:`/`ctl:`) and none of this fixture's routines declares a
+/// `.param`, so `sub` carries no interface and `require_interface` in
+/// the resolution pre-pass refuses it — before the glyph label, the open
+/// map or the exit vector is ever looked at. The message is asserted, not
+/// just the variant, so the comment above cannot drift away from the
+/// check that actually fires.
 #[test]
 fn the_refusal_is_gated_on_reachability() {
     let program = |unreached_body: &str, main_call: &str| {
@@ -300,9 +350,14 @@ G:      ret
         // The very same call, moved into the reached `main`, is refused.
         let err = link(&fake_syntax(), &[asm(&reached)], &[], opts(mech))
             .expect_err("the same binding in a reached function must be refused");
+        let LinkError::BadBinding { callee, message } = &err else {
+            panic!("under {mech}: {err:?}");
+        };
+        assert_eq!(callee, "sub", "under {mech}");
         assert!(
-            matches!(err, LinkError::BadBinding { .. }),
-            "under {mech}: {err:?}"
+            message.contains("a named entry") && message.contains("describes no interface"),
+            "under {mech} the pre-pass's interface check must be the one that \
+             fires: {message}"
         );
     }
 }

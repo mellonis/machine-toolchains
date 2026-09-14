@@ -747,7 +747,10 @@ struct TapeProj {
 /// no symbol inside the callee alphabet (a read hole).
 fn read_image(t: &CompositeTape, p: u16, callee_card: u32) -> Option<u16> {
     match t.rmap.apply(p) {
-        Some(v) if u32::from(v) < callee_card => Some(v),
+        // `callee_card` is the opaque index (docs/formats.md (bound
+        // calls)); it is an image, so the stamp synthesizes no trap row
+        // for it and its preimage expands the callee's `*` row.
+        Some(v) if u32::from(v) <= callee_card => Some(v),
         _ => None,
     }
 }
