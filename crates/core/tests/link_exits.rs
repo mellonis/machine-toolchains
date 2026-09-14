@@ -484,6 +484,25 @@ k:      wr      [1]
         retx    #0
 ";
 
+/// A callee whose BODY disagrees with its own declared exit count: it
+/// declares `exits=1` and returns through `retx #1`. Ruling 19 pins the
+/// site's vector to the declaration, so the splice is the only place this
+/// can surface — nothing validates a routine's body against its interface.
+const BODY_OVERRUNS_ITS_EXITS: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    sub [0] exits=(won)
+        stp
+won:    wr      [1]
+        stp
+.func sub
+        retx    #1
+";
+
 /// The absolute targets of every far `jmp` in `[start, end)` of the
 /// image's code. The sweep is linear, so it can read an operand byte as an
 /// opcode and add a spurious entry — harmless, because every assertion
@@ -651,6 +670,34 @@ fn an_exit_vector_links_under_mono_and_hybrid() {
                     .collect::<Vec<_>>()
             );
         }
+    }
+}
+
+/// A body that returns through an exit its own interface does not declare
+/// is refused where the splice would have to resolve it. The site's vector
+/// is already pinned to the declared count by name resolution, so this is
+/// the one place the disagreement can be seen at all.
+///
+/// Mutation it catches: index `s.exits` directly instead of taking the
+/// `get(k)` refusal and the splice jumps to whatever follows the vector —
+/// or panics — rather than naming the disagreement.
+#[test]
+fn a_body_returning_through_an_undeclared_exit_is_refused() {
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let err = link(
+            &fake_syntax(),
+            &[asm(BODY_OVERRUNS_ITS_EXITS)],
+            &[],
+            opts(mech),
+        )
+        .expect_err("a body overrunning its exit vector must be refused");
+        assert!(
+            matches!(&err, LinkError::BadBinding { callee, message }
+                if callee == "sub"
+                    && message.contains("the body returns through exit 1, but the call site \
+                                         supplies 1 exit(s)")),
+            "under {mech}: {err:?}"
+        );
     }
 }
 
