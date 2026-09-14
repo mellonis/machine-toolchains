@@ -256,11 +256,11 @@ fn a_glyph_labelled_destination_resolves_under_every_mechanism() {
 /// tape `opaque`.
 ///
 /// `{*}` no longer refuses. What an open map MEANS is pinned in
-/// `link_open.rs`, against its closed counterpart on the UNEQUAL
-/// alphabets where the two genuinely differ — on the equal
-/// cardinalities of this fixture the closed rule completes by identity
-/// and holes nothing, so an open/closed comparison here would prove
-/// nothing.
+/// `link_open.rs`, not here — the open rule bites on this fixture too
+/// (its rmap sends 1, 2 and 3 onto the opaque index 4 and its wmap holes
+/// all three), but `sub`'s body is `ret` and nothing else: it reads no
+/// tape and writes none, so no comparison run against it could observe
+/// either half. This test pins only that the link is accepted.
 ///
 /// Mutation it catches: restore the `open` arm of the refusal guard and
 /// this link fails under every mechanism with a `BadBinding`.

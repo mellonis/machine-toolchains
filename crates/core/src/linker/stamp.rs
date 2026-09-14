@@ -384,11 +384,18 @@ pub(super) fn lower_hybrid<'a>(
 }
 
 /// A completed bijection (mono-eligible): every bound tape equal-size (so
-/// identity completion is total) with no one-way `=>` pair (which is
-/// excluded from write-back). Injectivity on equal-size bindings is already
-/// enforced by the engine's `validate_binding`, and total + injective on
-/// equal finite alphabets is surjective — so this is the totality check the
-/// classifier owns, completing the bijection determination.
+/// identity completion is total), with no one-way `=>` pair (which is
+/// excluded from write-back) and not OPEN. Injectivity on equal-size
+/// bindings is already enforced by the engine's `validate_binding`, and
+/// total + injective on equal finite alphabets is surjective — so this is
+/// the totality check the classifier owns, completing the bijection
+/// determination.
+///
+/// An open tape fails it on both halves at once, whatever the
+/// cardinalities: its unlisted symbols read onto ONE opaque index (not
+/// injective) and write back through nothing (not total), so it is exactly
+/// the holey/one-way shape the classifier promises to leave on the frames
+/// path (docs/formats.md (bound calls)).
 fn is_bijection(caller_sig: &RoutineSig, callee_sig: &RoutineSig, record: &BoundCall) -> bool {
     if record.binding.len() != callee_sig.arity as usize {
         return false;
@@ -403,7 +410,7 @@ fn is_bijection(caller_sig: &RoutineSig, callee_sig: &RoutineSig, record: &Bound
         if caller_card != callee_card {
             return false;
         }
-        if tb.pairs.iter().any(|p| p.one_way) {
+        if tb.open || tb.pairs.iter().any(|p| p.one_way) {
             return false;
         }
     }

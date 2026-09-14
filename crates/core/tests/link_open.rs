@@ -126,7 +126,7 @@ fn opts(mech: CallMech) -> LinkOptions {
     }
 }
 
-/// A 5-symbol caller bound-calling a 3-symbol callee that READS its tape:
+/// A caller bound-calling a 3-symbol callee that READS its tape:
 /// `rd`, a match table naming every callee symbol plus a `*` catch-all,
 /// and a dispatch on the result — the probe's shape, and the smallest one
 /// that can tell an open binding from a closed one. A callee body with no
@@ -134,13 +134,15 @@ fn opts(mech: CallMech) -> LinkOptions {
 /// rows come only from a table rewrite), so a bodiless fixture could not
 /// discriminate under mono or hybrid.
 ///
-/// `main_param` and `sub_param` are the two `.param` blocks — the object's
-/// interface section is all-or-none, so both come or go together — and
-/// `binding` the call's operand text.
-fn program(main_param: &str, sub_param: &str, binding: &str) -> String {
+/// `main_card` is the caller band's cardinality (5 for the unequal
+/// fixtures, 3 for the equal-cardinality write-half pin); `main_param` and
+/// `sub_param` are the two `.param` blocks — the object's interface section
+/// is all-or-none, so both come or go together — and `binding` the call's
+/// operand text.
+fn program(main_card: u32, main_param: &str, sub_param: &str, binding: &str) -> String {
     format!(
         "\
-.routine main, tapes=1, alpha=(5)
+.routine main, tapes=1, alpha=({main_card})
 {main_param}.routine sub, tapes=1, alpha=(3)
 {sub_param}.section tables
 T0:     .row    [0]
@@ -185,6 +187,16 @@ const OPEN_MAP: &str = "[0{1->1, 2->2, *}]";
 /// symbols become holes instead.
 const CLOSED_MAP: &str = "[0{1->1, 2->2}]";
 
+/// `main`'s parameter block at the EQUAL cardinality — three glyphs, the
+/// same width as `sub` — for the write-half pin below.
+const MAIN_PARAM_EQ: &str = ".param t, ('_', 'a', 'b')\n";
+
+/// Equal cardinalities with one symbol deliberately left UNNAMED: `1->1`
+/// is the only pair, so the open rule sends caller symbol 2 onto the
+/// opaque index 3 on the read side and holes callee symbol 2 on the write
+/// side. Listing every symbol would hole nothing and pin nothing.
+const OPEN_MAP_EQ: &str = "[0{1->1, *}]";
+
 /// Mutation it catches: keep the closed rule for an open tape and this
 /// links to the CLOSED program's bytes — which the first assertion
 /// forbids — and, under mono, the stamp synthesizes an unmapped-read
@@ -193,8 +205,8 @@ const CLOSED_MAP: &str = "[0{1->1, 2->2}]";
 /// asserted.
 #[test]
 fn an_open_binding_links_under_every_mechanism_and_differs_from_the_closed_one() {
-    let open_src = program(MAIN_PARAM, SUB_OPAQUE, OPEN_MAP);
-    let closed_src = program(MAIN_PARAM, SUB_OPAQUE, CLOSED_MAP);
+    let open_src = program(5, MAIN_PARAM, SUB_OPAQUE, OPEN_MAP);
+    let closed_src = program(5, MAIN_PARAM, SUB_OPAQUE, CLOSED_MAP);
     for mech in MECHS {
         let open = link(&fake_syntax(), &[asm(&open_src)], &[], opts(mech))
             .unwrap_or_else(|e| panic!("the open form must link under {mech}: {e}"));
@@ -232,7 +244,7 @@ fn an_open_binding_links_under_every_mechanism_and_differs_from_the_closed_one()
 /// discriminates every glyph accepts opaque input it can only misread.
 #[test]
 fn an_open_binding_into_a_non_opaque_tape_is_refused() {
-    let src = program(MAIN_PARAM, SUB_PLAIN, OPEN_MAP);
+    let src = program(5, MAIN_PARAM, SUB_PLAIN, OPEN_MAP);
     for mech in MECHS {
         let err = link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
             .expect_err("a non-opaque tape must refuse an open binding");
@@ -255,7 +267,7 @@ fn an_open_binding_into_a_non_opaque_tape_is_refused() {
 /// interface and an interfaceless callee silently accepts one.
 #[test]
 fn an_open_binding_into_an_interfaceless_callee_is_refused() {
-    let src = program("", "", OPEN_MAP);
+    let src = program(5, "", "", OPEN_MAP);
     let err = link(&fake_syntax(), &[asm(&src)], &[], opts(CallMech::Frames))
         .expect_err("an interfaceless callee must refuse an open binding");
     assert!(
@@ -265,11 +277,14 @@ fn an_open_binding_into_an_interfaceless_callee_is_refused() {
 }
 
 /// The descriptor the frames path emits must carry the opaque index, not
-/// the hole sentinel. Mutation it catches: leave `dense_map`'s guard at
-/// `< codomain_card` and the two opaque symbols come back `0xFFFF`.
+/// the hole sentinel — on the READ map, which is the only direction the
+/// allowance is passed to. Mutation it catches: pass `allow_opaque: false`
+/// at `materialize`'s rmap call (or leave `dense_map`'s bound at
+/// `< codomain_card` outright) and the two opaque symbols come back
+/// `0xFFFF`.
 #[test]
 fn the_frames_descriptor_carries_the_opaque_index_not_a_hole() {
-    let src = program(MAIN_PARAM, SUB_OPAQUE, OPEN_MAP);
+    let src = program(5, MAIN_PARAM, SUB_OPAQUE, OPEN_MAP);
     let out = link(&fake_syntax(), &[asm(&src)], &[], opts(CallMech::Frames)).expect("links");
     let bytes = out.executable.to_bytes();
     // The dense rmap for a 5-symbol physical band reads
@@ -283,5 +298,95 @@ fn the_frames_descriptor_carries_the_opaque_index_not_a_hole() {
     assert!(
         bytes.windows(want.len()).any(|w| w == want),
         "the opaque rmap run is not in the image"
+    );
+}
+
+/// The open rule's WRITE half stays closed even where the two alphabets
+/// are the SAME size — the one place it changes behaviour on equal
+/// cardinalities, since the closed path only closes on unequal ones. `sub`
+/// writes symbol 2 at `C:`, and `[0{1->1, *}]` names only symbol 1, so the
+/// write map holes 2 and the stamped write becomes the dialect's `trap #1`
+/// (unmapped write) instead of writing through.
+///
+/// Mutation it catches: drop `close_unlisted(&mut wmap, card)` from the
+/// open branch and the write map identity-completes instead — `wr [2]`
+/// survives the stamp as `07 82` and no `trap #1` is emitted.
+#[test]
+fn the_open_write_half_closes_on_equal_cardinalities() {
+    let src = program(3, MAIN_PARAM_EQ, SUB_OPAQUE, OPEN_MAP_EQ);
+    let out = link(&fake_syntax(), &[asm(&src)], &[], opts(CallMech::Mono))
+        .expect("an open binding on equal cardinalities links under mono");
+    let code = &out.executable.code;
+    // `trap` is opcode 0x18 with an Imm8; kind 1 is the unmapped write.
+    assert!(
+        code.windows(2).any(|w| w == [0x18, 0x01]),
+        "the unmapped write must lower to `trap #1`: {code:?}"
+    );
+    // `wr [2]` is opcode 0x07 plus a one-element symbol vector whose only
+    // payload carries the terminator bit: 0x80 | 2.
+    assert!(
+        !code.windows(2).any(|w| w == [0x07, 0x82]),
+        "no `wr [2]` may survive the stamp: {code:?}"
+    );
+    // Non-vacuity: the MAPPED write does survive, so the two assertions
+    // above are reading a real stamped body and not an empty one.
+    assert!(
+        code.windows(2).any(|w| w == [0x07, 0x81]),
+        "`wr [1]` is mapped and must survive: {code:?}"
+    );
+}
+
+/// Hybrid's classifier promises to leave anything holey or one-way on the
+/// frames path. An open binding is both at once — its unlisted symbols
+/// read onto ONE opaque index (not injective) and write back through
+/// nothing (not total) — so `is_bijection` must reject it even where the
+/// cardinalities match and no `=>` pair appears.
+///
+/// Mutation it catches: drop `tb.open` from `is_bijection`'s condition and
+/// this equal-size, one-way-free binding classifies as a completed
+/// bijection; hybrid mono-stamps it onto the base profile
+/// (`instantiations` 1, `composites` 0), where nothing activates the open
+/// read map.
+#[test]
+fn hybrid_keeps_an_open_binding_on_the_frames_path() {
+    let src = program(3, MAIN_PARAM_EQ, SUB_OPAQUE, OPEN_MAP_EQ);
+    let out = link(&fake_syntax(), &[asm(&src)], &[], opts(CallMech::Hybrid))
+        .expect("an open binding links under hybrid");
+    assert!(
+        out.report.composites >= 1 && out.report.instantiations == 0,
+        "an open binding is not a bijection, so hybrid must route it to \
+         frames rather than mono-stamp it: {:?}",
+        out.report
+    );
+}
+
+/// Both `OpenBindingUnsupported` Display arms, rendered in full. Mutation
+/// it catches: swap the `param`/`tape` arms, or reword either, and the
+/// message a user reads stops naming what they wrote.
+#[test]
+fn the_open_binding_refusal_renders_the_parameter_or_the_tape_number() {
+    let named = link(
+        &fake_syntax(),
+        &[asm(&program(5, MAIN_PARAM, SUB_PLAIN, OPEN_MAP))],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect_err("a non-opaque tape refuses");
+    assert_eq!(
+        named.to_string(),
+        "an open binding into `sub`'s parameter `n`, which is not declared \
+         opaque; every state that reads it must have a `*` row"
+    );
+    let numbered = link(
+        &fake_syntax(),
+        &[asm(&program(5, "", "", OPEN_MAP))],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect_err("an interfaceless callee refuses");
+    assert_eq!(
+        numbered.to_string(),
+        "an open binding into `sub`'s tape 0, which is not declared \
+         opaque; every state that reads it must have a `*` row"
     );
 }

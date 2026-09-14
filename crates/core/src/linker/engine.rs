@@ -764,19 +764,28 @@ fn materialize(
                 ),
             })?;
         let callee_card = callee_sig.cardinalities.get(k).copied().unwrap_or(0);
-        // Read map: physical symbol (0..phys_card) -> virtual (< callee_card).
+        // Read map: physical symbol (0..phys_card) -> virtual (< callee_card),
+        // or the opaque index `callee_card` itself when an open binding sent
+        // an unlisted symbol there — a read-only image, hence the allowance
+        // on THIS call and not the write one below.
         let rmap = dense_map(
             |s| t.rmap.apply(s),
             t.rmap.is_identity(),
             phys_card,
             callee_card,
+            true,
         );
         // Write map: virtual symbol (0..callee_card) -> physical (< phys_card).
+        // An image equal to `phys_card` is meaningless here — the callee
+        // cannot write a symbol the physical band has no cell for — so the
+        // opaque allowance is OFF and such an image stays a hole, matching
+        // `stamp::write_image` (docs/formats.md (bound calls)).
         let wmap = dense_map(
             |s| t.wmap.apply(s),
             t.wmap.is_identity(),
             callee_card,
             phys_card,
+            false,
         );
         dense.push((t.phys, rmap, wmap));
     }
@@ -791,11 +800,21 @@ fn materialize(
 /// `codomain_card`: empty (identity, no translation) when the sparse map is
 /// identity and the alphabets match; otherwise one `u16` per input —
 /// `0xFFFF` for a hole or an identity symbol with no image in the codomain.
+///
+/// `allow_opaque` widens that bound by exactly one, admitting the image
+/// `codomain_card` itself. It is the OPAQUE index an open binding sends its
+/// unlisted symbols to — an index no callee row names, so only a `*` cell
+/// matches it (docs/formats.md (bound calls)). The allowance belongs to the
+/// READ direction alone: an opaque symbol is read-only, and on the write
+/// side an image equal to the physical cardinality names no cell of the
+/// band and must stay a hole. `stamp::read_image` / `write_image` are the
+/// mono-side twins of exactly this split.
 fn dense_map(
     apply: impl Fn(u16) -> Option<u16>,
     is_identity: bool,
     domain_card: u32,
     codomain_card: u32,
+    allow_opaque: bool,
 ) -> Vec<u16> {
     if is_identity && domain_card == codomain_card {
         return Vec::new();
@@ -806,12 +825,10 @@ fn dense_map(
                 return 0xFFFF;
             };
             match apply(s16) {
-                // `codomain_card` itself is the OPAQUE index an open
-                // binding sends unlisted symbols to: a real image the
-                // callee can only match with `*`, not a hole
-                // (docs/formats.md (bound calls)). Anything beyond it is
-                // still a hole.
-                Some(v) if u32::from(v) <= codomain_card => v,
+                Some(v) if u32::from(v) < codomain_card => v,
+                // Exactly one index past the codomain, and only where the
+                // caller allows it: the opaque index.
+                Some(v) if allow_opaque && u32::from(v) == codomain_card => v,
                 _ => 0xFFFF,
             }
         })
