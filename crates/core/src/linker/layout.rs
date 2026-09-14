@@ -805,10 +805,14 @@ pub(super) fn build(
             };
             let Some(&there) = abs_of.get(target_func).and_then(|m| m.get(&target_off)) else {
                 return Err(LinkError::MalformedBlob {
+                    // A target index past `order` means the prune dropped
+                    // the caller a splice returns into and the reindex
+                    // missed it; there is no name left to quote, so say so
+                    // rather than render an empty one.
                     symbol: order
                         .get(target_func)
                         .map(|t| t.name.to_string())
-                        .unwrap_or_default(),
+                        .unwrap_or_else(|| "<pruned>".to_string()),
                     at: target_off,
                 });
             };

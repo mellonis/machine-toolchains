@@ -503,6 +503,137 @@ won:    wr      [1]
         retx    #1
 ";
 
+/// A spliced callee whose body holds a `ret` AND a `stp`. Both are
+/// `OperandKind::None` + `Flow::Stop`, so only the dialect's declared
+/// `return_opcode` tells them apart: exactly one of the two becomes a
+/// jump, and the `stp` survives verbatim.
+const RET_THEN_STP: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    sub [0] exits=(won)
+back:   stp
+won:    wr      [1]
+        stp
+.func sub
+        ret
+        stp
+";
+
+/// Two callers with BYTE-IDENTICAL shapes, each bound-calling `sub` with
+/// one exit at the same offset. Their sites therefore share a composite,
+/// a `then` (6) and an exit offset (7) — everything in the stamp key
+/// except which function they sit in. `sub` comes back through `retx #0`,
+/// so each copy's one jump lands on ITS caller's exit label, which is what
+/// makes the two distinguishable in the image.
+const TWO_CALLERS: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine a, tapes=1, alpha=(3)
+.param p, ('_', '0', '1')
+.routine b, tapes=1, alpha=(3)
+.param q, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    a
+        call    b
+        stp
+.func a
+        call    sub [0] exits=(la)
+        stp
+la:     wr      [1]
+        stp
+.func b
+        call    sub [0] exits=(lb)
+        stp
+lb:     wr      [1]
+        stp
+.func sub
+        retx    #0
+";
+
+/// A nested exit-bearing site whose CALLER COPY shifts. `outer` runs on
+/// one tape inside a two-tape machine, so its `wr` re-emits one byte wider
+/// in the copy — and that `wr` sits AHEAD of the call, so every later
+/// offset in the copy is one past its offset in the generic. Only a
+/// coordinate translation through the copy's own offset map lands the
+/// splice on the right instruction.
+const NESTED_SHIFTED: &str = "\
+.routine main, tapes=2, alpha=(3, 3)
+.param t, ('_', '0', '1')
+.param u, ('_', '0', '1')
+.routine outer, tapes=1, alpha=(3)
+.param o, ('_', '0', '1')
+.routine inner, tapes=1, alpha=(3), exits=1
+.param i, ('_', '0', '1')
+.section code
+.func main
+        call    outer [0]
+        stp
+.func outer
+        wr      [1]
+        call    inner [0] exits=(k)
+        ret
+k:      wr      [1]
+        ret
+.func inner
+        retx    #0
+";
+
+/// A two-exit callee whose body reaches BOTH returns, so the copy mints
+/// two jumps and their order pins `k` positionally: `retx #0` must land on
+/// the first exit and `retx #1` on the second.
+const BOTH_EXITS: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine mid, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=2
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    mid
+        stp
+.func mid
+        call    sub [0] exits=(won, lost)
+        stp
+won:    wr      [1]
+        stp
+lost:   wr      [2]
+        stp
+.func sub
+        retx    #0
+        retx    #1
+";
+
+/// An exit-bearing site that is the LAST instruction of its function, so
+/// the copy's `ret` would have no instruction to return to. `sub` comes
+/// back through a plain `ret`, which is the return that actually has
+/// nowhere to land — the refusal itself is unconditional, because whether
+/// a callee reaches `ret` is a property of its body, not of the site.
+const TAIL_POSITION: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine mid, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    mid
+        stp
+.func mid
+won:    wr      [1]
+        call    sub [0] exits=(won)
+.func sub
+        ret
+";
+
 /// The absolute targets of every far `jmp` in `[start, end)` of the
 /// image's code. The sweep is linear, so it can read an operand byte as an
 /// opcode and add a spurious entry — harmless, because every assertion
@@ -697,6 +828,201 @@ fn a_body_returning_through_an_undeclared_exit_is_refused() {
                     && message.contains("the body returns through exit 1, but the call site \
                                          supplies 1 exit(s)")),
             "under {mech}: {err:?}"
+        );
+    }
+}
+
+/// `ret`, `stp` and `hlt` are all `OperandKind::None` + `Flow::Stop`, so
+/// the copy can only tell the RETURN apart by the dialect's declared
+/// `return_opcode`. `sub`'s body holds a `ret` and then a `stp`: exactly
+/// one jump is minted, and the `stp` is copied verbatim.
+///
+/// Mutation it catches: rewrite on `entry.flow == Flow::Stop` instead of
+/// `Some(entry.opcode) == syntax.return_opcode` and the `stp` becomes a
+/// second jump back to the call site — two jumps, and a program that can
+/// no longer stop.
+#[test]
+fn a_splice_rewrites_the_declared_return_and_nothing_else_that_stops() {
+    let obj = assemble(&fake_syntax(), ARCH, RET_THEN_STP, true).expect("assembles with -g");
+    let out = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        opts(CallMech::Mono),
+    )
+    .expect("links under mono");
+    let main = func(&out, "main");
+    let copy = copy_of(&out, "sub");
+    let landed = jump_targets(&out.executable.code, copy.start, copy.end);
+    assert_eq!(
+        landed,
+        vec![label_addr(main, "back")],
+        "exactly one jump, to the call site's continuation"
+    );
+    // The `stp` survived: it is the copy's last byte, still the stop
+    // opcode rather than the tail of a second jump's displacement.
+    let stp = fake_syntax()
+        .by_mnemonic("stp")
+        .expect("the fake dialect has `stp`")
+        .opcode;
+    assert_eq!(
+        out.executable.code[copy.end as usize - 1],
+        stp,
+        "the `stp` must be copied verbatim"
+    );
+}
+
+/// Two callers of the same shape produce sites that agree on EVERYTHING
+/// in the stamp key except which function they sit in: the same composite,
+/// the same `then`, the same exit offset. They still need two copies,
+/// because each returns into its own caller.
+///
+/// Mutation it catches: drop `caller` from the stamp key and the two sites
+/// dedup onto one copy — `b` then jumps into a copy that returns into `a`,
+/// at `a`'s exit label, which the per-caller decode below exposes.
+#[test]
+fn two_identical_callers_do_not_share_one_copy() {
+    let obj = assemble(&fake_syntax(), ARCH, TWO_CALLERS, true).expect("assembles with -g");
+    let out = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        opts(CallMech::Mono),
+    )
+    .expect("links under mono");
+    assert_eq!(
+        out.report.instantiations, 2,
+        "two callers, two copies: {:?}",
+        out.report
+    );
+    let code = &out.executable.code;
+    let mut entered = Vec::new();
+    for (caller, label) in [("a", "la"), ("b", "lb")] {
+        let f = func(&out, caller);
+        let targets = jump_targets(code, f.start, f.end);
+        assert_eq!(
+            targets.len(),
+            1,
+            "`{caller}` enters its copy by exactly one jump: {targets:?}"
+        );
+        let copy_start = targets[0];
+        // That copy returns into THIS caller, at THIS caller's exit.
+        let copy = out
+            .map
+            .functions
+            .iter()
+            .find(|c| c.start == copy_start)
+            .unwrap_or_else(|| panic!("`{caller}` jumps to {copy_start}, which is no function"));
+        assert!(
+            copy.name.starts_with("sub."),
+            "`{caller}` must jump into a copy of `sub`, not `{}`",
+            copy.name
+        );
+        assert!(
+            jump_targets(code, copy.start, copy.end).contains(&label_addr(f, label)),
+            "`{}` must return to `{label}` in `{caller}`",
+            copy.name
+        );
+        entered.push(copy_start);
+    }
+    assert_ne!(
+        entered[0], entered[1],
+        "the two callers must not share one copy"
+    );
+}
+
+/// The nested coordinate translation, positionally. `outer`'s copy
+/// re-emits its leading `wr [1]` at the machine's two-tape width — three
+/// bytes where the generic had two — so every offset past it shifts by one:
+/// the exit label `k`, at blob offset 9 in the generic, is at offset 10 in
+/// the copy. That +1 is the whole point of translating through the copy's
+/// own offset map.
+///
+/// Mutation it catches: skip the `xlat` in `resolve_site` and use the raw
+/// generic offsets — the exit (9 in the generic) lands on the copy's `ret`
+/// at offset 9 instead of on its `wr` at 10. The link still SUCCEEDS
+/// (measured): `inner`'s body returns only through `retx #0`, so the
+/// un-translated `then` (8, not an instruction boundary of the copy at
+/// all) is never emitted as a fixup and never checked. A silently wrong
+/// jump into a live instruction is exactly what the decode below is for.
+#[test]
+fn a_nested_splice_translates_its_offsets_into_the_caller_copy() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(NESTED_SHIFTED)],
+        &[],
+        opts(CallMech::Mono),
+    )
+    .expect("links under mono");
+    let outer = copy_of(&out, "outer");
+    let inner = copy_of(&out, "inner");
+    let landed = jump_targets(&out.executable.code, inner.start, inner.end);
+    let want = outer.start + 10;
+    assert_eq!(
+        landed,
+        vec![want],
+        "the exit must land on the copy's second `wr` at {want}, not on the \
+         un-translated offset {}",
+        outer.start + 9
+    );
+    // Self-describing: that address really is the widened `wr`.
+    let wr = fake_syntax()
+        .by_mnemonic("wr")
+        .expect("the fake dialect has `wr`")
+        .opcode;
+    assert_eq!(
+        out.executable.code[want as usize], wr,
+        "the splice's exit must land on a `wr`"
+    );
+}
+
+/// `retx #k` is indexed, and the index has to be honoured: `retx #0` lands
+/// on the first exit, `retx #1` on the second. The copy mints one jump per
+/// return, in body order, so the decoded pair is directly comparable.
+///
+/// Mutation it catches: index the site's vector with a constant (or read
+/// `k` from the wrong operand) and both jumps land on `won`.
+#[test]
+fn retx_lands_on_the_exit_its_index_names() {
+    let obj = assemble(&fake_syntax(), ARCH, BOTH_EXITS, true).expect("assembles with -g");
+    let out = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        opts(CallMech::Mono),
+    )
+    .expect("links under mono");
+    let mid = func(&out, "mid");
+    let copy = copy_of(&out, "sub");
+    assert_eq!(
+        jump_targets(&out.executable.code, copy.start, copy.end),
+        vec![label_addr(mid, "won"), label_addr(mid, "lost")],
+        "`retx #0` to the first exit, `retx #1` to the second"
+    );
+}
+
+/// An exit-bearing call in TAIL position has no instruction after it, so
+/// the copy's `ret` would have nowhere to land. Refused by name rather
+/// than left to surface as a malformed blob at an offset the author cannot
+/// trace back to this line.
+///
+/// Mutation it catches: drop the tail check from `check_splice_site` and
+/// the link still fails — but as `MalformedBlob` naming an offset one past
+/// the end of `mid`, which says nothing about the cause.
+#[test]
+fn an_exit_bearing_call_in_tail_position_is_refused_by_name() {
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let err = link(&fake_syntax(), &[asm(TAIL_POSITION)], &[], opts(mech))
+            .expect_err("a tail-position exit-bearing call must be refused");
+        assert_eq!(
+            err,
+            LinkError::ExitBearingTailCall("mid".to_string()),
+            "under {mech}"
+        );
+        assert!(
+            err.to_string()
+                .contains("cannot be the last instruction of `mid`"),
+            "the message must name the cause: {err}"
         );
     }
 }

@@ -117,6 +117,15 @@ pub enum LinkError {
     /// two mono refusals above — it mints no stamp names, so it cannot
     /// collide.
     StampNameCollision(String),
+    /// An exit-bearing declarative bound call is the LAST instruction of
+    /// its function. Such a site is lowered as a jump into a per-site copy
+    /// whose plain `ret` becomes a jump to the instruction after the call
+    /// (docs/core.md (call mechanisms)) — and here there is no instruction
+    /// after it, so the return has nowhere to land. Carries the owning
+    /// function's name. Named rather than left to surface as a malformed
+    /// blob at some offset, because the cause is a property of the source
+    /// the author can act on.
+    ExitBearingTailCall(String),
 }
 
 impl std::fmt::Display for LinkError {
@@ -188,6 +197,12 @@ impl std::fmt::Display for LinkError {
                 "a mono-stamped routine copy would be named `{name}`, which \
                  already names another routine or an earlier stamp in this \
                  link; build with --call-mech=frames"
+            ),
+            Self::ExitBearingTailCall(symbol) => write!(
+                f,
+                "an exit-bearing call needs an instruction after it for the \
+                 return to land on; it cannot be the last instruction of \
+                 `{symbol}`"
             ),
         }
     }

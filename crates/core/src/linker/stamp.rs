@@ -223,11 +223,11 @@ pub(super) fn lower_mono<'a>(
             } = site
             {
                 // An exit-bearing site is entered by a jump, not a call
-                // (docs/core.md (call mechanisms)) — resolve the opcode
-                // here, while the callee's name is still in hand for the
-                // message, so the retarget loop below cannot fail.
+                // (docs/core.md (call mechanisms)) — check here, while the
+                // caller and the callee's name are still in hand, so the
+                // retarget loop below cannot fail.
                 if !record.exits.is_empty() {
-                    enter_jump_opcode(syntax, &order[*callee].name)?;
+                    check_splice_site(syntax, &order[fi], *addr, &order[*callee].name)?;
                 }
                 seeds.push((fi, *addr, *callee, record));
             }
@@ -375,9 +375,10 @@ pub(super) fn lower_hybrid<'a>(
                 let caller_sig = order[fi].signature.unwrap_or(machine_sig);
                 if is_bijection(caller_sig, callee_sig, record) {
                     if !record.exits.is_empty() {
-                        // Resolved here, while the callee's name is in
-                        // hand, so the promotion loop below cannot fail.
-                        enter_jump_opcode(syntax, &order[*callee].name)?;
+                        // Checked here, while the caller and the callee's
+                        // name are in hand, so the promotion loop below
+                        // cannot fail.
+                        check_splice_site(syntax, &order[fi], *addr, &order[*callee].name)?;
                         mono_splices[fi].insert(*addr);
                     }
                     seeds.push((fi, *addr, *callee, record));
@@ -674,6 +675,32 @@ fn enter_jump_opcode(syntax: &ArchSyntax, name: &str) -> Result<u8, LinkError> {
     })
 }
 
+/// What an exit-bearing site needs before a mono path commits to splicing
+/// it (docs/core.md (call mechanisms)): the dialect's far jump to enter
+/// the copy with, and an instruction AFTER the call for the copy's plain
+/// `ret` to land on. A site in tail position has no such instruction —
+/// `then` would be the offset one past the end of the caller's blob — and
+/// is named here rather than left to surface downstream as a malformed
+/// blob at an offset nothing in the source points at.
+///
+/// Called at the three points a mono path first commits to copying a
+/// site: the seed loop, hybrid's classifier, and the stamp closure's own
+/// bound arm. In the closure the caller is the GENERIC routine, but the
+/// copy re-emits one instruction per original instruction, so tail
+/// position in the generic is tail position in the copy.
+fn check_splice_site(
+    syntax: &ArchSyntax,
+    caller: &FuncRef,
+    addr: u32,
+    callee_name: &str,
+) -> Result<(), LinkError> {
+    enter_jump_opcode(syntax, callee_name)?;
+    if addr as usize + 5 >= caller.blob.len() {
+        return Err(LinkError::ExitBearingTailCall(caller.name.to_string()));
+    }
+    Ok(())
+}
+
 /// The same opcode, as the instruction a splice LEAVES through — its
 /// `ret → jmp <then>` and `retx #k → jmp <exit_k>` rewrites (docs/core.md
 /// (call mechanisms)).
@@ -829,7 +856,7 @@ fn mono_stamps<'a>(
                     let site = if record.exits.is_empty() {
                         None
                     } else {
-                        enter_jump_opcode(syntax, &order[*callee].name)?;
+                        check_splice_site(syntax, &order[routine], *addr, &order[*callee].name)?;
                         Some(PendingSite::InStamp {
                             slot,
                             then: *addr + 5,
