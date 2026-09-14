@@ -26,7 +26,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use super::LinkError;
 use crate::formats::object::{
-    BlobDebug, BlobVariant, BoundCall, ObjectFile, RoutineSig, SymbolDef,
+    BlobDebug, BlobVariant, BoundCall, ObjectFile, RoutineInterface, RoutineSig, SymbolDef,
 };
 
 /// A blob's build column (docs/formats.md (MO)). An object carrying no
@@ -200,6 +200,15 @@ pub(crate) struct FuncRef<'a> {
     /// The function's generic-routine signature, when its object signs
     /// blobs (signatures are all-or-none per object, parallel to blobs).
     pub signature: Option<&'a RoutineSig>,
+    /// The function's interface record, when its object carries an
+    /// interface section: parameter names, per-tape glyphs, `writes`,
+    /// `enters`/`leaves`, the `opaque` bits, the exit count and the
+    /// `returns` bit (docs/formats.md (routine interfaces)). Indexed by
+    /// blob exactly like `signature`. `None` for a v2/v3 object, for a
+    /// PM-1 object, and for any object whose assembly declared no
+    /// `.param` lines — all three read the same way, which is the point
+    /// of the typed absence.
+    pub interface: Option<&'a RoutineInterface>,
     /// Index of the input that supplied this definition, counting through
     /// the user objects then the libraries — provenance for the
     /// name-resolution query surface (docs/core.md (name resolution)).
@@ -445,6 +454,10 @@ pub(crate) fn resolve<'a>(
                     .signatures
                     .as_ref()
                     .and_then(|s| s.get(site.1 as usize)),
+                interface: object
+                    .interface
+                    .as_ref()
+                    .and_then(|i| i.routines.get(site.1 as usize)),
                 origin: site.0,
             }
         })

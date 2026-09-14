@@ -112,16 +112,19 @@ pub(super) struct FramesPlan {
 }
 
 /// The composition engine's lowering result, shared by every entry point
-/// (`lower`, `lower_mono`, `lower_hybrid`): the (possibly rewritten) order,
-/// an optional `FramesPlan`, engine counters, and the sorted names any
-/// stamping pass pruned as newly-orphaned generics (docs/core.md (the link
-/// report)).
-pub(super) type LoweredOrder<'a> = (
-    Vec<FuncRef<'a>>,
-    Option<FramesPlan>,
-    EngineStats,
-    Vec<String>,
-);
+/// (`lower`, `lower_mono`, `lower_hybrid`): the (possibly rewritten)
+/// order, an optional `FramesPlan`, engine counters, the sorted names any
+/// stamping pass pruned as newly-orphaned generics, the link warnings the
+/// site checks raised, and the hybrid fold decisions
+/// (docs/core.md (the link report)).
+pub(super) struct Lowered<'a> {
+    pub order: Vec<FuncRef<'a>>,
+    pub plan: Option<FramesPlan>,
+    pub stats: EngineStats,
+    pub orphaned: Vec<String>,
+    pub diagnostics: Vec<super::LinkDiagnostic>,
+    pub folds: Vec<super::FoldDecision>,
+}
 
 /// One control-transfer site in a routine's original blob, in offset order.
 pub(super) enum SiteKind<'a> {
@@ -154,7 +157,7 @@ pub(super) fn lower<'a>(
     order: Vec<FuncRef<'a>>,
     machine_sig: &RoutineSig,
     call_mech: CallMech,
-) -> Result<LoweredOrder<'a>, LinkError> {
+) -> Result<Lowered<'a>, LinkError> {
     // The symbolic binding forms the object format carries are refused
     // before anything reads a binding, so no mechanism can mis-lower one.
     refuse_symbolic_binding(&order)?;
@@ -169,7 +172,14 @@ pub(super) fn lower<'a>(
         .iter()
         .any(|s| s.iter().any(|k| matches!(k, SiteKind::Bound { .. })));
     if !has_bound {
-        return Ok((order, None, EngineStats::default(), Vec::new()));
+        return Ok(Lowered {
+            order,
+            plan: None,
+            stats: EngineStats::default(),
+            orphaned: Vec::new(),
+            diagnostics: Vec::new(),
+            folds: Vec::new(),
+        });
     }
 
     // Mono stamps rewritten copies; hybrid classifies per site. FRAMES keeps
@@ -179,7 +189,14 @@ pub(super) fn lower<'a>(
         CallMech::Hybrid => super::stamp::lower_hybrid(syntax, order, &sites, machine_sig),
         CallMech::Frames => {
             let (order, plan, stats) = lower_frames(syntax, order, &sites, machine_sig)?;
-            Ok((order, plan, stats, Vec::new()))
+            Ok(Lowered {
+                order,
+                plan,
+                stats,
+                orphaned: Vec::new(),
+                diagnostics: Vec::new(),
+                folds: Vec::new(),
+            })
         }
     }
 }
@@ -1009,6 +1026,7 @@ fn rewrite_blob<'a>(
             table: Cow::Owned(new_table),
             table_fixups: new_fixups,
             signature: f.signature,
+            interface: f.interface,
             origin: f.origin,
         },
         framed,

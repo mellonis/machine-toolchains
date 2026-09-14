@@ -48,7 +48,7 @@ use super::compose::{
     is_full_passthrough,
 };
 use super::engine::{
-    EngineStats, LoweredOrder, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites,
+    EngineStats, Lowered, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites,
 };
 use super::resolve::FuncRef;
 use crate::asm::decode::{self, Body, DecodedOperand};
@@ -126,7 +126,7 @@ pub(super) fn lower_mono<'a>(
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<LoweredOrder<'a>, LinkError> {
+) -> Result<Lowered<'a>, LinkError> {
     let n = order.len();
     let id_world = identity_world(sites, n);
 
@@ -239,7 +239,14 @@ pub(super) fn lower_mono<'a>(
             .all(|name| out.iter().any(|f| f.name == *name)),
         "mono stamping must never orphan a stamp it just minted"
     );
-    Ok((out, None, engine_stats, orphaned))
+    Ok(Lowered {
+        order: out,
+        plan: None,
+        stats: engine_stats,
+        orphaned,
+        diagnostics: Vec::new(),
+        folds: Vec::new(),
+    })
 }
 
 // -- HYBRID ------------------------------------------------------------------
@@ -255,7 +262,7 @@ pub(super) fn lower_hybrid<'a>(
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<LoweredOrder<'a>, LinkError> {
+) -> Result<Lowered<'a>, LinkError> {
     let n = order.len();
     let id_world = identity_world(sites, n);
 
@@ -291,7 +298,14 @@ pub(super) fn lower_hybrid<'a>(
     // The two degenerate cases route straight to a single mechanism.
     if seeds.is_empty() {
         let (order, plan, stats) = lower_frames(syntax, order, sites, machine_sig)?;
-        return Ok((order, plan, stats, Vec::new()));
+        return Ok(Lowered {
+            order,
+            plan,
+            stats,
+            orphaned: Vec::new(),
+            diagnostics: Vec::new(),
+            folds: Vec::new(),
+        });
     }
     if !any_frames {
         return lower_mono(syntax, order, sites, machine_sig);
@@ -359,7 +373,14 @@ pub(super) fn lower_hybrid<'a>(
         synthesized_trap_rows: mono_stats.synthesized_trap_rows,
         expanded_rows: mono_stats.expanded_rows,
     };
-    Ok((order, plan, stats, orphaned))
+    Ok(Lowered {
+        order,
+        plan,
+        stats,
+        orphaned,
+        diagnostics: Vec::new(),
+        folds: Vec::new(),
+    })
 }
 
 /// A completed bijection (mono-eligible): every bound tape equal-size (so
@@ -653,6 +674,9 @@ fn mono_stamps<'a>(
             table: Cow::Owned(body.table),
             table_fixups: body.table_fixups,
             signature: None,
+            // A mono stamp is a specialized copy with no backing symbol,
+            // so it carries neither a signature nor an interface record.
+            interface: None,
             origin: callee.origin,
         });
     }
@@ -1334,6 +1358,7 @@ mod tests {
             table: Cow::Owned(Vec::new()),
             table_fixups: Vec::new(),
             signature: None,
+            interface: None,
             origin: 0,
         }
     }

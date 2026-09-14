@@ -4,6 +4,7 @@
 pub(crate) mod binding_label;
 pub(crate) mod compose;
 mod engine;
+mod interface;
 mod layout;
 pub(crate) mod resolve;
 mod stamp;
@@ -190,6 +191,42 @@ impl std::fmt::Display for CallMech {
             Self::Hybrid => "hybrid",
         })
     }
+}
+
+/// A link-time WARNING: a finding that does not stop the link
+/// (docs/core.md (link warnings)). Its fields and its code registry come
+/// with the site checks that raise it; it exists already so every
+/// lowering entry point has one shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkDiagnostic {
+    /// The stable kebab-case code; joins the shared allow namespace
+    /// (docs/tmt/lint.md (the allow namespace)).
+    pub code: &'static str,
+    /// The rendered finding, one sentence, no trailing period.
+    pub message: String,
+    /// The function the site sits in.
+    pub function: String,
+    /// The site's blob offset inside that function.
+    pub offset: u32,
+    /// The source line, when the object carried `-g` debug lines.
+    pub line: Option<u32>,
+}
+
+/// One hybrid exit-bearing fold decision, for the link report
+/// (docs/core.md (call mechanisms)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldDecision {
+    /// The callee routine the group reaches.
+    pub routine: String,
+    /// The number of exit-bearing bijection sites in the group.
+    pub sites: u32,
+    /// The callee body's size in bytes (code blob plus table blob).
+    pub body_bytes: u32,
+    /// The bytes the would-be frames descriptors cost, summed.
+    pub descriptor_bytes: u32,
+    /// True when the group was shared under frames; false when each site
+    /// became a mono seed.
+    pub shared: bool,
 }
 
 /// The BFS entry symbol a link resolves from when [`LinkOptions::entry`]
@@ -431,15 +468,32 @@ pub fn link(
     // calls and computes the runtime compose table (docs/core.md (the
     // composition engine)). It is a no-op for bindingless links, keeping
     // them on the byte-identical bindingless path.
-    let (order, frames_plan, stats, orphaned) = match entry_sig {
-        Some(sig) => engine::lower(syntax, resolved.order, sig, options.call_mech)?,
-        None => (
-            resolved.order,
-            None,
-            engine::EngineStats::default(),
-            Vec::new(),
-        ),
+    //
+    // Symbolic bound-call records resolve here, once, into an arena the
+    // engine reads instead of the objects (docs/core.md (symbolic
+    // resolution)). Nothing below this point can see a parameter name or
+    // a glyph label.
+    let arena = interface::resolve_bindings(&resolved.order)?;
+    let resolved_order = interface::rebind(resolved.order, &arena);
+    let lowered = match entry_sig {
+        Some(sig) => engine::lower(syntax, resolved_order, sig, options.call_mech)?,
+        None => engine::Lowered {
+            order: resolved_order,
+            plan: None,
+            stats: engine::EngineStats::default(),
+            orphaned: Vec::new(),
+            diagnostics: Vec::new(),
+            folds: Vec::new(),
+        },
     };
+    let engine::Lowered {
+        order,
+        plan: frames_plan,
+        stats,
+        orphaned,
+        diagnostics: _diagnostics,
+        folds: _folds,
+    } = lowered;
 
     let built = layout::build(syntax, &order, options.relax, frames_plan.as_ref())?;
 
