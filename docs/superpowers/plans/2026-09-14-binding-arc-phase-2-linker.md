@@ -34,6 +34,7 @@ Ratified 2026-09-13 with the arc, and again for this phase:
 - **Drift guards are set-compares in BOTH directions**: the error/warning code registries against the `docs/tmt/cli.md` tables (`crates/turing-machine/tests/error_code_docs.rs`, `crates/core/tests/error_code_docs.rs`); the completions registry against the real parser (`crates/turing-machine/src/completions/registry.rs`, `crates/turing-machine/tests/completions_registry.rs`); `cli_docs` quoting `--help` verbatim (`crates/turing-machine/tests/cli_docs.rs:52`, which pins `docs/tmt/cli.md:277-291` byte-for-byte against `LINK_USAGE`); the man page (rendered from `cli::usage_text`, so an edited `LINK_USAGE` propagates automatically).
 - **The composition algebra's law tests stay green** (`crates/core/src/linker/compose.rs:1211-1284`: `compose_matches_step_by_step_simulation`, `composition_is_associative`, `identity_laws_hold`, `canonicalize_stable_under_repetition`). **The everything-matrix stays green** (`crates/turing-machine/tests/opt_equivalence.rs::everything_matrix_is_green`). **The three mechanisms stay equivalent on every existing program** (`crates/turing-machine/tests/mode_equivalence.rs`).
 - **Docs policy.** Published pages (`docs/core.md`, `docs/formats.md`, `docs/tmt/*.md`) and code comments cite `docs/<page>.md (keyword)` only — no `spec §N`, no `Task N`, no issue/PR numbers, no hosting URLs. This plan is an internal artifact and may cite freely.
+- **Forward citations are accepted within this phase** (the same ruling phase 1 ran under): a code comment may cite `docs/core.md (symbolic resolution)`, `(link warnings)`, `(graft drift)` or `(call mechanisms)` before Tasks 10, 13 and 17 land those sections. **The final whole-branch review checks that every citation resolves to a real page-plus-keyword** — a citation still dangling when the branch is reviewed is a defect, not a deferred nicety.
 - **Commits.** Conventional commits with scope (`feat(core):`, `fix(core):`, `test(core):`, `docs(core):`, `feat(turing-machine):`). Implementer subagents MAY commit their own task on branch `binding-arc-2`; merging and pushing stay the owner's. **Commit messages carry no Claude attribution and no `Claude-Session:` line** — the harness appends one, so every commit step ends with: run `git log -1 --format=%B`, and if a `Claude-Session:` or `Generated with Claude Code` line is present, `git commit --amend` with the message stripped back to the intended text.
 - **`git add` explicit paths, never `-A` or `.`** — a task commit carries its own files only; anything else in the working tree (the SDD workspace, scratch, another task's leftovers) must never be swept into it.
 - **Temp paths in tests**: PID plus a per-call atomic counter, never a fixed name. Copy `crates/turing-machine/tests/mode_equivalence.rs:902-917` (`fn scratch`) verbatim into any new TM test file that writes to disk.
@@ -84,7 +85,7 @@ Verified against the working tree on 2026-09-14. An implementer may rely on thes
 | `crates/turing-machine/src/cli/driver.rs` | `tmt build`'s `-Werror` covers the link stage; manifest `lint.allow` unions into the link allow list |
 | `crates/turing-machine/src/lint/mod.rs` | `known_code` gains the fifth surface |
 | `crates/turing-machine/src/completions/registry.rs` | `link_spec()` gains `--allow` (repeatable) and `-Werror` |
-| `crates/turing-machine/tests/link_matrix.rs` | **NEW.** The `.tma`-driven three-mechanism run matrix (exits, open, cross-object) |
+| `crates/turing-machine/tests/link_matrix.rs` | **CREATED by Task 8b** (its harness — the `mono_run.rs` `build`/`run`/`cell_at` helpers, `MECHS`, and the closure-fold run test); **appended to by Task 16** with the exits/open/cross-object/mixed fixtures. Task 16 keeps 8b's fixtures. |
 | `crates/turing-machine/tests/mode_equivalence.rs` | The relink byte-identity sweep gains the three new programs |
 | `crates/turing-machine/tests/plain_site_sweep.rs` | **NEW, `#[ignore]`d.** The corpus sweep instrument (Task 1) |
 | `docs/core.md` | The linker sections: symbolic resolution, graft drift, link diagnostics, the hybrid fold rule, the link-warning code table |
@@ -97,6 +98,8 @@ Verified against the working tree on 2026-09-14. An implementer may rely on thes
 ### Task 1: The plain-site corpus sweep (a gated finding, no behaviour change)
 
 **Why first:** Task 12 turns "a callee wider in tape count or alphabet" into a hard link error. Today plain call sites are checked for *nothing* (`crates/core/src/linker/engine.rs:583-588` pushes `SiteKind::Plain` and moves on), so this is the one genuine behaviour change in the phase. This task measures it before anybody implements it.
+
+**`SiteKind::Plain` is wider than "a call".** `scan_sites` pushes it for a relocated plain call AND for a relocated tail jump or conditional branch into another function (`crates/core/src/linker/engine.rs:595-609`) — the tail-call optimizer turns calls into jumps, and the hazard is identical either way: control reaches the callee's body over the caller's bands. So Task 12 grades those edges too, and this sweep must cover them. It does, and not by accident: it walks `obj.relocations`, which is every symbol reference in the blob regardless of the instruction that consumes it — calls, tail jumps and branches alike. Do not narrow it to call sites.
 
 **Files:**
 - Create: `crates/turing-machine/tests/plain_site_sweep.rs`
@@ -293,11 +296,9 @@ Paste the full `ERROR-WOULD-FIRE` and `WARN-WOULD-FIRE` line count and the lines
 
 If `mtc_turing_machine::stdlib::object()` is not public, use whatever the crate exposes (`crates/turing-machine/src/stdlib/mod.rs:57` holds the `OnceLock`); if nothing is, make the sweep compile `crates/turing-machine/src/stdlib/std.tmc` itself and say so in the notes.
 
-- [ ] **Step 3: Run the same sweep over core's own link tests**
+- [ ] **Step 3: Audit core's own link fixtures by hand**
 
-Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core --test link_tables && CARGO_TARGET_DIR=... cargo test -p mtc-core --test link_variants && CARGO_TARGET_DIR=... cargo test -p mtc-core --test mode_equivalence 2>/dev/null; true`
-
-Then grep the fixtures by hand for plain sites whose callee is wider:
+Grep the fixtures for plain sites whose callee is wider:
 
 Run: `grep -n "^\.routine" crates/core/tests/link_tables.rs crates/core/tests/link_variants.rs crates/turing-machine/tests/mode_equivalence.rs crates/turing-machine/tests/mono_run.rs crates/turing-machine/tests/composition_engine.rs`
 
@@ -353,41 +354,66 @@ Then run `git log -1 --format=%B` and `git commit --amend` if a `Claude-Session:
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `crates/core/tests/link_interface.rs`, after `a_written_empty_map_still_links_exactly_like_the_bare_form`:
+The regression floor for this task is **the existing `cargo test -p mtc-core` suite** — its link tests already assert report numbers and image properties over the whole bound-call surface, so a pre-pass that corrupted a record would break them. Linking one source twice and comparing proves nothing extra, so this task's own new test targets the one thing the suite cannot see: that the records the engine reads are *the arena's*, not the objects'.
+
+Add a `#[cfg(test)] mod tests` at the end of `crates/core/src/linker/interface.rs` (a unit test — it needs `FuncRef` and the arena, both private to the crate):
 
 ```rust
-/// The pre-pass runs on every link and is transparent while it resolves
-/// nothing: a purely numeric program links to the same bytes it always
-/// did. This is the arena's regression floor — neutralize `rebind` so it
-/// hands the engine a record that is not the one the pre-pass produced,
-/// and the bytes move.
-#[test]
-fn a_numeric_program_is_unchanged_by_the_resolution_pre_pass() {
-    let src = program("[1, 0]");
-    for mech in MECHS {
-        let a = link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
-            .unwrap_or_else(|e| panic!("the numeric form must link under {mech}: {e}"));
-        // The image is well-formed and carries the one framed/stamped site.
-        assert!(
-            !a.executable.to_bytes().is_empty(),
-            "an empty image under {mech}"
-        );
-        // Re-linking is byte-identical: the arena introduces no ordering
-        // or identity dependence.
-        let b = link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("relinks");
-        assert_eq!(
-            a.executable.to_bytes(),
-            b.executable.to_bytes(),
-            "the pre-pass made the {mech} link non-reproducible"
-        );
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pre-pass is the identity on a purely numeric binding, and
+    /// `rebind` really re-points the `FuncRef`s at the arena: after it,
+    /// every `bound` entry's record is the arena's own allocation, not
+    /// the object's.
+    ///
+    /// Mutation it catches: make `rebind` a no-op (or have it point at
+    /// anything other than the arena entry the pre-pass produced) and the
+    /// `ptr::eq` assertion fails — which is precisely the failure the
+    /// hybrid re-scan would otherwise hit silently, since the object's
+    /// record and the arena's are EQUAL for a numeric binding and no
+    /// value comparison can tell them apart.
+    #[test]
+    fn rebind_points_every_site_at_its_arena_record() {
+        let (objects, order) = numeric_fixture();
+        let arena = resolve_bindings(&order).expect("a numeric binding resolves");
+        // The identity half: nothing symbolic, so nothing changed.
+        for (f, resolved) in order.iter().zip(&arena) {
+            for (&(_, _, original), r) in f.bound.iter().zip(resolved) {
+                assert_eq!(original, r, "the pre-pass altered a numeric record");
+            }
+        }
+        // The identity half again, sharper: equal but NOT the same object.
+        for (f, resolved) in order.iter().zip(&arena) {
+            for (&(_, _, original), r) in f.bound.iter().zip(resolved) {
+                assert!(
+                    !std::ptr::eq(original, r),
+                    "the arena must own its records, not alias the object's"
+                );
+            }
+        }
+        let order = rebind(order, &arena);
+        for (f, resolved) in order.iter().zip(&arena) {
+            for (&(_, _, record), r) in f.bound.iter().zip(resolved) {
+                assert!(
+                    std::ptr::eq(record, r),
+                    "`{}` still reads the object's record, not the arena's",
+                    f.name
+                );
+            }
+        }
+        drop(objects);
     }
 }
 ```
 
-- [ ] **Step 2: Run it to confirm it passes today (it is the floor, not a red test)**
+`numeric_fixture()` builds an `ObjectFile` carrying one numeric bound call and runs `resolve::resolve` over it to get the order. Write it in the same module; the shape to copy is `crates/core/tests/link_tables.rs`'s single-object link fixtures plus `crates/core/src/asm::assemble` with the crate's own `asm::syntax::fixture::test_syntax()`. Keep the objects alive (hence the binding and the `drop` at the end) — `order` borrows from them.
 
-Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core --test link_interface`
-Expected: PASS. Record the exact `.executable.to_bytes().len()` for each mechanism by adding a temporary `println!` if you want a stronger floor; remove it before committing.
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core linker::interface`
+Expected: FAIL — `resolve_bindings`/`rebind` do not exist yet (compile error). After Step 4 it must pass; if the `ptr::eq` assertion passes *before* `rebind` is called, the arena is aliasing the object and Step 4 is wrong.
 
 - [ ] **Step 3: Add `interface` to `FuncRef`**
 
@@ -560,7 +586,7 @@ and add the two types `Lowered` refers to in `crates/core/src/linker/mod.rs`, ri
 
 ```rust
 /// A link-time WARNING: a finding that does not stop the link
-/// (docs/core.md (link diagnostics)). Task 10 gives it its fields and
+/// (docs/core.md (link warnings)). Task 10 gives it its fields and
 /// its code registry; it exists from this task so every lowering entry
 /// point has one shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -640,7 +666,7 @@ Expected: PASS — every existing image is byte-identical.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/core/src/linker/interface.rs crates/core/src/linker/mod.rs crates/core/src/linker/resolve.rs crates/core/src/linker/engine.rs crates/core/src/linker/stamp.rs crates/core/tests/link_interface.rs
+git add crates/core/src/linker/interface.rs crates/core/src/linker/mod.rs crates/core/src/linker/resolve.rs crates/core/src/linker/engine.rs crates/core/src/linker/stamp.rs
 git commit -m "feat(core): the link stage's resolution arena, FuncRef::interface and a named lowering result"
 ```
 
@@ -960,7 +986,7 @@ fn a_mixed_named_and_positional_list_is_refused() {
     // The assembler rejects a mixed list at parse time, so this fixture
     // is built by hand rather than assembled: it is the hand-crafted
     // object a third-party producer could emit.
-    use mtc_core::formats::object::{BoundCall, TapeBinding};
+    use mtc_core::formats::object::TapeBinding;
     let mut obj = asm(&program("[1, 0]"));
     obj.bound_calls[0].binding[0] = TapeBinding {
         param: Some("p".to_string()),
@@ -973,7 +999,6 @@ fn a_mixed_named_and_positional_list_is_refused() {
             if message.contains("mixes named and positional entries")),
         "{err:?}"
     );
-    let _ = std::mem::size_of::<BoundCall>();
 }
 ```
 
@@ -1215,7 +1240,7 @@ Then `git log -1 --format=%B`; amend if a `Claude-Session:` line was appended.
 - Modify: `crates/core/src/linker/compose.rs:284-395` (`binding_to_composite`), `:423-438` (`close_unlisted`)
 - Modify: `crates/core/src/linker/interface.rs` (the `opaque` check)
 - Modify: `crates/core/src/linker/mod.rs` (`LinkError::OpenBindingUnsupported`)
-- Modify: `crates/core/src/linker/engine.rs` (delete `refuse_symbolic_binding`'s last arm — the function becomes a no-op body; **do not delete the function yet**, Task 9 does)
+- Modify: `crates/core/src/linker/engine.rs` (shrink `refuse_symbolic_binding` to the ONE form still unresolved — the exit vector; its call stays, and Task 9 deletes the function)
 - Modify: `crates/core/tests/link_interface.rs:185-188`
 - Create: `crates/core/tests/link_open.rs`
 
@@ -1237,16 +1262,21 @@ Replace `an_open_map_is_refused_under_every_mechanism` (`crates/core/tests/link_
 /// index is 4 and the binding is legal only because `sub` declares that
 /// tape `opaque`.
 ///
-/// Mutation it catches: keep the closed rule for an open tape and the
-/// unlisted symbols become HOLES, so the frames descriptor carries
-/// `0xFFFF` where it must carry 4 — the two images below stop matching.
+/// `{*}` no longer refuses. What an open map MEANS is pinned in
+/// `link_open.rs` (Step 7), against its closed counterpart on the
+/// UNEQUAL alphabets where the two genuinely differ — on the equal
+/// cardinalities of this fixture the closed rule completes by identity
+/// and holes nothing, so an open/closed comparison here would prove
+/// nothing.
+///
+/// Mutation it catches: restore the `open` arm of the refusal guard and
+/// this link fails under every mechanism with a `BadBinding`.
 #[test]
-fn an_open_map_links_under_every_mechanism() {
+fn an_open_map_no_longer_refuses() {
     let src = open_program("[1{*}, 0]");
     for mech in MECHS {
-        let out = link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
+        link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
             .unwrap_or_else(|e| panic!("an open map must link under {mech}: {e}"));
-        assert!(!out.executable.to_bytes().is_empty(), "under {mech}");
     }
 }
 ```
@@ -1569,8 +1599,11 @@ const CLOSED: &str = "\
 ";
 
 /// Mutation it catches: keep the closed rule for an open tape and this
-/// links to the CLOSED program's bytes — which the second assertion
-/// forbids.
+/// links to the CLOSED program's bytes — which the first assertion
+/// forbids — and, under mono, the stamp synthesizes an unmapped-read
+/// trap row for each of the two unlisted symbols, which the second
+/// forbids. The two halves fail in different mechanisms, so both are
+/// asserted.
 #[test]
 fn an_open_binding_links_under_every_mechanism_and_differs_from_the_closed_one() {
     for mech in MECHS {
@@ -1583,7 +1616,22 @@ fn an_open_binding_links_under_every_mechanism_and_differs_from_the_closed_one()
             closed.executable.to_bytes(),
             "an open map must not link like a closed one under {mech}"
         );
+        assert_eq!(
+            open.report.synthesized_trap_rows, 0,
+            "an opaque symbol is an IMAGE, not a hole, so it owes no trap row \
+             under {mech}: {:?}",
+            open.report
+        );
     }
+    // And the closed form really does hole — otherwise the contrast above
+    // would hold for a reason unrelated to the open rule.
+    let closed = link(&fake_syntax(), &[asm(CLOSED)], &[], opts(CallMech::Mono))
+        .expect("the closed form links under mono");
+    assert!(
+        closed.report.synthesized_trap_rows > 0,
+        "the closed counterpart must hole: {:?}",
+        closed.report
+    );
 }
 
 /// Mutation it catches: delete `check_opaque` and a routine that
@@ -1648,7 +1696,7 @@ fn the_frames_descriptor_carries_the_opaque_index_not_a_hole() {
 - [ ] **Step 8: Run everything and commit**
 
 Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core`
-Expected: PASS (with `an_exit_vector_is_refused_under_every_mechanism` ignored).
+Expected: PASS, all six `link_interface` tests included — `an_exit_vector_is_refused_under_every_mechanism` still refuses, because the guard still runs for that one form. Nothing is ignored anywhere in this task.
 
 Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-post-machine --test golden_programs && CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-turing-machine --test mode_equivalence`
 Expected: PASS — no existing program has an open binding, so no image moves.
@@ -2171,14 +2219,35 @@ fn a_wrong_exit_count_is_refused() {
     );
 }
 
-/// The descriptor's exit words must be ABSOLUTE code addresses inside
-/// `main`, not the blob-relative placeholders the engine wrote. Mutation
-/// it catches: skip the rebase in `emit_planned_region` and the exits
-/// come out as small blob offsets, which are not inside the image's code
-/// range.
+/// The descriptor's exit words must be the EXACT absolute addresses of
+/// `won` and `lost`, in that order — not the blob-relative placeholders
+/// the engine wrote.
+///
+/// The expected values are DERIVED, not transcribed: assemble with `-g`
+/// so the object carries each label's original blob offset, then
+/// `absolute = main.start + raw + 4`, the `+ 4` being the one widened
+/// bound site (`main`'s only bound call, at offset 1) that precedes both
+/// labels. The sidecar's own label addresses must agree with that
+/// arithmetic, which pins the shift independently of the descriptor.
+///
+/// Mutation it catches: skip the rebase in `emit_planned_region` and the
+/// image carries the shifted BLOB offsets instead — small numbers, which
+/// the final assertion explicitly forbids. A range check would not catch
+/// it, since a small offset can also fall inside `main`'s range.
 #[test]
-fn the_frames_descriptor_exits_are_absolute_code_addresses() {
-    let out = link(&fake_syntax(), &[asm(TWO_EXITS)], &[], opts(CallMech::Frames))
+fn the_frames_descriptor_exits_are_the_exact_absolute_addresses() {
+    let obj = assemble(&fake_syntax(), ARCH, TWO_EXITS, true).expect("assembles with -g");
+    let raw_of = |name: &str| -> u32 {
+        obj.debug
+            .as_ref()
+            .expect("-g")
+            .iter()
+            .flat_map(|b| b.labels.iter())
+            .find(|(n, _)| n == name)
+            .map(|(_, off)| *off)
+            .unwrap_or_else(|| panic!("no label `{name}` in the object"))
+    };
+    let out = link(&fake_syntax(), &[obj.clone()], &[], opts(CallMech::Frames))
         .expect("links under frames");
     let main = out
         .map
@@ -2186,24 +2255,42 @@ fn the_frames_descriptor_exits_are_absolute_code_addresses() {
         .iter()
         .find(|f| f.name == "main")
         .expect("`main` is in the sidecar");
-    // Both exit targets lie strictly inside `main`'s emitted range, and
-    // neither is 0 (the blob-relative placeholder for `main`'s first
-    // instruction would be, and a rebase that silently did nothing would
-    // leave small values here).
+    let want_addr = |name: &str| main.start + raw_of(name) + 4;
+    // The sidecar agrees with the arithmetic: the shift is +4, once.
+    for name in ["won", "lost"] {
+        let sidecar = main
+            .labels
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, a)| *a)
+            .unwrap_or_else(|| panic!("no `{name}` in the sidecar"));
+        assert_eq!(sidecar, want_addr(name), "`{name}`'s address");
+    }
+    // The descriptor carries exactly those two words, in vector order.
     let bytes = out.executable.to_bytes();
-    let in_main: Vec<u32> = (main.start..main.end).collect();
+    let want: Vec<u8> = [want_addr("won"), want_addr("lost")]
+        .iter()
+        .flat_map(|a| a.to_le_bytes())
+        .collect();
     assert!(
-        in_main.iter().any(|&a| bytes
-            .windows(4)
-            .any(|w| u32::from_le_bytes(w.try_into().unwrap()) == a && a > main.start)),
-        "no rebased exit address inside `main` ({}..{})",
-        main.start,
-        main.end
+        bytes.windows(want.len()).any(|w| w == want),
+        "the descriptor does not carry [{}, {}] in order",
+        want_addr("won"),
+        want_addr("lost")
+    );
+    // And the UN-rebased placeholders are nowhere in it.
+    let bad: Vec<u8> = [raw_of("won") + 4, raw_of("lost") + 4]
+        .iter()
+        .flat_map(|a| a.to_le_bytes())
+        .collect();
+    assert!(
+        !bytes.windows(bad.len()).any(|w| w == bad),
+        "the exit vector was never rebased"
     );
 }
 ```
 
-Note for the implementer: if `LinkOutput.map`'s field is not `functions`, read `crates/core/src/linker/mod.rs`'s `MapFile`/`MapFunction` definitions and adjust the accessor — the assertion's substance (an address inside `main`'s range) does not change.
+Notes for the implementer, both load-bearing: `assemble` needs importing into this file with `ARCH` (copy the `const ARCH: u8` and the `use` line from `link_interface.rs:17-22`), and `ObjectFile` must be `Clone` for the `obj.clone()` above — it is (`crates/core/src/formats/object/mod.rs:75`). If `MapFunction`'s field for labels is not `labels`, read `crates/core/src/linker/mod.rs`'s `MapFunction` and adjust; the arithmetic does not change.
 
 - [ ] **Step 9: Run the gates and commit**
 
@@ -2233,7 +2320,7 @@ Two mechanisms this task introduces, both new:
 
 **Files:**
 - Modify: `crates/core/src/asm/syntax.rs:73-93` (`ArchSyntax`), plus a `jump_opcode()` helper near `framed_call_opcode()`
-- Modify: **all 36 `ArchSyntax { … }` literals** (list in "Established facts", item 6)
+- Modify: **every `ArchSyntax { … }` literal in the tree at this point.** Established fact 6 counted 36 across twelve files on the pre-phase tree, and this phase has since ADDED two test files that carry one each — `crates/core/tests/link_resolution.rs` (Task 3) and `crates/core/tests/link_open.rs` (Task 5) — plus `crates/core/tests/link_exits.rs` (Task 6). **Do not work from the fact's list.** Run `grep -rln "ArchSyntax {" crates` first, edit every file it names, and stage exactly that set.
 - Modify: `crates/core/src/linker/resolve.rs` (`FuncRef.site_fixups`)
 - Modify: `crates/core/src/linker/stamp.rs:124-243` (`lower_mono` seeds), `:505-661` (`mono_stamps` key + targets), `:741-1020` (`build_stamp`)
 - Modify: `crates/core/src/linker/layout.rs` (patch `site_fixups`)
@@ -2245,7 +2332,19 @@ Two mechanisms this task introduces, both new:
   - `ArchSyntax.return_opcode: Option<u8>` — the dialect's plain return instruction. `None` means the dialect has none, which is an error only if a reachable mono exit-bearing site needs one.
   - `ArchSyntax::jump_opcode(&self) -> Option<u8>` — the single `Flow::Jump` entry whose operand is `OperandKind::RelI32`.
   - `FuncRef.site_fixups: Vec<(u32, usize, u32)>` — `(hole offset in this blob, target function index, post-rewrite blob offset inside that function)`. Layout patches each to the RelI32 displacement reaching that address. Empty for every function the engine did not synthesize.
-  - The mono stamp key becomes `(routine, composite, exits, then)` — the exits and `then` appended to `canonical_key(&composite)` exactly as Task 6 appends them to the frames intern key, so an exit-free stamp's key and therefore its `<routine>.<digest8>` NAME are unchanged. **The digest itself stays `digest(&composite)`** — widening it would rename every existing stamp and move every existing mono image.
+  - The mono stamp key becomes `(routine, composite, caller, exits, then)` — appended to `canonical_key(&composite)` exactly as Task 6 appends to the frames intern key, so an exit-free stamp's key and therefore its `<routine>.<digest8>` NAME are unchanged. **The digest itself stays `digest(&composite)`** — widening it would rename every existing stamp and move every existing mono image. The **caller index** is in the key alongside the spec's `(routine, composite, exits, then)` because `then` and the exit offsets are CALLER-blob-relative and mean nothing without naming which caller: two sites in different functions can share a `then` value and be entirely different splices. A precision of the spec's tuple, not a departure from it.
+  - ```rust
+    /// The `SpliceSite` for one exit-bearing site, with its caller
+    /// offsets shifted into the post-rewrite blob layout. One spelling,
+    /// used by the seed loop, the closure loop, and Task 8b's
+    /// shared-aware closure.
+    fn site_for(
+        caller: usize,
+        addr: u32,
+        record: &BoundCall,
+        widened: &[HashSet<u32>],
+    ) -> Option<SpliceSite>;
+    ```
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2336,7 +2435,8 @@ won:    call    tail
 .func tail
         ret
 ";
-    let out = link(&fake_syntax(), &[asm(ORPHANS)], &[], opts(CallMech::Mono))
+    let obj = assemble(&fake_syntax(), ARCH, ORPHANS, true).expect("assembles with -g");
+    let out = link(&fake_syntax(), &[obj], &[], opts(CallMech::Mono))
         .expect("links under mono");
     // `sub` lost its only caller when the site was retargeted to the copy.
     assert!(
@@ -2344,12 +2444,53 @@ won:    call    tail
         "the generic must be pruned: {:?}",
         out.report.dropped
     );
-    // And the image still names `tail`, whose index moved.
+    // The copy's `retx #0` became a jump to `won` in `main`. DECODE it:
+    // a stale function index would send it somewhere else entirely, and
+    // nothing about `dropped` or the function list would show that.
+    let main = out
+        .map
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("`main` is in the sidecar");
+    let want = main
+        .labels
+        .iter()
+        .find(|(n, _)| n == "won")
+        .map(|(_, a)| *a)
+        .expect("`won` is a labelled position in `main`");
+    // The copy is the one function whose name starts with `sub.`.
+    let copy = out
+        .map
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with("sub."))
+        .expect("the splice copy is in the sidecar");
+    let bytes = out.executable.to_bytes();
+    let jmp = fake_syntax()
+        .jump_opcode()
+        .expect("the fake dialect has a far jump");
+    let mut landed = Vec::new();
+    let mut at = copy.start as usize;
+    while at + 5 <= copy.end as usize {
+        if bytes[at] == jmp {
+            let disp = i32::from_le_bytes(bytes[at + 1..at + 5].try_into().unwrap());
+            landed.push((at as i64 + 5 + i64::from(disp)) as u32);
+            at += 5;
+        } else {
+            at += 1;
+        }
+    }
     assert!(
-        out.map.functions.iter().any(|f| f.name == "tail"),
-        "`tail` must survive the reindex"
+        landed.contains(&want),
+        "the splice's jump lands at {landed:?}, not at `won` ({want})"
     );
 }
+```
+
+The scan is a linear sweep, so it can read an operand byte as an opcode and add a spurious entry — harmless, because the assertion is that the wanted address IS among the targets, not that it is the only one.
+
+```rust
 
 /// A caller holding BOTH a spliced exit-bearing site and a framed holey
 /// one: under hybrid the frames path widens the second 5 → 9 bytes,
@@ -2431,7 +2572,7 @@ and, next to `framed_call_opcode()`:
     }
 ```
 
-Now add `return_opcode: …` to every one of the 36 literals. The two production dialects:
+Now add `return_opcode: …` to every literal `grep -rln "ArchSyntax {" crates` names. The two production dialects:
 
 - `crates/turing-machine/src/asm/mod.rs`, in `tm1_syntax()`, next to `trap_opcode: Some(TRAP),`:
   ```rust
@@ -2439,11 +2580,11 @@ Now add `return_opcode: …` to every one of the 36 literals. The two production
         // to the call site's continuation (docs/core.md (call mechanisms)).
         return_opcode: Some(RET),
   ```
-- `crates/post-machine/src/asm/mod.rs`, in `pm1_syntax()`: `return_opcode: Some(<PM-1's ret opcode>),` — read the entry table in that function for the name; PM-1 never reaches the mono exit path (it has no exit-bearing sites and `interface` is off), so this is a table entry only and no PM-1 byte moves.
+- `crates/post-machine/src/asm/mod.rs`, in `pm1_syntax()`: `return_opcode: Some(<PM-1's ret opcode>),` — read the entry table in that function for the name. **PM-1 cannot reach the mono exit path at all**, and the reason is structural rather than a property of PM programs: PM's compiler builds objects through `ObjectFile::v2` (`crates/core/src/formats/object/mod.rs:292-314`), which sets `signatures: None`, so `link()` takes the `None` arm of its `match entry_sig` (`crates/core/src/linker/mod.rs:417-442`) and never calls `engine::lower`. No lowering, no stamping, no splice. This is a table entry only, and no PM-1 byte moves.
 
-Every other literal is a fake dialect in core's own source or tests: add `return_opcode: None,` unless the dialect has a `ret` entry that a test needs rewritten — in `crates/core/tests/link_exits.rs` and `crates/core/tests/link_interface.rs` set `return_opcode: Some(0x0B)` (their `ret`).
+Every other literal is a fake dialect in core's own source or tests: add `return_opcode: None,` unless the dialect has a `ret` entry that a test needs rewritten — in `crates/core/tests/link_exits.rs`, `link_interface.rs`, `link_resolution.rs` and `link_open.rs` set `return_opcode: Some(0x0B)` (their `ret`).
 
-Run `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo build --workspace 2>&1 | grep "missing field"` to enumerate anything missed; the compiler is the checklist.
+Run `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo build --workspace --all-targets 2>&1 | grep "missing field"` to enumerate anything missed; the compiler is the checklist, and `--all-targets` is what makes it see the test files.
 
 - [ ] **Step 4: Add `site_fixups` to `FuncRef` and patch them in layout**
 
@@ -2499,6 +2640,15 @@ In `crates/core/src/linker/layout.rs`, after the per-function code loop and **be
                 });
             };
             let operand_at = (bases[fi] + here + 1) as usize;
+            // The same typed refusal the two lookups above take: a fixup
+            // whose operand falls outside the emitted code is malformed
+            // blob data, never a slice panic.
+            if operand_at + 4 > code.len() {
+                return Err(LinkError::MalformedBlob {
+                    symbol: f.name.to_string(),
+                    at: hole,
+                });
+            }
             let end = i64::from(bases[fi] + here + 5);
             let off = i64::from(bases[target_func] + there) - end;
             let off32 = i32::try_from(off).expect("a spliced jump reaches within i32");
@@ -2571,36 +2721,35 @@ with the name still `format!("{}.{:08x}", order[routine].name, digest(&composite
     }
 ```
 
-(c) `lower_mono`'s seed loop (`:150-166`) records the site for an exit-bearing record. The `then` offset is the instruction after the call — under mono the site is NOT widened (a `jmp` is the same 5 bytes as a `call`), so `then = addr + 5` and the exits need no shift: `widen_shift` over a mono site list is the identity, because mono widens nothing. State that in a comment and assert it:
+(c) **`lower_mono`'s seed loop (`:150-166`) is unchanged.** It keeps pushing `(fi, *addr, *callee, record)`; every splice-site datum is derived inside `mono_stamps` from that same `record` and `addr` through `site_for` (below), so there is one construction site rather than two that can drift. `lower_mono` passes an all-empty `widened`, because mono rewrites no blob and therefore shifts nothing — which is what makes `site_for` the identity on the pure-mono path while still being correct on hybrid's.
+
+(d) In `mono_stamps`, the seed interning (`:527-550`) passes the site — **with the offsets shifted into the post-rewrite blob layout** — through the one helper both loops use:
 
 ```rust
-            if let SiteKind::Bound {
-                addr,
-                callee,
-                record,
-                collapse: false,
-            } = site
-            {
-                seeds.push((fi, *addr, *callee, record));
-            }
-```
-stays as it is; the site data is derived inside `mono_stamps` from the same `record` and `addr`, so nothing changes here.
-
-(d) In `mono_stamps`, the seed interning (`:527-550`) passes the site — **with the offsets shifted into the post-rewrite blob layout**:
-
-```rust
-        let site = (!record.exits.is_empty()).then(|| SpliceSite {
-            caller: fi,
-            then: splice_shift(&widened[fi], addr + 5),
-            exits: record
-                .exits
-                .iter()
-                .map(|&e| splice_shift(&widened[fi], e))
-                .collect(),
-        });
+/// The `SpliceSite` for one exit-bearing site, with its caller offsets
+/// shifted into the post-rewrite blob layout. `None` for an exit-free
+/// site, which splices nothing.
+fn site_for(
+    caller: usize,
+    addr: u32,
+    record: &BoundCall,
+    widened: &[HashSet<u32>],
+) -> Option<SpliceSite> {
+    if record.exits.is_empty() {
+        return None;
+    }
+    let w = &widened[caller];
+    Some(SpliceSite {
+        caller,
+        // Under mono the site keeps its 5-byte shape (a `jmp` where the
+        // `call` was), so `then` is the very next instruction.
+        then: splice_shift(w, addr + 5),
+        exits: record.exits.iter().map(|&e| splice_shift(w, e)).collect(),
+    })
+}
 ```
 
-and the closure's bound arm (`:583-622`) does the same with `caller: routine` and `&widened[routine]`.
+called as `site_for(fi, addr, record, widened)` in the seed loop and `site_for(routine, *addr, record, widened)` in the closure's bound arm (`:583-622`).
 
 **Why the shift is not optional, and why it is not `widen_shift`.** A splice fixup names an offset in the CALLER's blob, and layout's `abs_of` map is keyed by POST-rewrite offsets. Under pure mono nothing is rewritten, so the shift is the identity. Under **hybrid** it is not: `lower_hybrid` finishes by calling `lower_frames` over the mono-rewritten order, which widens every bound site that is still framed 5 → 9 bytes — shifting exactly the caller offsets these fixups name. A caller holding one spliced exit-bearing site and one framed holey site is the reachable shape, and an unshifted `then` then lands on the wrong instruction or misses `abs_of` entirely.
 
@@ -2721,7 +2870,7 @@ fn splice_shift(widened: &HashSet<u32>, old: u32) -> u32 {
   }
   ```
 
-(f) The retarget loop in `lower_mono` (`:188-209`) turns an exit-bearing site's `call` into a `jmp` rather than pushing a `calls` entry. Since the opcode is in the caller's blob, rewrite the byte in place: `lower_mono` must own the caller's blob. Add, before the retarget loop:
+(f) The retarget loop in `lower_mono` (`:188-209`) additionally rewrites an exit-bearing site's OPCODE from the call to the far jump. **The `calls` entry it already pushes stays exactly as it is** — layout relocates a jump's displacement through the same `Piece::CallSite` path it relocates a call's, so dropping the entry would leave the displacement unpatched. Only the one opcode byte changes, in the caller's blob, which means `lower_mono` must own that blob (`Cow::to_mut`). Add, before the retarget loop:
 
 ```rust
     // An exit-bearing site is ENTERED by `jmp`, not `call` (P2: the copy
@@ -2731,7 +2880,7 @@ fn splice_shift(widened: &HashSet<u32>, old: u32) -> u32 {
     let jmp = syntax.jump_opcode();
 ```
 
-and inside the loop, for a site whose `record.exits` is non-empty and which is in the identity world:
+and inside the loop, AFTER the existing `f.calls.push((*addr + 1, target));`, for a site whose `record.exits` is non-empty and which is in the identity world:
 
 ```rust
                 if !record.exits.is_empty() {
@@ -2762,9 +2911,12 @@ Expected: PASS. Mono stamp NAMES must be unchanged for every existing program (t
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/core/src/asm/syntax.rs crates/core/src/linker/layout.rs crates/core/src/linker/resolve.rs crates/core/src/linker/stamp.rs crates/core/tests/link_exits.rs crates/core/tests/link_interface.rs crates/post-machine/src/asm/mod.rs crates/turing-machine/src/asm/mod.rs crates/core/src/asm/cst.rs crates/core/src/asm/lower.rs crates/core/src/asm/assembler.rs crates/core/src/asm/disassembler.rs crates/core/src/asm/fmt.rs crates/core/src/asm/lint/mod.rs crates/core/src/asm/lint/rules/unused_label.rs crates/core/src/asm/lint/rules/leftover_debugger.rs crates/core/tests/asm_tables.rs crates/core/tests/asm_interface.rs crates/core/tests/link_variants.rs crates/core/tests/link_tables.rs
+git add crates/core/src/asm/syntax.rs crates/core/src/linker/layout.rs crates/core/src/linker/resolve.rs crates/core/src/linker/stamp.rs
+git add $(grep -rln "ArchSyntax {" crates)
 git commit -m "feat(core): mono splices an exit-bearing call site into a per-site copy"
 ```
+
+The second `git add` stages exactly the set the grep in Step 3 edited — never `-A`, and never a hand-copied list that can go stale as earlier tasks add fake dialects.
 
 Then `git log -1 --format=%B`; amend if a `Claude-Session:` line was appended.
 
@@ -2796,12 +2948,18 @@ otherwise each is a mono seed (a per-site splice by P2). Holey exit-bearing site
 Append to `crates/core/tests/link_exits.rs`:
 
 ```rust
-/// One exit-bearing site over a SMALL body: two copies would cost less
-/// than a body plus a descriptor load, so hybrid splices (mono) rather
-/// than sharing.
+/// ONE exit-bearing site: the rule refuses on `k >= 2` alone, so the
+/// site is seeded to mono and `TWO_EXITS` has no other bound site — which
+/// means `any_frames` stays false and hybrid takes its **`!any_frames` →
+/// `lower_mono` fast path**. That is precisely why `folds` has to be
+/// attached to that return too: the decision was taken before the fast
+/// path was chosen, and it is the only place it can be reported from.
 ///
-/// Mutation it catches: drop the `k >= 2` conjunct and a single site
-/// shares under frames, producing a frames region for nothing.
+/// Mutation it catches: leave `folds` off the `lower_mono` return (or
+/// take the fast path before the decision loop) and `report.folds` comes
+/// back empty, so the `expect` below fires. Separately, drop the
+/// `k >= 2` conjunct and a single site shares under frames, producing a
+/// frames region for nothing — which `composites == 0` forbids.
 #[test]
 fn one_exit_bearing_site_splices_under_hybrid() {
     let out = link(&fake_syntax(), &[asm(TWO_EXITS)], &[], opts(CallMech::Hybrid))
@@ -2812,9 +2970,10 @@ fn one_exit_bearing_site_splices_under_hybrid() {
         .folds
         .iter()
         .find(|f| f.routine == "sub")
-        .expect("a fold decision for `sub`");
+        .unwrap_or_else(|| panic!("no fold decision survived the mono fast path: {:?}", out.report));
     assert!(!fold.shared, "{fold:?}");
     assert_eq!(fold.sites, 1, "{fold:?}");
+    assert!(out.report.instantiations >= 1, "{:?}", out.report);
 }
 
 /// Three exit-bearing sites over a body big enough that two extra copies
@@ -2834,6 +2993,10 @@ fn three_exit_bearing_sites_over_a_large_body_share_under_hybrid() {
         .expect("a fold decision for `big`");
     assert!(fold.shared, "{fold:?}");
     assert_eq!(fold.sites, 3, "{fold:?}");
+    // The arithmetic, pinned: if either number moves, the instruction
+    // widths are not what the fixture assumes and N must be re-derived.
+    assert_eq!(fold.body_bytes, 23, "1 ent + 20 nop + 2 retx: {fold:?}");
+    assert_eq!(fold.descriptor_bytes, 36, "three 12-byte descriptors: {fold:?}");
     assert!(
         out.report.composites > 0,
         "a shared group frames: {:?}",
@@ -2842,12 +3005,28 @@ fn three_exit_bearing_sites_over_a_large_body_share_under_hybrid() {
 }
 ```
 
-and the fixture, whose body is padded with `nop`s until `B` clears the three descriptors. **Build it empirically:** start at 40 `nop`s, link, and if `shared` is false add more; record the final count in a comment. A fixture tuned by measurement is the honest way to pin a size rule.
+and the fixture, whose body is padded with exactly the `nop` count the arithmetic calls for — computable, not tuned, now that `descriptor_cost` is exact:
+
+> Each site's binding is `[0]` over a 3-symbol caller into a 3-symbol
+> callee, so the composite is the identity on one tape. `dense_map`
+> returns EMPTY for an identity map at equal cardinalities
+> (`crates/core/src/linker/engine.rs:802-804`), so both maps are
+> zero-length and `descriptor_bytes` emits
+> `1 (arity) + 2 (exit_count) + [1 (phys) + 2 + 0 + 2 + 0] + 4 (one exit)`
+> = **12 bytes** per site. Three sites: `sum(d_i)` = **36**.
+> `big`'s blob is the implicit 1-byte `ent` prologue + N `nop`s +
+> 2 bytes of `retx #0`, and it carries no table, so `B = N + 3`.
+> The rule shares iff `2 * B > 36`, i.e. `B > 18`, i.e. **N ≥ 16**.
+> The fixture uses **N = 20** (`B = 23`, `2 * 23 = 46 > 36`) — clear of
+> the boundary, so a one-byte drift in any instruction width does not
+> silently flip the test's meaning.
+
+Assert the arithmetic in the test rather than trusting it: `fold.body_bytes == 23` and `fold.descriptor_bytes == 36`. If either differs, the instruction widths are not what this note assumes — report the real numbers and re-derive N before touching the rule.
 
 ```rust
-/// A body large enough that sharing three sites beats three copies.
-/// The `nop` run was tuned by measurement: at N nops the decision flips
-/// (record N here once measured).
+/// A body large enough that sharing three sites beats three copies:
+/// 20 `nop`s, so `B` = 23 against `sum(d_i)` = 36 and `2 * 23 > 36`.
+/// The flip point is 16 nops; see the arithmetic in the plan.
 const THREE_SITES_BIG_BODY: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
@@ -2868,7 +3047,24 @@ z:      wr      [1]
 .func big
         nop
         nop
-        … (repeat to the measured count) …
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
         retx    #0
 ";
 ```
@@ -2895,6 +3091,8 @@ and `folds: lowered_folds,` in the `LinkReport { … }` literal (`crates/core/sr
 - [ ] **Step 4: Group and decide in `lower_hybrid`**
 
 In `crates/core/src/linker/stamp.rs`, `lower_hybrid`'s classification loop (`:264-289`) splits exit-bearing bijection sites out of `seeds` into a grouping map, keyed by `(callee, canonical_key(composite))`:
+
+**The whole classify → group → decide sequence runs BEFORE both of `lower_hybrid`'s fast paths** (`seeds.is_empty()` → `lower_frames` at `:292-295`, and `!any_frames` → `lower_mono` at `:296-298`). It has to: the decision loop is what fills `seeds` for a spliced group and what sets `any_frames` for a shared one, so a fast path taken ahead of it would branch on a state the rule has not produced yet. Move both `if`s below the decision loop.
 
 ```rust
     // Exit-bearing bijection sites are grouped rather than seeded
@@ -2939,12 +3137,15 @@ Then, after the loop, decide per group and record it:
         let body = u32::try_from(order[callee].blob.len() + order[callee].table.len())
             .expect("a body size fits u32");
         let k = u32::try_from(sites_in_group.len()).expect("a group size fits u32");
-        // Each site's would-be descriptor: the composite's materialized
-        // bytes plus four per exit.
+        // Each site's would-be descriptor, EXACTLY: the bytes
+        // `materialize` will emit for that composite and that exit
+        // vector.
         let descriptors: u32 = sites_in_group
             .iter()
-            .map(|(_, _, record)| descriptor_cost(record))
-            .sum();
+            .map(|(_, _, record)| {
+                descriptor_cost(&group_composite[key], machine_sig, &order, &record.exits)
+            })
+            .sum::<Result<u32, LinkError>>()?;
         let shared = k >= 2 && u64::from(k - 1) * u64::from(body) > u64::from(descriptors);
         folds.push(super::FoldDecision {
             routine: order[callee].name.to_string(),
@@ -2965,32 +3166,53 @@ Then, after the loop, decide per group and record it:
     folds.sort_by(|a, b| (&a.routine, a.sites).cmp(&(&b.routine, b.sites)));
 ```
 
-with
+with a **per-group composite map** built alongside `groups` in the classification loop (`group_composite.entry(key).or_insert(composite)` — every member of a group shares the key's composite by construction, so the first one is the group's), and:
 
 ```rust
-/// The bytes a site's frames descriptor would cost: the composite's
-/// materialized maps plus four per exit. Estimated from the binding
-/// rather than materialized, because materialization needs the rewritten
-/// order the decision precedes; the estimate is exact for the exit half
-/// and an upper bound for the map half, which is the safe direction — it
-/// makes sharing LESS attractive, never more (docs/core.md (call
-/// mechanisms)).
-fn descriptor_cost(record: &BoundCall) -> u32 {
-    // arity u8 + exit_count u16, then per tape phys u8 + two u16 lengths
-    // + two dense u16 maps sized to the larger alphabet, then the exits.
-    let per_tape: u32 = record
-        .binding
-        .iter()
-        .map(|tb| {
-            let entries = u32::try_from(tb.pairs.len()).unwrap_or(0);
-            1 + 2 + 2 + 4 * entries
-        })
-        .sum();
-    3 + per_tape + 4 * u32::try_from(record.exits.len()).unwrap_or(0)
+/// The bytes a site's frames descriptor costs — EXACT, not an estimate.
+/// The composite is already known at decision time (it is what the
+/// group key was computed from), and `materialize` needs only the
+/// machine signature and the callee's own signature, neither of which
+/// the blob rewrite touches. So the size is taken from the bytes
+/// themselves rather than re-derived from a second formula that could
+/// disagree with the emitter (docs/core.md (call mechanisms)).
+fn descriptor_cost(
+    composite: &Composite,
+    machine_sig: &RoutineSig,
+    order: &[FuncRef],
+    exits: &[u32],
+) -> Result<u32, LinkError> {
+    Ok(
+        u32::try_from(super::engine::materialize(composite, machine_sig, order, exits)?.len())
+            .expect("a descriptor size fits u32"),
+    )
 }
 ```
 
-Thread `folds` into the two `Lowered` returns of `lower_hybrid`, and leave `Vec::new()` in `lower_mono`'s and `lower_frames`'.
+This needs `engine::materialize` to be `pub(super)` — Task 8b's Interfaces record the same change, so whichever task lands first makes it and the other finds it done.
+
+**Thread `folds` into ALL THREE of `lower_hybrid`'s returns**, not two. The two fast paths return somebody else's `Lowered`, so each is wrapped and the field attached:
+
+```rust
+    if seeds.is_empty() {
+        let (order, plan, stats) = lower_frames(syntax, order, sites, machine_sig)?;
+        return Ok(Lowered {
+            order,
+            plan,
+            stats,
+            orphaned: Vec::new(),
+            diagnostics: Vec::new(),
+            folds,
+        });
+    }
+    if !any_frames {
+        let mut lowered = lower_mono(syntax, order, sites, machine_sig)?;
+        lowered.folds = folds;
+        return Ok(lowered);
+    }
+```
+
+and the mixed path's own `Lowered` carries `folds` directly. `lower_mono` called on its OWN (under `CallMech::Mono`) still returns `folds: Vec::new()` — a mono link takes no fold decisions, because nothing is ever shared.
 
 **The `widened` set Task 7 introduced must be computed AFTER this loop, not before it.** A group the rule SHARES stays in `f.bound` and is widened by the frames path; a group it SPLICES joins `mono_holes` and is not. Build `widened` from the final `mono_holes` immediately before the `mono_stamps` call, exactly as Task 7 spells it — if it is built earlier, every shared group's widening is missing from the splice offsets of any site that follows it in the same blob.
 
@@ -3053,9 +3275,10 @@ The walk is written once and used by both passes, so the probe cannot drift from
 
 **Files:**
 - Modify: `crates/core/src/linker/stamp.rs:253-363` (`lower_hybrid` — the probe, the widened group, the shared set), `:505-661` (`mono_stamps` — the shared-aware closure), `:741-1020` (`build_stamp` — the framed emission), plus the new `mono_closure_probe`, `GroupSite`, `ClosureSite`, `StampTarget`
-- Modify: `crates/core/src/linker/engine.rs:749-790` (`materialize` becomes `pub(super)`)
+- Modify: `crates/core/src/linker/engine.rs:749-790` (`materialize` becomes `pub(super)`; Task 8's exact `descriptor_cost` may have made this already — if so, leave it)
 - Modify: `crates/core/tests/link_exits.rs`
-- Modify: `crates/turing-machine/tests/link_matrix.rs` (the run-equivalence half)
+- Create: `crates/turing-machine/tests/link_matrix.rs` (its harness and the closure-fold run test; Task 16 appends the rest)
+- Modify: `crates/turing-machine/tests/mode_equivalence.rs` (add `CLOSURE_FOLD` to the relink byte-identity list)
 
 **Interfaces:**
 
@@ -3082,7 +3305,6 @@ The walk is written once and used by both passes, so the probe cannot drift from
       },
       InClosure {
           routine: usize,
-          addr: u32,
           record: &'a BoundCall,
       },
   }
@@ -3091,8 +3313,6 @@ The walk is written once and used by both passes, so the probe cannot drift from
   struct ClosureSite<'a> {
       /// The routine whose body the site sits in.
       routine: usize,
-      /// The site's offset in that routine's ORIGINAL blob.
-      addr: u32,
       /// The callee the site reaches.
       callee: usize,
       record: &'a BoundCall,
@@ -3138,14 +3358,22 @@ Append to `crates/core/tests/link_exits.rs`. **[shape-copied]** from `link_inter
 /// swap does). The three are one group only if the closure sites are
 /// counted.
 ///
-/// The arithmetic, stated so the fixture is auditable rather than tuned:
-/// `big`'s blob is the `ent` prologue + 40 `nop`s + `retx #0` = 43 bytes,
-/// and it carries no table, so `B` = 43. `descriptor_cost` gives the
-/// swap site `3 + (1 + 2 + 2 + 4*2) + 4*1` = 20 bytes and each
-/// transparent site `3 + (1 + 2 + 2 + 0) + 4*1` = 12, so the group's
-/// `sum(d_i)` = 44. With all three sites, `(3 - 1) * 43 = 86 > 44` and
-/// the group SHARES. With only the identity-world site, `k` is 1 and the
-/// rule refuses on `k >= 2` alone, whatever `B` is.
+/// The arithmetic, EXACT and stated so the fixture is auditable rather
+/// than tuned. All three sites reach the SAME composite — the swap —
+/// because `outer` is stamped under it and its two calls to `big` are
+/// transparent, so `compose(C_swap, identity)` is `C_swap` again. That
+/// composite's maps are not identity, so `dense_map` emits one `u16`
+/// per symbol in each direction over the 4-symbol alphabet and
+/// `descriptor_bytes` writes
+/// `1 (arity) + 2 (exit_count) + [1 (phys) + 2 + 2*4 + 2 + 2*4] + 4 (one exit)`
+/// = **28 bytes** per site — the same 28 for the swap site and for each
+/// transparent one, since they share the composite. `sum(d_i)` = **84**.
+/// `big`'s blob is the implicit 1-byte `ent` prologue + 50 `nop`s +
+/// 2 bytes of `retx #0`, with no table, so `B` = **53**. With all three
+/// sites, `(3 - 1) * 53 = 106 > 84` and the group SHARES; the flip point
+/// is 40 nops, so the fixture is clear of the boundary. With only the
+/// identity-world site, `k` is 1 and the rule refuses on `k >= 2` alone,
+/// whatever `B` is.
 ///
 /// Mutation it catches: drop the probe (group over the identity world
 /// only) and `fold.sites` is 1 and `fold.shared` is false — the two
@@ -3212,6 +3440,16 @@ q:      ret
         nop
         nop
         nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
         retx    #0
 ";
 
@@ -3229,12 +3467,15 @@ fn exit_bearing_sites_inside_a_stamped_copy_join_their_group() {
         fold.sites, 3,
         "one identity-world site plus two inside the copy: {fold:?}"
     );
-    assert_eq!(fold.body_bytes, 43, "the fixture's stated body size: {fold:?}");
     assert_eq!(
-        fold.descriptor_bytes, 44,
-        "20 for the swap site, 12 for each transparent one: {fold:?}"
+        fold.body_bytes, 53,
+        "1 ent + 50 nop + 2 retx: {fold:?}"
     );
-    assert!(fold.shared, "86 > 44, so the group shares: {fold:?}");
+    assert_eq!(
+        fold.descriptor_bytes, 84,
+        "three 28-byte descriptors over one shared composite: {fold:?}"
+    );
+    assert!(fold.shared, "106 > 84, so the group shares: {fold:?}");
 }
 
 /// A shared closure site becomes a framed call inside the copy, NOT a
@@ -3374,7 +3615,6 @@ fn mono_closure_probe<'a>(
                     {
                         met.push(ClosureSite {
                             routine,
-                            addr: *addr,
                             callee: *callee,
                             record,
                             composite: child.clone(),
@@ -3409,7 +3649,6 @@ In `lower_hybrid`, after the identity-world classification loop and **before** t
             .or_default()
             .push(GroupSite::InClosure {
                 routine: cs.routine,
-                addr: cs.addr,
                 record: cs.record,
             });
     }
@@ -3428,17 +3667,19 @@ and change the identity-world push to the enum form:
                             });
 ```
 
-The decision loop's `descriptors` sum reads the record out of either variant:
+The decision loop's `descriptors` sum reads the record out of either variant — and stays EXACT, through the group's own composite:
 
 ```rust
         let descriptors: u32 = sites_in_group
             .iter()
-            .map(|s| match s {
-                GroupSite::Identity { record, .. } | GroupSite::InClosure { record, .. } => {
-                    descriptor_cost(record)
-                }
+            .map(|s| {
+                let record = match s {
+                    GroupSite::Identity { record, .. }
+                    | GroupSite::InClosure { record, .. } => *record,
+                };
+                descriptor_cost(&group_composite[key], machine_sig, &order, &record.exits)
             })
-            .sum();
+            .sum::<Result<u32, LinkError>>()?;
 ```
 
 and the `else` branch (splice) seeds only the identity-world members — a closure member is spliced by `mono_stamps` itself, which is what it already does when the pair is not in `shared`:
@@ -3450,7 +3691,7 @@ and the `else` branch (splice) seeds only the identity-world members — a closu
         } else {
             for s in sites_in_group {
                 if let GroupSite::Identity { caller, addr, record } = s {
-                    seeds.push((*caller, *addr, callee, record));
+                    seeds.push((*caller, *addr, callee, *record));
                     mono_holes[*caller].insert(*addr);
                 }
             }
@@ -3603,14 +3844,21 @@ Finally, make `materialize` reachable: change `fn materialize(` to `pub(super) f
 Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core --test link_exits`
 Expected: PASS, all of Tasks 6, 7, 8 and 8b.
 
-Then append to `crates/turing-machine/tests/link_matrix.rs` the TM-1 twin — **[tool-verified]**, assembled 2026-09-14 — and its equivalence test. This is where a mixed image is proven equivalent by RUNNING it; core has no VM harness of its own.
+Then **CREATE** `crates/turing-machine/tests/link_matrix.rs` — this task is the file's first author; Task 16 appends to it. Set up its harness by copying `fn build`/`fn run`/`fn cell_at` verbatim from `crates/turing-machine/tests/mono_run.rs:17-63` (`build(src, mech)` assembles and links under a mechanism; `run(exe, widths)` runs on blank tapes and returns `(Outcome, Vec<TapeSnapshot>)`; `cell_at(snap, pos)` reads one absolute cell). **Keep the `drop(devices);` line before `to_snapshot()`** — it is a required borrow release, not decoration. Add the module header and
+
+```rust
+const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid];
+```
+
+then the TM-1 twin — **[tool-verified]**, assembled 2026-09-14 — and its equivalence test. This is where a mixed image is proven equivalent by RUNNING it; core has no VM harness of its own.
 
 ```rust
 /// The closure-fold shape on TM-1: `big` is reached once at the identity
 /// world and twice inside `outer`'s stamped copy, so hybrid shares the
 /// body and the image carries both a stamp and a frames region. Mono
 /// splices all three; frames descriptors all three. All three must leave
-/// the same tape.
+/// the same tape. The 50-`nop` body is the core test's arithmetic
+/// (`B` = 53 against `sum(d_i)` = 84); this twin only has to RUN.
 ///
 /// Mutation it catches: build the stamp's descriptor from the SITE's
 /// binding instead of `compose(C, binding)` and the copy reads `big`
@@ -3636,6 +3884,16 @@ p:      call    big [0] exits=(q)
         ret
 q:      ret
 .func big
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
         nop
         nop
         nop
@@ -3893,7 +4151,7 @@ In `crates/core/src/linker/mod.rs`, after the `LinkDiagnostic` definition:
 
 ```rust
 /// Every link-time warning code, with its one-line meaning
-/// (docs/core.md (link diagnostics)). The published catalog is
+/// (docs/core.md (link warnings)). The published catalog is
 /// set-compared against this table in both directions, and a
 /// consumer's allow namespace joins it here rather than maintaining a
 /// copy.
@@ -3917,7 +4175,7 @@ and in `LinkReport`, after `folds`:
 ```rust
     /// Link-time WARNINGS, in site order (function order, then blob
     /// offset): findings that do not stop the link
-    /// (docs/core.md (link diagnostics)). A consumer suppresses them
+    /// (docs/core.md (link warnings)). A consumer suppresses them
     /// through its own allow namespace and promotes them with its own
     /// `-Werror`; the linker itself never prints and never decides.
     pub diagnostics: Vec<LinkDiagnostic>,
@@ -3960,10 +4218,10 @@ pub(super) fn diag_at(
 
 - [ ] **Step 5: Add the docs section**
 
-In `docs/core.md`, after `### The link report` (`:752`), add:
+In `docs/core.md`, after `### The link report` (`:752`), add the section — **the heading is `### Link warnings`, byte for byte**, because `section()` in `crates/core/tests/error_code_docs.rs` matches a line equal to its argument after `trim_end`, and Step 1's test passes exactly that string. Do not spell it "Link diagnostics" anywhere it is used as a heading; the prose may call them diagnostics, the heading may not.
 
 ```markdown
-### Link diagnostics
+### Link warnings
 
 A link error stops the link; a link **warning** does not. The report
 carries them in `diagnostics`, one per site, each with a stable
@@ -3982,8 +4240,6 @@ Codes are permanent identifiers: they never change meaning.
 
 Errors are outside this catalog and cannot be suppressed.
 ```
-
-Match the heading text to whatever `section()` in `crates/core/tests/error_code_docs.rs` expects — it compares after `trim_end`, so `### Link warnings` must be spelled exactly as the test's argument. Use `### Link warnings` for the heading and put the prose under it.
 
 - [ ] **Step 6: Run and commit**
 
@@ -4008,8 +4264,9 @@ The spec rules that warnings **print always**, in the compile-warning format —
 - Modify: `crates/turing-machine/src/cli/driver.rs:518-528` + `:751-757` (`link_and_write`, `link_and_write_argv`), `:472-486` + `:719-734` (the `-Werror` blocks)
 - Modify: `crates/turing-machine/src/lint/mod.rs:178-188` (`known_code`)
 - Modify: `crates/turing-machine/src/completions/registry.rs:291-332` (`link_spec`)
-- Modify: `docs/tmt/cli.md:277-291` (the quoted usage block) and the `## `tmt link`` section
+- Modify: `docs/tmt/cli.md:277-291` (the quoted usage block) and the `## `tmt link`` section (adding `### Link warnings` as its last subsection)
 - Modify: `docs/tmt/lint.md` (the fifth allow surface)
+- Modify: `crates/turing-machine/tests/error_code_docs.rs` (the link-warning catalog set-compare)
 - Create: `crates/turing-machine/tests/link_warnings.rs`
 
 **Interfaces:**
@@ -4134,7 +4391,7 @@ fn an_unknown_allow_code_is_rejected() {
 }
 ```
 
-**Note for the implementer:** these tests depend on Task 12 actually raising `narrow-alphabet`. Run this task's implementation first, then leave the four tests `#[ignore = "raised by the plain-site check task"]` and remove the attribute as the first step of Task 12. Alternatively, execute Task 12 before Task 11 — the two are independent apart from this test file. Record which order you took in the commit body.
+**Note for the implementer:** these four tests depend on Task 12 actually raising `narrow-alphabet`, and **Task 11 runs before Task 12** — the plan executes in order. So write them, mark each `#[ignore = "raised by the plain-site check task"]` with that exact reason string, and remove the four attributes as the first step of Task 12. Do not reorder the tasks.
 
 - [ ] **Step 2: Add the flags**
 
@@ -4155,7 +4412,7 @@ and the parse (after `let nostdlib = args.flag("--nostdlib");`):
 
 - [ ] **Step 3: Factor the rendering and wire it**
 
-Replace the `-v` block (`:341-367`) with:
+Replace the `-v` block (`:341-367`) with the following, and place it **BEFORE the code that writes `OUT.tmx` and its `.map` sidecar**. A promoted warning is an error, and an error writes nothing — leaving a half-finished artifact on disk after a failed strict build is the one behaviour a `-Werror` user cannot want. Move the write below this block if it currently sits above it.
 
 ```rust
     let mut stderr = String::new();
@@ -4167,10 +4424,18 @@ Replace the `-v` block (`:341-367`) with:
         render_link_report(&mut stderr, "", &linked.report);
     }
     if werror && warned > 0 {
-        return Err(format!(
-            "{stderr}-Werror: {warned} link warning(s) treated as errors"
-        ));
+        return Err(werror_message(&stderr, warned));
     }
+```
+
+with the message factored so `link` and both `build` modes cannot drift:
+
+```rust
+/// The one spelling of the strict-mode refusal, shared by `tmt link` and
+/// both of `tmt build`'s modes (docs/tmt/cli.md (link warnings)).
+pub(super) fn werror_message(stderr: &str, warned: usize) -> String {
+    format!("{stderr}-Werror: {warned} link warning(s) treated as errors")
+}
 ```
 
 and add the two renderers near `render_warnings` (`:40`):
@@ -4254,15 +4519,19 @@ Import `LinkReport` in `crates/turing-machine/src/cli/build.rs`.
 
 - [ ] **Step 4: Cover the two `build` paths**
 
-In `crates/turing-machine/src/cli/driver.rs`, `link_and_write` and `link_and_write_argv` both return `Result<String, String>` (the `-v` chunk). Change both to return `Result<(String, usize), String>` — the rendered text and the warning count — calling `render_link_diagnostics` before `render_link_report`. Then at both call sites (`:495-505` and `:740-742`), after `stderr.push_str(&tail)`, add:
+In `crates/turing-machine/src/cli/driver.rs`, `link_and_write` and `link_and_write_argv` both return `Result<String, String>` (the `-v` chunk). Change both to return `Result<(String, usize), String>` — the rendered text and the warning count — calling `render_link_diagnostics` before `render_link_report`.
+
+**Both functions currently link AND write in one body.** Split the write off so the promotion happens first: render the diagnostics, and if `flags.werror` and the count is non-zero, return `werror_message(...)` **before** the executable and its sidecar are written. A strict build that fails must leave no artifact, exactly as a link error does today.
+
+Then at both call sites (`:495-505` and `:740-742`), after `stderr.push_str(&tail)`, add:
 
 ```rust
     if flags.werror && link_warnings > 0 {
-        return Err(format!(
-            "{stderr}-Werror: {link_warnings} link warning(s) treated as errors"
-        ));
+        return Err(crate::cli::build::werror_message(&stderr, link_warnings));
     }
 ```
+
+(The inner refusal already covers the write ordering; this outer one carries the accumulated `stderr` — the compile warnings plus the link ones — into the message the user sees.)
 
 In manifest mode, the allow list is `flags.allow` unioned with the manifest's own `lint.allow` — `crate::project::load_file` already parsed and validated it into `TmtFile.allow`, so read it from the loaded manifest rather than adding a second discovery walk. In argv mode there is no manifest, so the list is `flags.allow` alone. Add `allow: Vec<String>` to `struct Flags` (`:60-81`) parsed as `allow: args.values("--allow")?` with `crate::lint::validate_allow(&flags.allow)` immediately after, and the `--allow CODE` line in `BUILD_USAGE`.
 
@@ -4314,9 +4583,42 @@ The codes share the one allow namespace `tmt lint` uses, so `--allow CODE`
 suppresses one here and `lint.allow` in `tmt.json` suppresses it for
 `tmt build`. `-Werror` promotes every unsuppressed warning to an error.
 Errors — a callee wider than the caller, a graft whose digest drifted —
-are outside the namespace and cannot be suppressed. The catalog lives in
-`docs/core.md (link diagnostics)`.
+are outside the namespace and cannot be suppressed.
+
+| Code | Meaning |
+|---|---|
+| `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
+| `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
 ```
+
+**Placement matters, and so does the guard.** Before writing the section, read `crates/turing-machine/tests/error_code_docs.rs` end to end: `section()` takes the lines after a heading that equals its argument (after `trim_end`) up to the next line starting with `#`, and `table_codes()` keeps only lines beginning with `` | ` `` and reads the first cell. So put `### Link warnings` as the LAST subsection of `## tmt link`, ending at `## tmt build` — anywhere earlier and it would swallow `### --call-mech`, whose `| \`mono\` |` rows would then read as codes. The fenced example above is transparent to the parser (its lines do not start with `` | ` ``).
+
+Then extend the guard, per the spec's "the codes enter the same registry-versus-docs set-compare as error codes" — **in both directions**, so a code in one place and not the other is red either way:
+
+```rust
+/// The published link-warning catalog on the CLI page lists exactly the
+/// linker's registry — the same two-way set-compare the compile-error
+/// catalog gets.
+///
+/// Mutation it catches: add a code to `DIAGNOSTIC_CODES` without a row
+/// here (or leave a row behind after retiring a code) and the sorted
+/// vectors differ.
+#[test]
+fn the_published_link_warning_catalog_lists_exactly_the_registry_codes() {
+    let doc = doc();
+    let mut published = table_codes(&section(&doc, "### Link warnings"));
+    published.sort();
+    assert!(!published.is_empty(), "no `### Link warnings` table in docs/tmt/cli.md");
+    let mut registry: Vec<String> = mtc_core::linker::DIAGNOSTIC_CODES
+        .iter()
+        .map(|(c, _)| (*c).to_string())
+        .collect();
+    registry.sort();
+    assert_eq!(published, registry, "docs/tmt/cli.md (### Link warnings)");
+}
+```
+
+The `assert!(!published.is_empty(), …)` is load-bearing: without it, a heading typo makes `section()` return nothing and an empty-vs-empty comparison would pass while the table went unguarded. Add `mtc_core` as a dev-dependency of the TM crate if the test file does not already reach it — check `crates/turing-machine/Cargo.toml` first; the crate already depends on `mtc-core` normally, so the test can use it as-is.
 
 In `docs/tmt/lint.md`, in the allow-namespace paragraph, extend the list of surfaces to name link warnings as the fifth and point at `docs/tmt/cli.md (link warnings)`.
 
@@ -4331,7 +4633,7 @@ Expected: PASS — `pmt` is untouched.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/turing-machine/src/cli/build.rs crates/turing-machine/src/cli/driver.rs crates/turing-machine/src/lint/mod.rs crates/turing-machine/src/completions/registry.rs crates/turing-machine/tests/link_warnings.rs docs/tmt/cli.md docs/tmt/lint.md
+git add crates/turing-machine/src/cli/build.rs crates/turing-machine/src/cli/driver.rs crates/turing-machine/src/lint/mod.rs crates/turing-machine/src/completions/registry.rs crates/turing-machine/tests/link_warnings.rs crates/turing-machine/tests/error_code_docs.rs docs/tmt/cli.md docs/tmt/lint.md
 git commit -m "feat(turing-machine): tmt link and tmt build surface link warnings, with --allow and -Werror"
 ```
 
@@ -4357,6 +4659,11 @@ The same grading runs on a **bound** site's tape whose map is omitted (`!tb.map_
 
 **The check runs ONCE.** `lower` computes `sites` a single time (`crates/core/src/linker/engine.rs:164-167`) before dispatching; hybrid's second `scan_sites` (`crates/core/src/linker/stamp.rs:351`) is for the stamps and must not re-raise anything. Putting the check in `lower` next to that one scan is what keeps a hybrid link from double-reporting.
 
+**Two scope facts, both deliberate, both disclosed rather than discovered later.**
+
+- **`SiteKind::Plain` covers more than calls.** `scan_sites` pushes it for a relocated plain call and for a relocated tail jump or conditional branch into another function (`crates/core/src/linker/engine.rs:595-609`). Grading those is intended, not an accident of the match arm: the tail-call pass turns calls into jumps, so restricting the rule to calls would let the same hazard through whenever the optimizer had run. Task 1's sweep covers them too, because it walks `obj.relocations`.
+- **An unsigned entry is graded not at all.** `link()` calls `engine::lower` only when the entry function has a signature (`crates/core/src/linker/mod.rs:417-442`); without one there is no machine signature to grade against and the whole engine is skipped. So a hand-assembled `.tma` with no `.routine` lines gets no plain-site check — the same degradation the spec describes for a callee that carries no interface, one level up. This is also exactly why PM-1 is untouched (Step 5).
+
 **Files:**
 - Modify: `crates/core/src/linker/engine.rs:152-185` (`lower` — call the new pass), plus `check_sites`
 - Modify: `crates/core/src/linker/mod.rs` (`LinkError::CalleeWider`)
@@ -4377,7 +4684,7 @@ Create `crates/core/tests/link_checks.rs` with the `link_interface.rs` dialect h
 ```rust
 //! What the linker checks at a call site that binds by INDEX: a plain
 //! call, and a bound call whose map is omitted
-//! (docs/core.md (link diagnostics)). An explicit map — `{}` included —
+//! (docs/core.md (link warnings)). An explicit map — `{}` included —
 //! is the author's statement and silences the glyph comparison.
 
 // … fake_syntax / asm / MECHS / opts copied from link_interface.rs …
@@ -4604,7 +4911,7 @@ In `crates/core/src/linker/mod.rs`, after `OpenBindingUnsupported`:
     /// caller band cannot hold. Either would let the callee touch what
     /// the caller lacks — address a band that does not exist, or write an
     /// index past the band's width — so it is an error, not a warning
-    /// (docs/core.md (link diagnostics)). `what` names the dimension:
+    /// (docs/core.md (link warnings)). `what` names the dimension:
     /// `"tape count"`, or `"the alphabet of tape N"`.
     CalleeWider {
         callee: String,
@@ -4636,7 +4943,7 @@ In `crates/core/src/linker/engine.rs`, add after `scan_sites`:
 
 ```rust
 /// Grade every index-binding call site against the callee's declared
-/// shape (docs/core.md (link diagnostics)): a plain call, and each tape
+/// shape (docs/core.md (link warnings)): a plain call, and each tape
 /// of a bound call whose map is OMITTED. An explicit map — the empty
 /// `{}` included — is the author's statement that the re-labelling is
 /// meant, and is never graded.
@@ -4798,7 +5105,7 @@ In `lower`, immediately after `sites` is computed and **before** the `has_bound`
 
 ```rust
     // Index-binding sites are graded once, here, over the one scan every
-    // mechanism shares (docs/core.md (link diagnostics)).
+    // mechanism shares (docs/core.md (link warnings)).
     let diagnostics = check_sites(&order, &sites, machine_sig)?;
 ```
 
@@ -4823,11 +5130,11 @@ Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/too
 Expected: PASS. **If an existing core fixture now fails with `CalleeWider`, STOP and report it** — Task 1's sweep was supposed to find it, and a fixture that trips the rule is either a latent bug in the fixture or evidence the rule is too broad.
 
 Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-turing-machine && CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-post-machine`
-Expected: PASS. PM-1 programs are single-alphabet and single-arity by construction, so nothing there can be graded — confirm by running `golden_programs` explicitly.
+Expected: PASS, and the reason is structural rather than statistical: **PM-1 objects carry no signatures at all.** PM's compiler builds them through `ObjectFile::v2` (`crates/core/src/formats/object/mod.rs:292-314`), which sets `signatures: None`, so the entry function has none; `link()` then takes the `None` arm of its `match entry_sig` (`crates/core/src/linker/mod.rs:417-442`) and **never calls `engine::lower` at all**. No lowering means no `scan_sites`, no `check_sites`, and no grading — for PM-1 and for any other unsigned program. Confirm with `golden_programs` and `asm_volatile` explicitly.
 
 - [ ] **Step 6: Un-ignore the CLI warning tests**
 
-Remove the four `#[ignore = "raised by the plain-site check task"]` attributes from `crates/turing-machine/tests/link_warnings.rs` (if Task 11 ran first) and run it.
+Remove the four `#[ignore = "raised by the plain-site check task"]` attributes Task 11 left in `crates/turing-machine/tests/link_warnings.rs` and run it.
 
 Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-turing-machine --test link_warnings`
 Expected: PASS.
@@ -5054,7 +5361,7 @@ In `crates/core/src/linker/mod.rs::link`, immediately after `let resolved = reso
 
 - [ ] **Step 5: Document it**
 
-In `docs/core.md`, after the `### Link diagnostics` section Task 10 added:
+In `docs/core.md`, after the `### Link warnings` section Task 10 added:
 
 ```markdown
 ### Graft drift
@@ -5197,36 +5504,52 @@ fn a_symbolic_binding_resolves_against_a_library_callee() {
 
 And the reader normalization test, appended to `crates/core/src/formats/object/tests.rs`:
 
+The writer's debug assert fires on `to_bytes` for an un-normalized value, so the test cannot round-trip one — it must build the BYTES. Phase 1 already established the idiom for exactly this, in `reserved_binding_flags_rejected` (`crates/core/src/formats/object/tests.rs:926-940`) over the `minimal_v4_bound_call()` helper (`:908-924`): serialize, assert the expected flags byte at a known tail offset, patch it, restamp the CRC, read back. Follow it.
+
 ```rust
-    /// A hand-crafted v4 stream can spell a binding with pairs and a
-    /// CLEARED `map_written` flag; the writer's own invariant forbids that
-    /// value, so `from_bytes` would hand back something `to_bytes` panics
-    /// on. The reader normalizes instead (docs/formats.md (bound calls)).
+    /// A hand-crafted v4 stream can spell a binding that is OPEN with a
+    /// cleared `map_written` flag, or one that carries pairs with the
+    /// flag cleared. The writer's own invariant forbids both values
+    /// (docs/formats.md (bound calls)), so `from_bytes` would otherwise
+    /// hand back something `to_bytes` panics on. The reader normalizes.
     ///
-    /// Mutation it catches: drop the normalization and the round trip
-    /// below trips the writer's debug assert.
+    /// Mutation it catches: drop the normalization and `map_written`
+    /// comes back false, so a caller that re-encodes the value trips the
+    /// writer's debug assert — a `from_bytes`/`to_bytes` asymmetry no
+    /// round-trip proptest can reach, because the proptest only ever
+    /// generates legal values.
     #[test]
-    fn the_reader_normalizes_map_written_from_the_pairs() {
-        let mut obj = /* … a v4 object carrying one bound call with pairs … */;
-        obj.bound_calls[0].binding[0].map_written = false;
-        obj.bound_calls[0].binding[0].pairs = vec![MapPair {
-            src: 1,
-            dst: 1,
-            dst_label: None,
-            one_way: false,
-        }];
-        // Force the value onto the wire through the v4 path, then read it
-        // back: the flag comes home set.
-        let back = ObjectFile::from_bytes(&obj.to_bytes()).expect("reads back");
-        assert!(back.bound_calls[0].binding[0].map_written);
+    fn the_reader_normalizes_map_written_from_open() {
+        let mut obj = minimal_v4_bound_call();
+        obj.bound_calls[0].binding[0].open = true;
+        let mut bytes = obj.to_bytes();
+        // Same tail as `reserved_binding_flags_rejected`: binding flags,
+        // pair count (u16), exit count, graft count (u32).
+        let pos = bytes.len() - 8;
+        assert_eq!(
+            bytes[pos], 0b11,
+            "layout assumption: the binding-flags byte (map written | open)"
+        );
+        bytes[pos] = 0b10; // open, map_written cleared — the illegal spelling
+        crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+        let back = ObjectFile::from_bytes(&bytes).expect("reads back");
+        assert!(
+            back.bound_calls[0].binding[0].map_written,
+            "an open map is a written one"
+        );
+        // And the normalized value survives its own re-encoding.
+        assert_eq!(
+            ObjectFile::from_bytes(&back.to_bytes()).expect("re-reads"),
+            back
+        );
     }
 ```
 
-**Implementer note:** the writer's debug assert will fire on `to_bytes` for the un-normalized value, so this test cannot round-trip it directly. Build the BYTES by hand instead — take a legal v4 object's `to_bytes()`, clear the map-written flag bit in the tape-binding record (the layout is in `crates/core/src/formats/object/write.rs`; find the flag's bit position there), fix up the CRC-32 at `CRC_OFFSET`, and assert `from_bytes` returns the flag set. Read `write.rs`'s binding encoder before writing the test; if the byte surgery is impractical, assert the normalization at the reader's own unit level instead and say so in the commit body.
+**Then add the pairs half.** It needs its own helper — `minimal_v4_bound_call()` deliberately carries no pairs so its tail offset is fixed. Write `one_pair_v4_bound_call()` beside it (same object, one `MapPair { src: 1, dst: 1, dst_label: None, one_way: false }` and `map_written: true`), read `crates/core/src/formats/object/write.rs`'s binding encoder to get the pair record's width, and compute the flags byte's offset from the end the same way. **Pin it with the same `assert_eq!(bytes[pos], 0b01, "layout assumption: …")` guard before patching** — that assertion is what turns a wrong offset into a loud failure instead of a silently patched neighbouring byte. Then clear bit 0, restamp, and assert `map_written` comes back true.
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core --test link_cross_object && CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core formats::object::tests::the_reader_normalizes`
+Run: `CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core --test link_cross_object && CARGO_TARGET_DIR=/Users/mellonis/Developer/mellonis-workspace/machines/toolchains/target cargo test -p mtc-core the_reader_normalizes
 Expected: the cross-object tests may already PASS (the path is correct by inspection — that is the point of adding them); the reader test FAILS.
 
 If a cross-object test fails, that is a real finding: report the exact assertion and the mechanism before changing anything.
@@ -5292,12 +5615,12 @@ Append to `crates/core/src/formats/object/tests.rs`:
     /// the reverse) and the value does not come home.
     #[test]
     fn imported_alphabets_round_trip() {
-        let mut obj = /* … the module's existing v4 fixture builder … */;
-        let iface = obj.interface.get_or_insert_with(Interface::default);
-        iface.alphabets.push(ExportedAlphabet {
-            name: "lib::bits".to_string(),
-            glyphs: vec!["_".to_string(), "0".to_string(), "1".to_string()],
-        });
+        // `v4_sample()` (crates/core/src/formats/object/tests.rs:494) is
+        // the module's own v4 fixture: signatures, one `RoutineInterface`,
+        // one exported alphabet, one exported graph. Extend it rather
+        // than building a second one.
+        let mut obj = v4_sample();
+        let iface = obj.interface.as_mut().expect("v4_sample carries one");
         iface.imports.push(ImportedAlphabet {
             name: "other::wide".to_string(),
             glyphs: vec!["_".to_string(), "a".to_string()],
@@ -5306,7 +5629,7 @@ Append to `crates/core/src/formats/object/tests.rs`:
     }
 ```
 
-Read the existing v4 fixture builder in that file and reuse it by name rather than inventing one.
+`v4_sample()` already carries an exported alphabet (`bits`), so the test exercises exports and imports side by side without adding one.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -5386,7 +5709,23 @@ with the `Display` arm:
             ),
 ```
 
-In `crates/core/src/linker/interface.rs`, `check_imported_alphabets` mirrors `check_graft_drift` exactly: build a first-wins map from `Interface::alphabets` over `objects.iter().chain(libraries)`, then walk every input's `Interface::imports` and compare glyph lists element-wise, reporting the first difference. An import no input exports is NOT checked — the same header-only rule.
+In `crates/core/src/linker/interface.rs`, `check_imported_alphabets` mirrors `check_graft_drift` exactly: build a first-wins map from `Interface::alphabets` over `objects.iter().chain(libraries)`, then walk every input's `Interface::imports` and compare glyph lists. An import no input exports is NOT checked — the same header-only rule.
+
+**`position` has one definition, and it must be implemented as exactly that:** the index of the first element at which the two lists differ, or — when one list is a prefix of the other — the shorter list's length. In code:
+
+```rust
+            let differs = imported
+                .glyphs
+                .iter()
+                .zip(&exported.glyphs)
+                .position(|(a, b)| a != b)
+                .or_else(|| {
+                    (imported.glyphs.len() != exported.glyphs.len())
+                        .then(|| imported.glyphs.len().min(exported.glyphs.len()))
+                });
+```
+
+`None` means the lists agree entirely; `Some(position)` is the error. Note the `.or_else` arm: `zip` stops at the shorter list, so a pure prefix would otherwise report no difference at all and a truncated import would link silently.
 
 Call it in `link()` on the line after `check_graft_drift`.
 
@@ -5446,7 +5785,7 @@ Then `git log -1 --format=%B`; amend if a `Claude-Session:` line was appended.
 `opt_equivalence.rs`'s matrix is driven by `.tmc` programs, and the compiler has no `state` parameters until phase 3 — so it cannot take an exit-bearing program yet. This task adds the `.tma`-driven equivalent on the TM side and extends the relink byte-identity sweep with the three new shapes.
 
 **Files:**
-- Create: `crates/turing-machine/tests/link_matrix.rs`
+- Modify: `crates/turing-machine/tests/link_matrix.rs` — **created by Task 8b**, which already put the harness (`build`/`run`/`cell_at` copied from `mono_run.rs:17-63`, `MECHS`, the imports) and the `CLOSURE_FOLD` run test there. This task APPENDS the remaining fixtures and keeps 8b's.
 - Modify: `crates/turing-machine/tests/mode_equivalence.rs:740-769`
 
 **Interfaces:**
@@ -5455,20 +5794,24 @@ Then `git log -1 --format=%B`; amend if a `Claude-Session:` line was appended.
 
 All three fixtures below are **[tool-verified]**: each was assembled with `cargo run -q -p mtc-turing-machine --bin tmt -- asm` and disassembled back on 2026-09-14.
 
-- [ ] **Step 1: Write the matrix**
+- [ ] **Step 1: Append to the matrix**
 
-Create `crates/turing-machine/tests/link_matrix.rs`. Copy `fn build`/`fn run`/`fn cell_at` verbatim from `crates/turing-machine/tests/mono_run.rs:17-63` — `build(src, mech)` assembles and links under a mechanism, `run(exe, widths)` runs on blank tapes and returns `(Outcome, Vec<TapeSnapshot>)`, and `cell_at(snap, pos)` reads one absolute cell. Keep the `drop(devices);` line before `to_snapshot()`: it is a required borrow release, not decoration.
+`crates/turing-machine/tests/link_matrix.rs` already exists: Task 8b created it with the module header, the `build`/`run`/`cell_at` harness copied from `crates/turing-machine/tests/mono_run.rs:17-63`, the `MECHS` array, and `CLOSURE_FOLD` with `a_closure_fold_program_agrees_across_mechanisms`. **Keep all of it** and append the fixtures below; the harness is shared, so do not re-declare `build`, `run`, `cell_at` or `MECHS`.
+
+Widen the module header to name the whole set:
 
 ```rust
 //! The three call mechanisms agree on the shapes phase 2 adds: an
-//! exit-bearing call, an open binding, and a cross-object bound call.
-//! Driven from `.tma`, because the `.tmc` front end has no `state`
-//! parameters yet (docs/core.md (call mechanisms)).
+//! exit-bearing call (from one site and from three), a fold inside a
+//! stamped copy, an open binding, a mixed splice-and-frame caller, and
+//! a cross-object bound call. Driven from `.tma`, because the `.tmc`
+//! front end has no `state` parameters yet
+//! (docs/core.md (call mechanisms)).
+```
 
-// … build / run / cell_at copied from mono_run.rs …
+then append:
 
-const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid];
-
+```rust
 /// ONE exit-bearing site: hybrid splices it (one site never pays to
 /// share), mono splices it, frames descriptors it. All three must leave
 /// the same tape.
@@ -5732,9 +6075,9 @@ In `crates/turing-machine/tests/mode_equivalence.rs`, add the three programs to 
     ] {
 ```
 
-(`OPEN` is the const's name in `link_matrix.rs`; keep it spelled the same on both sides. `MIXED_SPLICE_AND_FRAME` is the fixture Step 1b adds.)
+`CLOSURE_FOLD` is **already in this list** — Task 8b added it and its const alongside. Do not add it twice; do not drop it. `OPEN` is the const's name in `link_matrix.rs`, so keep it spelled the same on both sides, and `MIXED_SPLICE_AND_FRAME` is the fixture Step 1b adds.
 
-(The cross-object program is not added here: `build_full` links one object, and widening its signature for one case is not worth it — the cross-object determinism is covered by `link_matrix.rs`'s byte comparison of the symbolic and numeric images in Task 14.)
+(The cross-object program is not added here: `build_full` links one object, and widening its signature for one case is not worth it — the cross-object determinism is covered by `crates/core/tests/link_cross_object.rs`, whose `a_symbolic_cross_object_binding_links_like_the_numeric_one` byte-compares the two images under every mechanism, in Task 14.)
 
 - [ ] **Step 4: Run the sweep**
 
@@ -5871,11 +6214,26 @@ Append to this plan file, under a `## Behaviour changes in phase 2` heading:
 ```markdown
 ## Behaviour changes in phase 2
 
-One. **A plain call site into a callee wider than the caller — in tape
-count, or in the alphabet of a shared tape — is now a link error.** It
-was unchecked: the linker inspected nothing at a plain site, not even
-arity. Everything else the phase adds is either a resolution of a form
-that was previously REFUSED (named entries, glyph labels, open maps, exit
+One. **An index-binding site into a callee wider than the caller — in
+tape count, or in the alphabet of a shared tape — is now a link error.**
+It was unchecked: the linker inspected nothing at a plain site, not even
+arity.
+
+Two things sharpen that sentence, and both are deliberate:
+
+- **"Site" is wider than "call".** The rule grades every relocated edge
+  into another function — a plain call, and also a tail jump or
+  conditional branch, which the linker classifies identically because
+  the tail-call pass turns one into the other. A call-only rule would
+  miss the same hazard on any optimized program.
+- **A program whose entry function carries no signature is graded not at
+  all.** There is no machine signature to grade against, and the whole
+  composition engine is skipped for such a link. Hand-assembled files
+  without `.routine` lines are therefore unaffected, and so is every
+  `pmt` program.
+
+Everything else the phase adds is either a resolution of a form that was
+previously REFUSED (named entries, glyph labels, open maps, exit
 vectors), a new WARNING that does not stop a link, or an error on a form
 that could not be written before. No existing program's image moves; the
 sweep that measured the error's blast radius is Task 1, and its recorded
@@ -5920,7 +6278,8 @@ Then `git log -1 --format=%B`; amend if a `Claude-Session:` line was appended.
 | Open bindings: compose, stamp, engine; mono keeps the `*` row | 5 | `open_unlisted` + the two `<=` guard widenings |
 | `OpenBindingUnsupported` for a non-opaque or interfaceless tape | 5 | |
 | Graft drift | 13 | Object-level, first-wins, header-only unchecked |
-| Plain-site checks and the omitted-map warning; `{}` silences | 12 | Gated on Task 1's sweep |
+| Plain-site checks and the omitted-map warning; `{}` silences | 12 | Gated on Task 1's sweep; grades relocated tail jumps and branches too (S1), and nothing at all for an unsigned entry (S2) |
+| A header's `noreturn` checked against the object's `returns` bit | — | **Deferred to phase 3** (S3): headers arrive there, so there is nothing yet to disagree with |
 | Link diagnostics: code, message, function, offset, line under `-g` | 10 | |
 | Codes join the shared allow namespace; `lint.allow`, `--allow`, `-Werror` | 11 | Fifth arm of `known_code` |
 | Codes enter the registry ↔ docs set-compare | 10, 11 | `docs/core.md (### Link warnings)` + `docs/tmt/cli.md` |
@@ -5968,7 +6327,7 @@ Two places name a symbol the implementer must confirm against the code rather th
 - `widen_shift(sites, old)` — Task 6, one definition, used once (the frames closure).
 - `SpliceSite { caller, then, exits }` and `splice_shift(widened, old)` — Task 7, one definition each. `splice_shift` is deliberately NOT `widen_shift`: the frames closure derives its widening set from a `SiteKind` list, while a splice's set is known only after the mono/frames split, so the two take different inputs and neither can stand in for the other. Both are used in Task 7 and constrained by Task 8's ordering note.
 - `mono_stamps`' new `widened: &[HashSet<u32>]` parameter — Task 7, passed empty by `lower_mono` and populated by `lower_hybrid` after its group loop (Task 8).
-- `descriptor_cost(record)` — Task 8, one definition; used by Task 8's identity-world sites and Task 8b's closure sites through the same `GroupSite` match.
+- `descriptor_cost(composite, machine_sig, order, exits) -> Result<u32, LinkError>` — Task 8, one definition, four arguments; used by Task 8's identity-world sites and Task 8b's closure sites through the same `GroupSite` match, and by both through `group_composite[key]`. It wraps `engine::materialize`, so the size can never disagree with the emitter.
 - `GroupSite { Identity, InClosure }`, `ClosureSite`, `StampTarget { Plain, Framed }`, `mono_closure_probe` — Task 8b, one definition each. `GroupSite` REPLACES Task 8's `(usize, u32, &BoundCall)` group element; the group KEY `(callee, canonical_key(&composite))` is unchanged in both tasks, which is what puts an identity-world site and a closure site in one group.
 - `engine::materialize(c, machine_sig, order, exits)` — Task 6 defines it private, Task 8b makes it `pub(super)`. One signature, four arguments, both call sites.
 - `mono_stamps`' `shared: &HashSet<(usize, Vec<u8>)>` parameter — Task 8b; `lower_mono` passes an empty set, `lower_hybrid` passes `shared_pairs`.
@@ -5986,7 +6345,12 @@ Every point where this plan had to choose. None is settled by the spec.
 - **(E) A wider callee on a BOUND site is not a new hazard the way a plain one is.** A bound site already passes through `binding_to_composite`, which holes the gap and traps at run time. The plan says so in Task 12's table but still errors, per the spec; the narrowing above is the alternative.
 - **(P4) The compose-column term is dropped from the hybrid byte rule.** `(k − 1)·B > Σ d_i` is implemented; the spec's additional "+ the compose-column entries" depends on `K`, the directory size, which is not known when the decision is made — a circular dependency, and `mode_equivalence`'s relink byte-identity requires determinism. The term is second-order. **Restore it only with a defined proxy for `K` at decision time.**
 - **(P4) ~~Hybrid groups over the identity world only.~~ RULED BY THE CONTROLLER, 2026-09-14: not for this plan to narrow.** The ratified rule — "the fold happens wherever the sites are, including inside stamped closures" — is built in full by **Task 8b**: `mono_closure_probe` reports the exit-bearing bijection sites met inside copies with their bindings pre-composed against the enclosing composite, they join their `(routine, composite)` group, and a shared group is reached from inside the copy through a `call.m` whose descriptor is `compose(C, binding)` plus the site's exits. The circular dependency the narrowing had been justified by — a stamp that reaches a shared callee frames instead of recursing, so the closure's shape depends on the decision — is broken by probing before deciding and building after, over one shared walk.
-- **(P4) `descriptor_cost` estimates rather than materializes.** The decision precedes the rewritten order materialization needs. The estimate is exact for the exit half and an upper bound for the map half — the safe direction, since it makes sharing less attractive, never more.
+- **(P4) `descriptor_cost` is EXACT.** An earlier draft of this plan estimated it from the binding and argued the estimate was a safe upper bound; **that argument was wrong in both halves** — the formula under-counted the dense maps (it sized them by the number of listed pairs, where `descriptor_bytes` emits one `u16` per symbol of the whole alphabet whenever the map is not identity), and under-counting `d` makes sharing MORE attractive, not less. It is now taken from `engine::materialize(...).len()`, the emitter's own output. That is available at decision time: `materialize` reads only the machine signature and the callee's signature, and the blob rewrite changes neither. One source of truth, no second formula to drift.
+- **(S1) `check_sites` grades every `SiteKind::Plain` edge, including relocated tail jumps and conditional branches into another function.** The spec says "plain call site"; `scan_sites` classifies a relocated tail jump or branch the same way (`crates/core/src/linker/engine.rs:595-609`), and grading those is deliberate — the tail-call pass turns calls into jumps, so a call-only rule would let the identical hazard through on any optimized program. Task 1's sweep covers them because it walks `obj.relocations`. Disclosed in Task 1, Task 12 and "Behaviour changes".
+- **(S2) A link whose entry function has no signature is graded not at all.** `link()` calls `engine::lower` only for a signed entry (`crates/core/src/linker/mod.rs:417-442`); otherwise there is no machine signature to grade against and the engine is skipped entirely. So a hand-assembled `.tma` with no `.routine` lines gets no plain-site check — the same shape of degradation the spec describes for a callee with no interface, one level up. This is also the stated reason PM-1 is untouched throughout: PM builds objects through `ObjectFile::v2`, which sets `signatures: None`.
+- **(S3) The header-`noreturn`-versus-object-`returns` check is DEFERRED to phase 3.** The spec lists it under the linker ("A header's `noreturn` is likewise checked against the object's `returns` bit"), but headers do not exist until phase 3 — there is nothing in this phase for the object's bit to disagree with. The bit is read and round-tripped by the format layer already; only the comparison waits.
+- **(S4) The mono stamp key carries the CALLER INDEX alongside `(routine, composite, exits, then)`.** `then` and the exit offsets are caller-blob-relative, so two sites in different functions can share a `then` value and be entirely different splices. A precision of the spec's tuple, not a departure from it.
+- **(S5) Task 6 rebases engine-descriptor exits in `emit_planned_region`, not in `append_frame_descriptor`.** The spec points at the path raw-descriptor exits take today, and that path is `append_frame_descriptor` — which works from a function's own table blob. An engine descriptor is not in any function's table blob; it is appended to the table section by `emit_planned_region`, which runs after layout's per-function loop (Established fact 7). So the rebase lives there, and layout retains the per-function offset maps for it. Same arithmetic, different site.
 - **(P2) Two new mechanisms the spec does not name.** Mono's exit lowering needs (a) `ArchSyntax.return_opcode`, because `ret`, `stp` and `hlt` are indistinguishable in the syntax table, which touches **36 `ArchSyntax` literals**; and (b) `FuncRef.site_fixups`, a cross-function code-offset fixup layout patches, because `FuncRef.calls` names a function START and a splice jumps into the middle of the caller. Both follow existing precedents (`trap_opcode`; table fixups), but both are structural.
 - **(P2) An exit-bearing mono stamp's NAME is numbered, not refused.** Two exit-bearing splices of one `(routine, composite)` share a digest by construction — the exits are deliberately not in it, so existing stamp names do not move — so `intern` appends `.1`, `.2` rather than raising `StampNameCollision`. The alternative, widening the digest, would rename every existing stamp and move every existing mono image.
 - **(F) Where a link warning's location comes from.** A compile warning renders `{path}:{line}:{col}: warning: {msg}`; a link diagnostic has neither path nor column. The plan renders `{function}:{line}: warning: {msg} [{code}]` under `-g` and `` {function}+0x{offset:04x}: warning: {msg} [{code}] `` without. **An alternative is to thread the map sidecar's per-function `source` into the render for a real path.**
