@@ -365,7 +365,7 @@ one whose glyphs differ at the same width. It prints always, in the same
 format a compile warning does, and carries a bracketed code:
 
 ```
-main+0x0000: warning: `sub` reads a 3-symbol alphabet where `main`'s band is 5 wide [narrow-alphabet]
+main+0x0001: warning: `sub` reads a 3-symbol alphabet where `main`'s tape 0 is 5 wide [narrow-alphabet]
 ```
 
 The codes share the one allow namespace `tmt lint` uses, so `--allow CODE`
@@ -377,6 +377,11 @@ binding naming a parameter or a glyph the callee does not declare, an
 open binding into a tape the callee does not declare opaque, a graft or
 an imported alphabet whose digest drifted, and the copy path's own
 refusals (`docs/core.md (call mechanisms)`).
+
+In manifest mode `-Werror`'s promotion is per TARGET, not per build: a
+strict refusal stops the build where it stands, and the targets already
+linked keep the artifacts they wrote — the same way a plain link error
+on a later target behaves.
 
 | Code | Meaning |
 |---|---|

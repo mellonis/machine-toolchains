@@ -6474,6 +6474,13 @@ what changes is that the non-termination is now a named error advising
 `--call-mech=frames` (`f2556ec`, narrowed to the unbroken chain in
 `b39b8e5`).
 
+**Four. `tmt link` and `tmt build` print more.** Link warnings print
+always, with no `-v` needed, and `-v` now prints the whole link report
+through the shared `render_link_report` the PM crate already used — the
+`frames: … composite(s) …` counters and the new `fold:` lines — where
+both build modes previously printed only `link: dropped […]`. Output
+only; no image changes.
+
 Everything else the phase adds is either a resolution of a form that was
 previously REFUSED (named entries, glyph labels, open maps, exit
 vectors), a new WARNING that does not stop a link, or an error on a form

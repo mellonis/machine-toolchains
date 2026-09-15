@@ -68,7 +68,7 @@ fn report(path: &Path, obj: &ObjectFile, extra: &[&ObjectFile], framed_call_opco
     let mut unresolved = 0usize;
     for reloc in &obj.relocations {
         // A framed call's displacement half is emitted as a relocation
-        // shaped exactly like a plain call's (docs/core.md (framed calls));
+        // shaped exactly like a plain call's (docs/core.md (call mechanisms));
         // the opcode byte sits one before the operand hole. Skip it, the
         // same way a bound site with an explicit map is skipped — it goes
         // through the composition algebra, not the plain-site check.

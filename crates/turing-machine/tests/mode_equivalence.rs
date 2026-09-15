@@ -35,9 +35,19 @@ use mtc_turing_machine::asm::{assemble, link};
 /// Assemble + link `src` under `mech`; returns the whole link output so a
 /// caller can read the executable, the sidecar map, or the report.
 fn build_full(src: &str, mech: CallMech) -> LinkOutput {
-    let obj = assemble(src, false).expect("assembles");
+    build_full_multi(&[src], mech)
+}
+
+/// The same, over SEVERAL sources: each becomes its own object and the
+/// objects are linked together — the shape a cross-object bound call can
+/// only be written in.
+fn build_full_multi(srcs: &[&str], mech: CallMech) -> LinkOutput {
+    let objs: Vec<_> = srcs
+        .iter()
+        .map(|s| assemble(s, false).expect("assembles"))
+        .collect();
     link(
-        &[obj],
+        &objs,
         &[],
         LinkOptions {
             call_mech: mech,
@@ -986,6 +996,155 @@ zero:   retx    #0
 rest:   ret
 ";
 
+/// The twice-spliced shape (`link_matrix.rs`'s `twice_spliced_callee`):
+/// `outer` is copied once and holds TWO splices of `mid`, so `mid` is
+/// copied twice and each copy carries its own splice of `big`. It is the
+/// only shape here that exercises the widened stamp intern key across two
+/// copies of one routine — the key that tells two splices of the same
+/// (routine, composite) apart by the site they return to. Both sizings
+/// are swept, because the byte rule decides `big`'s group differently at
+/// each and the two decisions run different code.
+fn twice_spliced_callee(body: usize) -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine outer, tapes=1, alpha=(4)
+.param u, ('_', 'x', 'y', 'z')
+.routine mid, tapes=1, alpha=(4), exits=1
+.param v, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.section code
+.func main
+        call    outer [0{{1->2, 2->1}}]
+        stp
+.func outer
+        call    mid [0] exits=(p)
+        ret
+p:      call    mid [0] exits=(q)
+        ret
+q:      ret
+.func mid
+        call    big [0] exits=(r)
+        retx    #0
+r:      retx    #0
+.func big
+        wrmv    [1], [>]
+{}        retx    #0
+",
+        "        nop\n".repeat(body)
+    )
+}
+
+/// The nested-under-an-exit-bearing-frame shape (`link_matrix.rs`'s
+/// `NESTED_UNDER_EXIT_BEARING`): `mid` runs under a composite whose
+/// directory entry is keyed by its own site's exit vector, and `mid`'s
+/// call into `big` composes in that row.
+const NESTED_UNDER_EXIT_BEARING: &str = "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine mid, tapes=1, alpha=(4), exits=1
+.param v, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.section code
+.func main
+        call    mid [0{1->2, 2->1}] exits=(p)
+        stp
+p:      stp
+.func mid
+        call    big [0] exits=(r)
+        retx    #0
+r:      retx    #0
+.func big
+        wrmv    [1], [>]
+        retx    #0
+";
+
+/// The broken-cycle shape (`link_matrix.rs`'s `BROKEN_CYCLE`): `outer`
+/// splices `b`, `b` plain-calls `c`, and `c` splices `b` again. It is the
+/// only shape here that exercises the splice-chain RESET at the
+/// non-splice node — the second lap dedups onto the first rather than
+/// minting an endless chain — so the copy count, and with it every stamp
+/// name, depends on where that reset falls.
+const BROKEN_CYCLE: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', 'x', 'y')
+.routine outer, tapes=1, alpha=(3)
+.param u, ('_', 'x', 'y')
+.routine b, tapes=1, alpha=(3), exits=1
+.param n, ('_', 'x', 'y')
+.routine c, tapes=1, alpha=(3)
+.param m, ('_', 'x', 'y')
+.section tables
+Tb:     .row    [0]
+        .row    [*]
+Db:     .targets first, done
+.section code
+.func main
+        call    outer [0{1->2, 2->1}]
+        stp
+.func outer
+        call    b [0] exits=(p)
+        ret
+p:      ret
+.func b
+        rd
+        mtc     Tb
+        djmp    Db
+first:  wrmv    [1], [.]
+        call    c
+        retx    #0
+done:   wrmv    [2], [>]
+        retx    #0
+.func c
+        call    b [0] exits=(q)
+        ret
+q:      ret
+";
+
+/// The cross-object pair (`link_matrix.rs`'s `XO_CALLER` / `XO_CALLEE`),
+/// assembled as two objects and linked together: the binding resolves
+/// against an interface the caller's own object never carried, and the
+/// composite is interned under a callee index that only resolution
+/// assigns.
+const XO_CALLER: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', '0', '1')
+.section code
+.func main
+        call    mylib::plusOne [num: 0{3->'0', 4->'1'}]
+        stp
+";
+
+const XO_CALLEE: &str = "\
+.routine mylib::plusOne, tapes=1, alpha=(3)
+.param num, ('_', '0', '1'), writes=('0', '1')
+.section code
+.func mylib::plusOne
+        rd
+        wrmv    [2], [.]
+        ret
+";
+
+/// One program's relink check: the same sources under the same mechanism,
+/// linked twice.
+fn assert_relinks_identically(srcs: &[&str], mech: CallMech) {
+    let a = build_full_multi(srcs, mech);
+    let b = build_full_multi(srcs, mech);
+    assert_eq!(
+        a.executable.to_bytes(),
+        b.executable.to_bytes(),
+        "the {mech} image is not reproducible"
+    );
+    assert_eq!(
+        a.map.to_json(),
+        b.map.to_json(),
+        "the {mech} sidecar is not reproducible"
+    );
+}
+
 #[test]
 fn every_program_relinks_byte_identically_in_every_mode() {
     // Reproducible builds: the closure BFS is deterministic, so linking the
@@ -993,6 +1152,8 @@ fn every_program_relinks_byte_identically_in_every_mode() {
     // AND an identical sidecar JSON (docs/core.md (the composition engine)).
     let closure = closure_fold();
     let shared_frame = shared_under_frame();
+    let twice_small = twice_spliced_callee(20);
+    let twice_big = twice_spliced_callee(60);
     for src in [
         CROSS_ALPHABET,
         NESTED_TWO_LEVEL,
@@ -1008,21 +1169,19 @@ fn every_program_relinks_byte_identically_in_every_mode() {
         MIXED_SPLICE_AND_FRAME,
         shared_frame.as_str(),
         EXITS_UNDER_FRAME,
+        twice_small.as_str(),
+        twice_big.as_str(),
+        BROKEN_CYCLE,
+        NESTED_UNDER_EXIT_BEARING,
     ] {
         for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
-            let a = build_full(src, mech);
-            let b = build_full(src, mech);
-            assert_eq!(
-                a.executable.to_bytes(),
-                b.executable.to_bytes(),
-                "the {mech} image is not reproducible"
-            );
-            assert_eq!(
-                a.map.to_json(),
-                b.map.to_json(),
-                "the {mech} sidecar is not reproducible"
-            );
+            assert_relinks_identically(&[src], mech);
         }
+    }
+    // The cross-object pair is the one shape that needs two objects, so it
+    // is swept separately rather than folded into the single-source list.
+    for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+        assert_relinks_identically(&[XO_CALLER, XO_CALLEE], mech);
     }
 }
 
