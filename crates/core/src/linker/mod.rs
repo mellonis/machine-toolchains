@@ -125,6 +125,11 @@ pub enum LinkError {
     /// function's name. Named rather than left to surface as a malformed
     /// blob at some offset, because the cause is a property of the source
     /// the author can act on.
+    ///
+    /// The refusal is SPLICE-specific, not a property of tail position
+    /// itself: a site whose hybrid fold group shares one generic body is
+    /// reached through a frame descriptor and returns through it, so it
+    /// needs no following instruction and is never refused here.
     ExitBearingTailCall(String),
 }
 
@@ -200,9 +205,10 @@ impl std::fmt::Display for LinkError {
             ),
             Self::ExitBearingTailCall(symbol) => write!(
                 f,
-                "an exit-bearing call needs an instruction after it for the \
-                 return to land on; it cannot be the last instruction of \
-                 `{symbol}`"
+                "an exit-bearing call COPIED into its call site needs an \
+                 instruction after it for the return to land on; it cannot \
+                 be the last instruction of `{symbol}` — a site reached \
+                 through a frame descriptor instead is unaffected"
             ),
         }
     }

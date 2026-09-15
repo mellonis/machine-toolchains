@@ -739,11 +739,51 @@ fn the_same_binding_made_injective_links_and_runs_in_every_mode() {
 
 // ── determinism: re-link is byte-identical (image + sidecar) ─────────────────
 
+/// The closure-fold shape (docs/core.md (call mechanisms)): `big` is
+/// reached once at the identity world through a swap binding and twice
+/// inside `outer`'s stamped copy, so hybrid's byte rule shares the body and
+/// the image carries BOTH a stamp and a frames region. Its determinism is
+/// the interesting one: the fold decision is taken over a `HashMap` of
+/// groups, and the closure probe walks a queue seeded from it, so an
+/// iteration order leaking into the decision would show up here as a
+/// relink that is not byte-identical. `link_matrix.rs` carries the same
+/// program and runs it; this file only re-links it.
+fn closure_fold() -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine outer, tapes=1, alpha=(4)
+.param u, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.section code
+.func main
+        call    outer [0{{1->2, 2->1}}]
+        call    big [0{{1->2, 2->1}}] exits=(a)
+        stp
+a:      wrmv    [1], [.]
+        stp
+.func outer
+        call    big [0] exits=(p)
+        ret
+p:      call    big [0] exits=(q)
+        ret
+q:      ret
+.func big
+        wrmv    [1], [>]
+{}        retx    #0
+",
+        "        nop\n".repeat(50)
+    )
+}
+
 #[test]
 fn every_program_relinks_byte_identically_in_every_mode() {
     // Reproducible builds: the closure BFS is deterministic, so linking the
     // same program under the same mechanism twice yields byte-identical bytes
     // AND an identical sidecar JSON (docs/core.md (the composition engine)).
+    let closure = closure_fold();
     for src in [
         CROSS_ALPHABET,
         NESTED_TWO_LEVEL,
@@ -752,6 +792,7 @@ fn every_program_relinks_byte_identically_in_every_mode() {
         NARROWER_IDENTITY,
         IN_RANGE_HOLES,
         UNALIASED,
+        closure.as_str(),
     ] {
         for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
             let a = build_full(src, mech);

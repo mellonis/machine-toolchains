@@ -99,6 +99,22 @@ fn fake_syntax() -> ArchSyntax {
                 operand: OperandKind::Imm8,
                 flow: Stop,
             },
+            // A match table (a pure lookup) and the dispatch that consumes
+            // its result: a callee carrying one has a non-empty table blob,
+            // which is the half of `B` a fold decision would miss if it
+            // counted the code alone.
+            SyntaxEntry {
+                opcode: 0x11,
+                mnemonic: "tmatch",
+                operand: OperandKind::TableRef,
+                flow: FT,
+            },
+            SyntaxEntry {
+                opcode: 0x12,
+                mnemonic: "tdispatch",
+                operand: OperandKind::TableRef,
+                flow: Stop,
+            },
         ],
         relax_pairs: vec![RelaxPair {
             far: 0x21,
@@ -1209,6 +1225,26 @@ fn a_spliced_site_and_a_framed_site_in_one_caller_agree_under_hybrid() {
         "the caller must jump into the copy at {}",
         copy.start
     );
+    // The MIXED path returns its fold decisions too — not just the two fast
+    // paths. One group, one site, refused on `k >= 2`; `pick` is 1 `ent` +
+    // 2 bytes of `retx #0` against a 12-byte identity descriptor.
+    //
+    // Mutation it catches: leave `folds` off the mixed path's own `Lowered`
+    // (the one return the two fast-path tests cannot reach) and this comes
+    // back empty.
+    let fold = out
+        .report
+        .folds
+        .iter()
+        .find(|f| f.routine == "pick")
+        .unwrap_or_else(|| panic!("the mixed path reports no folds: {:?}", out.report));
+    assert_eq!(fold.sites, 1, "{fold:?}");
+    assert!(!fold.shared, "{fold:?}");
+    assert_eq!(fold.body_bytes, 3, "1 ent + 2 retx: {fold:?}");
+    assert_eq!(
+        fold.descriptor_bytes, 12,
+        "one identity descriptor: {fold:?}"
+    );
 }
 
 /// A NESTED exit-bearing site whose composite is the full identity is
@@ -1545,4 +1581,329 @@ fn three_exit_bearing_sites_over_a_large_body_share_under_hybrid() {
         "one descriptor per site: {:?}",
         out.report
     );
+}
+
+// -- P4b: the fold count runs over the whole reachable set -------------------
+
+/// `n` `nop` lines. A fold fixture's whole size knob is the body length, and
+/// the arithmetic in each comment below names `n` directly — a helper keeps
+/// the two from drifting apart the way fifty literal lines invite.
+fn nops(n: usize) -> String {
+    "        nop\n".repeat(n)
+}
+
+/// `big` is reached from ONE exit-bearing site at the identity world
+/// (`main`'s, through a swap binding) and from TWO more inside `outer`'s
+/// stamped copy (transparent, so they compose to the same composite the
+/// swap does). The three are one group only if the closure sites are
+/// counted.
+///
+/// The arithmetic, EXACT and stated so the fixture is auditable rather
+/// than tuned. All three sites reach the SAME composite — the swap —
+/// because `outer` is stamped under it and its two calls to `big` are
+/// transparent, so `compose(C_swap, identity)` is `C_swap` again. That
+/// composite's maps are not identity, so `dense_map` emits one `u16`
+/// per symbol in each direction over the 4-symbol alphabet and
+/// `descriptor_bytes` writes
+/// `1 (arity) + 2 (exit_count) + [1 (phys) + 2 + 2*4 + 2 + 2*4] + 4 (one exit)`
+/// = **28 bytes** per site — the same 28 for the swap site and for each
+/// transparent one, since they share the composite. `sum(d_i)` = **84**.
+/// `big`'s blob is the implicit 1-byte `ent` prologue + 50 `nop`s +
+/// 2 bytes of `retx #0`, with no table, so `B` = **53**. With all three
+/// sites, `(3 - 1) * 53 = 106 > 84` and the group SHARES; the flip point
+/// is 40 nops, so the fixture is clear of the boundary. With only the
+/// identity-world site, `k` is 1 and the rule refuses on `k >= 2` alone,
+/// whatever `B` is.
+fn closure_fold() -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine outer, tapes=1, alpha=(4)
+.param u, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.section code
+.func main
+        call    outer [0{{1->2, 2->1}}]
+        call    big [0{{1->2, 2->1}}] exits=(a)
+        stp
+a:      wr      [1]
+        stp
+.func outer
+        call    big [0] exits=(p)
+        ret
+p:      call    big [0] exits=(q)
+        ret
+q:      ret
+.func big
+{}        retx    #0
+",
+        nops(50)
+    )
+}
+
+/// The fold group spans the identity world and the inside of a stamped
+/// copy.
+///
+/// Mutation it catches: drop the probe (group over the identity world
+/// only) and `fold.sites` is 1 and `fold.shared` is false — the two
+/// closure sites each splice a per-site copy instead, which
+/// `instantiations` shows.
+///
+/// The three numeric assertions are the pin on the EXACT cost, exactly as
+/// in the identity-world case: `shared` alone has slack.
+#[test]
+fn exit_bearing_sites_inside_a_stamped_copy_join_their_group() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(&closure_fold())],
+        &[],
+        opts(CallMech::Hybrid),
+    )
+    .expect("links under hybrid");
+    let fold = out
+        .report
+        .folds
+        .iter()
+        .find(|f| f.routine == "big")
+        .unwrap_or_else(|| panic!("no fold decision for `big`: {:?}", out.report.folds));
+    assert_eq!(
+        fold.sites, 3,
+        "one identity-world site plus two inside the copy: {fold:?}"
+    );
+    assert_eq!(fold.body_bytes, 53, "1 ent + 50 nop + 2 retx: {fold:?}");
+    assert_eq!(
+        fold.descriptor_bytes, 84,
+        "three 28-byte descriptors over one shared composite: {fold:?}"
+    );
+    assert!(fold.shared, "106 > 84, so the group shares: {fold:?}");
+}
+
+/// A shared closure site becomes a framed call inside the copy, NOT a
+/// child stamp: `outer` is stamped once and `big` keeps its single
+/// generic copy, so the image carries exactly one stamp.
+///
+/// Mutation it catches: ignore the `shared` set in `mono_stamps` and the
+/// copy interns two child stamps of `big`, so `instantiations` is 3
+/// instead of 1. It ALSO catches dropping `any_frames = true` from the
+/// shared branch: hybrid then takes its `!any_frames` fast path into
+/// `lower_mono`, which re-seeds every identity-world bound site with an
+/// EMPTY shared set — four stamps, not one.
+#[test]
+fn a_shared_closure_site_frames_instead_of_stamping_a_child() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(&closure_fold())],
+        &[],
+        opts(CallMech::Hybrid),
+    )
+    .expect("links under hybrid");
+    assert_eq!(
+        out.report.instantiations, 1,
+        "only `outer` is stamped; `big` stays generic: {:?}",
+        out.report
+    );
+    assert!(
+        out.report.composites >= 2,
+        "the shared body needs a directory entry per site: {:?}",
+        out.report
+    );
+    // `big` survives as a generic routine — a shared group's whole point.
+    assert!(
+        out.map.functions.iter().any(|f| f.name == "big"),
+        "the shared body must be in the image"
+    );
+}
+
+/// The same program under the other two mechanisms: mono splices
+/// everything, frames descriptors everything, and both must still link.
+/// The three images differ; what must not differ is that each is
+/// well-formed and reproducible.
+///
+/// Mutation it catches: emit the stamp's descriptor with exits in the
+/// ENCLOSING routine's offsets (skip the `old_to_new` remap) and layout
+/// rejects the raw descriptor as malformed table data, so hybrid stops
+/// linking while mono and frames still do.
+#[test]
+fn the_closure_fold_program_links_and_relinks_under_every_mechanism() {
+    let src = closure_fold();
+    for mech in MECHS {
+        let a = link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
+            .unwrap_or_else(|e| panic!("under {mech}: {e}"));
+        let b = link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
+            .unwrap_or_else(|e| panic!("under {mech}: {e}"));
+        assert_eq!(
+            a.executable.to_bytes(),
+            b.executable.to_bytes(),
+            "the {mech} image is not reproducible"
+        );
+    }
+}
+
+/// The same shape with `main`'s own exit-bearing site REMOVED: `big`'s
+/// only two sites both sit inside `outer`'s stamped copy, so the group
+/// has no identity-world member at all. With 10 `nop`s, `B` = 13 against
+/// `sum(d_i)` = 56 and `13 > 56` is false — the group splices, and
+/// `mono_stamps` is what splices it, since the decision loop has nothing
+/// to seed.
+fn closure_only_fold() -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine outer, tapes=1, alpha=(4)
+.param u, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.section code
+.func main
+        call    outer [0{{1->2, 2->1}}]
+        stp
+.func outer
+        call    big [0] exits=(p)
+        ret
+p:      call    big [0] exits=(q)
+        ret
+q:      ret
+.func big
+{}        retx    #0
+",
+        nops(10)
+    )
+}
+
+/// A group whose members are ALL closure sites is still decided, and a
+/// refused group is spliced by the stamp closure itself rather than
+/// seeded by the decision loop.
+///
+/// Mutation it catches: leave `group_composite` unpopulated in the probe
+/// merge and the decision loop's `group_composite[key]` index panics —
+/// `closure_fold` masks that, because its identity-world member fills the
+/// key first. Also: the splice branch seeding a non-`Identity` member has
+/// no caller or address to seed WITH, which is why the branch skips them
+/// and this fixture is the one that proves the skip still links.
+#[test]
+fn a_group_with_only_closure_sites_is_decided_and_spliced() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(&closure_only_fold())],
+        &[],
+        opts(CallMech::Hybrid),
+    )
+    .expect("links under hybrid");
+    let fold = out
+        .report
+        .folds
+        .iter()
+        .find(|f| f.routine == "big")
+        .unwrap_or_else(|| panic!("no fold decision for `big`: {:?}", out.report.folds));
+    assert_eq!(fold.sites, 2, "both sites sit inside the copy: {fold:?}");
+    assert_eq!(fold.body_bytes, 13, "1 ent + 10 nop + 2 retx: {fold:?}");
+    assert_eq!(
+        fold.descriptor_bytes, 56,
+        "two 28-byte descriptors: {fold:?}"
+    );
+    assert!(!fold.shared, "13 > 56 is false: {fold:?}");
+    // `outer`'s copy plus one per-site copy of `big` each.
+    assert_eq!(
+        out.report.instantiations, 3,
+        "the refused group splices inside the copy: {:?}",
+        out.report
+    );
+}
+
+/// Two fold groups in ONE link, one of them over a TABLE-BEARING callee.
+/// Both bindings are the identity over equal 3-symbol alphabets, so every
+/// descriptor's dense maps are empty and each costs
+/// `1 + 2 + [1 + 2 + 0 + 2 + 0] + 4` = **12 bytes**; two sites per group
+/// gives `sum(d_i)` = **24**.
+///
+/// `abe` is 1 `ent` + 25 `nop` + 2 `retx` = **28** bytes of code and no
+/// table. `zed` is 1 `ent` + 5 (`tmatch`) + 5 (`tdispatch`) + 2 (`wr`) +
+/// 2 (`retx`) + 2 (`wr`) + 2 (`retx`) = **19** bytes of code PLUS a table
+/// blob of 5 (match: width 1, 2 rows) + 10 (dispatch: count + 2 entries)
+/// = 15, so `B` = **34**. Both clear `(2 - 1) * B > 24` and share.
+///
+/// `zed` is declared and called FIRST, so it takes the lower `order`
+/// index and the decision loop — which walks the group keys in
+/// `(callee index, composite)` order — reaches it first. `folds` comes
+/// back sorted by name, so `abe` precedes it: insertion order and
+/// reported order genuinely differ.
+fn two_groups_one_table() -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine zed, tapes=1, alpha=(3), exits=1
+.param v, ('_', '0', '1')
+.routine abe, tapes=1, alpha=(3), exits=1
+.param w, ('_', '0', '1')
+.section tables
+T0: .row [1]
+    .row [*]
+D0: .targets P, Q
+.section code
+.func main
+        call    zed [0] exits=(e1)
+        call    zed [0] exits=(e2)
+        call    abe [0] exits=(e3)
+        call    abe [0] exits=(e4)
+        stp
+e1:     wr      [1]
+        stp
+e2:     wr      [2]
+        stp
+e3:     wr      [1]
+        stp
+e4:     wr      [2]
+        stp
+.func zed
+        tmatch  T0
+        tdispatch D0
+P:      wr      [1]
+        retx    #0
+Q:      wr      [2]
+        retx    #0
+.func abe
+{}        retx    #0
+",
+        nops(25)
+    )
+}
+
+/// A callee's TABLE counts toward `B`, and two groups report in sorted
+/// order.
+///
+/// Mutation it catches: drop `order[callee].table.len()` from `B` and
+/// `zed`'s body falls to 19, which loses `19 > 24` — the table-bearing
+/// group stops sharing and both the `body_bytes` and the `shared`
+/// assertions below fail. Reverse the `folds` sort and the two
+/// `routine` assertions fail.
+#[test]
+fn a_table_bearing_callee_counts_its_table_and_folds_report_in_sorted_order() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(&two_groups_one_table())],
+        &[],
+        opts(CallMech::Hybrid),
+    )
+    .expect("links under hybrid");
+    let folds = &out.report.folds;
+    assert_eq!(folds.len(), 2, "one decision per group: {folds:?}");
+    assert_eq!(folds[0].routine, "abe", "sorted by name: {folds:?}");
+    assert_eq!(folds[1].routine, "zed", "sorted by name: {folds:?}");
+    assert_eq!(
+        folds[0].body_bytes, 28,
+        "1 ent + 25 nop + 2 retx: {folds:?}"
+    );
+    assert_eq!(
+        folds[1].body_bytes, 34,
+        "19 bytes of code plus a 15-byte table blob: {folds:?}"
+    );
+    for f in folds {
+        assert_eq!(f.sites, 2, "{f:?}");
+        assert_eq!(f.descriptor_bytes, 24, "two 12-byte descriptors: {f:?}");
+        assert!(f.shared, "{f:?}");
+    }
 }

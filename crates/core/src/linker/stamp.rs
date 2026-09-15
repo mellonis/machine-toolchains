@@ -237,8 +237,18 @@ pub(super) fn lower_mono<'a>(
     // Mono rewrites no blob, so nothing shifts: every splice offset is
     // already in its caller's final coordinates.
     let unshifted: Vec<HashSet<u32>> = vec![HashSet::new(); n];
-    let (stamps, seed_target, stats) =
-        mono_stamps(syntax, &order, sites, machine_sig, &seeds, &unshifted)?;
+    // Pure mono shares nothing: every exit-bearing site splices, wherever
+    // it sits (docs/core.md (call mechanisms)).
+    let nothing_shared: HashSet<GroupKey> = HashSet::new();
+    let (stamps, seed_target, stats) = mono_stamps(
+        syntax,
+        &order,
+        sites,
+        machine_sig,
+        &seeds,
+        &unshifted,
+        &nothing_shared,
+    )?;
     // `dedup_savings`, `synthesized_trap_rows`, and `expanded_rows` are
     // summed over every stamp `mono_stamps` builds, before the prune below
     // runs. That is sound because `mono_stamps` closes "mono all the way
@@ -341,9 +351,65 @@ pub(super) fn lower_mono<'a>(
 /// agree on both — wherever in the reachable set each was met.
 type GroupKey = (usize, Vec<u8>);
 
-/// One fold group's members: per site, the calling function's index in
-/// `order`, the site's blob offset in that function, and its record.
-type GroupSites<'a> = Vec<(usize, u32, &'a BoundCall)>;
+/// One fold group's members (docs/core.md (call mechanisms)).
+type GroupSites<'a> = Vec<GroupSite<'a>>;
+
+/// One exit-bearing bijection site in a fold group. An IDENTITY-WORLD site
+/// names the calling function in `order` and its blob offset there, which
+/// is what a splice needs to seed itself. A CLOSURE site was met inside a
+/// copy, where neither number means anything in `order`'s coordinates:
+/// such a member is spliced by the stamp closure itself when its group is
+/// refused, so the only thing the decision needs from it is its record.
+enum GroupSite<'a> {
+    Identity {
+        caller: usize,
+        addr: u32,
+        record: &'a BoundCall,
+    },
+    InClosure {
+        record: &'a BoundCall,
+    },
+}
+
+impl<'a> GroupSite<'a> {
+    /// The site's call record, whichever variant carries it — the exit
+    /// count is what sizes its would-be descriptor.
+    fn record(&self) -> &'a BoundCall {
+        match self {
+            GroupSite::Identity { record, .. } | GroupSite::InClosure { record } => record,
+        }
+    }
+}
+
+/// One exit-bearing bijection site the closure probe met inside a copy
+/// (docs/core.md (call mechanisms)).
+struct ClosureSite<'a> {
+    /// The callee the site reaches.
+    callee: usize,
+    record: &'a BoundCall,
+    /// `compose(enclosing, binding)` — absolute, and exactly the descriptor
+    /// a shared site is given.
+    composite: Composite,
+}
+
+/// What a stamped body does at one of its own call sites.
+enum StampTarget {
+    /// A plain call into a child stamp, or into the original on a full
+    /// pass-through. `splice` marks a site ENTERED by a jump rather than a
+    /// call — an exit-bearing site whose group was refused sharing
+    /// (docs/core.md (call mechanisms)).
+    Plain { target: usize, splice: bool },
+    /// A framed call into the ONE generic copy of the callee, through a
+    /// descriptor the stamp carries in its own table blob.
+    Framed {
+        callee: usize,
+        composite: Composite,
+        /// The site's exits, as offsets in the ENCLOSING routine's original
+        /// blob; `build_stamp` remaps them into the stamp's own blob before
+        /// writing them into the descriptor.
+        exits: Vec<u32>,
+    },
+}
 
 /// Lower under HYBRID: mono-stamp the completed-bijection sites, hand the
 /// rest to the frames path. If every non-collapse site is a bijection this
@@ -412,13 +478,31 @@ pub(super) fn lower_hybrid<'a>(
                         .map_err(|e| bad_binding(&order[*callee].name, &e))?;
                         let key = (*callee, canonical_key(&composite));
                         group_composite.entry(key.clone()).or_insert(composite);
-                        groups.entry(key).or_default().push((fi, *addr, record));
+                        groups.entry(key).or_default().push(GroupSite::Identity {
+                            caller: fi,
+                            addr: *addr,
+                            record,
+                        });
                     }
                 } else {
                     any_frames = true;
                 }
             }
         }
+    }
+
+    // The fold count runs over the WHOLE reachable set, not only the
+    // identity world (docs/core.md (call mechanisms)): an exit-bearing
+    // site met while a routine is copied under composite `C` joins its
+    // group, and a shared group is reached from inside that copy through
+    // a descriptor `compose(C, binding)` plus the site's exits.
+    for cs in mono_closure_probe(&order, sites, machine_sig, &seeds) {
+        let key = (cs.callee, canonical_key(&cs.composite));
+        group_composite.entry(key.clone()).or_insert(cs.composite);
+        groups
+            .entry(key)
+            .or_default()
+            .push(GroupSite::InClosure { record: cs.record });
     }
 
     // The byte rule (docs/core.md (call mechanisms)): with `k` sites, a
@@ -431,6 +515,9 @@ pub(super) fn lower_hybrid<'a>(
     // fast path taken ahead of it would branch on a state the rule has not
     // produced yet.
     let mut folds: Vec<super::FoldDecision> = Vec::new();
+    // The `(callee, composite)` pairs the rule shared: consulted by the
+    // stamp closure, which frames such a site instead of minting a child.
+    let mut shared_pairs: HashSet<GroupKey> = HashSet::new();
     let mut keys: Vec<&GroupKey> = groups.keys().collect();
     keys.sort();
     for key in keys {
@@ -441,8 +528,13 @@ pub(super) fn lower_hybrid<'a>(
         let k = u32::try_from(sites_in_group.len()).expect("a group size fits u32");
         let descriptors: u32 = sites_in_group
             .iter()
-            .map(|(_, _, record)| {
-                descriptor_cost(&group_composite[key], machine_sig, &order, &record.exits)
+            .map(|s| {
+                descriptor_cost(
+                    &group_composite[key],
+                    machine_sig,
+                    &order,
+                    &s.record().exits,
+                )
             })
             .sum::<Result<u32, LinkError>>()?;
         let shared = k >= 2 && u64::from(k - 1) * u64::from(body) > u64::from(descriptors);
@@ -454,12 +546,28 @@ pub(super) fn lower_hybrid<'a>(
             shared,
         });
         if shared {
-            // A shared group keeps its sites in `f.bound`, so the frames
-            // path lowers them — with their exit vectors — against the one
-            // generic body.
+            // A shared group keeps its IDENTITY-WORLD sites in `f.bound`,
+            // so the frames path lowers them — with their exit vectors —
+            // against the one generic body. A closure member reaches the
+            // same body through a descriptor the stamp carries in its own
+            // table blob, which the stamp closure emits when it finds the
+            // pair here.
             any_frames = true;
+            shared_pairs.insert(key.clone());
         } else {
-            for &(fi, addr, record) in sites_in_group {
+            // Only an identity-world member is seeded: a closure member
+            // names no function in `order` and no offset in one, and is
+            // spliced by the stamp closure itself — which is exactly what
+            // it does for every pair NOT in `shared_pairs`.
+            for s in sites_in_group {
+                let GroupSite::Identity {
+                    caller: fi,
+                    addr,
+                    record,
+                } = *s
+                else {
+                    continue;
+                };
                 // Checked here, while the caller and the callee's name are
                 // in hand, so the promotion loop below cannot fail. A
                 // SHARED group needs neither a jump opcode nor a `then`,
@@ -530,8 +638,15 @@ pub(super) fn lower_hybrid<'a>(
                 .collect()
         })
         .collect();
-    let (stamps, seed_target, mono_stats) =
-        mono_stamps(syntax, &order, sites, machine_sig, &seeds, &widened)?;
+    let (stamps, seed_target, mono_stats) = mono_stamps(
+        syntax,
+        &order,
+        sites,
+        machine_sig,
+        &seeds,
+        &widened,
+        &shared_pairs,
+    )?;
     let stamp_names: HashSet<String> = stamps.iter().map(|f| f.name.to_string()).collect();
 
     let jmp = syntax.jump_opcode();
@@ -603,6 +718,114 @@ pub(super) fn lower_hybrid<'a>(
         diagnostics: Vec::new(),
         folds,
     })
+}
+
+/// Enumerate the `(routine, composite)` closure from the identity-world
+/// mono seeds WITHOUT building any body, reporting every exit-bearing
+/// bijection site met inside a copy with its binding already composed
+/// against the enclosing composite (docs/core.md (call mechanisms)).
+///
+/// Hybrid needs this before it can size a fold group: a group's members
+/// are not all visible at the machine's own frame, and a stamp that
+/// reaches a SHARED callee emits a framed call rather than recursing, so
+/// the closure's own shape depends on the decision. Probing first, then
+/// deciding, then building is what breaks that circle.
+///
+/// The probe is purely ADDITIVE and never fails: a site it cannot compose,
+/// or a raw framed call inside a copy, is skipped rather than reported as
+/// an error, so a probe walking one step further than the builder will
+/// (past a site whose group ends up shared, which the builder does not
+/// descend through) can never turn a linkable program into a refusal. The
+/// seeds are the EXIT-FREE bijection sites alone — the copies those mint
+/// exist whatever the decision — so the count can only ever under-report,
+/// and an under-reported group splices, which is always sound.
+///
+/// Keep it that way: a refusal belongs in `mono_stamps`, which walks the
+/// authoritative closure. One raised here would be raised over a walk that
+/// is deliberately neither a subset nor a superset of what gets built.
+fn mono_closure_probe<'a>(
+    order: &[FuncRef<'a>],
+    sites: &[Vec<SiteKind<'a>>],
+    machine_sig: &RoutineSig,
+    seeds: &[(usize, u32, usize, &'a BoundCall)],
+) -> Vec<ClosureSite<'a>> {
+    let ma = machine_sig.arity as usize;
+    let id = identity_composite(ma, 0);
+    let mut visited: HashSet<(usize, Vec<u8>)> = HashSet::new();
+    let mut queue: VecDeque<(usize, Composite)> = VecDeque::new();
+    let mut met: Vec<ClosureSite<'a>> = Vec::new();
+
+    let caller_cards = |fi: usize| -> &[u32] {
+        order[fi]
+            .signature
+            .map(|s| s.cardinalities.as_slice())
+            .unwrap_or(machine_sig.cardinalities.as_slice())
+    };
+
+    for &(fi, _, callee, record) in seeds {
+        let Ok(callee_sig) = routine_sig(order, callee) else {
+            continue;
+        };
+        let Ok(child) = compose(&id, caller_cards(fi), callee, &record.binding, callee_sig) else {
+            continue;
+        };
+        queue.push_back((callee, child));
+    }
+
+    while let Some((routine, comp)) = queue.pop_front() {
+        if !visited.insert((routine, canonical_key(&comp))) {
+            continue;
+        }
+        for site in &sites[routine] {
+            match site {
+                // A raw framed call inside a copy is the mono refusal
+                // `mono_stamps` raises; leave it to raise it, so the
+                // probe never changes which error a link reports.
+                SiteKind::RawCallM { .. } => {}
+                SiteKind::Plain { callee, .. } => {
+                    let mut child = comp.clone();
+                    child.routine = *callee;
+                    queue.push_back((*callee, child));
+                }
+                SiteKind::Bound { callee, record, .. } => {
+                    let Ok(callee_sig) = routine_sig(order, *callee) else {
+                        continue;
+                    };
+                    let Ok(child) = compose(
+                        &comp,
+                        caller_cards(routine),
+                        *callee,
+                        &record.binding,
+                        callee_sig,
+                    ) else {
+                        continue;
+                    };
+                    // An exit-bearing bijection site is a fold-group
+                    // candidate wherever it sits. Everything else keeps
+                    // descending exactly as the builder will.
+                    if !record.exits.is_empty()
+                        && is_bijection(
+                            order[routine].signature.unwrap_or(machine_sig),
+                            callee_sig,
+                            record,
+                        )
+                    {
+                        met.push(ClosureSite {
+                            callee: *callee,
+                            record,
+                            composite: child.clone(),
+                        });
+                    }
+                    if !(record.exits.is_empty()
+                        && is_full_passthrough(&child, machine_sig, callee_sig))
+                    {
+                        queue.push_back((*callee, child));
+                    }
+                }
+            }
+        }
+    }
+    met
 }
 
 /// The bytes one site's frames descriptor costs — EXACT, not an estimate.
@@ -877,7 +1100,14 @@ fn site_for(
 /// `widened` is parallel to `order`: the bound-site addresses the frames
 /// path will widen in each function once the mono/frames split is decided
 /// (all empty under pure mono, which rewrites no blob).
-#[allow(clippy::type_complexity)]
+///
+/// `shared` names the `(callee, composite)` pairs hybrid's byte rule folded
+/// onto ONE generic body (docs/core.md (call mechanisms)). A site inside a
+/// copy that reaches such a pair is emitted as a framed call through a
+/// descriptor in the copy's own table blob, rather than recursing into a
+/// child stamp — which is what keeps the shared body shared. Pure mono
+/// shares nothing and passes an empty set.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn mono_stamps<'a>(
     syntax: &ArchSyntax,
     order: &[FuncRef<'a>],
@@ -885,6 +1115,7 @@ fn mono_stamps<'a>(
     machine_sig: &RoutineSig,
     seeds: &[(usize, u32, usize, &'a BoundCall)],
     widened: &[HashSet<u32>],
+    shared: &HashSet<GroupKey>,
 ) -> Result<(Vec<FuncRef<'a>>, HashMap<(usize, u32), usize>, StampStats), LinkError> {
     let ma = machine_sig.arity as usize;
     let id = identity_composite(ma, 0);
@@ -931,14 +1162,13 @@ fn mono_stamps<'a>(
     // composite (the callee runs under the same frame); a bound call composes
     // its binding onto it; both stay mono. A raw `call.m` is a frames
     // instruction — refused.
-    // Per stamp slot: the copy-blob address of each call site, its target
-    // order index, and whether the site is a SPLICE (entered by a jump
-    // rather than a call — docs/core.md (call mechanisms)).
-    let mut stamp_targets: Vec<HashMap<u32, (usize, bool)>> = Vec::new();
+    // Per stamp slot: the copy-blob address of each call site and what the
+    // copy does there (docs/core.md (call mechanisms)).
+    let mut stamp_targets: Vec<HashMap<u32, StampTarget>> = Vec::new();
     while let Some(slot) = worklist.pop_front() {
         let routine = nodes[slot].routine;
         let comp = nodes[slot].composite.clone();
-        let mut targets: HashMap<u32, (usize, bool)> = HashMap::new();
+        let mut targets: HashMap<u32, StampTarget> = HashMap::new();
         for site in &sites[routine] {
             match site {
                 SiteKind::RawCallM { .. } => {
@@ -960,7 +1190,13 @@ fn mono_stamps<'a>(
                     if dup {
                         stats.dedup_savings += 1;
                     }
-                    targets.insert(*addr, (idx, false));
+                    targets.insert(
+                        *addr,
+                        StampTarget::Plain {
+                            target: idx,
+                            splice: false,
+                        },
+                    );
                 }
                 SiteKind::Bound {
                     addr,
@@ -968,6 +1204,35 @@ fn mono_stamps<'a>(
                     record,
                     ..
                 } => {
+                    // A group the byte rule SHARED is reached through one
+                    // generic body: the copy frames the call instead of
+                    // minting a child, through a descriptor
+                    // `compose(C, binding)` it carries in its own table
+                    // blob (docs/core.md (call mechanisms)). Decided before
+                    // anything else, because such a site needs neither a
+                    // jump opcode nor a `then` — it returns through the
+                    // frame, exactly as the identity-world members of the
+                    // same group do.
+                    let callee_sig = routine_sig(order, *callee)?;
+                    // The caller is this stamp's own routine; its declared
+                    // cardinalities carry the closed-on-unequal binding rule.
+                    let caller_cards = order[routine]
+                        .signature
+                        .map(|s| s.cardinalities.as_slice())
+                        .unwrap_or(machine_sig.cardinalities.as_slice());
+                    let child = compose(&comp, caller_cards, *callee, &record.binding, callee_sig)
+                        .map_err(|e| bad_binding(&order[*callee].name, &e))?;
+                    if shared.contains(&(*callee, canonical_key(&child))) {
+                        targets.insert(
+                            *addr,
+                            StampTarget::Framed {
+                                callee: *callee,
+                                composite: child,
+                                exits: record.exits.clone(),
+                            },
+                        );
+                        continue;
+                    }
                     // A bound site NESTED inside a routine being copied
                     // splices exactly as a top-level one does, except that
                     // the caller is this stamp: its offsets are the
@@ -985,15 +1250,6 @@ fn mono_stamps<'a>(
                         })
                     };
                     let splice = site.is_some();
-                    let callee_sig = routine_sig(order, *callee)?;
-                    // The caller is this stamp's own routine; its declared
-                    // cardinalities carry the closed-on-unequal binding rule.
-                    let caller_cards = order[routine]
-                        .signature
-                        .map(|s| s.cardinalities.as_slice())
-                        .unwrap_or(machine_sig.cardinalities.as_slice());
-                    let child = compose(&comp, caller_cards, *callee, &record.binding, callee_sig)
-                        .map_err(|e| bad_binding(&order[*callee].name, &e))?;
                     // A binding that composes back to a genuine full
                     // pass-through — identity placement and maps AND the callee
                     // alphabet as wide as the machine's on every tape — lowers
@@ -1025,7 +1281,13 @@ fn mono_stamps<'a>(
                         }
                         idx
                     };
-                    targets.insert(*addr, (idx, splice));
+                    targets.insert(
+                        *addr,
+                        StampTarget::Plain {
+                            target: idx,
+                            splice,
+                        },
+                    );
                 }
             }
         }
@@ -1054,6 +1316,7 @@ fn mono_stamps<'a>(
             &node.composite,
             machine_sig,
             callee_sig,
+            order,
             &stamp_targets[slot],
             site.as_ref(),
         )?;
@@ -1259,6 +1522,10 @@ fn emit_splice_jump(
 /// jump rather than a call, so its `ret` becomes a jump to the site's
 /// continuation and its `retx #k` a jump to exit `k` — both recorded as
 /// cross-function fixups for layout (docs/core.md (call mechanisms)).
+///
+/// `order` is the whole pre-stamp function order: `materialize` reads the
+/// callee's own signature out of it by `composite.routine` when this copy
+/// carries a framed call into a SHARED body.
 #[allow(clippy::too_many_arguments)]
 fn build_stamp(
     syntax: &ArchSyntax,
@@ -1266,7 +1533,8 @@ fn build_stamp(
     comp: &Composite,
     machine_sig: &RoutineSig,
     callee_sig: &RoutineSig,
-    targets: &HashMap<u32, (usize, bool)>,
+    order: &[FuncRef],
+    targets: &HashMap<u32, StampTarget>,
     site: Option<&SpliceSite>,
 ) -> Result<StampBody, LinkError> {
     let ma = machine_sig.arity as usize;
@@ -1311,6 +1579,9 @@ fn build_stamp(
     let mut table_fixups: Vec<(u32, u32)> = Vec::new();
     let mut calls: Vec<(u32, usize)> = Vec::new();
     let mut site_fixups: Vec<(u32, usize, u32)> = Vec::new();
+    // Per framed call into a shared body: where its exit slot sits in this
+    // copy's table blob, and the ENCLOSING routine's blob offset it names.
+    let mut frame_exit_fixups: Vec<(usize, u32)> = Vec::new();
     let mut old_to_new: HashMap<u32, u32> = HashMap::new();
     let mut jump_fixups: Vec<(u32, u32, u8)> = Vec::new();
     let mut dispatch_fixups: Vec<(usize, DispEntry)> = Vec::new();
@@ -1339,17 +1610,61 @@ fn build_stamp(
         // call — except an exit-bearing site, which is ENTERED by a jump
         // (docs/core.md (call mechanisms)). Either way the instruction
         // keeps its 5-byte opcode + RelI32 shape and its relocation hole.
-        if let Some(&(target, splice)) = targets.get(&old_addr) {
-            let opcode = if splice {
-                enter_jump_opcode(syntax, &callee.name)?
-            } else {
-                entry.opcode
-            };
-            blob.push(opcode);
-            let hole = blob.len() as u32;
-            blob.extend_from_slice(&[0u8; 4]);
-            calls.push((hole, target));
-            continue;
+        match targets.get(&old_addr) {
+            Some(&StampTarget::Plain { target, splice }) => {
+                let opcode = if splice {
+                    enter_jump_opcode(syntax, &callee.name)?
+                } else {
+                    entry.opcode
+                };
+                blob.push(opcode);
+                let hole = blob.len() as u32;
+                blob.extend_from_slice(&[0u8; 4]);
+                calls.push((hole, target));
+                continue;
+            }
+            Some(StampTarget::Framed {
+                callee: target,
+                composite,
+                exits,
+            }) => {
+                // A framed call into the SHARED generic body: opcode,
+                // displacement (relocated to the body like a far call),
+                // then the frame half, which names a descriptor in THIS
+                // stamp's own table blob — the hand-authored `.frame`
+                // shape, which layout already rebases
+                // (docs/formats.md (frame descriptors)).
+                let fc = syntax
+                    .framed_call_opcode()
+                    .ok_or_else(|| LinkError::BadBinding {
+                        callee: callee.name.to_string(),
+                        message: "the dialect has no framed-call opcode to reach a \
+                                  shared exit-bearing body"
+                            .to_string(),
+                    })?;
+                blob.push(fc);
+                let disp = blob.len() as u32;
+                blob.extend_from_slice(&[0u8; 4]);
+                calls.push((disp, *target));
+                let frame_hole = blob.len() as u32;
+                blob.extend_from_slice(&[0u8; 4]);
+                // The descriptor, with PLACEHOLDER exits: they are the
+                // enclosing routine's own blob offsets here, and are
+                // remapped into this copy's blob once the body is emitted.
+                // Only their COUNT affects the descriptor's length, so
+                // materializing before the remap sizes it correctly
+                // (docs/formats.md (frame descriptors)).
+                let desc_off = table.len() as u32;
+                let bytes = super::engine::materialize(composite, machine_sig, order, exits)?;
+                let exits_at = table.len() + bytes.len() - 4 * exits.len();
+                table.extend_from_slice(&bytes);
+                for (i, &old) in exits.iter().enumerate() {
+                    frame_exit_fixups.push((exits_at + 4 * i, old));
+                }
+                table_fixups.push((frame_hole, desc_off));
+                continue;
+            }
+            None => {}
         }
 
         match entry.operand {
@@ -1560,6 +1875,19 @@ fn build_stamp(
             }
             _ => unreachable!("relative jump width is 1 or 4"),
         }
+    }
+
+    // A framed call's descriptor names its exits as offsets in THIS copy's
+    // blob; layout rebases those to absolute addresses the way it does for
+    // any hand-authored descriptor (docs/formats.md (frames region)). The
+    // recorded offsets are the enclosing routine's, so they translate
+    // through the same map the copy's own jumps do.
+    for (pos, old) in frame_exit_fixups {
+        let new = *old_to_new.get(&old).ok_or(LinkError::MalformedBlob {
+            symbol: callee.name.to_string(),
+            at: old,
+        })?;
+        table[pos..pos + 4].copy_from_slice(&new.to_le_bytes());
     }
 
     // Resolve rebuilt dispatch entries to stamp-blob offsets.
