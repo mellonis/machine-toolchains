@@ -83,6 +83,17 @@ pub enum LinkError {
         offset: u32,
         what: String,
     },
+    /// A unit spliced a library graph whose body does not match the one
+    /// the exporting object describes: the two CRC-32 digests disagree,
+    /// so the consumer compiled against a header that has drifted from
+    /// its object (docs/core.md (graft drift)). `consumer` and `library`
+    /// name the two inputs, using their `LinkOptions::sources`
+    /// provenance when the caller supplied it.
+    GraftDrift {
+        graph: String,
+        consumer: String,
+        library: String,
+    },
     /// A frame descriptor is inconsistent with the entry signature: a
     /// physical-tape index at or past the machine's arity, or an
     /// undecodable hand-authored descriptor. Carries the owning function's
@@ -200,6 +211,15 @@ impl std::fmt::Display for LinkError {
                 "`{callee}`, called from `{caller}`+0x{offset:04x}, is wider than the \
                  caller in {what}; a call binding by index cannot reach what the \
                  caller does not have"
+            ),
+            Self::GraftDrift {
+                graph,
+                consumer,
+                library,
+            } => write!(
+                f,
+                "`{graph}` was grafted into {consumer} from a header that does not \
+                 match {library}"
             ),
             Self::BadFrameDescriptor { symbol, message } => {
                 write!(f, "bad frame descriptor in `{symbol}`: {message}")
@@ -543,6 +563,11 @@ pub fn link(
 ) -> Result<LinkOutput, LinkError> {
     let entry = options.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
     let resolved = resolve::resolve(objects, libraries, entry)?;
+
+    // Graft provenance is object-level and reachability does not gate it:
+    // a unit either spliced that body or it did not
+    // (docs/core.md (graft drift)).
+    interface::check_graft_drift(objects, libraries, &options.sources)?;
 
     let arch = objects
         .first()

@@ -802,6 +802,20 @@ Codes are permanent identifiers: they never change meaning.
 
 Errors are outside this catalog and cannot be suppressed.
 
+### Graft drift
+
+A graph is a compile-time template, so it travels as source rather than
+inside an object. The link stage verifies the splice after the fact: the
+exporting object records, per exported graph, a CRC-32 of the graph's
+canonical text, and a unit that spliced one records the graph's qualified
+name and the digest of the body it actually spliced. When both objects
+are in the link the two must agree, and a mismatch stops it — the
+consumer compiled against a header that has drifted from its object.
+
+A graph no input exports is not checked. That is a header-only library,
+and it is the one place a header is trusted; the trust is deliberate and
+recorded here rather than discovered.
+
 ## The composition engine
 
 An architecture with the frames profile may let a call carry a

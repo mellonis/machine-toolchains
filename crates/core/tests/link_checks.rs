@@ -516,3 +516,106 @@ fn diagnostics_are_reported_in_function_then_offset_order() {
     );
     assert_eq!(ds[2].function, "helper");
 }
+
+/// An exporter and a consumer that agree, and one that does not. The
+/// `.graph` and `.grafted` directives are object-level, before the first
+/// `.func` (docs/formats.md (routine interfaces)).
+fn exporter(digest: u32) -> String {
+    format!(
+        "\
+.graph lib::findA, {digest}
+.routine lib::facade, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func lib::facade
+        ret
+"
+    )
+}
+
+fn consumer(digest: u32) -> String {
+    format!(
+        "\
+.grafted lib::findA, {digest}
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func main
+        call    lib::facade
+        stp
+"
+    )
+}
+
+/// Mutation it catches: compare the graph NAMES only and a drifted body
+/// links silently — the failure mode the digest exists to prevent.
+#[test]
+fn a_drifted_graft_digest_is_refused() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(&consumer(42))],
+        &[asm(&exporter(7))],
+        opts(CallMech::Frames),
+    )
+    .expect_err("a drifted digest must stop the link");
+    assert!(
+        matches!(&err, LinkError::GraftDrift { graph, .. } if graph == "lib::findA"),
+        "{err:?}"
+    );
+}
+
+/// Mutation it catches: compare with `!=` inverted and the agreeing pair
+/// is refused instead.
+#[test]
+fn an_agreeing_graft_digest_links() {
+    link(
+        &fake_syntax(),
+        &[asm(&consumer(42))],
+        &[asm(&exporter(42))],
+        opts(CallMech::Frames),
+    )
+    .expect("agreeing digests link");
+}
+
+/// A header-only library exports nothing to check against. Mutation it
+/// catches: treat a missing exporter as a mismatch and every header-only
+/// library stops linking.
+#[test]
+fn a_graft_with_no_exporter_in_the_link_is_unchecked() {
+    const ALONE: &str = "\
+.grafted lib::findA, 42
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func main
+        stp
+";
+    link(&fake_syntax(), &[asm(ALONE)], &[], opts(CallMech::Frames))
+        .expect("an unexported graft is not checked");
+}
+
+/// A user object that ALSO exports the graph shadows the library's
+/// export, exactly as a user symbol shadows a library one: the consumer
+/// is checked against the user object's digest, not the library's.
+///
+/// Mutation it catches: resolve the exporter last-wins (or library-first)
+/// and the consumer, which agrees with the user object and disagrees
+/// with the library, is refused.
+#[test]
+fn a_user_export_shadows_a_library_export_for_the_check() {
+    const USER_EXPORTER: &str = "\
+.graph lib::findA, 42
+.routine helper, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func helper
+        ret
+";
+    link(
+        &fake_syntax(),
+        &[asm(&consumer(42)), asm(USER_EXPORTER)],
+        &[asm(&exporter(7))],
+        opts(CallMech::Frames),
+    )
+    .expect("the user object's export wins, and it agrees");
+}

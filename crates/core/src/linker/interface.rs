@@ -27,7 +27,8 @@
 
 use super::LinkError;
 use super::resolve::FuncRef;
-use crate::formats::object::{BoundCall, RoutineInterface, TapeBinding};
+use crate::formats::object::{BoundCall, ObjectFile, RoutineInterface, TapeBinding};
+use std::collections::HashMap;
 
 /// Resolve every reached bound call's binding against its callee's
 /// interface. Returns one `Vec<BoundCall>` per function, parallel to
@@ -301,6 +302,58 @@ pub(super) fn rebind<'a>(
         }
     }
     order
+}
+
+/// Compare every recorded library graft against the digest its exporter
+/// declares (docs/core.md (graft drift)). The exporter is found in the
+/// linker's own namespace order — user objects first, then libraries,
+/// first-wins — so a user object that also exports the graph shadows a
+/// library exactly as it shadows a symbol. A graph no input exports is
+/// NOT checked: that is a header-only library, the one place a header is
+/// trusted.
+///
+/// Object-level, not per-blob: `Interface::graphs` and
+/// `ObjectFile::grafts` describe a whole unit, so this runs over the
+/// inputs rather than over the reached order, and reachability does not
+/// gate it — a unit either spliced that body or it did not.
+pub(super) fn check_graft_drift(
+    objects: &[ObjectFile],
+    libraries: &[ObjectFile],
+    sources: &[Option<String>],
+) -> Result<(), LinkError> {
+    let inputs: Vec<&ObjectFile> = objects.iter().chain(libraries).collect();
+    let name_of = |i: usize| -> String {
+        sources
+            .get(i)
+            .and_then(Option::as_ref)
+            .cloned()
+            .unwrap_or_else(|| format!("input #{i}"))
+    };
+    // First-wins exporter map, in the namespace's own order.
+    let mut exporter: HashMap<&str, (usize, u32)> = HashMap::new();
+    for (i, obj) in inputs.iter().enumerate() {
+        let Some(iface) = obj.interface.as_ref() else {
+            continue;
+        };
+        for g in &iface.graphs {
+            exporter.entry(g.name.as_str()).or_insert((i, g.digest));
+        }
+    }
+    for (i, obj) in inputs.iter().enumerate() {
+        for graft in &obj.grafts {
+            let Some(&(lib, digest)) = exporter.get(graft.graph.as_str()) else {
+                continue; // header-only library: nothing to check against
+            };
+            if digest != graft.digest {
+                return Err(LinkError::GraftDrift {
+                    graph: graft.graph.clone(),
+                    consumer: name_of(i),
+                    library: name_of(lib),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
