@@ -458,6 +458,11 @@ pub struct LinkReport {
     /// offers only the normal column, so EVERY reached name is counted.
     /// That is the intended signal, not a degenerate case.
     pub variant_fallbacks: Vec<String>,
+    /// The hybrid exit-bearing fold decisions, sorted by routine then site
+    /// count so the report is deterministic (docs/core.md (call
+    /// mechanisms)). Empty under `mono` and `frames`, and for any image
+    /// with no exit-bearing site.
+    pub folds: Vec<FoldDecision>,
     /// The volatile bit this link resolved with: the bit carried by the
     /// object defining the entry symbol, which selects the column every
     /// name resolves to (docs/core.md (linking)). Reported so a consumer
@@ -535,7 +540,7 @@ pub fn link(
         stats,
         orphaned,
         diagnostics: _diagnostics,
-        folds: _folds,
+        folds,
     } = lowered;
 
     let built = layout::build(syntax, &order, options.relax, frames_plan.as_ref())?;
@@ -640,6 +645,7 @@ pub fn link(
             expanded_rows: stats.expanded_rows,
             variant_fallbacks,
             program_volatile,
+            folds,
         },
     })
 }

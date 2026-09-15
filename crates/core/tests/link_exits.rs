@@ -1409,3 +1409,140 @@ fn the_frames_descriptor_exits_are_the_exact_absolute_addresses() {
         "the exit vector was never rebased"
     );
 }
+
+// -- P4: hybrid's exit-bearing fold -----------------------------------------
+
+/// A body large enough that sharing three sites beats three copies:
+/// 20 `nop`s, so `B` = 23 against `sum(d_i)` = 36 and `2 * 23 > 36`.
+/// The flip point is 16 nops, so the fixture is clear of the boundary and
+/// a one-byte drift in any instruction width cannot silently flip the
+/// test's meaning. The arithmetic is asserted below, not trusted.
+const THREE_SITES_BIG_BODY: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine big, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    big [0] exits=(x)
+        call    big [0] exits=(y)
+        call    big [0] exits=(z)
+        stp
+x:      wr      [1]
+        stp
+y:      wr      [2]
+        stp
+z:      wr      [1]
+        stp
+.func big
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        retx    #0
+";
+
+/// ONE exit-bearing site: the byte rule refuses to share it, so the site
+/// is seeded to mono and `TWO_EXITS` has no other bound site — which means
+/// `any_frames` stays false and hybrid takes its `!any_frames` →
+/// `lower_mono` fast path. That is precisely why `folds` has to be
+/// attached to that return too: the decision was taken before the fast
+/// path was chosen, and it is the only place it can be reported from.
+///
+/// Mutation it catches: leave `folds` off the `lower_mono` return (or take
+/// a fast path before the decision loop) and `report.folds` comes back
+/// empty, so the `unwrap_or_else` below fires.
+///
+/// The `k >= 2` conjunct of the rule is NOT pinned here, and no fixture
+/// can pin it: with `k == 1` the product `(k - 1) * B` is 0 and
+/// `0 > sum(d_i)` is false for every group, because a descriptor is never
+/// zero bytes. The conjunct states the intent and guards the `k - 1`
+/// subtraction; it changes no outcome anywhere. Recorded rather than
+/// faked.
+#[test]
+fn one_exit_bearing_site_splices_under_hybrid() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(TWO_EXITS)],
+        &[],
+        opts(CallMech::Hybrid),
+    )
+    .expect("links under hybrid");
+    assert_eq!(out.report.composites, 0, "{:?}", out.report);
+    let fold = out
+        .report
+        .folds
+        .iter()
+        .find(|f| f.routine == "sub")
+        .unwrap_or_else(|| {
+            panic!(
+                "no fold decision survived the mono fast path: {:?}",
+                out.report
+            )
+        });
+    assert!(!fold.shared, "{fold:?}");
+    assert_eq!(fold.sites, 1, "{fold:?}");
+    assert!(out.report.instantiations >= 1, "{:?}", out.report);
+}
+
+/// Three exit-bearing sites over a body big enough that two extra copies
+/// cost more than three descriptors: hybrid shares them under frames.
+///
+/// Mutation it catches: invert the inequality and this shares nothing —
+/// `composites` drops to 0 and `shared` goes false. The two numeric
+/// assertions are the ONLY pin on the exact cost: `fold.shared` alone has
+/// slack (drop the `4 * |exits|` term from the descriptor and the group
+/// still shares at 46 > 24), so they are load-bearing and must not be
+/// relaxed.
+#[test]
+fn three_exit_bearing_sites_over_a_large_body_share_under_hybrid() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(THREE_SITES_BIG_BODY)],
+        &[],
+        opts(CallMech::Hybrid),
+    )
+    .expect("links under hybrid");
+    let fold = out
+        .report
+        .folds
+        .iter()
+        .find(|f| f.routine == "big")
+        .expect("a fold decision for `big`");
+    assert!(fold.shared, "{fold:?}");
+    assert_eq!(fold.sites, 3, "{fold:?}");
+    // The arithmetic, pinned: if either number moves, the instruction
+    // widths are not what the fixture assumes and the `nop` count must be
+    // re-derived.
+    assert_eq!(fold.body_bytes, 23, "1 ent + 20 nop + 2 retx: {fold:?}");
+    assert_eq!(
+        fold.descriptor_bytes, 36,
+        "three 12-byte descriptors: {fold:?}"
+    );
+    // A shared group gets ONE body and one descriptor PER SITE: the three
+    // sites agree on the composite and differ only in their exit labels,
+    // and the engine's intern key carries the exits, so they never dedup
+    // onto one directory entry. `> 0` would also be satisfied by a single
+    // group-wide descriptor, which is the wrong lowering.
+    assert_eq!(
+        out.report.composites, 3,
+        "one descriptor per site: {:?}",
+        out.report
+    );
+}

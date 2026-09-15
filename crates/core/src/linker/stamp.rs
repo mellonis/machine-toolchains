@@ -335,6 +335,16 @@ pub(super) fn lower_mono<'a>(
 
 // -- HYBRID ------------------------------------------------------------------
 
+/// A fold group's identity: the callee's index in `order` paired with the
+/// canonical key of the composite its sites reach (docs/core.md (call
+/// mechanisms)). Two exit-bearing sites fold together exactly when they
+/// agree on both — wherever in the reachable set each was met.
+type GroupKey = (usize, Vec<u8>);
+
+/// One fold group's members: per site, the calling function's index in
+/// `order`, the site's blob offset in that function, and its record.
+type GroupSites<'a> = Vec<(usize, u32, &'a BoundCall)>;
+
 /// Lower under HYBRID: mono-stamp the completed-bijection sites, hand the
 /// rest to the frames path. If every non-collapse site is a bijection this
 /// is pure mono; if none is, pure frames; otherwise both, and the image is
@@ -359,6 +369,20 @@ pub(super) fn lower_hybrid<'a>(
     // mechanisms)).
     let mut mono_splices: Vec<HashSet<u32>> = vec![HashSet::new(); n];
     let mut any_frames = false;
+    // Exit-bearing bijection sites are GROUPED rather than seeded
+    // directly: whether they share one framed body or each splice a copy
+    // is a byte count over the whole group, not a per-site property
+    // (docs/core.md (call mechanisms)).
+    //
+    // The fold count runs over the whole reachable set — an exit-bearing
+    // site met inside a stamped copy joins its group by the same
+    // (routine, composite) key. This loop sees the machine-frame sites;
+    // the closure probe that reports the rest merges into the same map
+    // before the decision is taken.
+    let mut groups: HashMap<GroupKey, GroupSites> = HashMap::new();
+    // Every member of a group reaches the key's composite by
+    // construction, so the first member's is the group's.
+    let mut group_composite: HashMap<GroupKey, Composite> = HashMap::new();
     for (fi, in_world) in id_world.iter().enumerate() {
         if !in_world {
             continue;
@@ -374,15 +398,22 @@ pub(super) fn lower_hybrid<'a>(
                 let callee_sig = routine_sig(&order, *callee)?;
                 let caller_sig = order[fi].signature.unwrap_or(machine_sig);
                 if is_bijection(caller_sig, callee_sig, record) {
-                    if !record.exits.is_empty() {
-                        // Checked here, while the caller and the callee's
-                        // name are in hand, so the promotion loop below
-                        // cannot fail.
-                        check_splice_site(syntax, &order[fi], *addr, &order[*callee].name)?;
-                        mono_splices[fi].insert(*addr);
+                    if record.exits.is_empty() {
+                        seeds.push((fi, *addr, *callee, record));
+                        mono_holes[fi].insert(*addr);
+                    } else {
+                        let composite = compose(
+                            &identity_composite(machine_sig.arity as usize, 0),
+                            caller_sig.cardinalities.as_slice(),
+                            *callee,
+                            &record.binding,
+                            callee_sig,
+                        )
+                        .map_err(|e| bad_binding(&order[*callee].name, &e))?;
+                        let key = (*callee, canonical_key(&composite));
+                        group_composite.entry(key.clone()).or_insert(composite);
+                        groups.entry(key).or_default().push((fi, *addr, record));
                     }
-                    seeds.push((fi, *addr, *callee, record));
-                    mono_holes[fi].insert(*addr);
                 } else {
                     any_frames = true;
                 }
@@ -390,7 +421,68 @@ pub(super) fn lower_hybrid<'a>(
         }
     }
 
-    // The two degenerate cases route straight to a single mechanism.
+    // The byte rule (docs/core.md (call mechanisms)): with `k` sites, a
+    // body of `B` bytes and would-be descriptors of `d_i` bytes, share iff
+    // `k >= 2 && (k - 1) * B > sum(d_i)`. Both counts are pre-layout, so
+    // the decision is deterministic and a relink is byte-identical.
+    //
+    // This runs BEFORE both fast paths below: it is what fills `seeds` for
+    // a spliced group and what sets `any_frames` for a shared one, so a
+    // fast path taken ahead of it would branch on a state the rule has not
+    // produced yet.
+    let mut folds: Vec<super::FoldDecision> = Vec::new();
+    let mut keys: Vec<&GroupKey> = groups.keys().collect();
+    keys.sort();
+    for key in keys {
+        let sites_in_group = &groups[key];
+        let callee = key.0;
+        let body = u32::try_from(order[callee].blob.len() + order[callee].table.len())
+            .expect("a body size fits u32");
+        let k = u32::try_from(sites_in_group.len()).expect("a group size fits u32");
+        let descriptors: u32 = sites_in_group
+            .iter()
+            .map(|(_, _, record)| {
+                descriptor_cost(&group_composite[key], machine_sig, &order, &record.exits)
+            })
+            .sum::<Result<u32, LinkError>>()?;
+        let shared = k >= 2 && u64::from(k - 1) * u64::from(body) > u64::from(descriptors);
+        folds.push(super::FoldDecision {
+            routine: order[callee].name.to_string(),
+            sites: k,
+            body_bytes: body,
+            descriptor_bytes: descriptors,
+            shared,
+        });
+        if shared {
+            // A shared group keeps its sites in `f.bound`, so the frames
+            // path lowers them — with their exit vectors — against the one
+            // generic body.
+            any_frames = true;
+        } else {
+            for &(fi, addr, record) in sites_in_group {
+                // Checked here, while the caller and the callee's name are
+                // in hand, so the promotion loop below cannot fail. A
+                // SHARED group needs neither a jump opcode nor a `then`,
+                // which is why the check sits on this branch alone.
+                check_splice_site(syntax, &order[fi], addr, &order[callee].name)?;
+                seeds.push((fi, addr, callee, record));
+                mono_holes[fi].insert(addr);
+                // `mono_splices` moves WITH `mono_holes`: a site that is a
+                // mono seed and carries exits is entered by a jump, and a
+                // reclassification that moved only one of the two would
+                // leave the site a `call` whose copy returns through an
+                // address nobody pushed.
+                mono_splices[fi].insert(addr);
+            }
+        }
+    }
+    // Stable, so groups that tie on (routine, sites) keep the sorted-key
+    // order above rather than the hash map's.
+    folds.sort_by(|a, b| (&a.routine, a.sites).cmp(&(&b.routine, b.sites)));
+
+    // The two degenerate cases route straight to a single mechanism. Each
+    // returns somebody else's `Lowered`, so the fold decisions — taken
+    // above, and reportable from nowhere else — are attached here.
     if seeds.is_empty() {
         let (order, plan, stats) = lower_frames(syntax, order, sites, machine_sig)?;
         return Ok(Lowered {
@@ -399,11 +491,17 @@ pub(super) fn lower_hybrid<'a>(
             stats,
             orphaned: Vec::new(),
             diagnostics: Vec::new(),
-            folds: Vec::new(),
+            folds,
         });
     }
     if !any_frames {
-        return lower_mono(syntax, order, sites, machine_sig);
+        // Sound only because nothing was shared: sharing sets
+        // `any_frames`, so reaching here means every exit-bearing group
+        // spliced, which is exactly what `lower_mono` does with the seeds
+        // it re-derives from `sites` for itself.
+        let mut lowered = lower_mono(syntax, order, sites, machine_sig)?;
+        lowered.folds = folds;
+        return Ok(lowered);
     }
 
     // Mixed: build the mono stamps, promote the bijection bound sites to
@@ -503,8 +601,31 @@ pub(super) fn lower_hybrid<'a>(
         stats,
         orphaned,
         diagnostics: Vec::new(),
-        folds: Vec::new(),
+        folds,
     })
+}
+
+/// The bytes one site's frames descriptor costs — EXACT, not an estimate.
+/// The composite is already known at decision time (it is what the group
+/// key was computed from), so the size is taken from the bytes themselves
+/// rather than re-derived by a second formula that could disagree with the
+/// emitter (docs/core.md (call mechanisms)).
+///
+/// The length is determined by the composite, the machine signature, the
+/// callee's own signature and the exit COUNT — never by the exit VALUES,
+/// which are blob offsets layout rebases to absolute addresses afterwards
+/// (docs/formats.md (frame descriptors)). That is why a pre-layout
+/// decision survives the rebase and why a relink is byte-identical.
+fn descriptor_cost(
+    composite: &Composite,
+    machine_sig: &RoutineSig,
+    order: &[FuncRef],
+    exits: &[u32],
+) -> Result<u32, LinkError> {
+    Ok(
+        u32::try_from(super::engine::materialize(composite, machine_sig, order, exits)?.len())
+            .expect("a descriptor size fits u32"),
+    )
 }
 
 /// A completed bijection (mono-eligible): every bound tape equal-size (so

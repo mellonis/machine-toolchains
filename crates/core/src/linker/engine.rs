@@ -822,7 +822,7 @@ fn validate_binding(
 /// descriptor's exits (docs/formats.md (frames region)). An exit-free
 /// descriptor is address-independent, as every engine descriptor was
 /// before declarative exits existed.
-fn materialize(
+pub(super) fn materialize(
     c: &Composite,
     machine_sig: &RoutineSig,
     order: &[FuncRef],
