@@ -463,6 +463,8 @@ fn build_routine(w: &IrWorld, members: &[u32], name: &str) -> IrWorld {
         states,
         local: true,
         line: 0,
+        exits: 0,
+        returns: true,
     }
 }
 
@@ -480,6 +482,7 @@ fn trampoline(w: &mut IrWorld, root: u32, routine_name: &str, junction: u32) {
         transition: IrTransition::CallThen {
             target: routine_name.to_string(),
             binding: vec![],
+            exits: Vec::new(),
             then: IrThen::Goto { state: junction },
         },
         synthesized: false,
@@ -565,7 +568,7 @@ mod tests {
             .filter(|s| {
                 matches!(
                     s.rules.first().map(|r| &r.transition),
-                    Some(IrTransition::CallThen { target, binding, then })
+                    Some(IrTransition::CallThen { target, binding, then, .. })
                         if target == "main.outline0"
                             && binding.is_empty()
                             && *then == IrThen::Goto { state: mid_id }

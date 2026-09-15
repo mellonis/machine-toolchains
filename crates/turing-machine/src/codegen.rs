@@ -46,8 +46,8 @@ use std::collections::HashSet;
 use mtc_core::asm::grid_line as grid;
 
 use crate::ir::{
-    IrCell, IrDispatch, IrMove, IrProgram, IrRule, IrState, IrTapeBinding, IrThen, IrTransition,
-    IrWorld, IrWrite,
+    IrCell, IrDispatch, IrMapDst, IrMove, IrProgram, IrRule, IrState, IrTapeBinding, IrThen,
+    IrTransition, IrWorld, IrWrite,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -628,6 +628,9 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
             target,
             binding,
             then,
+            // The `exits=(…)` operand (T11's codegen arm) — no call site
+            // carries one yet.
+            ..
         } => {
             let operand = if binding.is_empty() {
                 target.clone()
@@ -648,6 +651,11 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
         IrTransition::TailCall { target } => Term::TailCall(target.clone()),
         IrTransition::TrapRead => Term::TrapRead,
         IrTransition::TrapWrite => Term::TrapWrite,
+        // Never produced by any pass yet — `retx #k` (T11's codegen arm)
+        // lands with the pass that first emits this variant.
+        IrTransition::ReturnExit { .. } => {
+            unreachable!("ReturnExit is not yet produced by any pass")
+        }
     }
 }
 
@@ -671,7 +679,15 @@ fn render_binding(binding: &[IrTapeBinding]) -> String {
                     .iter()
                     .map(|p| {
                         let arrow = if p.one_way { "=>" } else { "->" };
-                        format!("{}{}{}", p.src, arrow, p.dst)
+                        // `Index` renders exactly as the bare `u32` used to —
+                        // the only shape any pass produces today. `Label`
+                        // (a glyph-labelled pair against an out-of-unit
+                        // callee) is reserved shape; nothing emits it yet.
+                        let dst = match &p.dst {
+                            IrMapDst::Index(n) => n.to_string(),
+                            IrMapDst::Label(s) => s.clone(),
+                        };
+                        format!("{}{}{}", p.src, arrow, dst)
                     })
                     .collect();
                 format!("{}{{{}}}", b.caller_tape, pairs.join(", "))

@@ -37,10 +37,12 @@ pub fn run(w: &mut IrWorld) -> u32 {
                         work.push(*state);
                     }
                 }
-                // A `TailCall` leaves the world (its target is another world),
-                // like the terminators — no intra-world successor.
+                // A `TailCall`/`ReturnExit` leaves the world (its target is
+                // another world, or another `then`-site's exit table), like
+                // the terminators — no intra-world successor.
                 IrTransition::TailCall { .. }
                 | IrTransition::Return
+                | IrTransition::ReturnExit { .. }
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead

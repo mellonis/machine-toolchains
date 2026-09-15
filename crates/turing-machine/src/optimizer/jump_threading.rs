@@ -85,10 +85,12 @@ pub fn run(w: &mut IrWorld) -> u32 {
                             }
                         }
                     }
-                    // `TailCall` has no in-world target to thread (its target
-                    // is another world), like the terminators.
+                    // `TailCall`/`ReturnExit` has no in-world target to thread
+                    // (its target is another world, or another `then`-site's
+                    // exit table), like the terminators.
                     IrTransition::TailCall { .. }
                     | IrTransition::Return
+                    | IrTransition::ReturnExit { .. }
                     | IrTransition::Stop
                     | IrTransition::Halt
                     | IrTransition::TrapRead

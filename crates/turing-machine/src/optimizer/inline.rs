@@ -284,6 +284,11 @@ fn remap_transition(t: &IrTransition, base: u32, then: IrThen) -> IrTransition {
         IrTransition::CallThen { .. } | IrTransition::TailCall { .. } => {
             unreachable!("inline candidates are leaves — no nested call to remap")
         }
+        // Never produced by lowering or the optimizer yet — no routine
+        // declares `exits=`, so a leaf candidate can never carry one.
+        IrTransition::ReturnExit { .. } => {
+            unreachable!("ReturnExit is not yet produced by any pass")
+        }
     }
 }
 
@@ -407,6 +412,8 @@ machine {
             alphabet: "ab".into(),
             cardinality: 2,
             volatile: false,
+            glyphs: Vec::new(),
+            writes: None,
         }];
         let machine = IrWorld {
             name: "main".into(),
@@ -427,6 +434,7 @@ machine {
                         transition: IrTransition::CallThen {
                             target: "r".into(),
                             binding: vec![],
+                            exits: Vec::new(),
                             then: IrThen::Goto { state: 1 },
                         },
                         synthesized: false,
@@ -454,6 +462,8 @@ machine {
             ],
             local: false,
             line: 0,
+            exits: 0,
+            returns: true,
         };
         let routine = IrWorld {
             name: "r".into(),
@@ -479,6 +489,8 @@ machine {
             }],
             local: true,
             line: 0,
+            exits: 0,
+            returns: true,
         };
         let mut ir = IrProgram {
             version: crate::ir::TM_IR_VERSION,
@@ -513,12 +525,16 @@ machine {
             alphabet: "ab".into(),
             cardinality: 2,
             volatile: false,
+            glyphs: Vec::new(),
+            writes: None,
         }];
         let callee_tapes = vec![IrTape {
             name: "t".into(),
             alphabet: "abc".into(),
             cardinality: 3,
             volatile: false,
+            glyphs: Vec::new(),
+            writes: None,
         }];
         let machine = IrWorld {
             name: "main".into(),
@@ -539,6 +555,7 @@ machine {
                         transition: IrTransition::CallThen {
                             target: "r".into(),
                             binding: vec![],
+                            exits: Vec::new(),
                             then: IrThen::Goto { state: 1 },
                         },
                         synthesized: false,
@@ -566,6 +583,8 @@ machine {
             ],
             local: false,
             line: 0,
+            exits: 0,
+            returns: true,
         };
         let routine = IrWorld {
             name: "r".into(),
@@ -591,6 +610,8 @@ machine {
             }],
             local: true,
             line: 0,
+            exits: 0,
+            returns: true,
         };
         let mut ir = IrProgram {
             version: crate::ir::TM_IR_VERSION,
@@ -673,6 +694,8 @@ machine {
             alphabet: "ab".into(),
             cardinality: 2,
             volatile: false,
+            glyphs: Vec::new(),
+            writes: None,
         }];
         let stop_state = |id: u32, name: &str| IrState {
             id,
@@ -699,6 +722,8 @@ machine {
             states: vec![stop_state(0, "m")],
             local: false,
             line: 0,
+            exits: 0,
+            returns: true,
         };
         let routine = IrWorld {
             name: "r".into(),
@@ -718,6 +743,7 @@ machine {
                     transition: IrTransition::CallThen {
                         target: "main".into(),
                         binding: vec![],
+                        exits: Vec::new(),
                         then: IrThen::Return,
                     },
                     synthesized: false,
@@ -728,6 +754,8 @@ machine {
             }],
             local: true,
             line: 0,
+            exits: 0,
+            returns: true,
         };
         let mut ir = IrProgram {
             version: crate::ir::TM_IR_VERSION,
@@ -757,6 +785,8 @@ machine {
                 alphabet: "ab".into(),
                 cardinality: 2,
                 volatile: true,
+                glyphs: Vec::new(),
+                writes: None,
             }],
             entry: 0,
             states: vec![
@@ -772,6 +802,7 @@ machine {
                         transition: IrTransition::CallThen {
                             target: "r".into(),
                             binding: vec![],
+                            exits: Vec::new(),
                             then: IrThen::Goto { state: 1 },
                         },
                         synthesized: false,
@@ -799,6 +830,8 @@ machine {
             ],
             local: false,
             line: 0,
+            exits: 0,
+            returns: true,
         };
         let routine = IrWorld {
             name: "r".into(),
@@ -809,6 +842,8 @@ machine {
                 alphabet: "ab".into(),
                 cardinality: 2,
                 volatile: false,
+                glyphs: Vec::new(),
+                writes: None,
             }],
             entry: 0,
             states: vec![IrState {
@@ -829,6 +864,8 @@ machine {
             }],
             local: true,
             line: 0,
+            exits: 0,
+            returns: true,
         };
         let mut ir = IrProgram {
             version: crate::ir::TM_IR_VERSION,

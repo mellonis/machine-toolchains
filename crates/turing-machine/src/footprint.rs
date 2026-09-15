@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::compiler::{Resolved, ResolvedCallTarget, ResolvedWorld};
-use crate::ir::{IrMapPair, IrProgram, IrTapeBinding, IrTransition, IrWorld, IrWrite};
+use crate::ir::{IrMapDst, IrMapPair, IrProgram, IrTapeBinding, IrTransition, IrWorld, IrWrite};
 use crate::lint::patterns::glyph_label;
 use crate::parser::{BindingArg, BindingValue, MapArrow, SymLit, SymMap, WriteCellKind};
 
@@ -197,7 +197,12 @@ fn project_write_back(
     for symbol in callee.iter() {
         let mut listed = false;
         for pair in pairs {
-            if !pair.one_way && pair.dst == symbol {
+            // This is an intra-compilation-unit analysis — the pairs it
+            // walks always resolve to a concrete `Index` (no pass mints a
+            // `Label` dst yet); a `Label` simply never matches, falling
+            // through to the completion rules below like any unlisted
+            // symbol.
+            if !pair.one_way && pair.dst == IrMapDst::Index(symbol) {
                 // A repeat with a different image is a link-time conflict;
                 // taking every image keeps the answer on the safe side.
                 out.insert(pair.src);
@@ -421,7 +426,7 @@ fn source_pairs(
         .map(|p| {
             Some(IrMapPair {
                 src: glyph_index(host_glyphs, &p.src)?,
-                dst: glyph_index(callee_glyphs, &p.dst)?,
+                dst: IrMapDst::Index(glyph_index(callee_glyphs, &p.dst)?),
                 one_way: p.arrow == MapArrow::ReadOnly,
             })
         })
@@ -790,8 +795,8 @@ mod tests {
     use super::*;
     use crate::compiler::{CompileOptions, analyze, compile};
     use crate::ir::{
-        IrCell, IrDispatch, IrMapPair, IrProgram, IrRule, IrState, IrTape, IrTapeBinding, IrThen,
-        IrTransition, IrWorld, IrWorldKind, IrWrite, TM_IR_VERSION,
+        IrCell, IrDispatch, IrMapDst, IrMapPair, IrProgram, IrRule, IrState, IrTape, IrTapeBinding,
+        IrThen, IrTransition, IrWorld, IrWorldKind, IrWrite, TM_IR_VERSION,
     };
 
     // -- fixture builders (the `ir.rs::serde_tags_are_frozen` construction
@@ -803,6 +808,8 @@ mod tests {
             alphabet: format!("al_{name}"),
             cardinality,
             volatile: false,
+            glyphs: Vec::new(),
+            writes: None,
         }
     }
 
@@ -848,6 +855,8 @@ mod tests {
             }],
             local: true,
             line: 0,
+            exits: 0,
+            returns: true,
         }
     }
 
@@ -863,6 +872,7 @@ mod tests {
         IrTransition::CallThen {
             target: target.into(),
             binding,
+            exits: Vec::new(),
             then: IrThen::Return,
         }
     }
@@ -874,10 +884,11 @@ mod tests {
                 .iter()
                 .map(|(src, dst, one_way)| IrMapPair {
                     src: *src,
-                    dst: *dst,
+                    dst: IrMapDst::Index(*dst),
                     one_way: *one_way,
                 })
                 .collect(),
+            param: None,
         }]
     }
 

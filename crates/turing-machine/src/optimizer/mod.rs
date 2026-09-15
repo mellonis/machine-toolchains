@@ -100,10 +100,11 @@ fn renumber_dense(w: &mut IrWorld) {
                         *state = remap[state];
                     }
                 }
-                // Terminals and the cross-world `TailCall` carry no in-world
-                // target to remap.
+                // Terminals and the cross-world `TailCall`/`ReturnExit` carry
+                // no in-world target to remap.
                 IrTransition::TailCall { .. }
                 | IrTransition::Return
+                | IrTransition::ReturnExit { .. }
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead

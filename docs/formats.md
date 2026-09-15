@@ -1236,7 +1236,7 @@ to the callee.
 
 ### The `.tmc` state-graph IR
 
-`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 3`. The
+`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 4`. The
 form follows the model — a Turing world is a set of states, each a
 priority-ordered list of classical match rows, so the document is a graph of
 states rather than a CFG of basic blocks. `tmt ir graph` renders one of its
@@ -1244,13 +1244,20 @@ worlds as a diagram (`docs/tmt/cli.md`).
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "worlds": [
     {
       "name": "main",
       "kind": "machine",
       "arity": 1,
-      "tapes": [{ "name": "main", "alphabet": "ab", "cardinality": 3 }],
+      "tapes": [
+        {
+          "name": "main",
+          "alphabet": "ab",
+          "cardinality": 3,
+          "glyphs": ["_", "a", "b"]
+        }
+      ],
       "entry": 0,
       "states": [
         {
@@ -1277,11 +1284,14 @@ worlds as a diagram (`docs/tmt/cli.md`).
 }
 ```
 
-The document is **index-only**: patterns and write vectors carry symbol
-indices, never glyphs — the processor never sees glyphs, so neither does the
-IR. Each tape's alphabet *name* and cardinality ride along for readability
-and for index-bound validation; the glyph tables stay in the presentation
-layers (the map sidecar, tape blocks).
+Rows and action vectors are **index-only**: a pattern or write cell carries a
+symbol index, never a glyph — the processor never sees glyphs. Each tape's
+alphabet *name* and cardinality ride along for readability and for
+index-bound validation; since version 4 every tape also carries its own
+glyph table (`glyphs`, one entry per index) and, for a contracted signature
+tape, its declared effective write set as glyphs (`writes` — `writes` minus
+`preserves`; omitted when the parameter declares neither clause). A
+pre-version-4 document has neither field.
 
 - `kind` per world is `machine` or `routine`. Graphs do not survive to the
   IR — they have been spliced into their hosts by then.
@@ -1295,17 +1305,31 @@ layers (the map sidecar, tape blocks).
   vector is the identity — all-keep, all-stay — which is the same condition
   under which codegen elides the action instruction.
 - Per-transition tags (`kind` field, snake_case): `goto` (`state`),
-  `call_then` (`target`, an optional `binding`, and a `then` resume point
-  that is itself a `goto`/`return`/`stop`/`halt`), `return`, `stop`, `halt`,
-  `tail_call` (`target`), and the two synthesized trap terminals `trap_read`
-  and `trap_write`. A `binding` entry carries the same per-callee-tape data
-  the `.tma` binding-call operand does: `caller_tape`, plus each authored
-  `src`/`dst` pair resolved to caller and callee alphabet indices, with
-  one-way pairs flagged. No blank pin or closure is applied here — the
-  composition engine does that at link time.
+  `call_then` (`target`, an optional `binding`, an `exits` list of same-world
+  resume states, and a `then` resume point that is itself a
+  `goto`/`return`/`stop`/`halt`), `return`, `return_exit` (`exit`, a resume
+  through one of the callee's declared exits instead of `then`), `stop`,
+  `halt`, `tail_call` (`target`), and the two synthesized trap terminals
+  `trap_read` and `trap_write`. A `binding` entry carries the same
+  per-callee-tape data the `.tma` binding-call operand does: `caller_tape`,
+  each authored `src`/`dst` pair resolved to a caller alphabet index and a
+  callee destination (a callee alphabet index for an in-unit callee, or a
+  glyph label when the callee is resolved only at link time), one-way pairs
+  flagged, and an optional `param` naming a symbolic (non-tape) binding
+  entry. No blank pin or closure is applied here — the composition engine
+  does that at link time. As of version 4 no compiler pass produces
+  `return_exit`, a nonempty `call_then.exits`, a label `dst`, or a `param` —
+  every one of these is reserved shape, filled by lowering with its empty
+  value until a routine can declare `exits=`/`noreturn` and a binding can
+  name something other than a caller tape.
 - `dispatch` is a codegen hint, `table` (the canonical form: a match table
   plus an indexed jump) or `branch` (the two-row form the optimizer's
   dispatch-selection pass picks). `tail_call`, `branch`, and the `debugger`
   and `synthesized` row flags are the shapes only the optimizer or the
   compiler's own splicing produce; a `-O0` document carries none of them but
   `synthesized`.
+- Per-world, `exits` (a `.routine`'s declared exit count) and `returns`
+  (`false` only for a `noreturn` routine) round out the same reserved
+  vocabulary — every world today lowers with `exits: 0` and `returns: true`
+  (or omits them, since both default and skip when at that value), since no
+  `.routine` declares either clause yet.

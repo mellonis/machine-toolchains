@@ -86,6 +86,7 @@ fn retarget(w: &mut IrWorld, from: u32, to: u32) {
                 }
                 IrTransition::TailCall { .. }
                 | IrTransition::Return
+                | IrTransition::ReturnExit { .. }
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead

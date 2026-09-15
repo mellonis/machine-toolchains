@@ -14,12 +14,15 @@
 //!
 //! # The versioned contract ([`TM_IR_VERSION`])
 //!
-//! The IR is **index-only**: match rows and action vectors carry symbol
-//! INDICES, never glyphs — the processor never sees glyphs, and the spec's
-//! match rows are index-resolved. Per-tape *alphabet names* and cardinalities
-//! ride along for readability (`tmt ir`) and index-bound validation, but the
-//! glyph tables themselves stay in the presentation layers (the `.pmx`/`.tmx`
-//! map sidecar, MT snapshots), never here.
+//! Rows and action vectors are **index-only**: a pattern or write cell carries
+//! a symbol INDEX, never a glyph — the processor never sees glyphs, and the
+//! spec's match rows are index-resolved. Per-tape *alphabet names* and
+//! cardinalities ride along for readability (`tmt ir`) and index-bound
+//! validation; since v4 each [`IrTape`] also carries its own glyph table
+//! ([`IrTape::glyphs`]) and, for a contracted signature tape, its declared
+//! effective write set as glyphs ([`IrTape::writes`]) — both presentation
+//! data resolved against THIS tape's alphabet, not a second source of truth
+//! for indices already fixed elsewhere in the document.
 //!
 //! State ids are dense (`0..states.len()`) in the module's EMISSION order (a
 //! world's own states in source order, then its spliced graft instances). The
@@ -62,7 +65,19 @@ use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, S
 ///
 /// Version 3 adds the [`IrRule::direct`] lowering hint (the `jump_threading`
 /// pass's output). Internal — no released artifact carries it.
-pub const TM_IR_VERSION: u32 = 3;
+///
+/// Version 4 adds the binding-arc vocabulary: [`IrTape::glyphs`] and
+/// [`IrTape::writes`] (a contracted signature tape's effective write set),
+/// [`IrWorld::exits`] and [`IrWorld::returns`] (a routine's declared exit
+/// count and whether it can resume normally), the
+/// [`IrTransition::ReturnExit`] terminal, [`IrTransition::CallThen`]'s
+/// `exits` field, [`IrTapeBinding::param`] (a symbolic binding entry), and
+/// [`IrMapPair::dst`]'s widening from a bare index to [`IrMapDst`] (a
+/// glyph-labelled pair against an out-of-unit callee). No pass produces the
+/// new variant or a `Label` dst yet — lowering fills every new field with its
+/// empty value, so a plain `-O0` document's only visible change is `glyphs`
+/// and the version digit.
+pub const TM_IR_VERSION: u32 = 4;
 
 /// A whole compiled module: its emitted worlds plus the index (into `worlds`)
 /// of the `machine` block — the program entry — or `None` for a library.
@@ -95,6 +110,28 @@ pub struct IrWorld {
     pub local: bool,
     /// Source line of the world's definition; `0` if unknown.
     pub line: u32,
+    /// The `.routine`'s declared exit count (its `exits=` clause) — `0` when
+    /// none is declared. No pass produces a nonzero value yet.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub exits: u8,
+    /// Whether the world can resume normally at a call site's `then` —
+    /// `false` only for a `noreturn` routine. `true` (the only state a v3
+    /// document ever meant) is the fill/deserialization default, so absence
+    /// on the wire reads as "returns", never as "noreturn".
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub returns: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
 }
 
 /// A world kind that survives to the IR (graphs are gone).
@@ -106,8 +143,8 @@ pub enum IrWorldKind {
 }
 
 /// A tape's position, name, and the index bound its symbols must respect. The
-/// `alphabet` name is presentation only (readability of `tmt ir`); the IR
-/// itself is index-only.
+/// `alphabet` name is presentation only (readability of `tmt ir`); match rows
+/// and action vectors stay index-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrTape {
     pub name: String,
@@ -117,6 +154,21 @@ pub struct IrTape {
     /// memory (docs/tmt/language.md (volatile tapes)).
     #[serde(default, skip_serializing_if = "is_false")]
     pub volatile: bool,
+    /// This tape's glyph table, one entry per index — `glyphs.len() ==
+    /// cardinality` on any document lowering itself produces. A document
+    /// deserialized from a pre-v4 wire form carries this field empty (the
+    /// glyph tables lived only in the presentation layers before v4), which
+    /// is a legitimate reading of old data, not a violated invariant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub glyphs: Vec<String>,
+    /// The declared EFFECTIVE write set (`writes` minus `preserves`,
+    /// `compiler::declared_effective`) of a contracted signature tape, as
+    /// glyphs — `None` when the parameter declares neither clause (every
+    /// symbol permitted; always `None` on a machine tape, which takes no
+    /// contract). `preserves` itself has no IR representation: it is
+    /// source-level sugar the effective set already absorbs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writes: Option<Vec<String>>,
 }
 
 /// One state: an id, its source name (synthetic for graft-instance internals),
@@ -230,9 +282,22 @@ pub enum IrTransition {
         /// tape `k`. Empty for a bindless `call`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         binding: Vec<IrTapeBinding>,
+        /// The `exits=(…)` operand: same-world state ids the callee's
+        /// declared exits (`IrWorld::exits`) resume at, in exit order —
+        /// `ReturnExit { exit: k }` in the callee resumes at `exits[k]`
+        /// instead of at `then`. Empty for a call whose callee declares no
+        /// exits (the only shape any pass produces today).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exits: Vec<u32>,
         then: IrThen,
     },
     Return,
+    /// A return through one of the callee's declared exits (`retx #k`) —
+    /// resumes at the call site's `exits[k]` instead of at `then`. Never
+    /// produced by lowering yet: no routine declares `exits=` today.
+    ReturnExit {
+        exit: u32,
+    },
     Stop,
     Halt,
     /// A tail call to a routine — `jmp @<target>` (the `tail_call` pass's
@@ -271,16 +336,34 @@ pub struct IrTapeBinding {
     /// `(src, dst, one_way)` per authored pair, in source order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pairs: Vec<IrMapPair>,
+    /// A symbolic binding entry's name — a named binding arg that resolves to
+    /// something other than a caller tape. `None` for every entry lowering
+    /// emits today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
 }
 
 /// One `src -> dst` (or `src => dst`, `one_way`) symbol-map pair: `src` a
-/// caller-alphabet index, `dst` a callee-alphabet index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// caller-alphabet index, `dst` the callee-alphabet destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrMapPair {
     pub src: u32,
-    pub dst: u32,
+    pub dst: IrMapDst,
     #[serde(default, skip_serializing_if = "is_false")]
     pub one_way: bool,
+}
+
+/// A map pair's destination: a callee symbol INDEX when the callee is in this
+/// compilation unit, or its glyph LABEL when it is not and the linker must
+/// resolve it against the callee's interface (docs/formats.md (bound calls)).
+/// `untagged`: a numeric `dst` reads as `Index`, a string `dst` as `Label` —
+/// the two JSON shapes never overlap, so this stays unambiguous both ways
+/// (pinned by the v3-shaped round-trip test, which feeds a bare `"dst": 1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IrMapDst {
+    Index(u32),
+    Label(String),
 }
 
 impl IrProgram {
@@ -313,6 +396,9 @@ impl IrWorld {
                     let _ = writeln!(out, "    {id}((\"{text}\"))");
                 }
             };
+        // `ReturnExit` terminals are per-exit, so they cannot share the
+        // `&'static str` pool above; one shared node per exit number instead.
+        let mut ret_exit_terms: HashSet<u32> = HashSet::new();
         // Two passes so all node declarations precede the edges.
         let mut edges = String::new();
         for st in &self.states {
@@ -357,6 +443,12 @@ impl IrWorld {
                     IrTransition::Return => {
                         declare(&mut out, "T_ret", "ret", &mut terms);
                         let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_ret", st.id);
+                    }
+                    IrTransition::ReturnExit { exit } => {
+                        if ret_exit_terms.insert(*exit) {
+                            let _ = writeln!(out, "    T_ret{exit}((\"ret #{exit}\"))");
+                        }
+                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_ret{exit}", st.id);
                     }
                     IrTransition::Stop => {
                         declare(&mut out, "T_stp", "stp", &mut terms);
@@ -535,17 +627,45 @@ fn lower_world(
         tapes: ew
             .tapes
             .iter()
-            .map(|t| IrTape {
-                name: t.name.clone(),
-                alphabet: t.alphabet.clone(),
-                cardinality: t.cardinality as u32,
-                volatile: t.volatile,
+            .enumerate()
+            .map(|(i, t)| {
+                let glyphs = expanded.alphabets[&t.alphabet].glyphs.clone();
+                // `rw.tapes` and `ew.tapes` are both vector-position order
+                // over the same signature (a machine's tape decls, or a
+                // routine's tape params), so index `i` names the same tape in
+                // both — but `rw` itself is `None` for a graft-instance world
+                // (synthesized, no resolved original), which never declares a
+                // contract, so `writes` is `None` there too.
+                let writes = rw.and_then(|w| w.tapes.get(i)).and_then(|rt| {
+                    if rt.writes.is_none() && rt.preserves.is_none() {
+                        None
+                    } else {
+                        Some(
+                            crate::compiler::declared_effective(rt)
+                                .iter()
+                                .filter_map(|index| glyphs.get(index as usize).cloned())
+                                .collect(),
+                        )
+                    }
+                });
+                IrTape {
+                    name: t.name.clone(),
+                    alphabet: t.alphabet.clone(),
+                    cardinality: t.cardinality as u32,
+                    volatile: t.volatile,
+                    glyphs,
+                    writes,
+                }
             })
             .collect(),
         entry,
         states,
         local: rw.map(|w| w.local).unwrap_or(false),
         line: rw.map(|w| w.name_span.start.line).unwrap_or(0),
+        // No routine declares `exits=`/`noreturn` yet — every world lowers
+        // with no exits and normal-return semantics.
+        exits: 0,
+        returns: true,
     };
 
     unreachable_state_warnings(&world, ew, warnings);
@@ -649,6 +769,9 @@ fn lower_rule(
                 IrTransition::CallThen {
                     target: target.clone(),
                     binding,
+                    // No `.routine` declares `exits=` yet, so no call site
+                    // ever resolves a multi-exit resume table.
+                    exits: Vec::new(),
                     then: then_of(then)?,
                 },
                 false,
@@ -680,6 +803,7 @@ fn lower_rule(
                 IrTransition::CallThen {
                     target: bind.target.clone(),
                     binding,
+                    exits: Vec::new(),
                     then: then_of(then)?,
                 },
                 false,
@@ -792,7 +916,10 @@ fn resolve_binding(
                 })?;
                 pairs.push(IrMapPair {
                     src: src as u32,
-                    dst: dst as u32,
+                    // The callee is always in this compilation unit here
+                    // (the `external` case refused above), so `dst` always
+                    // resolves to a concrete index — never a label.
+                    dst: IrMapDst::Index(dst as u32),
                     one_way: p.arrow == MapArrow::ReadOnly,
                 });
             }
@@ -800,6 +927,9 @@ fn resolve_binding(
         binding.push(IrTapeBinding {
             caller_tape: phys as u32,
             pairs,
+            // No named binding arg resolves to anything but a caller tape
+            // yet.
+            param: None,
         });
     }
     Ok(binding)
@@ -839,11 +969,13 @@ fn unreachable_state_warnings(world: &IrWorld, ew: &ExpandedWorld, warnings: &mu
                         work.push(*state);
                     }
                 }
-                // `TailCall` leaves the world (no in-world successor), like the
-                // terminators. Lowering never produces it, but the walk stays
-                // exhaustive so a later intra-world variant must be considered.
+                // `TailCall`/`ReturnExit` leave the world (no in-world
+                // successor), like the terminators. Lowering never produces
+                // either, but the walk stays exhaustive so a later
+                // intra-world variant must be considered.
                 IrTransition::TailCall { .. }
                 | IrTransition::Return
+                | IrTransition::ReturnExit { .. }
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
@@ -1036,8 +1168,12 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                 // A `TailCall` names another WORLD (like `CallThen.target`), so
                 // there is no in-world state target to bounds-check — legal
                 // wherever a `CallThen` is, which is anywhere a terminal is.
+                // `ReturnExit`'s `exit` is bounds-checked against the
+                // declaring world's `exits` count once a pass produces it —
+                // not here, and not yet (no pass does).
                 IrTransition::TailCall { .. }
                 | IrTransition::Return
+                | IrTransition::ReturnExit { .. }
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
@@ -1143,7 +1279,208 @@ machine {
         let (ir, _) = lower_of(A1);
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
-        assert!(json.contains("\"version\": 3"), "{json}");
+        assert!(json.contains("\"version\": 4"), "{json}");
+    }
+
+    /// The bare version literal names the acceptance contract, not a hint —
+    /// bumping it is what marks the vocabulary grown in this round as part of
+    /// v4. Mutation: leaving `TM_IR_VERSION` at 3.
+    #[test]
+    fn the_version_literal_is_four() {
+        assert_eq!(TM_IR_VERSION, 4);
+    }
+
+    /// A document exercising every v4 field — glyphs and an effective write
+    /// set, a two-exit `CallThen` alongside a `ReturnExit`, a `noreturn`
+    /// world, a named binding-call param, and a glyph-labelled map pair —
+    /// round-trips unchanged. Mutation: `#[serde(skip_serializing)]` on
+    /// `IrTapeBinding.param` drops it from the wire form, so the compare
+    /// goes red.
+    #[test]
+    fn v4_documents_round_trip() {
+        let ir = IrProgram {
+            version: TM_IR_VERSION,
+            worlds: vec![
+                IrWorld {
+                    name: "main".into(),
+                    kind: IrWorldKind::Machine,
+                    arity: 1,
+                    tapes: vec![IrTape {
+                        name: "a".into(),
+                        alphabet: "al".into(),
+                        cardinality: 3,
+                        volatile: false,
+                        glyphs: vec!["_".into(), "x".into(), "y".into()],
+                        writes: Some(vec!["x".into(), "y".into()]),
+                    }],
+                    entry: 0,
+                    states: vec![IrState {
+                        id: 0,
+                        name: "s".into(),
+                        line: 1,
+                        rules: vec![
+                            IrRule {
+                                pattern: vec![IrCell::Wildcard],
+                                write: None,
+                                moves: None,
+                                debugger: false,
+                                transition: IrTransition::CallThen {
+                                    target: "r".into(),
+                                    binding: vec![IrTapeBinding {
+                                        caller_tape: 0,
+                                        pairs: vec![
+                                            IrMapPair {
+                                                src: 1,
+                                                dst: IrMapDst::Index(1),
+                                                one_way: false,
+                                            },
+                                            IrMapPair {
+                                                src: 2,
+                                                dst: IrMapDst::Label("y".into()),
+                                                one_way: true,
+                                            },
+                                        ],
+                                        param: Some("k".into()),
+                                    }],
+                                    // A two-exit call: the exits= operand
+                                    // (T11) names the resume states.
+                                    exits: vec![1, 2],
+                                    then: IrThen::Goto { state: 1 },
+                                },
+                                synthesized: false,
+                                direct: false,
+                                line: 1,
+                            },
+                            IrRule {
+                                pattern: vec![IrCell::Wildcard],
+                                write: None,
+                                moves: None,
+                                debugger: false,
+                                transition: IrTransition::ReturnExit { exit: 1 },
+                                synthesized: false,
+                                direct: false,
+                                line: 2,
+                            },
+                            IrRule {
+                                pattern: vec![IrCell::Wildcard],
+                                write: None,
+                                moves: None,
+                                debugger: false,
+                                transition: IrTransition::Stop,
+                                synthesized: false,
+                                direct: false,
+                                line: 3,
+                            },
+                        ],
+                        dispatch: IrDispatch::Table,
+                    }],
+                    local: false,
+                    line: 1,
+                    exits: 2,
+                    returns: true,
+                },
+                IrWorld {
+                    name: "r".into(),
+                    kind: IrWorldKind::Routine,
+                    arity: 1,
+                    tapes: vec![IrTape {
+                        name: "t".into(),
+                        alphabet: "al".into(),
+                        cardinality: 3,
+                        volatile: false,
+                        glyphs: vec!["_".into(), "x".into(), "y".into()],
+                        writes: None,
+                    }],
+                    entry: 0,
+                    states: vec![IrState {
+                        id: 0,
+                        name: "s".into(),
+                        line: 1,
+                        rules: vec![IrRule {
+                            pattern: vec![IrCell::Wildcard],
+                            write: None,
+                            moves: None,
+                            debugger: false,
+                            transition: IrTransition::Return,
+                            synthesized: false,
+                            direct: false,
+                            line: 1,
+                        }],
+                        dispatch: IrDispatch::Table,
+                    }],
+                    local: true,
+                    line: 1,
+                    // A routine declared `noreturn` — it never resumes at an
+                    // in-caller `then`.
+                    exits: 0,
+                    returns: false,
+                },
+            ],
+            entry_world: Some(0),
+        };
+        let json = ir.to_json();
+        assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
+    }
+
+    /// A v3 document (no `glyphs`, no `writes`, no `exits`/`returns`, no
+    /// `param`, a bare numeric `dst`) still deserializes into the v4 struct,
+    /// every new field landing at its empty value. Mutation: removing
+    /// `#[serde(default)]` from `IrTapeBinding.param` (or from any other new
+    /// field) turns a missing key into a hard deserialization error instead
+    /// of a fill.
+    #[test]
+    fn a_v3_shaped_document_deserializes_with_empty_new_fields() {
+        let v3 = r#"{
+            "version": 3,
+            "worlds": [
+                {
+                    "name": "main",
+                    "kind": "machine",
+                    "arity": 1,
+                    "tapes": [{ "name": "a", "alphabet": "al", "cardinality": 3 }],
+                    "entry": 0,
+                    "states": [
+                        {
+                            "id": 0,
+                            "name": "s",
+                            "line": 1,
+                            "rules": [
+                                {
+                                    "pattern": [{ "kind": "wildcard" }],
+                                    "transition": {
+                                        "kind": "call_then",
+                                        "target": "r",
+                                        "binding": [
+                                            {
+                                                "caller_tape": 0,
+                                                "pairs": [{ "src": 1, "dst": 1 }]
+                                            }
+                                        ],
+                                        "then": { "kind": "stop" }
+                                    },
+                                    "line": 1
+                                }
+                            ]
+                        }
+                    ],
+                    "local": false,
+                    "line": 1
+                }
+            ],
+            "entry_world": 0
+        }"#;
+        let ir = IrProgram::from_json(v3).unwrap();
+        let w = &ir.worlds[0];
+        assert_eq!(w.exits, 0);
+        assert!(w.returns, "absent means returns — v3 knew no noreturn");
+        let tape = &w.tapes[0];
+        assert!(tape.glyphs.is_empty());
+        assert_eq!(tape.writes, None);
+        let IrTransition::CallThen { binding, .. } = &w.states[0].rules[0].transition else {
+            panic!("expected a call_then");
+        };
+        assert_eq!(binding[0].param, None);
+        assert_eq!(binding[0].pairs[0].dst, IrMapDst::Index(1));
     }
 
     /// The serde tags are the frozen wire contract. Build one program that
@@ -1164,12 +1501,16 @@ machine {
                             alphabet: "al".into(),
                             cardinality: 3,
                             volatile: false,
+                            glyphs: vec!["_".into(), "x".into(), "y".into()],
+                            writes: None,
                         },
                         IrTape {
                             name: "b".into(),
                             alphabet: "al".into(),
                             cardinality: 3,
                             volatile: false,
+                            glyphs: vec!["_".into(), "x".into(), "y".into()],
+                            writes: None,
                         },
                     ],
                     entry: 0,
@@ -1189,10 +1530,12 @@ machine {
                                         caller_tape: 0,
                                         pairs: vec![IrMapPair {
                                             src: 1,
-                                            dst: 1,
+                                            dst: IrMapDst::Index(1),
                                             one_way: true,
                                         }],
+                                        param: None,
                                     }],
+                                    exits: Vec::new(),
                                     then: IrThen::Goto { state: 0 },
                                 },
                                 synthesized: false,
@@ -1215,6 +1558,8 @@ machine {
                     }],
                     local: false,
                     line: 1,
+                    exits: 0,
+                    returns: true,
                 },
                 IrWorld {
                     name: "r".into(),
@@ -1225,6 +1570,8 @@ machine {
                         alphabet: "al".into(),
                         cardinality: 3,
                         volatile: false,
+                        glyphs: vec!["_".into(), "x".into(), "y".into()],
+                        writes: None,
                     }],
                     entry: 0,
                     states: vec![IrState {
@@ -1262,6 +1609,8 @@ machine {
                     }],
                     local: true,
                     line: 1,
+                    exits: 0,
+                    returns: true,
                 },
             ],
             entry_world: Some(0),
@@ -1304,6 +1653,8 @@ machine {
             alphabet: "al".into(),
             cardinality: 3,
             volatile: false,
+            glyphs: Vec::new(),
+            writes: None,
         };
         let json = serde_json::to_string(&tape).unwrap();
         assert!(!json.contains("volatile"), "false is omitted: {json}");
@@ -1339,6 +1690,67 @@ machine {
             .find(|w| w.name.ends_with("probe"))
             .expect("the probe world");
         assert!(probe.tapes[0].volatile);
+    }
+
+    /// `IrTape.glyphs` carries every tape's glyph table, and `IrTape.writes`
+    /// carries the EFFECTIVE set (`compiler::declared_effective`) — never the
+    /// raw `writes` clause. The `preserves`-only routine mirrors
+    /// `std::…::invertNumber` (`preserves { '_' }`, no `writes` clause): the
+    /// controller's ruling is that this must still yield `Some` (the
+    /// alphabet minus the preserved glyph), not the `None` a raw reading of
+    /// "no `writes` clause" would produce. Mutation: reading `tape.writes`
+    /// directly instead of calling `declared_effective` makes the
+    /// `preserves`-only assertion fail (it would see `None`).
+    #[test]
+    fn writes_is_the_effective_set_not_the_raw_clause() {
+        let src = "\
+alphabet bits { '_', '1' }
+export routine byWrites(tape a: bits writes { '1' }) {
+  entry state s { [*] -> return; }
+}
+export routine byPreserves(tape a: bits preserves { '_' }) {
+  entry state s { [*] -> return; }
+}
+export routine byNeither(tape a: bits) {
+  entry state s { [*] -> return; }
+}
+machine {
+  tape t: bits;
+  entry state go { [*] -> stop; }
+}";
+        let (ir, _) = lower_of(src);
+        let main = world(&ir, "main");
+        assert_eq!(main.tapes[0].glyphs, vec!["_".to_string(), "1".to_string()]);
+        assert_eq!(
+            main.tapes[0].writes, None,
+            "a machine tape takes no contract"
+        );
+
+        let by_writes = ir
+            .worlds
+            .iter()
+            .find(|w| w.name.ends_with("byWrites"))
+            .expect("the byWrites world");
+        assert_eq!(by_writes.tapes[0].writes, Some(vec!["1".to_string()]));
+
+        // The invertNumber shape: `preserves` only, no `writes` clause. A raw
+        // reading of "no `writes` clause" would answer `None`; the effective
+        // set is the alphabet minus the preserved blank.
+        let by_preserves = ir
+            .worlds
+            .iter()
+            .find(|w| w.name.ends_with("byPreserves"))
+            .expect("the byPreserves world");
+        assert_eq!(by_preserves.tapes[0].writes, Some(vec!["1".to_string()]));
+
+        // Neither clause: every symbol permitted, so `None` — the only case
+        // that omits the `writes=` suffix.
+        let by_neither = ir
+            .worlds
+            .iter()
+            .find(|w| w.name.ends_with("byNeither"))
+            .expect("the byNeither world");
+        assert_eq!(by_neither.tapes[0].writes, None);
     }
 
     #[test]
@@ -1419,6 +1831,7 @@ machine {
                     target,
                     binding,
                     then,
+                    ..
                 } => Some((target.clone(), binding.clone(), *then)),
                 _ => None,
             })
@@ -1436,16 +1849,17 @@ machine {
             vec![
                 IrMapPair {
                     src: 3,
-                    dst: 1,
+                    dst: IrMapDst::Index(1),
                     one_way: false
                 },
                 IrMapPair {
                     src: 4,
-                    dst: 2,
+                    dst: IrMapDst::Index(2),
                     one_way: false
                 },
             ]
         );
+        assert_eq!(call.1[0].param, None);
         validate_world(m).unwrap();
         validate_world(plus).unwrap();
     }
