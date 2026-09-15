@@ -1363,7 +1363,7 @@ mod faithfulness {
         .unwrap();
 
         const SHARED: &str = "\
-alphabet b { '_', '0' }
+alphabet b { '_', '0', '1' }
 
 export routine helper(tape t: b) { entry state s { [*] -> return; } }
 
@@ -1376,8 +1376,12 @@ export routine dup(tape t: b) { entry state s { [*] -> return; } }
 ";
         fs::write(root.join("shared.tmc"), SHARED).unwrap();
 
+        // Three symbols, not two: the final state plainly calls the
+        // embedded std's 3-symbol `plusOne`, and the link stage refuses a
+        // callee wider than the caller's band (docs/core.md (link
+        // warnings)); every unit here shares the width so no site warns.
         const APP: &str = "\
-alphabet b { '_', '0' }
+alphabet b { '_', '0', '1' }
 
 machine {
   tape t: b;
@@ -1393,11 +1397,11 @@ machine {
 ";
         fs::write(root.join("app.tmc"), APP).unwrap();
 
-        const HELPERS: &str = ".routine asm_fn, tapes=1, alpha=(2)\n.func asm_fn\nhlt\n";
+        const HELPERS: &str = ".routine asm_fn, tapes=1, alpha=(3)\n.func asm_fn\nhlt\n";
         fs::write(root.join("helpers.tma"), HELPERS).unwrap();
 
         let pre_bytes = crate::compiler::compile(
-            "alphabet b { '_', '0' }\nexport routine pre_fn(tape t: b) { entry state s { [*] -> return; } }\n",
+            "alphabet b { '_', '0', '1' }\nexport routine pre_fn(tape t: b) { entry state s { [*] -> return; } }\n",
             crate::compiler::CompileOptions::default(),
         )
         .expect("pre_fn's source compiles")
@@ -1406,7 +1410,7 @@ machine {
         fs::write(root.join("pre.tmo"), &pre_bytes).unwrap();
 
         let bitops_bytes = crate::compiler::compile(
-            "alphabet b { '_', '0' }\nnamespace ns {\nexport routine dup(tape t: b) { entry state s { [*] -> return; } }\n}\nexport routine bit_only(tape t: b) { entry state s { [*] -> return; } }\n",
+            "alphabet b { '_', '0', '1' }\nnamespace ns {\nexport routine dup(tape t: b) { entry state s { [*] -> return; } }\n}\nexport routine bit_only(tape t: b) { entry state s { [*] -> return; } }\n",
             crate::compiler::CompileOptions::default(),
         )
         .expect("bitops's source compiles")
