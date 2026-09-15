@@ -923,6 +923,111 @@ fn minimal_v4_bound_call() -> ObjectFile {
     obj
 }
 
+/// A hand-crafted v4 stream can spell a binding that is OPEN with a
+/// cleared `map_written` flag, or one that carries pairs with the flag
+/// cleared. The writer's own invariant forbids both values
+/// (docs/formats.md (bound calls)), so `from_bytes` would otherwise hand
+/// back something `to_bytes` panics on. The reader normalizes.
+///
+/// Mutation it catches: drop the normalization and `map_written` comes
+/// back false, so a caller that re-encodes the value trips the writer's
+/// debug assert — a `from_bytes`/`to_bytes` asymmetry no round-trip
+/// proptest can reach, because the proptest only ever generates legal
+/// values.
+#[test]
+fn the_reader_normalizes_map_written_from_open() {
+    let mut obj = minimal_v4_bound_call();
+    obj.bound_calls[0].binding[0].open = true;
+    let mut bytes = obj.to_bytes();
+    // Same tail as `reserved_binding_flags_rejected`: binding flags,
+    // pair count (u16), exit count, graft count (u32).
+    let pos = bytes.len() - 8;
+    assert_eq!(
+        bytes[pos], 0b11,
+        "layout assumption: the binding-flags byte (map written | open)"
+    );
+    bytes[pos] = 0b10; // open, map_written cleared — the illegal spelling
+    crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+    let back = ObjectFile::from_bytes(&bytes).expect("reads back");
+    assert!(
+        back.bound_calls[0].binding[0].map_written,
+        "an open map is a written one"
+    );
+    // And the normalized value survives its own re-encoding.
+    assert_eq!(
+        ObjectFile::from_bytes(&back.to_bytes()).expect("re-reads"),
+        back
+    );
+}
+
+/// `minimal_v4_bound_call`, but the one binding carries a single written
+/// pair — so the tail widens past the fixed-offset shape that helper
+/// deliberately keeps minimal. A written map WITH pairs is, on its own,
+/// not a v4 trigger (`is_v4_shape`'s documented rule: the pairs already
+/// express it completely, and v3 stores them too) — so this binding also
+/// names its parameter, which IS a v4-only field, to keep the object in
+/// v4 shape independent of the map/pairs flags under test.
+fn one_pair_v4_bound_call() -> ObjectFile {
+    let mut obj = sample();
+    obj.bound_calls = vec![BoundCall {
+        blob: 0,
+        offset: 1,
+        symbol: 0,
+        binding: vec![TapeBinding {
+            caller_tape: 0,
+            param: Some("p".into()),
+            map_written: true,
+            open: false,
+            pairs: vec![MapPair {
+                src: 1,
+                dst: 1,
+                dst_label: None,
+                one_way: false,
+            }],
+        }],
+        exits: Vec::new(),
+    }];
+    obj
+}
+
+/// A hand-crafted v4 stream can spell a binding that carries pairs with
+/// the `map_written` flag cleared. The writer's own invariant forbids
+/// that value (docs/formats.md (bound calls)), so `from_bytes` would
+/// otherwise hand back something `to_bytes` panics on. The reader
+/// normalizes.
+///
+/// Mutation it catches: drop the normalization and `map_written` comes
+/// back false, so a caller that re-encodes the value trips the writer's
+/// debug assert — a `from_bytes`/`to_bytes` asymmetry no round-trip
+/// proptest can reach, because the proptest only ever generates legal
+/// values.
+#[test]
+fn the_reader_normalizes_map_written_from_pairs() {
+    let obj = one_pair_v4_bound_call();
+    let mut bytes = obj.to_bytes();
+    // Tail: binding flags, pair count (u16), one pair (src u32, dst u32,
+    // flags u8 = 9 bytes), exit count, graft count (u32). The param
+    // field sits before the flags byte, so it does not shift this
+    // fixed-width offset from the end.
+    let pos = bytes.len() - 17;
+    assert_eq!(
+        bytes[pos], 0b01,
+        "layout assumption: the binding-flags byte (map written)"
+    );
+    bytes[pos] = 0b00; // pairs present, map_written cleared — the illegal spelling
+    crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+    let back = ObjectFile::from_bytes(&bytes).expect("reads back");
+    assert!(
+        back.bound_calls[0].binding[0].map_written,
+        "a map with pairs is a written one"
+    );
+    // And the normalized value survives its own re-encoding.
+    assert_eq!(
+        ObjectFile::from_bytes(&back.to_bytes()).expect("re-reads"),
+        back
+    );
+}
+
 #[test]
 fn reserved_binding_flags_rejected() {
     let mut bytes = minimal_v4_bound_call().to_bytes();

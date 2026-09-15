@@ -268,6 +268,18 @@ impl ObjectFile {
                         } else {
                             !pairs.is_empty()
                         };
+                        // The writer's invariant: a binding with pairs, and
+                        // an open binding, both have `map_written` set — a
+                        // map with pairs was written by definition, and an
+                        // open map is a written one
+                        // (docs/formats.md (bound calls)). A hand-crafted
+                        // stream can spell the flag clear anyway, and the
+                        // value would then be one the writer refuses to
+                        // re-encode, so normalize on the way in. One
+                        // expression covers both branches above: v3's
+                        // `map_written` is already `!pairs.is_empty()`, so
+                        // only the v4 branch's effective value changes.
+                        let map_written = map_written || open || !pairs.is_empty();
                         binding.push(TapeBinding {
                             caller_tape,
                             param,
