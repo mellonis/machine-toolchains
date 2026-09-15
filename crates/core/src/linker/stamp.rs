@@ -64,6 +64,13 @@ struct StampNode {
     composite: Composite,
     name: String,
     site: Option<PendingSite>,
+    /// The slot this node was minted FROM — `None` for a node minted at
+    /// the machine's own frame. Following it upwards and collecting the
+    /// routine of every ancestor that is itself a splice gives this node's
+    /// SPLICE CHAIN: the routines whose copies it is nested inside through
+    /// exit-bearing calls. Stored as a back-pointer rather than a copied
+    /// vector, so a node costs no allocation for it.
+    enclosing: Option<usize>,
 }
 
 /// Where a mono exit-bearing copy returns to (docs/core.md (call
@@ -449,11 +456,13 @@ pub(super) fn lower_hybrid<'a>(
     // Every member of a group reaches the key's composite by
     // construction, so the first member's is the group's.
     let mut group_composite: HashMap<GroupKey, Composite> = HashMap::new();
-    // The decision phase drives the same [`Closure`] the probe below
-    // walks: a group key is `compose(identity, binding)` for a site at the
-    // machine's own frame, which is the very composition the walk does for
-    // a seed — taken from the one place that owns it.
-    let mut closure = Closure::new(&order, machine_sig);
+    // The decision phase composes its group keys with the same [`Closure`]
+    // rules the probe and the builder walk by: a group key is
+    // `compose(identity, binding)` for a site at the machine's own frame,
+    // which is the very composition the walk does for a seed — taken from
+    // the one place that owns it. This instance interns nothing; the probe
+    // below builds its own, so nothing it counts can come from here.
+    let closure = Closure::new(&order, machine_sig);
     let id = closure.identity();
     for (fi, in_world) in id_world.iter().enumerate() {
         if !in_world {
@@ -495,7 +504,7 @@ pub(super) fn lower_hybrid<'a>(
     // site met while a routine is copied under composite `C` joins its
     // group, and a shared group is reached from inside that copy through
     // a descriptor `compose(C, binding)` plus the site's exits.
-    for cs in mono_closure_probe(&mut closure, sites, &seeds) {
+    for cs in mono_closure_probe(&order, machine_sig, sites, &seeds) {
         let key = (cs.callee, canonical_key(&cs.composite));
         group_composite.entry(key.clone()).or_insert(cs.composite);
         groups
@@ -856,10 +865,14 @@ impl<'a, 'o> Closure<'a, 'o> {
     /// This is the ONE identity policy for the closure: the probe counts
     /// nodes by exactly the key the builder builds them by, so a pair
     /// reached through two distinct splices is walked twice because it IS
-    /// built twice. A consequence worth naming: a cycle of exit-bearing
-    /// bound calls mints a fresh node per turn, here exactly as in the
-    /// builder — such a program has no mono lowering, and neither walk
-    /// terminates on one.
+    /// built twice. That is also why a cycle of exit-bearing bound calls
+    /// has no copy-path lowering at all — a splice key names the enclosing
+    /// node, which is fresh every turn, so the key can never repeat and
+    /// the minting never ends. `enclosing` is what makes that detectable
+    /// before it happens: a splice into a routine already in its own
+    /// splice chain is refused with
+    /// [`LinkError::RecursiveExitBearingCall`], on the copy path only
+    /// (docs/core.md (call mechanisms)).
     ///
     /// The map-visible name is `<routine>.<digest8>` — a period, not the
     /// `$` an earlier scheme used, because `.tma` identifiers cannot
@@ -875,6 +888,7 @@ impl<'a, 'o> Closure<'a, 'o> {
     /// 32-bit digests collide — docs/core.md (the composition engine)).
     fn intern(
         &mut self,
+        enclosing: Option<usize>,
         routine: usize,
         mut composite: Composite,
         site: Option<PendingSite>,
@@ -891,6 +905,11 @@ impl<'a, 'o> Closure<'a, 'o> {
         }
         if let Some(&slot) = self.key_to_slot.get(&key) {
             return Ok((self.stamp_index(slot), true));
+        }
+        if site.is_some() && self.in_splice_chain(enclosing, routine) {
+            return Err(LinkError::RecursiveExitBearingCall(
+                self.order[routine].name.to_string(),
+            ));
         }
         let slot = self.nodes.len();
         let mut name = format!("{}.{:08x}", self.order[routine].name, digest(&composite));
@@ -913,10 +932,37 @@ impl<'a, 'o> Closure<'a, 'o> {
             composite,
             name,
             site,
+            enclosing,
         });
         self.key_to_slot.insert(key, slot);
         self.worklist.push_back(slot);
         Ok((self.stamp_index(slot), false))
+    }
+
+    /// Whether `routine` is already in the splice chain of the node at
+    /// `enclosing` — walking the back-pointers and asking, of every
+    /// ancestor that is itself a splice, whether it copies `routine`.
+    ///
+    /// A `true` here is exactly a copy path that cannot terminate, not a
+    /// heuristic: a splice's intern key names the node it sits inside, and
+    /// that node is fresh on every turn of the loop, so the key can never
+    /// dedup onto an earlier one and the walk would mint forever. Nothing
+    /// that links today can reach it — a program with such a cycle has no
+    /// finite copy-path lowering, so there is nothing for the refusal to
+    /// take away (docs/core.md (call mechanisms)).
+    ///
+    /// Bounded by construction: the first repeat refuses, so no chain is
+    /// ever longer than the routine count.
+    fn in_splice_chain(&self, enclosing: Option<usize>, routine: usize) -> bool {
+        let mut cursor = enclosing;
+        while let Some(slot) = cursor {
+            let node = &self.nodes[slot];
+            if node.site.is_some() && node.routine == routine {
+                return true;
+            }
+            cursor = node.enclosing;
+        }
+        false
     }
 }
 
@@ -938,9 +984,13 @@ impl<'a, 'o> Closure<'a, 'o> {
 /// one-way drift:
 ///
 /// - **It never FAILS.** A site it cannot compose, a name it cannot mint,
-///   or a raw framed call inside a copy is skipped rather than reported as
-///   an error, so the probe can never turn a linkable program into a
-///   refusal. A refusal belongs in `mono_stamps`, which walks the
+///   a raw framed call inside a copy, or a splice back into a routine the
+///   chain is already inside is skipped rather than reported as an error,
+///   so the probe can never turn a linkable program into a refusal — the
+///   recursive splice matters most there, since a program whose group the
+///   byte rule goes on to SHARE is copied nowhere and links. Skipping one
+///   also bounds the walk: the refused child is never queued. A refusal
+///   belongs in `mono_stamps`, which walks the
 ///   authoritative closure; one raised here would be raised over a walk
 ///   that is deliberately neither a subset nor a superset of what gets
 ///   built, for the two reasons below.
@@ -961,16 +1011,18 @@ impl<'a, 'o> Closure<'a, 'o> {
 ///   `shared` pair the builder never reaches, and a frames image is a
 ///   correct image for any site. The visible cost is a `FoldDecision` for
 ///   a group whose members are not all in the emitted image.
-fn mono_closure_probe<'a>(
-    closure: &mut Closure<'a, '_>,
+fn mono_closure_probe<'a, 'o>(
+    order: &'o [FuncRef<'a>],
+    machine_sig: &'o RoutineSig,
     sites: &[Vec<SiteKind<'a>>],
     seeds: &[(usize, u32, usize, &'a BoundCall)],
 ) -> Vec<ClosureSite<'a>> {
-    // The caller composed its own group keys with this same walk and
-    // interned nothing, so the node table starts empty here.
-    debug_assert!(closure.nodes.is_empty(), "the probe walks a fresh closure");
-    let order = closure.order;
-    let machine_sig = closure.machine_sig;
+    // The probe builds its OWN closure rather than borrowing the caller's:
+    // it counts nodes, so a node table that arrived with anything already
+    // in it would be counted too. Two instances of one type are still one
+    // walk — every rule below lives on [`Closure`] and is shared with the
+    // builder.
+    let mut closure = Closure::new(order, machine_sig);
     let id = closure.identity();
     let mut met: Vec<ClosureSite<'a>> = Vec::new();
 
@@ -978,7 +1030,7 @@ fn mono_closure_probe<'a>(
         let Ok((child, _)) = closure.bound_child(&id, fi, callee, record) else {
             continue;
         };
-        let _ = closure.intern(callee, child, None);
+        let _ = closure.intern(None, callee, child, None);
     }
 
     while let Some(slot) = closure.pop() {
@@ -992,7 +1044,7 @@ fn mono_closure_probe<'a>(
                 SiteKind::RawCallM { .. } => {}
                 SiteKind::Plain { callee, .. } => {
                     let child = closure.plain_child(&comp, *callee);
-                    let _ = closure.intern(*callee, child, None);
+                    let _ = closure.intern(Some(slot), *callee, child, None);
                 }
                 SiteKind::Bound {
                     addr,
@@ -1025,7 +1077,11 @@ fn mono_closure_probe<'a>(
                         continue;
                     }
                     let site = closure.nested_site(slot, *addr, record);
-                    let _ = closure.intern(*callee, child, site);
+                    // A recursive splice refuses here exactly as it does in
+                    // the builder; the probe swallows it and simply stops
+                    // descending, so the count it reports is bounded and
+                    // the refusal is raised once, by the walk that builds.
+                    let _ = closure.intern(Some(slot), *callee, child, site);
                 }
             }
         }
@@ -1332,6 +1388,7 @@ fn mono_stamps<'a>(
     for &(fi, addr, callee, record) in seeds {
         let (child, _) = closure.bound_child(&id, fi, callee, record)?;
         let (idx, dup) = closure.intern(
+            None,
             callee,
             child,
             site_for(fi, addr, record, widened).map(PendingSite::Resolved),
@@ -1360,7 +1417,7 @@ fn mono_stamps<'a>(
                 }
                 SiteKind::Plain { addr, callee } => {
                     let child = closure.plain_child(&comp, *callee);
-                    let (idx, dup) = closure.intern(*callee, child, None)?;
+                    let (idx, dup) = closure.intern(Some(slot), *callee, child, None)?;
                     if dup {
                         stats.dedup_savings += 1;
                     }
@@ -1419,7 +1476,7 @@ fn mono_stamps<'a>(
                     let idx = if closure.collapses(&child, callee_sig, record) {
                         *callee
                     } else {
-                        let (idx, dup) = closure.intern(*callee, child, site)?;
+                        let (idx, dup) = closure.intern(Some(slot), *callee, child, site)?;
                         if dup {
                             stats.dedup_savings += 1;
                         }
@@ -2326,7 +2383,7 @@ mod tests {
         let mut closure = Closure::new(&order, &sig);
 
         let (idx, dup) = closure
-            .intern(1, identity_composite(1, 1), None)
+            .intern(None, 1, identity_composite(1, 1), None)
             .expect("a fresh name mints cleanly");
         assert!(!dup);
         assert_eq!(idx, order.len(), "the stamp lands right past order");
@@ -2361,7 +2418,7 @@ mod tests {
         let mut closure = Closure::new(&order, &sig);
 
         let err = closure
-            .intern(1, identity_composite(1, 1), None)
+            .intern(None, 1, identity_composite(1, 1), None)
             .expect_err("the reserved name is already taken by a hand-written routine");
         assert_eq!(err, LinkError::StampNameCollision(expected_name));
         assert!(

@@ -168,6 +168,21 @@ pub enum LinkError {
     /// reached through a frame descriptor and returns through it, so it
     /// needs no following instruction and is never refused here.
     ExitBearingTailCall(String),
+    /// An exit-bearing declarative bound call reaches, through a chain of
+    /// copied calls, an exit-bearing call back into a routine the copy is
+    /// already nested inside. Each turn of such a loop is a DISTINCT
+    /// splice — it returns to a different place — so a mechanism that
+    /// copies the callee per site has to mint a copy per turn and never
+    /// closes the loop. Carries the routine named twice in the chain
+    /// (docs/core.md (call mechanisms)).
+    ///
+    /// Copy-path only, and `frames` is the escape rather than `hybrid`:
+    /// frames gives every site a descriptor and one generic body, so the
+    /// recursion costs a frame at run time instead of a copy at link time.
+    /// Hybrid links such a program exactly when its own byte rule shares
+    /// the group, which is not a property the caller can be told to rely
+    /// on.
+    RecursiveExitBearingCall(String),
 }
 
 impl std::fmt::Display for LinkError {
@@ -276,6 +291,12 @@ impl std::fmt::Display for LinkError {
                  instruction after it for the return to land on; it cannot \
                  be the last instruction of `{symbol}` — a site reached \
                  through a frame descriptor instead is unaffected"
+            ),
+            Self::RecursiveExitBearingCall(name) => write!(
+                f,
+                "an exit-bearing call into `{name}` reaches `{name}` again \
+                 through its exits; a copy per site cannot close that loop \
+                 — use --call-mech=frames"
             ),
         }
     }

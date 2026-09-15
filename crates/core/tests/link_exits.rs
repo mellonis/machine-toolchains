@@ -7,7 +7,7 @@
 
 use mtc_core::asm::{ArchSyntax, AsmCaps, Flow, RelaxPair, SyntaxEntry, assemble};
 use mtc_core::formats::object::ObjectFile;
-use mtc_core::linker::{CallMech, LinkError, LinkOptions, link};
+use mtc_core::linker::{CallMech, LinkError, LinkOptions, LinkOutput, link};
 use mtc_core::vm::OperandKind;
 
 const ARCH: u8 = 0x7E;
@@ -1999,6 +1999,174 @@ fn a_table_bearing_callee_counts_its_table_and_folds_report_in_sorted_order() {
         assert_eq!(f.descriptor_bytes, 24, "two 12-byte descriptors: {f:?}");
         assert!(f.shared, "{f:?}");
     }
+}
+
+// -- a recursive exit-bearing bound call -------------------------------------
+
+/// A CYCLE of exit-bearing bound calls. `main`'s swap into `outer` is the
+/// exit-free bijection seed, so the walk enters `outer`'s copy; `outer`
+/// calls `a` with an exit, and `a`'s own exit-bearing call goes straight
+/// back into `a`. Every turn returns somewhere new, so every turn is a
+/// distinct splice and a distinct copy: the copy path has no finite
+/// lowering for this at all.
+///
+/// Both of `a`'s incoming sites bind transparently under the swap, so they
+/// compose to the SAME composite and form ONE fold group of two — which is
+/// what lets the same source pin both halves of hybrid's decision at two
+/// body sizes.
+///
+/// The arithmetic, EXACT: the composite's maps are the swap's, so
+/// `dense_map` emits one `u16` per symbol in each direction over the
+/// 3-symbol alphabet and each descriptor is
+/// `1 (arity) + 2 (exit_count) + [1 (phys) + 2 + 2*3 + 2 + 2*3] + 4 (one
+/// exit)` = **24 bytes**; `sum(d_i)` = **48**. `a`'s blob is the implicit
+/// 1-byte `ent` prologue + 5 bytes of `call` + `body` `nop`s + two 2-byte
+/// `retx`es, so `B` = **10 + body** and the group shares exactly when
+/// `body > 38`.
+fn recursive_exit_bearing(body: usize) -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine outer, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine a, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    outer [0{{1->2, 2->1}}]
+        stp
+.func outer
+        call    a [0] exits=(p)
+        ret
+p:      ret
+.func a
+        call    a [0] exits=(s)
+{}        retx    #0
+s:      retx    #0
+",
+        nops(body)
+    )
+}
+
+/// The same cycle closed through a THIRD routine: `a` splices `b` and `b`
+/// splices back into `a`, so no node's immediate parent ever names the
+/// routine it is about to copy — only the chain does.
+const RECURSIVE_THROUGH_A_THIRD: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine outer, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine a, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.routine b, tapes=1, alpha=(3), exits=1
+.param m, ('_', '0', '1')
+.section code
+.func main
+        call    outer [0{1->2, 2->1}]
+        stp
+.func outer
+        call    a [0] exits=(p)
+        ret
+p:      ret
+.func a
+        call    b [0] exits=(s)
+        retx    #0
+s:      retx    #0
+.func b
+        call    a [0] exits=(u)
+        retx    #0
+u:      retx    #0
+";
+
+/// Link `src` under `mech` on a spawned thread and fail if it has not
+/// returned within the timeout. The defect these tests pin is a walk that
+/// mints forever, and a test that reproduces one by hanging reports
+/// nothing — it just never finishes.
+fn link_bounded(src: &str, mech: CallMech) -> Result<LinkOutput, LinkError> {
+    let owned = src.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(link(&fake_syntax(), &[asm(&owned)], &[], opts(mech)));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the link returned rather than minting copies forever")
+}
+
+/// Mutation it catches: drop the splice-chain check in the closure's
+/// intern and neither the mono link nor hybrid's own copy path ever
+/// returns — the bound is what turns that into a failure instead of a hung
+/// job.
+#[test]
+fn a_recursive_exit_bearing_call_is_refused_on_the_copy_path() {
+    let src = recursive_exit_bearing(20);
+    let refusal = LinkError::RecursiveExitBearingCall("a".to_string());
+    assert_eq!(
+        link_bounded(&src, CallMech::Mono).expect_err("mono always copies"),
+        refusal
+    );
+    // At 20 `nop`s `(2 - 1) * 30` is not more than 48, so hybrid's byte
+    // rule refuses the group sharing and the copy path is the one that
+    // runs — the same refusal, reached through hybrid's own decision.
+    assert_eq!(
+        link_bounded(&src, CallMech::Hybrid).expect_err("hybrid splices this group"),
+        refusal
+    );
+    // Frames copies nothing: one generic body, one descriptor per site,
+    // and the loop closes at run time through the frame register.
+    link_bounded(&src, CallMech::Frames).expect("frames lowers a recursive exit-bearing call");
+}
+
+/// Mutation it catches: compare against the immediate parent alone instead
+/// of walking the splice chain, and this shape mints forever — `a`'s
+/// parent is `b` and `b`'s is `a`, so no single step ever repeats. The
+/// refusal names the routine the chain re-enters.
+#[test]
+fn a_recursive_exit_bearing_call_through_a_third_routine_is_refused() {
+    assert_eq!(
+        link_bounded(RECURSIVE_THROUGH_A_THIRD, CallMech::Mono).expect_err("mono always copies"),
+        LinkError::RecursiveExitBearingCall("a".to_string())
+    );
+    link_bounded(RECURSIVE_THROUGH_A_THIRD, CallMech::Frames)
+        .expect("frames lowers the cycle through descriptors");
+}
+
+/// The refusal is the COPY path's, not the program's: the identical source
+/// links under hybrid as soon as its byte rule shares the group, because a
+/// shared group is reached through a descriptor and never copied.
+///
+/// Mutation it catches: raise the refusal before the sharing decision (in
+/// the probe, say, instead of swallowing it there) and this link refuses
+/// too — a program that has a correct lowering would stop having one.
+#[test]
+fn a_recursive_exit_bearing_call_links_under_hybrid_when_its_group_shares() {
+    let src = recursive_exit_bearing(60);
+    let out = link_bounded(&src, CallMech::Hybrid).expect("hybrid shares this group");
+    let fold = out
+        .report
+        .folds
+        .iter()
+        .find(|f| f.routine == "a")
+        .unwrap_or_else(|| panic!("no fold decision for `a`: {:?}", out.report));
+    assert_eq!(
+        fold.sites, 2,
+        "`outer`'s site and `a`'s own re-entry: {fold:?}"
+    );
+    assert_eq!(
+        fold.body_bytes, 70,
+        "1 ent + 5 call + 60 nop + 4 retx: {fold:?}"
+    );
+    assert_eq!(
+        fold.descriptor_bytes, 48,
+        "two 24-byte descriptors: {fold:?}"
+    );
+    assert!(fold.shared, "70 > 48, so hybrid shares: {fold:?}");
+    // Sharing is hybrid's alone — mono has no such decision to take, so
+    // the same source at the same size still refuses there.
+    assert_eq!(
+        link_bounded(&src, CallMech::Mono).expect_err("mono always copies"),
+        LinkError::RecursiveExitBearingCall("a".to_string())
+    );
 }
 
 /// Mutation it catches: derive a nested site's active-frame row by looking
