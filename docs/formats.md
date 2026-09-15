@@ -986,7 +986,8 @@ none of this — it resolves to nothing and links as the identity it is.
 
 An **open** map (`{…, *}`) is not symbolic and is not resolved away: it
 is read by the composition algebra itself, which sends every unlisted
-caller symbol one-way onto the index equal to the callee's cardinality —
+**non-blank** caller symbol one-way onto the index equal to the callee's
+cardinality — the blank stays pinned to the blank, never opened —
 an index no callee row names, so only a `*` cell matches it and only a
 keep preserves it. The link refuses an open binding into a tape the
 callee does not declare opaque. Only the READ half opens: an opaque

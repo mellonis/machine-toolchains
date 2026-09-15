@@ -336,8 +336,10 @@ impl std::fmt::Display for CallMech {
 /// lowering entry point has one shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkDiagnostic {
-    /// The stable kebab-case code; joins the shared allow namespace
-    /// (docs/pmt/lint.md and docs/tmt/lint.md (the allow namespace)).
+    /// The stable kebab-case code. It joins whichever allow namespace a
+    /// consumer keeps; today only the TM CLI draws on this registry
+    /// (docs/tmt/lint.md (one allow namespace across both languages)),
+    /// the PM side having nothing a link can grade.
     pub code: &'static str,
     /// The rendered finding, one sentence, no trailing period.
     pub message: String,

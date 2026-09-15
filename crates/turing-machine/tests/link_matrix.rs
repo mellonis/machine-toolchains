@@ -25,7 +25,7 @@
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::TapeSnapshot;
 use mtc_core::linker::{CallMech, LinkOptions, LinkOutput};
-use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, WideTape};
+use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, Trap, WideTape};
 use mtc_turing_machine::arch::Tm1;
 use mtc_turing_machine::asm::{assemble, link};
 
@@ -912,16 +912,16 @@ fn an_exit_bearing_site_inside_a_framed_callee_agrees_across_mechanisms() {
 /// each mechanism records for this call site — a stamped copy's return
 /// address into a caller blob that has nothing after the call, or a
 /// framed call's own continuation bookkeeping — is exercised here for the
-/// first time in this file. This is an OBSERVATION fixture: the ruling on
-/// whether the linker should refuse this shape outright is for the
-/// controller, not this test.
+/// first time in this file.
 ///
-/// Observed 2026-09-15: all three mechanisms link the shape without
-/// refusing it, and all three run to the SAME trap kind,
-/// `trapped:stack-underflow` — `ret` pops a call stack `main`'s own
-/// tail-position call left nothing further to return into, and that
-/// happens identically under a stamped copy's return address and under a
-/// framed call's own bookkeeping.
+/// Ruled after observing it: the linker does NOT refuse this shape, and
+/// the hazard is the author's (docs/core.md (call mechanisms)). All three
+/// mechanisms link it and all three run to `Trapped(StackUnderflow)` —
+/// `ret` pops a call stack `main`'s own tail-position call left nothing
+/// further to return into, and that happens identically under a stamped
+/// copy's return address and under a framed call's own bookkeeping. The
+/// test pins both halves: that the three agree, and which outcome they
+/// agree on.
 const TAIL_POSITION_FRAMED_CALL: &str = "\
 .routine main, tapes=1, alpha=(4)
 .param t, ('_', 'x', 'y', 'z')
@@ -994,6 +994,25 @@ fn a_tail_position_framed_call_is_observed() {
     }
     assert!(
         all_agree,
-        "tail-position framed call: mechanisms diverge, ruling pending: {observed:?}"
+        "tail-position framed call: the mechanisms diverge: {observed:?}"
     );
+
+    // The outcome itself, not only the agreement. `docs/core.md (call
+    // mechanisms)` states this shape links everywhere and traps
+    // `stack-underflow` at run time, so the page's claim needs the
+    // VARIANT pinned: agreement alone would hold just as well if all
+    // three started stopping cleanly, or trapping for another reason.
+    //
+    // Mutation it catches: change the lowering so a tail-position site's
+    // return lands somewhere — a synthesized continuation, say — and
+    // every mechanism moves together off `StackUnderflow`, which the
+    // agreement assert above cannot see.
+    for (m, r) in &observed {
+        assert_eq!(
+            r.as_ref().expect("the shape links under every mechanism"),
+            &Outcome::Trapped(Trap::StackUnderflow),
+            "tail-position framed call under {m}: the return has no \
+             continuation, so the run must trap on return-stack underflow"
+        );
+    }
 }

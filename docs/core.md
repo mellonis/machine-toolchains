@@ -808,7 +808,7 @@ image-level aggregates:
 | `expanded_rows` | extra match rows from one-way collapse expansion |
 | `variant_fallbacks` | sorted names that linked the build column NOT matching the program's bit, because the wanted one was absent |
 | `program_volatile` | the volatile bit this link resolved with — the column every name was selected by |
-| `diagnostics` | the link warnings raised, one per site (Link warnings below) |
+| `diagnostics` | the link warnings raised, one per graded tape (Link warnings below) |
 | `folds` | one record per hybrid exit-bearing fold decision: the callee, its site count, the body and would-be-descriptor byte counts the rule compared, and whether the group was shared under frames or spliced |
 
 `diagnostics` and `folds` are both lists rather than counters, because
@@ -831,7 +831,8 @@ itself a pure binary.
 ### Link warnings
 
 A link error stops the link; a link **warning** does not. The report
-carries them in `diagnostics`, one per site, each with a stable
+carries them in `diagnostics`, one per graded tape — a site whose two
+tapes are both narrow raises two — each with a stable
 kebab-case **code**, the finding, the function and blob offset it was
 raised at, and the source line when the objects carried debug data. The
 linker never prints and never decides what a warning means: a consumer
@@ -851,12 +852,16 @@ own.
 The grading has one error tier and one warning tier, and which side a
 finding lands on follows from what the callee can reach:
 
-- A callee declaring **more tapes** than the caller, or an alphabet
-  **wider** than the caller's band on a tape they share, is an **error**
-  — it would address a band that does not exist, or write an index past
-  the band's width. The message names the dimension, and a wider
-  alphabet names the CALLER's tape index, the band the author can look
-  at.
+- On a **plain** site, a callee declaring **more tapes** than the caller
+  is an **error**: it would address a band that does not exist. A bound
+  site's arity is the binding's own business — the binding is what says
+  which caller band each callee tape gets — so a callee too wide to
+  place there is refused as a bad binding by the composition algebra
+  instead, not by this grading.
+- An alphabet **wider** than the caller's band on a tape they share is
+  an **error** on either kind of site: the callee would write an index
+  past the band's width. The message names the CALLER's tape index, the
+  band the author can look at.
 - A callee declaring **fewer tapes** is silent: the surplus bands are
   simply not reached.
 - A **narrower** alphabet is `narrow-alphabet` — the caller's high
@@ -933,17 +938,17 @@ with holds three laws the implementation is property-tested against:
   and is excluded from the bidirectional bijectivity check.
 
 **One walk, two drivers.** The copy-path closure is enumerated once, and
-both the hybrid fold probe and the stamp builder run it. A node is a
-`(routine, composite)` pair; an **exit-bearing** node is additionally
-keyed by its call site — the caller, the continuation, and the exit
-offsets — so two splices of one pair are two copies, and the fold count
-counts the sites inside both. The probe is that same walk run without
-building anything: it never fails, seeds only from the exit-free
-bijection sites (the copies that exist whatever the fold rule decides),
-and keeps descending past an exit-bearing site whose group may yet be
-shared. That last is a deliberate over-report — a phantom member can
-only push its group into sharing, and sharing is a correct lowering for
-any site.
+both the hybrid fold probe and the stamp builder run it: a node is a
+`(routine, composite)` pair, and an **exit-bearing** node is
+additionally keyed by its call site — the caller, the continuation, and
+the exit offsets — so two splices of one pair are two copies, and the
+fold count counts the sites inside both. The probe is that same walk run
+without building anything, and it never fails, seeds only from the
+exit-free bijection sites (the copies that exist whatever the fold rule
+decides), and keeps descending past an exit-bearing site whose group may
+yet be shared — a deliberate over-report, since a phantom member can
+only push its group into sharing, which is a correct lowering for any
+site.
 
 ### Call mechanisms
 
@@ -1021,10 +1026,11 @@ pushed and has nowhere to put the other exits.
 
   The scope stops where splicing does. A group's members are the
   exit-bearing bijection sites reachable at the machine frame plus those
-  met inside a **stamped copy**; a site inside a frames-lowered callee —
-  one reached holey or one-way — is never grouped, because inside a
-  framed body every site is already a framed site and the byte rule has
-  nothing to trade.
+  met inside a **stamped copy** — holeyness is no barrier there, since a
+  bound site nested in a copy is stamped in turn. What is never grouped
+  is a site inside a callee reached through a **framed** call: inside a
+  framed body every site is a framed site, and the rule has nothing to
+  trade.
 
 All three are **observably equivalent** on the same program and inputs —
 same outcome, same final device state, and the **same trap kind** on a
