@@ -1,5 +1,10 @@
-//! The call-mechanism matrix on programs that carry EXIT VECTORS
-//! (docs/core.md (call mechanisms)), run on the real TM-1 arch.
+//! The three call mechanisms agree on the shapes phase 2 adds: an
+//! exit-bearing call (from one site and from three), a fold inside a
+//! stamped copy, an open binding, a mixed splice-and-frame caller, a
+//! cross-object bound call, a shared fold group reached only through a
+//! frame (no identity-world member at all), and a tail-position framed
+//! call observation. Driven from `.tma`, because the `.tmc` front end has
+//! no `state` parameters yet (docs/core.md (call mechanisms)).
 //!
 //! Mono splices a per-site copy of an exit-bearing callee, entered by a
 //! jump and leaving through jumps; frames gives every site a descriptor
@@ -197,5 +202,427 @@ fn a_closure_fold_program_agrees_across_mechanisms() {
         seen,
         vec![2, 2, 2, 1],
         "three swapped writes then one identity write"
+    );
+}
+
+// ── exits, open bindings, and cross-object calls ──────────────────────────
+
+/// ONE exit-bearing site: hybrid splices it (one site never pays to
+/// share), mono splices it, frames descriptors it. All three must leave
+/// the same tape.
+const ONE_EXIT_SITE: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine pick, tapes=1, alpha=(3), exits=2
+.param n, ('_', '0', '1')
+.section tables
+T0:     .row    [0]
+        .row    [1]
+        .row    [2]
+T1:     .targets zero, one, two
+.section code
+.func main
+        call    pick [n: 0] exits=(won, lost)
+        stp
+won:    wrmv    [1], [.]
+        stp
+lost:   wrmv    [2], [.]
+        stp
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+one:    retx    #1
+two:    ret
+";
+
+/// THREE exit-bearing sites into one routine: the shape hybrid's byte
+/// rule may share. Whatever it decides, the three mechanisms must agree
+/// on the tape.
+const THREE_EXIT_SITES: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine pick, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section tables
+T0:     .row    [0]
+        .row    [*]
+T1:     .targets zero, rest
+.section code
+.func main
+        call    pick [n: 0] exits=(a)
+        stp
+a:      call    pick [n: 0] exits=(b)
+        stp
+b:      call    pick [n: 0] exits=(c)
+        stp
+c:      wrmv    [2], [.]
+        stp
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+rest:   ret
+";
+
+/// An open binding: a 5-symbol band into a 3-symbol callee that declares
+/// its tape opaque and carries a `*` row. Modelled on the probe's
+/// hand-authored descriptor, written declaratively.
+const OPEN: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', 'c', 'd')
+.routine swapABopen, tapes=1, alpha=(3)
+.param n, ('_', 'a', 'b'), writes=('a', 'b'), opaque
+.section tables
+T0:     .row    [0]
+        .row    [1]
+        .row    [2]
+        .row    [*]
+T1:     .targets done, swapA, swapB, pass
+.section code
+.func main
+        call    swapABopen [0{1->1, 2->2, *}]
+        stp
+.func swapABopen
+walk:   rd
+        mtc     T0
+        djmp    T1
+swapA:  wrmv    [2], [>]
+        jmp     walk
+swapB:  wrmv    [1], [>]
+        jmp     walk
+done:   ret
+pass:   wrmv    [-], [>]
+        jmp     walk
+";
+
+/// The cross-object caller and callee, assembled separately and linked
+/// together.
+const XO_CALLER: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', '0', '1')
+.section code
+.func main
+        call    mylib::plusOne [num: 0{3->'0', 4->'1'}]
+        stp
+";
+
+const XO_CALLEE: &str = "\
+.routine mylib::plusOne, tapes=1, alpha=(3)
+.param num, ('_', '0', '1'), writes=('0', '1')
+.section code
+.func mylib::plusOne
+        rd
+        wrmv    [2], [.]
+        ret
+";
+
+/// Mutation it catches: break any one mechanism's exit lowering — mono's
+/// `retx → jmp`, frames' descriptor rebase, hybrid's routing — and the
+/// three stop agreeing on the final tape.
+#[test]
+fn an_exit_bearing_program_agrees_across_mechanisms() {
+    for src in [ONE_EXIT_SITE, THREE_EXIT_SITES] {
+        let results: Vec<_> = MECHS.iter().map(|&m| run(&build(src, m), &[3])).collect();
+        for (m, r) in MECHS.iter().zip(&results[1..]) {
+            assert_eq!(
+                (&results[0].0, &results[0].1),
+                (&r.0, &r.1),
+                "mono vs {m} diverged on an exit-bearing program"
+            );
+        }
+    }
+}
+
+/// Mutation it catches: revert the open rule anywhere — the sparse map,
+/// `dense_map`'s guard, or mono's `read_image` — and the opaque symbols
+/// trap under at least one mechanism, so the outcomes diverge.
+#[test]
+fn an_open_binding_program_agrees_across_mechanisms() {
+    let results: Vec<_> = MECHS.iter().map(|&m| run(&build(OPEN, m), &[5])).collect();
+    for (m, r) in MECHS.iter().zip(&results[1..]) {
+        assert_eq!(
+            (&results[0].0, &results[0].1),
+            (&r.0, &r.1),
+            "mono vs {m} diverged on an open binding"
+        );
+    }
+}
+
+/// Mutation it catches: resolve a cross-object binding against the wrong
+/// object's interface and the callee writes through the wrong glyph, so
+/// at least one mechanism's tape differs.
+#[test]
+fn a_cross_object_program_agrees_across_mechanisms() {
+    let caller = assemble(XO_CALLER, false).expect("assembles");
+    let callee = assemble(XO_CALLEE, false).expect("assembles");
+    let images: Vec<_> = MECHS
+        .iter()
+        .map(|&m| {
+            link(
+                &[caller.clone(), callee.clone()],
+                &[],
+                LinkOptions {
+                    call_mech: m,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("the {m} link failed: {e}"))
+            .executable
+        })
+        .collect();
+    let results: Vec<_> = images.iter().map(|e| run(e, &[5])).collect();
+    for (m, r) in MECHS.iter().zip(&results[1..]) {
+        assert_eq!(
+            (&results[0].0, &results[0].1),
+            (&r.0, &r.1),
+            "mono vs {m} diverged on a cross-object bound call"
+        );
+    }
+}
+
+// ── the mixed splice-and-frame caller ──────────────────────────────────────
+
+/// One caller, two sites: an exit-bearing one hybrid splices, and a
+/// holey one it frames. The framed site widens, shifting the splice's
+/// `then` and its exits — the only shape in this file where the offsets
+/// a splice fixup names are not the ones the record carried.
+const MIXED_SPLICE_AND_FRAME: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', 'c', 'd')
+.routine pick, tapes=1, alpha=(5), exits=1
+.param n, ('_', 'a', 'b', 'c', 'd')
+.routine holey, tapes=1, alpha=(3)
+.param m, ('_', 'a', 'b')
+.section tables
+T0:     .row    [0]
+        .row    [*]
+T1:     .targets zero, rest
+.section code
+.func main
+        call    pick [0] exits=(won)
+        stp
+won:    call    holey [0{1->1, 2->2}]
+        wrmv    [3], [.]
+        stp
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+rest:   ret
+.func holey
+        ret
+";
+
+/// Mutation it catches: drop `splice_shift` on the hybrid path and the
+/// splice's `then` lands on the wrong instruction (or misses the offset
+/// map and fails the link), so hybrid stops agreeing with mono.
+#[test]
+fn a_mixed_splice_and_frame_caller_agrees_across_mechanisms() {
+    let results: Vec<_> = MECHS
+        .iter()
+        .map(|&m| run(&build(MIXED_SPLICE_AND_FRAME, m), &[5]))
+        .collect();
+    for (m, r) in MECHS.iter().zip(&results[1..]) {
+        assert_eq!(
+            (&results[0].0, &results[0].1),
+            (&r.0, &r.1),
+            "mono vs {m} diverged on a mixed splice/frame caller"
+        );
+    }
+}
+
+// ── a shared fold group reached only through a frame ──────────────────────
+
+/// `outer` is a mono seed (an exit-free bijection reached at the machine
+/// identity through a swap), so the closure probe finds all three
+/// exit-bearing calls to `big` INSIDE its stamped copy — none at the
+/// identity world itself, unlike `closure_fold`'s mixed 1-plus-2 split.
+/// The whole group therefore lives under FR ≠ 0 (the swap composite) with
+/// no identity-world member at all. `main` separately calls `holey`
+/// through an unequal-cardinality (non-bijection) binding, which is never
+/// a mono seed and can never join the group — it exists only to put a
+/// SECOND, distinct composite into the link (the swap, and holey's own),
+/// so the engine's total composite count (2) differs from the group's
+/// site count (3): a byte-rule sharer that sized its runtime compose
+/// column count from the wrong one of the two would be caught here and
+/// not by `closure_fold`, where they coincide.
+///
+/// Sizing mirrors `closure_fold()` exactly (same 4-symbol alphabet, same
+/// swap composite, same `big` body), so the byte-rule arithmetic is
+/// already proven: `(3 - 1) * 56 = 112 > 84`, so hybrid shares. A function
+/// rather than a plain const, for the same reason `closure_fold` is one:
+/// the `nops(50)` body-size knob has to be interpolated by `format!`,
+/// which needs a literal format string at the call site.
+fn shared_under_frame() -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine outer, tapes=1, alpha=(4)
+.param u, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.routine holey, tapes=1, alpha=(3)
+.param m, ('_', 'x', 'y')
+.section code
+.func main
+        call    outer [0{{1->2, 2->1}}]
+        call    holey [0{{1->1, 2->2}}]
+        stp
+.func outer
+        call    big [0] exits=(p)
+        ret
+p:      call    big [0] exits=(q)
+        ret
+q:      call    big [0] exits=(r)
+        ret
+r:      ret
+.func big
+        wrmv    [1], [>]
+{}        retx    #0
+.func holey
+        ret
+",
+        nops(50)
+    )
+}
+
+/// Mutation it catches: size the frames compose matrix from the engine's
+/// total composite count (2) instead of the group's full K (3) — the
+/// shared site's descriptor under FR ≠ 0 then composes against the wrong
+/// column, and hybrid stops agreeing with mono.
+#[test]
+fn a_shared_group_under_an_active_frame_agrees_across_mechanisms() {
+    let src = shared_under_frame();
+
+    let out = build_full(&src, CallMech::Hybrid);
+    let fold = out
+        .report
+        .folds
+        .iter()
+        .find(|f| f.routine == "big")
+        .unwrap_or_else(|| panic!("no fold decision for `big`: {:?}", out.report));
+    assert_eq!(
+        fold.sites, 3,
+        "all three sites live inside outer's copy: {fold:?}"
+    );
+    assert_eq!(
+        fold.body_bytes, 56,
+        "1 ent + 3 wrmv + 50 nop + 2 retx: {fold:?}"
+    );
+    assert_eq!(
+        fold.descriptor_bytes, 84,
+        "three 28-byte descriptors: {fold:?}"
+    );
+    assert!(fold.shared, "112 > 84, so hybrid shares: {fold:?}");
+
+    let results: Vec<_> = MECHS.iter().map(|&m| run(&build(&src, m), &[4])).collect();
+    for (m, r) in MECHS.iter().zip(&results[1..]) {
+        assert_eq!(
+            (&results[0].0, &results[0].1),
+            (&r.0, &r.1),
+            "mono vs {m} diverged on a shared group reached only through a frame"
+        );
+    }
+}
+
+// ── a tail-position framed call: observation ───────────────────────────────
+
+/// A caller whose LAST instruction is a holey bound call, with nothing
+/// after it in the blob — no `stp`, no `ret`. Under mono every bound call
+/// stamps regardless of shape, so this becomes a plain `call` into a
+/// stamped copy of `holey` (mono has no frames machinery to route through
+/// in the first place). Under frames and hybrid the holey binding is
+/// never a mono seed (unequal cardinalities fail `is_bijection`), so
+/// `holey` is reached through a framed call, both mechanisms taking the
+/// same `seeds.is_empty()` early return to pure frames.
+///
+/// `holey` itself ends in a plain `ret`, so whatever return continuation
+/// each mechanism records for this call site — a stamped copy's return
+/// address into a caller blob that has nothing after the call, or a
+/// framed call's own continuation bookkeeping — is exercised here for the
+/// first time in this file. This is an OBSERVATION fixture: the ruling on
+/// whether the linker should refuse this shape outright is for the
+/// controller, not this test.
+///
+/// Observed 2026-09-15: all three mechanisms link the shape without
+/// refusing it, and all three run to the SAME trap kind,
+/// `trapped:stack-underflow` — `ret` pops a call stack `main`'s own
+/// tail-position call left nothing further to return into, and that
+/// happens identically under a stamped copy's return address and under a
+/// framed call's own bookkeeping.
+const TAIL_POSITION_FRAMED_CALL: &str = "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine holey, tapes=1, alpha=(3)
+.param m, ('_', 'x', 'y')
+.section code
+.func main
+        call    holey [0{1->1, 2->2}]
+.func holey
+        ret
+";
+
+/// The outcome KIND alone (mono and frames lay out code differently, so a
+/// trap's `at` offset legitimately differs — docs/core.md (call
+/// mechanisms), the trap-taxonomy claim carried over from
+/// `mode_equivalence.rs`).
+fn outcome_kind_only(a: &Outcome, b: &Outcome) -> bool {
+    match (a, b) {
+        (Outcome::Trapped(ta), Outcome::Trapped(tb)) => {
+            std::mem::discriminant(ta) == std::mem::discriminant(tb)
+        }
+        _ => a == b,
+    }
+}
+
+#[test]
+fn a_tail_position_framed_call_is_observed() {
+    let observed: Vec<(CallMech, Result<Outcome, String>)> = MECHS
+        .iter()
+        .map(|&m| {
+            let obj = assemble(TAIL_POSITION_FRAMED_CALL, false).expect("assembles");
+            let link_result = link(
+                &[obj],
+                &[],
+                LinkOptions {
+                    call_mech: m,
+                    ..Default::default()
+                },
+            );
+            match link_result {
+                Ok(out) => {
+                    let (outcome, _snaps) = run(&out.executable, &[4]);
+                    (m, Ok(outcome))
+                }
+                Err(e) => (m, Err(e.to_string())),
+            }
+        })
+        .collect();
+
+    let first = &observed[0].1;
+    let all_agree = observed.iter().all(|(_, r)| match (first, r) {
+        (Ok(a), Ok(b)) => outcome_kind_only(a, b),
+        (Err(_), Err(_)) => true,
+        _ => false,
+    });
+
+    if !all_agree {
+        // Per-mechanism observation, spelled out so a failure report never
+        // has to re-derive it:
+        for (m, r) in &observed {
+            match r {
+                Ok(o) => eprintln!("{m}: linked, ran to {o:?}"),
+                Err(e) => eprintln!("{m}: link refused: {e}"),
+            }
+        }
+    }
+    assert!(
+        all_agree,
+        "tail-position framed call: mechanisms diverge, ruling pending: {observed:?}"
     );
 }

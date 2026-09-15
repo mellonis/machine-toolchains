@@ -778,12 +778,178 @@ q:      ret
     )
 }
 
+// The four fixed-size fixtures below are copied verbatim from
+// `link_matrix.rs` (each integration test binary is its own crate, so no
+// cross-import): an exit-bearing call from one site and from three, an
+// open binding, and a mixed splice-and-frame caller. `link_matrix.rs`
+// runs them; this file only re-links them, to prove the fold decision and
+// the intern keys behind them are deterministic.
+
+/// ONE exit-bearing site: hybrid splices it (one site never pays to
+/// share), mono splices it, frames descriptors it.
+const ONE_EXIT_SITE: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine pick, tapes=1, alpha=(3), exits=2
+.param n, ('_', '0', '1')
+.section tables
+T0:     .row    [0]
+        .row    [1]
+        .row    [2]
+T1:     .targets zero, one, two
+.section code
+.func main
+        call    pick [n: 0] exits=(won, lost)
+        stp
+won:    wrmv    [1], [.]
+        stp
+lost:   wrmv    [2], [.]
+        stp
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+one:    retx    #1
+two:    ret
+";
+
+/// THREE exit-bearing sites into one routine: the shape hybrid's byte
+/// rule may share.
+const THREE_EXIT_SITES: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine pick, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section tables
+T0:     .row    [0]
+        .row    [*]
+T1:     .targets zero, rest
+.section code
+.func main
+        call    pick [n: 0] exits=(a)
+        stp
+a:      call    pick [n: 0] exits=(b)
+        stp
+b:      call    pick [n: 0] exits=(c)
+        stp
+c:      wrmv    [2], [.]
+        stp
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+rest:   ret
+";
+
+/// An open binding: a 5-symbol band into a 3-symbol callee that declares
+/// its tape opaque and carries a `*` row.
+const OPEN: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', 'c', 'd')
+.routine swapABopen, tapes=1, alpha=(3)
+.param n, ('_', 'a', 'b'), writes=('a', 'b'), opaque
+.section tables
+T0:     .row    [0]
+        .row    [1]
+        .row    [2]
+        .row    [*]
+T1:     .targets done, swapA, swapB, pass
+.section code
+.func main
+        call    swapABopen [0{1->1, 2->2, *}]
+        stp
+.func swapABopen
+walk:   rd
+        mtc     T0
+        djmp    T1
+swapA:  wrmv    [2], [>]
+        jmp     walk
+swapB:  wrmv    [1], [>]
+        jmp     walk
+done:   ret
+pass:   wrmv    [-], [>]
+        jmp     walk
+";
+
+/// One caller, two sites: an exit-bearing one hybrid splices, and a
+/// holey one it frames. The framed site widens, shifting the splice's
+/// `then` and its exits.
+const MIXED_SPLICE_AND_FRAME: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', 'c', 'd')
+.routine pick, tapes=1, alpha=(5), exits=1
+.param n, ('_', 'a', 'b', 'c', 'd')
+.routine holey, tapes=1, alpha=(3)
+.param m, ('_', 'a', 'b')
+.section tables
+T0:     .row    [0]
+        .row    [*]
+T1:     .targets zero, rest
+.section code
+.func main
+        call    pick [0] exits=(won)
+        stp
+won:    call    holey [0{1->1, 2->2}]
+        wrmv    [3], [.]
+        stp
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+rest:   ret
+.func holey
+        ret
+";
+
+/// The shared-fold-group-under-a-frame shape (`link_matrix.rs`'s
+/// `shared_under_frame`): `outer`'s whole exit-bearing group lives inside
+/// its stamped copy under the swap composite, with a second, unrelated
+/// composite (`holey`'s own) also in the link. Parameterized on `nops(50)`
+/// like `closure_fold`, so it is a function rather than a plain const.
+fn shared_under_frame() -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine outer, tapes=1, alpha=(4)
+.param u, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.routine holey, tapes=1, alpha=(3)
+.param m, ('_', 'x', 'y')
+.section code
+.func main
+        call    outer [0{{1->2, 2->1}}]
+        call    holey [0{{1->1, 2->2}}]
+        stp
+.func outer
+        call    big [0] exits=(p)
+        ret
+p:      call    big [0] exits=(q)
+        ret
+q:      call    big [0] exits=(r)
+        ret
+r:      ret
+.func big
+        wrmv    [1], [>]
+{}        retx    #0
+.func holey
+        ret
+",
+        "        nop\n".repeat(50)
+    )
+}
+
 #[test]
 fn every_program_relinks_byte_identically_in_every_mode() {
     // Reproducible builds: the closure BFS is deterministic, so linking the
     // same program under the same mechanism twice yields byte-identical bytes
     // AND an identical sidecar JSON (docs/core.md (the composition engine)).
     let closure = closure_fold();
+    let shared_frame = shared_under_frame();
     for src in [
         CROSS_ALPHABET,
         NESTED_TWO_LEVEL,
@@ -793,6 +959,11 @@ fn every_program_relinks_byte_identically_in_every_mode() {
         IN_RANGE_HOLES,
         UNALIASED,
         closure.as_str(),
+        ONE_EXIT_SITE,
+        THREE_EXIT_SITES,
+        OPEN,
+        MIXED_SPLICE_AND_FRAME,
+        shared_frame.as_str(),
     ] {
         for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
             let a = build_full(src, mech);
