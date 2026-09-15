@@ -39,7 +39,7 @@ use mtc_core::diagnostics::Span;
 use mtc_core::formats::object::ObjectFile;
 
 use crate::compiler::{
-    CompileOptions, ExternalContracts, Resolved, WorldKind, analyze_staged_with, compile,
+    CompileOptions, Declarations, Resolved, WorldKind, analyze_staged_with, compile,
 };
 use crate::optimizer::OptLevel;
 use crate::parser::Doc;
@@ -64,8 +64,18 @@ pub fn object() -> &'static ObjectFile {
                 strip_debugger: true,
                 // The library vouches for nobody but itself — and must not
                 // consult its own once-per-process cache while building it.
-                externals: ExternalContracts::None,
-                ..Default::default()
+                // Fields spelled out rather than `..Default::default()`:
+                // that tail would evaluate `Declarations::stdlib()` (part
+                // of `CompileOptions::default()`) before this line
+                // overwrote it, reading the very cache this comment says
+                // to avoid.
+                externals: Declarations::none(),
+                debug_info: false,
+                disabled_passes: Vec::new(),
+                capture_ir: false,
+                outline: false,
+                stamped_asm: false,
+                inline_cap: None,
             },
         )
         .expect("the embedded stdlib compiles")
@@ -104,10 +114,10 @@ pub(crate) struct RosterEntry {
 fn analysis() -> &'static (Vec<RosterEntry>, Resolved) {
     static ANALYSIS: OnceLock<(Vec<RosterEntry>, Resolved)> = OnceLock::new();
     ANALYSIS.get_or_init(|| {
-        // `ExternalContracts::None`: the library's own contract check must
+        // `Declarations::none()`: the library's own contract check must
         // not reach for this very cache while it is being initialized, and
         // the library calls nothing outside itself anyway.
-        let resolved = analyze_staged_with(SOURCE, ExternalContracts::None)
+        let resolved = analyze_staged_with(SOURCE, &Declarations::none())
             .resolved
             .expect("the embedded stdlib always resolves");
         let roster = resolved
@@ -125,7 +135,7 @@ fn analysis() -> &'static (Vec<RosterEntry>, Resolved) {
 
 /// The embedded stdlib's whole resolved module — the external module whose
 /// declared write contracts every requesting document's footprint inference
-/// believes by default (`crate::compiler::ExternalContracts`).
+/// believes by default (`crate::compiler::Declarations`).
 pub(crate) fn resolved() -> &'static Resolved {
     &analysis().1
 }

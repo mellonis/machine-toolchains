@@ -21,6 +21,7 @@ use mtc_core::formats::object::ObjectFile;
 use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
+pub use crate::declarations::{Declarations, Origin};
 use crate::footprint::SymSet;
 use crate::ir::{IrProgram, lower, validate_world};
 use crate::lexer::{LexMode, Token, lex_with};
@@ -1047,14 +1048,14 @@ pub(crate) struct Analysis {
 /// with, are pinned by `tests/tmc_green_analyze.rs` over a deliberately
 /// broken set.
 pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
-    analyze_with(source, ExternalContracts::Stdlib)
+    analyze_with(source, &Declarations::stdlib())
 }
 
 /// [`analyze`] with an explicit choice of the external modules whose
 /// declared write contracts the footprint inference believes.
 pub(crate) fn analyze_with(
     source: &str,
-    externals: ExternalContracts,
+    externals: &Declarations,
 ) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
@@ -1081,7 +1082,7 @@ pub(crate) fn analyze_with(
 /// deferred to the TM lint layer rather than shipped as compiler diagnostics.
 fn resolve_program(
     program: &Program,
-    externals: ExternalContracts,
+    externals: &Declarations,
 ) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
@@ -1139,7 +1140,7 @@ pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
 ///
 /// The whole-module fixpoint runs at most once per compile, and only when some
 /// world actually declares a clause: an uncontracted module pays nothing.
-fn check_contracts(resolved: &Resolved, externals: ExternalContracts) -> Result<(), CompileError> {
+fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), CompileError> {
     let contracted = resolved.worlds.iter().any(|w| {
         w.tapes
             .iter()
@@ -1328,12 +1329,12 @@ pub(crate) struct TmcStagedAnalysis {
 ///
 /// Consumed by the phase-7 `.tmc` language service, not by `compile()`.
 pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
-    analyze_staged_with(source, ExternalContracts::Stdlib)
+    analyze_staged_with(source, &Declarations::stdlib())
 }
 
 /// [`analyze_staged`] with an explicit choice of the external modules whose
 /// declared write contracts the footprint inference believes.
-pub(crate) fn analyze_staged_with(source: &str, externals: ExternalContracts) -> TmcStagedAnalysis {
+pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> TmcStagedAnalysis {
     let tokens = match lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
         Err(fatal) => {
@@ -2104,33 +2105,17 @@ fn unused_import_warnings(program: &Program, used: &[bool], diagnostics: &mut Ve
 // `compile()` field-for-field, with `.tma` text where PM-1 has `.pma`.
 // ---------------------------------------------------------------------------
 
-/// Which modules outside the compilation unit the write-footprint inference
-/// may believe (docs/tmt/language.md (contract clauses)): a callee found in
-/// one of them contributes its DECLARED effective set, projected through
-/// the binding; a callee found nowhere contributes the whole alphabet. The
-/// standard library is the default; its own analysis passes `None`, which
-/// is also what keeps the once-per-process stdlib cache from initializing
-/// itself recursively.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExternalContracts {
-    #[default]
-    Stdlib,
-    None,
-}
-
-impl ExternalContracts {
-    pub(crate) fn modules(self) -> Vec<&'static Resolved> {
-        match self {
-            ExternalContracts::Stdlib => vec![crate::stdlib::resolved()],
-            ExternalContracts::None => Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileOptions {
-    /// Whose declared write contracts the footprint inference believes.
-    pub externals: ExternalContracts,
+    /// Whose declared write contracts the footprint inference believes
+    /// (docs/tmt/language.md (declarations)): a callee found in one of
+    /// [`Declarations`]'s modules contributes its DECLARED effective set,
+    /// projected through the binding; a callee found nowhere contributes
+    /// the whole alphabet. The standard library is the implicit default
+    /// (see [`Default`] below); the library's own analysis passes
+    /// [`Declarations::none`], which also keeps the once-per-process
+    /// stdlib cache from initializing itself recursively.
+    pub externals: Declarations,
     /// `-g`: record label/line debug info in the object, remapped to `.tmc`.
     pub debug_info: bool,
     /// `--strip-debugger`: drop `brk` at codegen. The optimizer runs BEFORE
@@ -2155,6 +2140,29 @@ pub struct CompileOptions {
     /// measurement knob for the optimizer sweep, not CLI surface — no flag,
     /// no completions entry.
     pub inline_cap: Option<usize>,
+}
+
+/// Hand-written, not derived: [`Declarations`] itself defaults to
+/// [`Declarations::none`] (an owned table starts empty), but a compile with
+/// no explicit choice believes the standard library, exactly as
+/// `ExternalContracts::default() == Stdlib` did before `Declarations`
+/// replaced it. Deriving here would silently flip every implicit-default
+/// call site (`CompileOptions { .., ..Default::default() }`) from stdlib to
+/// none.
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            externals: Declarations::stdlib(),
+            debug_info: false,
+            strip_debugger: false,
+            opt_level: OptLevel::default(),
+            disabled_passes: Vec::new(),
+            capture_ir: false,
+            outline: false,
+            stamped_asm: false,
+            inline_cap: None,
+        }
+    }
 }
 
 /// Structured stage report — `tmt -v` renders it; the library never prints
@@ -2231,7 +2239,7 @@ pub struct CompileOutput {
 /// [`validate_world`] (the T6 invariant check, run here where `.pmc` runs
 /// `validate_function`), and the generated `.tma` failing to assemble.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
-    let mut analysis = analyze_with(source, options.externals)?;
+    let mut analysis = analyze_with(source, &options.externals)?;
     // Drop rules a second catch-all shadows before expansion (docs/tmt/
     // language.md (rules)) so codegen never emits two all-wildcard match rows.
     // Done here, on the compile path only — the language service and the batch

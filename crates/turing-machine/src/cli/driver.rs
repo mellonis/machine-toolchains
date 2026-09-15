@@ -12,7 +12,7 @@ use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::object::SymbolDef;
 use mtc_core::linker::{CallMech, LinkOptions};
 
-use crate::compiler::{CompileOptions, CompileReport, compile as compile_source};
+use crate::compiler::{CompileOptions, CompileReport, Declarations, compile as compile_source};
 use crate::optimizer::OptLevel;
 use crate::stdlib;
 
@@ -424,7 +424,7 @@ fn build_one_target(
     // --strip-debugger, -Werror) override the resolved profile's keys.
     let profile = manifest.profiles.resolve(flags.release_preset);
     let mut options = CompileOptions {
-        externals: Default::default(),
+        externals: Declarations::stdlib(),
         debug_info: if flags.debug_info {
             true
         } else {
@@ -714,7 +714,7 @@ fn run_block_tape_path<'a>(
 /// stay compile-only inspection artifacts.
 fn argv_compile_options(flags: &Flags) -> CompileOptions {
     let mut options = CompileOptions {
-        externals: Default::default(),
+        externals: Declarations::stdlib(),
         debug_info: flags.debug_preset || flags.debug_info,
         strip_debugger: flags.release_preset || flags.strip_debugger,
         opt_level: if flags.release_preset {

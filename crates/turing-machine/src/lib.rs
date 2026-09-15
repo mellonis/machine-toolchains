@@ -12,6 +12,7 @@ pub mod compiler;
 pub mod completions;
 mod config;
 pub mod dap;
+mod declarations;
 pub mod expand;
 pub mod fmt;
 pub(crate) mod footprint;

@@ -52,7 +52,7 @@ pub fn object(arch: Arch) -> &'static ObjectFile {
         Arch::Tm1 => {
             static OBJECT: OnceLock<ObjectFile> = OnceLock::new();
             OBJECT.get_or_init(|| {
-                use mtc_turing_machine::compiler::{CompileOptions, ExternalContracts, compile};
+                use mtc_turing_machine::compiler::{CompileOptions, Declarations, compile};
                 use mtc_turing_machine::optimizer::OptLevel;
                 compile(
                     source(arch),
@@ -61,10 +61,18 @@ pub fn object(arch: Arch) -> &'static ObjectFile {
                         strip_debugger: true,
                         // The library vouches for nobody but itself, and must
                         // not consult its own once-per-process cache while
-                        // building — the arch crate's own reasoning.
-                        externals: ExternalContracts::None,
+                        // building — the arch crate's own reasoning. Fields
+                        // spelled out rather than `..Default::default()`:
+                        // that tail would evaluate `Declarations::stdlib()`
+                        // before this line overwrote it, reading the very
+                        // cache this comment says to avoid.
+                        externals: Declarations::none(),
                         debug_info: true,
-                        ..Default::default()
+                        disabled_passes: Vec::new(),
+                        capture_ir: false,
+                        outline: false,
+                        stamped_asm: false,
+                        inline_cap: None,
                     },
                 )
                 .expect("the embedded TM-1 stdlib compiles")
