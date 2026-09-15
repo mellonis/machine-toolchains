@@ -391,3 +391,58 @@ fn the_open_binding_refusal_renders_the_parameter_or_the_tape_number() {
          opaque; every state that reads it must have a `*` row"
     );
 }
+
+/// Equal cardinalities, one pair whose IMAGE equals another symbol's own
+/// index — `1->2` leaves symbol 2 unlisted, and `2` is also `1->2`'s own
+/// target. Only a check that still identity-completes the unlisted symbol
+/// reads this as colliding on `2`; the real composite sends symbol 2 to
+/// the opaque index instead of to `2`, so the binding is legal.
+const OPEN_MAP_EQ_TARGETS_UNLISTED: &str = "[0{1->2, *}]";
+
+/// Mutation it catches: identity-complete an open tape's unlisted symbols
+/// in the equal-size injectivity check (the reasoning this pins against)
+/// and this legal binding is refused — symbol 2, left unlisted, would
+/// identity-complete to `2` and collide with `1->2`'s own image, even
+/// though the real composite sends unlisted symbol 2 to the opaque index,
+/// never to `2`.
+#[test]
+fn an_open_bindings_unlisted_symbols_do_not_identity_complete() {
+    let src = program(3, MAIN_PARAM_EQ, SUB_OPAQUE, OPEN_MAP_EQ_TARGETS_UNLISTED);
+    for mech in MECHS {
+        link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).unwrap_or_else(|e| {
+            panic!(
+                "a listed pair's image equalling an unlisted symbol's own \
+                 index must not read as a collision under {mech}: {e}"
+            )
+        });
+    }
+}
+
+/// Equal cardinalities, two listed pairs colliding directly on the same
+/// callee symbol — nothing to do with identity completion at all.
+const OPEN_MAP_EQ_COLLIDING: &str = "[0{1->1, 2->1, *}]";
+
+/// WHICH check refuses this one: two non-one-way pairs sharing a `dst`
+/// collide in `absolutize`'s write map (keyed by callee symbol), which
+/// runs — and can therefore refuse — before `validate_binding`'s own
+/// equal-size loop is ever reached; open or closed makes no difference to
+/// it. This is a verdict pin, not a pin of the identity-completion fix
+/// above: no fixture reaches that check's own message through two listed
+/// pairs, because any two that would collide there collide here first.
+///
+/// Mutation it catches: drop the write-direction `insert_checked` call in
+/// `absolutize` (or make it direction-blind) and two listed pairs land on
+/// the same callee symbol unnoticed.
+#[test]
+fn an_open_bindings_colliding_listed_pairs_are_still_refused() {
+    let src = program(3, MAIN_PARAM_EQ, SUB_OPAQUE, OPEN_MAP_EQ_COLLIDING);
+    for mech in MECHS {
+        let err = link(&fake_syntax(), &[asm(&src)], &[], opts(mech))
+            .expect_err("two listed pairs colliding on the same callee symbol must refuse");
+        assert!(
+            matches!(&err, LinkError::BadBinding { message, .. }
+                if message.contains("maps write symbol 1 to both 1 and 2")),
+            "under {mech}: {err:?}"
+        );
+    }
+}

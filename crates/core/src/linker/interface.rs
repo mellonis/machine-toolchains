@@ -13,10 +13,17 @@
 //! would break `from_bytes(to_bytes(x)) == x`
 //! (docs/formats.md (bound calls)).
 //!
-//! Placed here rather than in `resolve` for the reason the old refusal
-//! guard documented: `resolve` is shared with `resolve_names`, the
-//! standalone name-resolution query the editor overlays run against,
-//! which has no business failing over a binding.
+//! Placed here rather than in `resolve`: `resolve` is shared with
+//! `resolve_names`, the standalone name-resolution query the editor
+//! overlays run against, which has no business failing over a binding.
+//!
+//! This module is also where a symbolic form's resolution can FAIL, and
+//! it is the only place it can: a parameter the callee does not declare,
+//! a glyph outside its alphabet, an open binding into a tape it does not
+//! declare opaque, an exit vector whose length disagrees with the
+//! declared exit count. Every one of them is refused before the
+//! composition engine reads a binding, so no mechanism can mis-lower one
+//! — the single gate all three pass through.
 
 use super::LinkError;
 use super::resolve::FuncRef;

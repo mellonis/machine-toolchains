@@ -268,8 +268,9 @@ fn a_glyph_labelled_destination_resolves_under_every_mechanism() {
 /// tape and writes none, so no comparison run against it could observe
 /// either half. This test pins only that the link is accepted.
 ///
-/// Mutation it catches: restore the `open` arm of the refusal guard and
-/// this link fails under every mechanism with a `BadBinding`.
+/// Mutation it catches: make the resolution pre-pass reject a binding
+/// with `open` set (a `BadBinding` on any open entry) and this link
+/// fails under every mechanism.
 #[test]
 fn an_open_map_no_longer_refuses() {
     let src = open_program("[1{*}, 0]");
@@ -335,29 +336,35 @@ fn a_written_empty_map_still_links_exactly_like_the_bare_form() {
     }
 }
 
-/// The refusal is reachability-gated like every other link error: an
-/// unreachable function may carry anything, symbolic bindings included
-/// (docs/core.md (linking)). The two programs below differ ONLY in which
-/// function holds the symbolic call — `ghost`, which the BFS from `main`
-/// never reaches, or `main` itself — so the contrast pins the gating and
-/// nothing else. Both carry a REACHED bound call (`main`'s numeric one),
-/// so the pre-pass really walks a binding in each.
+/// Resolution is reachability-gated like every other link error: an
+/// unreachable function may carry anything, an unresolvable binding
+/// included (docs/core.md (linking)). The two programs below differ ONLY
+/// in which function holds the bad call — `ghost`, which the BFS from
+/// `main` never reaches, or `main` itself — so the contrast pins the
+/// gating and nothing else. Both carry a REACHED bound call (`main`'s
+/// numeric one), so the pre-pass really walks a binding in each.
 ///
-/// WHICH check refuses the reached one: `SYMBOLIC` is fully NAMED
-/// (`num:`/`ctl:`) and none of this fixture's routines declares a
-/// `.param`, so `sub` carries no interface and `require_interface` in
-/// the resolution pre-pass refuses it — before the glyph label, the open
-/// map or the exit vector is ever looked at. The message is asserted, not
-/// just the variant, so the comment above cannot drift away from the
-/// check that actually fires.
+/// The bad call names a parameter `sub` does not declare, which is a
+/// RESOLUTION error rather than the retired blanket refusal: had the
+/// fixture kept a form that merely used to be refused, this test would
+/// go green for the wrong reason once that form resolved.
+///
+/// Mutation it catches: move the pre-pass ahead of reachability (run it
+/// over every object rather than over `order`) and the first link fails.
 #[test]
-fn the_refusal_is_gated_on_reachability() {
+fn resolution_is_gated_on_reachability() {
     let program = |unreached_body: &str, main_call: &str| {
         format!(
             "\
 .routine main, tapes=2, alpha=(4, 4)
+.param a, ('_', 'x', 'y', 'z')
+.param b, ('_', 'x', 'y', 'z')
 .routine sub, tapes=2, alpha=(4, 4)
+.param p, ('_', '0', '1', '2')
+.param q, ('_', '0', '1', '2')
 .routine ghost, tapes=2, alpha=(4, 4)
+.param g, ('_', '0', '1', '2')
+.param h, ('_', '0', '1', '2')
 .section code
 .func main
         call    sub {main_call}
@@ -370,9 +377,9 @@ G:      ret
 "
         )
     };
-    const SYMBOLIC: &str = "[num: 1{3=>'0',*}, ctl: 0] exits=(G)";
-    let unreached = program(SYMBOLIC, "[1, 0]");
-    let reached = program("[1, 0]", &SYMBOLIC.replace("(G)", "(M)"));
+    const BAD: &str = "[nosuch: 1, q: 0]";
+    let unreached = program(BAD, "[1, 0]");
+    let reached = program("[1, 0]", BAD);
     for mech in MECHS {
         let out = link(&fake_syntax(), &[asm(&unreached)], &[], opts(mech))
             .unwrap_or_else(|e| panic!("an unreached binding must not refuse under {mech}: {e}"));
@@ -384,14 +391,10 @@ G:      ret
         // The very same call, moved into the reached `main`, is refused.
         let err = link(&fake_syntax(), &[asm(&reached)], &[], opts(mech))
             .expect_err("the same binding in a reached function must be refused");
-        let LinkError::BadBinding { callee, message } = &err else {
-            panic!("under {mech}: {err:?}");
-        };
-        assert_eq!(callee, "sub", "under {mech}");
         assert!(
-            message.contains("a named entry") && message.contains("describes no interface"),
-            "under {mech} the pre-pass's interface check must be the one that \
-             fires: {message}"
+            matches!(&err, LinkError::BadBinding { message, .. }
+                if message.contains("parameter `nosuch`")),
+            "under {mech}: {err:?}"
         );
     }
 }

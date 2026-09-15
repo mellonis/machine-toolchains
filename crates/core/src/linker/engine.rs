@@ -702,44 +702,6 @@ pub(super) fn scan_sites<'a>(
     Ok(out)
 }
 
-/// Refuse a reached bound call carrying the ONE form
-/// (docs/formats.md (bound calls)) the link stage still does not
-/// resolve: an exit vector. The object format and the assembler carry
-/// it; wiring exits to their targets is future link-stage work, and
-/// nothing below reads `exits`. Linking one through would therefore
-/// produce a silently wrong image — the exits would simply vanish — so
-/// a refusal is the only honest answer until that work lands. A named
-/// entry, a glyph-labelled destination and an open map are all resolved
-/// by the time this guard runs: the pre-pass ahead of it turns the
-/// first two into numbers against the callee's interface and checks the
-/// third against the callee's `opaque` bits
-/// (docs/core.md (symbolic resolution)), after which `open` is read by
-/// the composition algebra itself.
-///
-/// RETIRED, pending deletion: nothing calls it. It used to sit at the
-/// head of [`lower`] as the one gate all three call mechanisms pass
-/// through; the exit vector it guarded is now resolved — the frames path
-/// carries it in the site's descriptor, and the mono paths refuse it
-/// explicitly in `stamp.rs` — so the call was removed and the body is
-/// kept only until the reachability test that names it is re-pinned.
-#[allow(dead_code)]
-fn refuse_symbolic_binding(order: &[FuncRef]) -> Result<(), LinkError> {
-    for f in order {
-        for &(_, callee, record) in &f.bound {
-            if !record.exits.is_empty() {
-                return Err(LinkError::BadBinding {
-                    callee: order[callee].name.to_string(),
-                    message: "the call site uses an exit vector, a symbolic form the \
-                              object carries but the link stage does not resolve yet; \
-                              write the binding without one"
-                        .to_string(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Validate one binding once (docs/formats.md (bound calls)) and return its
 /// composite absolutized at the caller's own identity — the reference used
 /// for the identity-collapse decision. Core legality comes through `absolutize`
@@ -791,17 +753,27 @@ fn validate_binding(
                 .map(|p| (p.src as u16, p.dst as u16))
                 .collect();
             let mut seen: HashSet<u16> = HashSet::new();
-            for s in 0..caller_card {
-                let Ok(s16) = u16::try_from(s) else { break };
-                let v = bidir.get(&s16).copied().unwrap_or(s16);
-                if !seen.insert(v) {
-                    return Err(LinkError::BadBinding {
-                        callee: callee_name.to_string(),
-                        message: format!(
-                            "binding tape {k} is not injective on an equal-size alphabet: \
-                             identity completion collides on {v}"
-                        ),
-                    });
+            let mut check = |v: u16| -> Result<(), LinkError> {
+                if seen.insert(v) {
+                    return Ok(());
+                }
+                Err(LinkError::BadBinding {
+                    callee: callee_name.to_string(),
+                    message: format!(
+                        "binding tape {k} is not injective on an equal-size alphabet: \
+                         identity completion collides on {v}"
+                    ),
+                })
+            };
+            // An open tape's unlisted symbols are opaque, not identity (docs/formats.md (bound calls)).
+            if tb.open {
+                for &v in bidir.values() {
+                    check(v)?;
+                }
+            } else {
+                for s in 0..caller_card {
+                    let Ok(s16) = u16::try_from(s) else { break };
+                    check(bidir.get(&s16).copied().unwrap_or(s16))?;
                 }
             }
         }
