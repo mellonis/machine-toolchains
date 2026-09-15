@@ -1062,6 +1062,38 @@ r:      retx    #0
         retx    #0
 ";
 
+/// The tail-position `noreturn` shape (`link_matrix.rs`): an exit-bearing
+/// bound call as the last instruction into a callee with no plain return,
+/// spliced without a continuation — the one `None` branch of the intern
+/// key, so it belongs in the determinism sweep.
+const TAIL_POSITION_NORETURN: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine pick, tapes=1, alpha=(3), exits=2, noreturn
+.param n, ('_', '0', '1')
+.section tables
+T0:     .row    [0]
+        .row    [1]
+        .row    [2]
+T1:     .targets zero, one, two
+.section code
+.func main
+        wrmv    [1], [.]
+        jmp     go
+a:      wrmv    [1], [.]
+        stp
+b:      wrmv    [2], [.]
+        stp
+go:     call    pick [n: 0] exits=(a, b)
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+one:    retx    #1
+two:    retx    #0
+";
+
 /// The broken-cycle shape (`link_matrix.rs`'s `BROKEN_CYCLE`): `outer`
 /// splices `b`, `b` plain-calls `c`, and `c` splices `b` again. It is the
 /// only shape here that exercises the splice-chain RESET at the
@@ -1173,6 +1205,7 @@ fn every_program_relinks_byte_identically_in_every_mode() {
         twice_big.as_str(),
         BROKEN_CYCLE,
         NESTED_UNDER_EXIT_BEARING,
+        TAIL_POSITION_NORETURN,
     ] {
         for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
             assert_relinks_identically(&[src], mech);

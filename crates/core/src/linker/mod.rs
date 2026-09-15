@@ -173,7 +173,9 @@ pub enum LinkError {
     /// The refusal is SPLICE-specific, not a property of tail position
     /// itself: a site whose hybrid fold group shares one generic body is
     /// reached through a frame descriptor and returns through it, so it
-    /// needs no following instruction and is never refused here.
+    /// needs no following instruction and is never refused here. That is
+    /// also why the advice names `--call-mech=frames`, like every other
+    /// copy-path refusal: under frames the same program links and runs.
     ExitBearingTailCall(String),
     /// An exit-bearing declarative bound call reaches, through a chain of
     /// copied calls, an exit-bearing call back into a routine the copy is
@@ -299,7 +301,7 @@ impl std::fmt::Display for LinkError {
                  into a callee that can return cannot be the last \
                  instruction of `{symbol}` — a callee that never returns, \
                  and a site reached through a frame descriptor instead, \
-                 are both unaffected"
+                 are both unaffected; build with --call-mech=frames"
             ),
             Self::RecursiveExitBearingCall(name) => write!(
                 f,

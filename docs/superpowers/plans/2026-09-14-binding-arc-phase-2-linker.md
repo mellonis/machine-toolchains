@@ -6444,6 +6444,14 @@ Two things sharpen that sentence, and both are deliberate:
   without `.routine` lines are therefore unaffected, and so is every
   `pmt` program.
 
+The one shape a real user can plausibly hit is a **plain call into a
+wider stdlib routine**: `std::binaryNumbersBare::plusOne` declares three
+symbols, so a program whose band declares two and calls it transparently
+was silently letting the callee write index 2 into a 2-wide band, and is
+now refused with `CalleeWider`. Nothing shipped does this (the corpus
+sweep below and every example golden are green), but one in-repo test
+fixture did — the LSP overlay faithfulness fixture — and was corrected.
+
 **Blast radius, measured (Task 1, recorded in full above).** The on-disk
 sweep over `docs/examples/`, `crates/turing-machine/tests/golden/` and
 the TM stdlib compared **4 plain sites, 0 unresolved, 0 wider and 0
