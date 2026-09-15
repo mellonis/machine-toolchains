@@ -129,8 +129,10 @@ each task.**
 
 - **PM-1 byte identity.** No byte of any `pmt` output may change. This is a
   TM-compiler phase, so the PM crate should not appear in any diff at all;
-  the one shared surface is `crates/core`, and Task 16 is the only task that
-  touches it. Re-check deliberately on any `crates/core` change:
+  the one shared surface is `crates/core`, and **exactly two tasks touch it —
+  Task 2b and Task 16**, each justifying its own diff in its own text (see
+  Core neutrality below). Re-check deliberately on any `crates/core` change,
+  and both of those tasks name it in their gate step:
   `cargo test -p mtc-post-machine --test golden_programs` and
   `cargo test -p mtc-post-machine --test asm_volatile`.
 - **Core neutrality.** `crates/core` learns nothing about TM-1. **A new
@@ -186,8 +188,17 @@ each task.**
   own files only.
 - **Temp paths in tests**: PID plus a per-call atomic counter, never a fixed
   name. Copy `fn scratch` from
-  `crates/turing-machine/tests/mode_equivalence.rs` (~`:935`) verbatim into any
-  new TM test file that writes to disk.
+  `crates/turing-machine/tests/mode_equivalence.rs` verbatim into any new TM
+  test file that writes to disk. **Locate it by symbol name**
+  (`grep -n 'fn scratch'`), not by line: it is at `:1358` today and has already
+  moved twice during this arc.
+- **Every `file:line` in this plan is a bearing, not an address.** The tree
+  moves as tasks land, and several references here were already stale within a
+  day of being gathered. **An implementer locates by symbol name** — `fn
+  scratch`, `RELEASE_DATE`, `render_binding`, `parse_reuse`, `check_tape_count`
+  — and treats the line number as a hint about where to start looking. Where a
+  task deletes a line that a later task's reference sits below, the later task
+  names its target by CODE or SYMBOL for exactly this reason (Tasks 10 and 11).
 - **Every fixture is run through the real tool before it is trusted.** Fixtures
   marked **[tool-verified]** in this plan were run, with the command, exit code
   and first output line recorded in `.superpowers/plan3a-fixture-check.md`.
@@ -257,7 +268,7 @@ may rely on these without re-deriving them; each names its evidence.
    (`compiler.rs:2121-2128`), `'static` only because the stdlib is an
    `OnceLock`. Header declarations are per-invocation owned data, so the enum
    must become owned declarations with borrowed views — Task 1.
-6. **`parse_reuse` always demands a `{ … }` body** (`parser.rs:1443-1460`), and
+6. **`parse_reuse` always demands a `{ … }` body** (`parser.rs::parse_reuse`, `:1441` today), and
    that is the WHOLE header grammar delta: a `.tmh` carrying `export alphabet`,
    `namespace`, a `?` doc line, a signature and a `writes` clause fails at
    `expected '{' to open the body, found ';'` — column 61 of line 4, i.e. past
@@ -300,9 +311,27 @@ may rely on these without re-deriving them; each names its evidence.
     landed by phase 1). 3a writes `None`/`false` into all three and leaves them
     as 3b's seam; the reader already rejects a present-but-empty `enters`/
     `leaves` list as `Malformed`.
-14. **`Interface.imports` is dormant** (`mod.rs:261-270`; the linker's
-    `AlphabetDrift` check is live but no writer fills the list). Task 8 fills it.
-15. **`ExportedGraph.digest` is on the wire and nothing computes it.**
+14. **`Interface.imports` is dormant** — the FIELD, `Interface.imports` on the
+    `Interface` struct (`mod.rs`, around `:286`; `struct ImportedAlphabet` that
+    it holds is a few lines above, at `:261-270`). The linker's `AlphabetDrift`
+    check is live but no writer fills the list. Task 8 fills it.
+14a. **`preserves` has no peer on the wire.** `RoutineInterface` carries
+    `writes` and nothing else about the write set (`object/mod.rs:239`), while
+    `preserves { … }` is a first-class signature clause
+    (`parser.rs::sig_param`; `docs/tmt/language.md`, contract clauses) whose
+    effect is subtractive — `compiler::declared_effective` is `writes`, or the
+    whole alphabet absent the clause, minus `preserves`. **The format has
+    therefore already ruled that `preserves` collapses into the effective set**,
+    which is what Task 2's F1 ruling makes explicit for the IR and the header.
+    `std.tmc:375` and `:526` (`invertNumber`) are the shipped case, and they are
+    `preserves`-only — no `writes` clause at all.
+15. **Every `export routine` in `std.tmc` reaches `return`.** Verified during
+    the pre-flight scan; recorded so nobody re-derives it. Consequence:
+    Task 12's `noreturn` emission moves neither the `std.tmh` pin nor the
+    compiled-stdlib object, so both gates hold exactly through that task.
+16. **`docs/tmt/asm.md` exists**, so Task 2b's conditional edit to it is
+    actionable rather than a maybe. Also recorded from the pre-flight scan.
+17. **`ExportedGraph.digest` is on the wire and nothing computes it.**
     `docs/formats.md:253,369,684` specify the field and the `.graph`/`.grafted`
     directives; no code produces a canonical-text CRC-32. Task 4's printer
     becomes that text's single source of truth, which is why Task 13 depends
@@ -348,7 +377,8 @@ may rely on these without re-deriving them; each names its evidence.
 | `docs/tmt/cli.md` | `interface`, `--extern`, `--nostdlib`, two retired code rows, the new rows (T17, and each surface's own task) |
 | `docs/tmt/lint.md` | The new lints (T17) |
 | `docs/tmt/project.md` | How `build` derives declarations; header-only libraries (T15, T17) |
-| `docs/formats.md`, `docs/core.md` | Where the linker-side checks gain a compiler feeder (T17); the text-expressibility caveat count (T3) |
+| `docs/formats.md`, `docs/core.md` | The glyph-literal rule and the caveat-bullet deletion (T2b); where the linker-side checks gain a compiler feeder (T17) |
+| `crates/wasm/src/inner/**` | Follows the `Declarations`/`CompileOptions` shape change (T1) and the stdlib-object byte pin moves with the interface section (T3) — the wasm32 library build is in the full gate |
 | `CLAUDE.md` | The version table, "fourteen" → "fifteen" subcommands, the standing-state paragraphs that say "until phase 3" (T17) |
 
 ---
@@ -492,7 +522,7 @@ the controller" (D2) for why:
 | Field | Type | Consumer |
 |---|---|---|
 | `IrTape.glyphs` | `Vec<String>`, len == `cardinality` | `.param` glyph lists (T3) |
-| `IrTape.writes` | `Option<Vec<String>>` | `.param`'s `writes=(…)` (T3) |
+| `IrTape.writes` | `Option<Vec<String>>` — **the EFFECTIVE set** | `.param`'s `writes=(…)` (T3) |
 | `IrWorld.exits` | `u8` | `.routine`'s `exits=` (T11) |
 | `IrWorld.returns` | `bool` | `.routine`'s `noreturn` (T12) |
 | `IrTransition::ReturnExit { exit: u32 }` | new variant | `retx #k` (T11) |
@@ -500,6 +530,24 @@ the controller" (D2) for why:
 | `IrTapeBinding.param` | `Option<String>` | a symbolic entry (T10) |
 | `IrMapPair.dst` | `IrMapDst::{Index(u32), Label(String)}` | a glyph-labelled pair (T10) |
 
+- **`IrTape.writes` carries the EFFECTIVE set, and `preserves` never reaches
+  the IR** (controller ruling, 2026-09-16 — F1). `preserves { … }` is a peer of
+  `writes { … }` on a signature tape parameter, and the effective permission is
+  `writes` (or the whole alphabet, absent the clause) MINUS `preserves` —
+  `compiler::declared_effective`. The wire has already ruled on this:
+  `RoutineInterface` carries `writes` and no `preserves` peer. So:
+  - fill `IrTape.writes` from `declared_effective`, **never from the raw
+    clause**. On the raw reading, `std::…::invertNumber` — which declares
+    `preserves { '_' }` and **no** `writes` clause (`std.tmc:375`, `:526`) —
+    would emit no `writes=` suffix and publish an interface permitting a write
+    its own source forbids. That is the bug this ruling forecloses.
+  - a `preserves`-only clause therefore yields *the alphabet minus the
+    preserved glyphs*, which is a `Some`, not a `None`;
+  - **neither clause** yields `None` and no `writes=` suffix — the only case
+    that does;
+  - `preserves` is source-level sugar with no representation in the IR, on the
+    wire, or in a header. Tasks 3, 4 and 7 each restate the consequence for
+    their own surface.
 - `#[serde(default, skip_serializing_if = …)]` on every added field that has a
   natural empty value, so a v3 document with none of them deserializes into a
   v4 struct unchanged — **but the version field still moves to 4**, because the
@@ -509,10 +557,9 @@ the controller" (D2) for why:
   `:1155`) follow for free.
 - **3b's seam, stated not built:** `IrTape` will gain `enters`, `leaves` and
   `opaque` in 3b. They are NOT added here — a field written as `None` by
-  everything is not a seam, it is dead weight, and 3b bumps no version (R-3a-2
-  keeps `TMC_LANG_VERSION` at 0.2 and says nothing about IR, so **3b will need
-  its own `TM_IR_VERSION` decision; record it as a question, do not pre-empt
-  it**).
+  everything is not a seam, it is dead weight. **3b needs no version bump**
+  either: v4 is unreleased, so those fields join the v4 encoding exactly as the
+  language version stays 0.2 (R-3a-2, controller ruling 2026-09-16).
 - Nothing in this task PRODUCES a new variant. Lowering still refuses a
   `state`-parameter continuation and an external binding; the fields are filled
   with their empty values. This is what keeps the task independently reviewable.
@@ -634,30 +681,36 @@ Task 3's corpus measurement runs over a `.tma` that can spell every label a
   rejected by core's parser AND by the `.tmc` resolver. Widening the literal
   must not widen the range rule; that test is the guard, and this task adds the
   `.tma`-side twin.
-- **This is the plan's SECOND `crates/core` diff, justified in Task 16's terms:**
-  arch-agnostic (a lexer rule in the shared asm layer, under the interface
-  capability PM-1 does not enable), and notation catching up with what the
+- **This is ONE OF THE PLAN'S TWO `crates/core` diffs** (this task and Task 16;
+  Global Constraints names both), justified in the same terms as the other:
+  arch-agnostic — a lexer rule in the shared asm layer, under the interface
+  capability PM-1 does not enable — and notation catching up with what the
   object format already stores. **PM-1 byte identity is unaffected by
-  construction** — the literal rides the interface capability, and a dialect
+  construction**: the literal rides the interface capability, and a dialect
   without it "never sees a quote as anything but junk"
-  (`docs/formats.md:697-698`). Re-check it anyway, per Global Constraints.
+  (`docs/formats.md`, glyph literals and glyph lists). Re-check it anyway, per
+  Global Constraints.
 
 **Docs this task edits** (Task 17 does not inherit them):
 
 - `docs/formats.md:693-697` — "A glyph literal is a **single** character … a
   multi-character one does not lex at all" becomes the widened rule, worded to
   match `docs/tmt/language.md:72-76` so the two pages state one thing.
-- `docs/formats.md:727-730` — **the caveat bullet is DELETED.** The
-  text-expressibility caveat list shrinks to two entries: exported and imported
-  alphabets, and the grafts-without-interface combination.
-- **`CLAUDE.md:213`'s count and list are reconciled by Task 17**, which already
-  owns that line. Note what it costs: the line says "Three declared exceptions"
-  and names `-g` plus exported and imported alphabets — a list of three that
-  counts `-g` and treats the two alphabet kinds as one. `formats.md`'s list is
-  three bullets covering different ground. **After this task the true set is:
-  `-g` debug side-tables, exported and imported alphabets, and the
-  grafts-without-interface combination.** Task 17 states that set once and makes
-  both pages agree.
+- `docs/formats.md`'s "Text-expressibility caveats" list — **the
+  multi-character-label bullet is DELETED.**
+
+**THE CAVEAT STATEMENT, used verbatim everywhere this plan mentions it.** After
+this task the text-expressibility caveats are **three bullets**, exactly as
+`docs/formats.md` lists them:
+
+1. `-g` debug side-tables;
+2. exported and imported alphabets (one bullet, two comment forms);
+3. an object with grafts but no interface.
+
+`CLAUDE.md:213` says "three" and must name these same three. **Task 17 checks
+that the two pages agree bullet for bullet** — they do not today, which is why
+the count survives the deletion unchanged: `formats.md` loses a bullet it had
+and gains none, while `CLAUDE.md`'s three were never the same three.
 - `docs/tmt/asm.md` — check whether it repeats the single-character rule; if it
   does, it changes here too.
 
@@ -736,8 +789,12 @@ measurement, and phase 2's own Task 1 set the precedent of recording the number.
 
 - Codegen emits, for every world, `.param <name>, (<glyphs>)[, writes=(<glyphs>)]`
   lines in tape order immediately after the `.routine` line, from `IrTape.glyphs`
-  and `IrTape.writes` (Task 2). `writes=()` is never printed (phase-1 ruling);
-  an absent `writes` clause prints no suffix.
+  and `IrTape.writes` (Task 2). `writes=()` is never printed (phase-1 ruling).
+- **The `writes=` suffix carries the EFFECTIVE set, and its absence means
+  "neither clause"** (Task 2's `preserves` ruling). A tape declaring only
+  `preserves { '_' }` prints `writes=` with the alphabet minus `'_'`, **not** no
+  suffix — `std::…::invertNumber` is exactly that shape, so the stdlib exercises
+  it on the first run. A tape declaring neither clause prints no suffix.
 - `exits=` and `noreturn` on `.routine` are NOT emitted here — `IrWorld.exits`
   is 0 and `returns` is `true` for everything until Tasks 11 and 12. Emitting
   a suffix for a zero value would break the "lowest version that carries the
@@ -785,11 +842,17 @@ measurement, and phase 2's own Task 1 set the precedent of recording the number.
     declaration order rather than band order; the assert on the second tape
     goes red. (Make the two tapes' alphabets DIFFER, or the mutation is
     invisible.)
-  - `the_writes_suffix_is_absent_without_a_clause` and
-    `the_writes_suffix_lists_only_the_declared_glyphs` — the pair.
+  - `the_writes_suffix_is_absent_only_when_neither_clause_is_written` and
+    `the_writes_suffix_lists_the_effective_set` — the pair.
     **Mutation:** defaulting an absent `writes` to the full alphabet, which is
     what `declared_effective` does internally and is the easy mistake; the
     first test goes red.
+  - `a_preserves_only_clause_prints_the_alphabet_minus_the_preserved_glyphs` —
+    the `invertNumber` shape. **Mutation:** filling `IrTape.writes` from the
+    raw `writes` clause instead of `declared_effective`; this tape then prints
+    no suffix and the object publishes permission to write `'_'`, which the
+    source forbids. **This is the mutation F1 was raised about**, and nothing
+    else in the suite catches it.
   - `an_exported_alphabet_reaches_the_interface_section` +
     `a_local_alphabet_does_not`. **Mutation:** dropping the `exported` filter.
   - `emitted_assembly_reassembles_to_the_same_object` — `compile -S`, then
@@ -844,6 +907,18 @@ measurement, and phase 2's own Task 1 set the precedent of recording the number.
   contracts and `?` doc lines, and `export graph` bodies **in full**. From an
   object it carries routine signatures, contracts and exported alphabets but no
   graphs, maps or doc lines — the one difference worth stating in `--help`.
+- **The printer never emits `preserves`** (Task 2's ruling, F1). A contract
+  clause prints as `writes { … }` carrying the EFFECTIVE set, so a routine
+  declaring `preserves { '_' }` and no `writes` — `std::…::invertNumber`, at
+  `std.tmc:375` and `:526` — renders as `writes { <alphabet minus '_'> }`.
+  A header is a declaration of what a caller may rely on, not a transcription
+  of how the author spelled it; `preserves` is source-level sugar with no
+  representation on the wire, so an object-arm render could not reproduce it
+  even in principle.
+- **The two arms must therefore render IDENTICAL text for the same routine**,
+  and that is a pinned property, not an aspiration — it is what makes the
+  object arm a real fallback rather than a lossy approximation. Pinned over
+  every `std.tmc` routine in step 2.
 - The printer lives in `crates/turing-machine/src/header.rs` (created here,
   extended by Task 5's reader). It is the **canonical rendering**, which makes
   it the single source of truth for the graph digests Task 13 computes — so it
@@ -863,24 +938,28 @@ section **in this task**, not in Task 17).
 
 **Fixtures**
 
-`[shape-derived: `std.tmc`'s declarations plus the `.param` canonical spelling
-at `docs/formats.md:705-715`]` — the subcommand does not exist, so the expected
-text cannot be tool-verified. **Step 1 of this task is to generate it and read
-it**, not to match it against a transcription. The plan's expected shape, for
-`mylib.tmc` (the spec's own sketch):
+`[shape-derived: `std.tmc`'s declarations plus the canonical glyph-list
+spelling in `docs/formats.md` (canonical spelling)]` — the subcommand does not
+exist, so the expected text cannot be tool-verified. **Step 1 of this task is
+to generate it and read it**, not to match it against a transcription. The
+plan's expected shape, for `mylib.tmc` (the spec's own sketch, with the second
+alphabet dropped — see below):
 
 ```
 export alphabet bits { '_', '0', '1' }
-export alphabet wide { '_', 'a', 'b', '0', '1' }
 namespace mylib {
   ? Add one to the binary number under the head.
   export routine plusOne(tape num: bits writes { '0', '1' });
 }
 ```
 
-This is the same text log row C1 fed to the compiler, which parsed everything
-except the `;` — so it is a header the Task 5 reader will accept by
-construction.
+**This is byte-for-byte the file log row C1 fed to the compiler**, which parsed
+everything except the `;` and failed at `4:61` — so it is a header the Task 5
+reader will accept by construction, and Task 5 re-verifies that same pre-state
+before touching the grammar. The `wide` alphabet of the spec's sketch is
+deliberately omitted: with it the signature sits on line 5 and the `4:61`
+correspondence — the only thing that makes this fixture evidence rather than
+decoration — no longer holds.
 
 **TDD steps**
 
@@ -910,6 +989,13 @@ construction.
     **Mutation:** any printer path that echoes source text rather than
     rendering from the resolved module. **This is the digest's precondition**
     and Task 13 depends on it.
+  - `the_two_arms_agree_on_every_stdlib_routine` — for each routine in
+    `std.tmc`, the header rendered from source and the header rendered from the
+    compiled object are byte-identical. **Mutation:** printing `preserves`
+    from the source arm; `invertNumber` diverges, because the object arm has no
+    `preserves` to print. This pins the F1 ruling at the surface where it is
+    observable, and it is why the printer emits the effective set on both
+    sides rather than the author's spelling on one.
   - `interface_output_reparses_as_a_header` — `#[ignore]`d until Task 5 lands
     the reader, then un-ignored **by Task 5**. Note the hand-off explicitly.
 
@@ -933,7 +1019,7 @@ construction.
 
 **Requirements**
 
-- **The grammar delta is one alternative.** `parse_reuse` (`parser.rs:1443-1460`)
+- **The grammar delta is one alternative.** `parse_reuse` (`parser.rs::parse_reuse`, `:1441` today)
   accepts `;` in place of `{` after a signature, yielding a routine or graph
   with no body. Established fact 6 pins that this is the WHOLE delta: a header
   carrying `export alphabet`, `namespace`, a `?` doc line, a signature and a
@@ -981,8 +1067,16 @@ graph bodies at all.
 
 **TDD steps**
 
-- [ ] **Step 1: Run log row C1's header through the new reader** before writing
-  expectations. Record the result.
+- [ ] **Step 1: Reconstruct C1 and re-verify its pre-state FIRST.** The log's
+  fixtures live in the planning session's scratchpad, not in the repo, so there
+  is no file to re-run — rebuild it from its row: one `export alphabet`, a
+  `namespace`, a `?` doc line, and a bodiless
+  `export routine … (tape … : … writes { … });`, which is exactly Task 4's
+  sketch. **Run it through the UNCHANGED compiler and confirm
+  `4:61: expected '{' to open the body, found ';'`** before touching the
+  grammar. If the column differs, the reconstruction differs from C1 and the
+  "one alternative is the whole delta" claim is unproven — report rather than
+  proceed. Then run it through the new reader.
 
 - [ ] **Step 2: Tests** in `crates/turing-machine/tests/header_roundtrip.rs`:
 
@@ -1096,7 +1190,16 @@ next two tasks enable would be a green test that proves nothing here.
     both declaring `lib::sym` with different glyphs; assert the FIRST wins.
     **Mutation:** reversing the order, or pushing the stdlib first.
 
-- [ ] **Step 2: Flags + plumbing** — `cli/build.rs::compile`, `argv_compile_options`.
+- [ ] **Step 2: Flags + plumbing** — `cli/build.rs::compile`,
+  `argv_compile_options`. **And specify the resolver's multi-module rule here**,
+  because this is the task in which a second declaration module first exists
+  (controller ruling, F12): `resolve_program`'s lookup over
+  `Declarations::modules()` is **first-match**, and `modules()` returns them in
+  the order Task 1's `push` recorded — `--extern` files in command-line order,
+  then the embedded stdlib. Task 1 was explicitly behaviour-preserving and could
+  not state this; with one module the question does not arise. Pinned by
+  `extern_order_is_command_line_order_then_stdlib` above, which is the test that
+  would otherwise be asserting behaviour no task specified.
 
 - [ ] **Step 3: Drift guards** — registry, `COMPILE_USAGE`, `docs/tmt/cli.md`.
   Run `--test cli_docs` and `--test completions_registry` individually.
@@ -1146,9 +1249,17 @@ next two tasks enable would be a green test that proves nothing here.
 **TDD steps**
 
 - [ ] **Step 1: Generate and READ.** Run `tmt interface` over `std.tmc`,
-  read the output, and record it in the task report. Look specifically for:
-  every `? ` doc line preserved, both `symbols` alphabets present with their
-  glyphs in band order, every `export graph` body complete, and no `main`.
+  read the output, and record it in the task report. The checklist:
+  - every `? ` doc line preserved;
+  - both `symbols` alphabets present with their glyphs in band order;
+  - every `export graph` body complete;
+  - no `main`;
+  - **`preserves` nowhere in the output.** `std.tmc:375` and `:526` declare
+    `export routine invertNumber(tape num: symbols preserves { '_' })` with no
+    `writes` clause, so this is the case that proves the F1 ruling: the header
+    must read `writes { … }` over the alphabet minus `'_'`. A header that
+    echoed `preserves { '_' }` would be text the object arm can never produce,
+    breaking Task 4's two-arms-agree pin.
 
 - [ ] **Step 2: Tests** in `crates/turing-machine/tests/stdlib_header.rs`:
 
@@ -1157,8 +1268,11 @@ next two tasks enable would be a green test that proves nothing here.
     the generator.
   - `regen` — `#[ignore]`d.
   - `the_header_and_the_source_agree_on_every_declared_contract` — described
-    above. **Mutation:** dropping the `writes` clause from the printer; the
-    header would still parse, and only this test would notice.
+    above, comparing EFFECTIVE sets on both sides (`declared_effective` over
+    `std.tmc`'s resolved module against the header's `writes` clauses), which
+    is what makes `invertNumber`'s `preserves`-only shape compare equal rather
+    than trivially differ. **Mutation:** dropping the `writes` clause from the
+    printer; the header would still parse, and only this test would notice.
   - `every_exported_stdlib_graph_is_in_the_header_with_its_body` — a count plus
     one body spot-check. **Mutation:** printing graph signatures without
     bodies, which would compile and would silently make every library graft
@@ -1242,9 +1356,14 @@ even though it spans two stages.
     `a_qualified_alphabet_names_a_signature_parameter` — the two grammar
     positions. **Mutation:** accepting `::` in only one of them (the likely
     half-fix); one test goes red.
-  - The four-fixture table above, each asserting the message TEXT, not merely
-    the code — the split is invisible at code granularity.
-    **Mutation:** collapsing the two arms back to one message.
+  - The four-fixture table above, one test each, **each asserting the message
+    TEXT, not merely the code** — the split is invisible at code granularity:
+    `an_imported_alphabet_without_declarations_says_so`,
+    `the_same_import_with_extern_resolves`,
+    `an_alphabet_no_scope_declares_says_no_such_alphabet`, and
+    `a_locally_declared_alphabet_resolves`.
+    **Mutation:** collapsing the two arms back to one message; the first and
+    third then assert the same string and one of them goes red.
   - `an_imported_alphabet_is_recorded_in_the_interface_section` — with its
     glyphs in band order. **Mutation:** recording the name without the glyphs,
     which leaves `AlphabetDrift` unable to fire.
@@ -1471,7 +1590,7 @@ test is a byte compare against it.
 loop so both paths share them — the in-unit branch keeps its behaviour exactly,
 which is what the byte-identity gate below checks.
 
-**`render_binding`** (`codegen.rs:658-681`) gains two spellings, from the
+**`render_binding`** (`codegen.rs::render_binding`, `:662` today) gains two spellings, from the
 tool-verified target text: an entry with a `param` prints `name: phys`, and a
 labelled `dst` prints as a glyph literal — `[num: 1{3->'0', 4->'1'}]`.
 
@@ -1521,7 +1640,9 @@ labelled `dst` prints as a glyph literal — `[num: 1{3->'0', 4->'1'}]`.
 
 - [ ] **Step 3: Retire the code** — delete
   `CompileErrorKind::ExternalBindingUnsupported`, its `code()` arm
-  (`compiler.rs:383`), its `docs/tmt/cli.md:250` row, and the stale
+  (the `CompileErrorKind::ExternalBindingUnsupported` arm of
+  `compiler.rs::code()`), the `external-binding-unsupported` row of
+  `docs/tmt/cli.md`'s error table, and the stale
   "composition engine not yet online" comments at `compiler.rs:270-279` and
   `:2809`. `error_code_docs.rs`'s set compare goes red until BOTH sides move —
   that is the guard working.
@@ -1557,9 +1678,22 @@ stamp. **[tool-verified]** And log row A2 is the `.tmc` that must produce it —
   states, in the callee's `state_param` order. **Same ordering obligation, other
   end** — and it is the ordering that a test must break to prove itself
   (mutation: reverse the vector; the two-exit run takes the wrong branch).
-- `IrWorld.exits` is set to `state_params.len()`; codegen prints
+- `IrWorld.exits` is set from `state_params.len()`; codegen prints
   `exits=<K>` on `.routine` when K > 0 and the `exits=(<labels>)` operand on the
   `call`.
+- **The `usize` → `u8` narrowing is a typed compile error, never a bare `as u8`
+  and never an `expect` on user input** (controller ruling, F14). The precedent
+  is `compiler.rs::check_tape_count`, which refuses a world with more than 16
+  tapes as `CompileErrorKind::TooManyTapes(n)`, code `too-many-tapes`, message
+  "`{n}` tapes — a world has at most 16", raised at the offending parameter's
+  span. **There is no equivalent ceiling on `state_params` today** — verified by
+  searching `compiler.rs` for `state_params`, which is only ever pushed to and
+  iterated — so this task **adds one**: a sibling typed error in the same shape
+  (ceiling 255, because `RoutineInterface.exits` is a `u8` on the wire), its
+  `code()` arm, its `Display` arm, and its `docs/tmt/cli.md` error-table row,
+  which moves `error_code_docs.rs`'s set in both directions. The conversion
+  itself is an explicit `u8::try_from` whose `Err` is that error, so the check
+  and the narrowing cannot drift apart. **Name the code in the task report.**
 - **`then` stays mandatory** in 3a except against a known `noreturn` callee —
   that rule and its `unreachable-continuation` lint are Task 12. Here, a
   routine with `state` parameters still writes `then`.
@@ -1585,7 +1719,11 @@ stamp. **[tool-verified]** And log row A2 is the `.tmc` that must produce it —
   same bytes. The `exits=` suffix is printed only for K > 0, which is what
   makes this hold structurally.
 - Retire `CompileErrorKind::StateParamContinuationUnsupported`, its `code()`
-  arm (`compiler.rs:384`), its `docs/tmt/cli.md:251` row, and the stale comment
+  arm (`CompileErrorKind::StateParamContinuationUnsupported` in
+  `compiler.rs::code()`), the `state-param-continuation-unsupported` row of
+  `docs/tmt/cli.md`'s error table — **named by code deliberately: Task 10
+  deletes the row and the arm directly above each of these, so any line number
+  written here is wrong by one before this task starts** — and the stale comment
   at `compiler.rs:4380-4382`.
 
 **Fixtures** — log row A2's `stateparam.tmc` is the headline, and its expected
@@ -1621,6 +1759,11 @@ ends.
     so it is a decision and not a drift. **Mutation:** allowing it.
   - `a_program_without_state_parameters_is_byte_identical` at `-O0` and `-O1`,
     over an existing corpus program. **Mutation:** printing `exits=0`.
+  - `more_than_255_state_parameters_is_a_typed_error` and the near miss at
+    exactly 255. **Mutation:** a bare `as u8`; the 256-parameter routine then
+    compiles and publishes `exits: 0`, which is silent corruption rather than
+    a diagnostic. Generate the fixture programmatically rather than writing
+    256 parameters by hand.
 
 - [ ] **Step 2: Lower, emit, and audit every pass.** Audit means: open each
   pass, find its match over `IrTransition`, and decide the arm explicitly. A
@@ -1688,7 +1831,11 @@ what the unit actually knows.
 **TDD steps**
 
 - [ ] **Step 1: Tests** in `crates/turing-machine/tests/state_params.rs` (the
-  clause rides the same feature) and the lint's own file:
+  `noreturn` clause rides the same feature) and, for the lint, in
+  `crates/turing-machine/src/lint/rules/unreachable_continuation.rs`'s own
+  `#[cfg(test)]` module — the pattern every rule in `lint/rules/` follows;
+  check a neighbour such as `unused_graft_name.rs` for the harness shape before
+  writing the first test:
 
   - `noreturn_is_inferred_from_the_body_independently_of_opt_level` — compile
     the same source at `-O0` and `-O1`, assert the interface's `returns` bit is
@@ -1696,11 +1843,16 @@ what the unit actually knows.
     whose only `return` is in a dead state flips between levels. **Build the
     fixture with exactly that shape** or the mutation is invisible.
   - `a_declared_noreturn_that_returns_is_refused` / `a_truthful_one_compiles`.
-  - `the_interface_carries_the_returns_bit` and `tmt interface prints noreturn`.
-  - The three-fixture `then` table above. **Mutation for the third:** keying
-    the lint on the callee's declared clause without checking that the
-    declarations were given.
-  - The comment guard on the quickfix.
+  - `the_interface_carries_the_returns_bit` and
+    `tmt_interface_prints_noreturn`.
+  - The three-fixture `then` table above, one test each:
+    `a_then_on_a_known_noreturn_callee_is_a_finding`,
+    `an_omitted_then_on_a_known_noreturn_callee_is_clean`, and
+    `a_then_on_an_undeclared_callee_is_clean_and_still_mandatory`.
+    **Mutation for the third:** keying the lint on the callee's declared clause
+    without checking that the declarations were given — the third test is the
+    only one that goes red, which is why it is named rather than left as prose.
+  - `the_comment_guard_withholds_the_quickfix`.
 
 - [ ] **Step 2: Implement** — inference in the expanded world (before the
   optimizer), the check, the emission, the printer, the grammar word, the lint.
@@ -1907,7 +2059,14 @@ fixtures in `crates/turing-machine/tests/`]` — find them with
     unresolvable. **Mutation:** passing the setting to the link stage only,
     which is today's behaviour — so this test is red before the change and
     green after, which is what makes it a real test rather than a description.
-  - `build_rejects_extern` — the flag belongs to `compile`.
+  - `build_rejects_extern` — the flag belongs to `compile`. **No new rejection
+    code** (controller ruling, F9): manifest mode's rejection list is unchanged,
+    and argv mode already rejects unknown flags, so **step 1 first runs
+    `tmt build --extern x.tmh` in argv mode against the unchanged binary,
+    records the message, and the test asserts THAT message.** If the existing
+    wording would mislead — for instance by implying `--extern` is valid
+    elsewhere — say so in the task report rather than changing it here; a flag
+    taxonomy is not this task's to redesign.
 
 - [ ] **Step 2: Implement** — `find_library` widened, the sibling pass in
   `build_one_target` (`driver.rs:414-560`) and in `argv_mode` (`:740`), the
@@ -2071,10 +2230,10 @@ cross-unit one, and the pointer in `language.md` says so plainly (spec item 4).
 libraries; `stdlib: false` on both stages. **No `tmt.json` schema bump** — the
 `project` section stays 0.2 in 3a; 3b bumps it to 0.3 for `strip-asserts`.
 
-**`docs/formats.md`** — the fourth text-expressibility caveat (Task 3 wrote the
-bullet; this task checks the surrounding count and cross-references), and the
-sentences where an interface-section field gains a compiler feeder rather than
-only an assembler one.
+**`docs/formats.md`** — the sentences where an interface-section field gains a
+compiler feeder rather than only an assembler one. The text-expressibility
+caveat list itself was edited by Task 2b; this task only checks it against
+`CLAUDE.md` (below).
 
 **`docs/core.md`** — where the linker's checks gain a compiler feeder:
 `AlphabetDrift` is live as of Task 8; `GraftDrift` as of Task 13; the plain-site
@@ -2092,21 +2251,20 @@ section), and every standing-state paragraph that says "until phase 3" or names
 `external-binding-unsupported` / `state-param-continuation-unsupported` as live
 limits.
 
-**The text-expressibility line (`CLAUDE.md:213`) is reconciled here**, and it
-needs care because the two pages disagreed *before* this phase and Task 2b then
-deleted one bullet. `CLAUDE.md` says "Three declared exceptions" and names `-g`
-plus exported and imported alphabets — a count of three that treats the two
-alphabet kinds as one item and omits the grafts-without-interface combination.
-`docs/formats.md`'s own list was three bullets covering different ground, and
-is now two. **State the set once, in `formats.md`, and have `CLAUDE.md` name
-the same set:** `-g` debug side-tables; exported and imported alphabets; and an
-object with grafts but no interface. Verify the count sentence matches the
-bullets it points at — this is the claim that has been wrong on one page or the
-other for two phases.
+**The text-expressibility line (`CLAUDE.md:213`) is reconciled here.** After
+Task 2b the caveats are **three bullets**, exactly as `docs/formats.md` lists
+them: (1) `-g` debug side-tables; (2) exported and imported alphabets — one
+bullet, two comment forms; (3) an object with grafts but no interface.
+`CLAUDE.md` already says "three" and keeps saying it, but it currently names a
+DIFFERENT three (it omits the grafts case and splits the alphabets). **Check the
+two pages agree bullet for bullet, not merely on the digit** — this is the claim
+that has been wrong on one page or the other for two phases, and a matching
+count is exactly what hid it.
 
 **The man page** is rendered automatically from `cli::usage_text`. **But read
 `crates/turing-machine/src/man.rs` before touching any usage constant**:
-`RELEASE_DATE` (`:31`) is held against the CHANGELOG heading for the crate
+`RELEASE_DATE` (locate by name; `:31` today — the pre-flight scan's `:30` is
+itself off by one, re-verified 2026-09-16) is held against the CHANGELOG heading for the crate
 version by a test, and the crate version does NOT move in 3a (R-3a-2), so
 `RELEASE_DATE` does NOT move either. A subcommand missing from
 `cli::usage_text`'s table fails the man module's own tests — Task 4 handled that.
@@ -2223,11 +2381,12 @@ character. Nothing collided while the compiler emitted no `.param`. Rather than
 let interface emission produce disassembly the assembler refuses, the two
 lexers are brought to one rule. A `..` range endpoint must still be a single
 character or a bare number, unchanged. **The text-expressibility caveat list
-shrinks** — the "multi-character label" bullet is deleted, leaving exported and
-imported alphabets and the grafts-without-interface combination — and
-`CLAUDE.md`'s count and list are reconciled with `docs/formats.md`'s, which
-disagreed with each other before this phase. `pmt` is unaffected: the glyph
-literal rides the interface capability, which PM-1 does not enable.
+loses its "multi-character label" bullet**, leaving three: `-g` debug
+side-tables; exported and imported alphabets; and an object with grafts but no
+interface. `CLAUDE.md` and `docs/formats.md` are made to name that same three —
+they disagreed with each other before this phase, behind a matching count.
+`pmt` is unaffected: the glyph literal rides the interface capability, which
+PM-1 does not enable.
 
 **Eight. A `.tmh` given to `tmt lint` or `tmt fmt` is refused by extension.**
 Both print `error: unknown source extension (expected .tmc or .tma)` and exit
@@ -2389,11 +2548,12 @@ Every point where this plan had to choose. None is settled by the spec.
   flips to an acceptance test; a `'ab'` round trip through `.param` is added;
   the range endpoint stays single-character with its own test (the `.tmc` and
   `parse_glyph_list` halves are already pinned, so this is the third leg);
-  `docs/formats.md:693-697` is rewritten and the caveat bullet at `:727-730` is
-  **deleted**, shrinking the caveat list to two entries plus the
-  grafts-without-interface one; and **Task 17 reconciles `CLAUDE.md:213`'s count
-  and list with `formats.md`'s**, which disagree today independently of this
-  change.
+  the "single character" paragraph of `docs/formats.md` (glyph literals and
+  glyph lists) is rewritten and the multi-character-label caveat bullet is
+  **deleted**, leaving three caveats — `-g` side-tables, exported and imported
+  alphabets, and an object with grafts but no interface; and **Task 17 checks
+  `CLAUDE.md:213` names that same three**, which it does not today (it keeps
+  the right digit while listing a different set).
 - **(D2) IR v4 carries three things the spec does not name.** The spec lists
   `ReturnExit`, `CallThen.exits`, `IrTapeBinding.param` and the index-or-label
   `dst`. But `.param` needs glyph labels and `writes` sets, and `.routine` needs
