@@ -62,6 +62,30 @@ fn the_published_compile_catalog_lists_exactly_the_registry_codes() {
     );
 }
 
+/// The published link-warning catalog on the CLI page lists exactly the
+/// linker's registry — the same two-way set-compare the compile-error
+/// catalog gets.
+///
+/// Mutation it catches: add a code to `DIAGNOSTIC_CODES` without a row
+/// here (or leave a row behind after retiring a code) and the sorted
+/// vectors differ.
+#[test]
+fn the_published_link_warning_catalog_lists_exactly_the_registry_codes() {
+    let doc = doc();
+    let mut published = table_codes(&section(&doc, "### Link warnings"));
+    published.sort();
+    assert!(
+        !published.is_empty(),
+        "no `### Link warnings` table in docs/tmt/cli.md"
+    );
+    let mut registry: Vec<String> = mtc_core::linker::DIAGNOSTIC_CODES
+        .iter()
+        .map(|(c, _)| (*c).to_string())
+        .collect();
+    registry.sort();
+    assert_eq!(published, registry, "docs/tmt/cli.md (### Link warnings)");
+}
+
 #[test]
 fn the_assembly_section_points_at_the_shared_catalog() {
     let doc = doc();

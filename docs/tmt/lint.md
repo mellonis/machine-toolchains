@@ -53,12 +53,13 @@ tmt: unknown lint rule `no-such-rule`
 ### One allow namespace across both languages
 
 `--allow` and `--warn` draw from the UNION of every catalog `tmt` knows:
-the `.tmc` rules, the opt-in rule, the `.tma` additions, and core's
-arch-agnostic assembly rules. One allow-list therefore works for a batch
-mixing both languages — a `.tma`-only code named on a `.tmc` run is
-accepted and simply inert for that file, and a `.tmc`-only code on a
-`.tma` run likewise. That is what lets a single project file govern a
-directory holding both.
+the `.tmc` rules, the opt-in rule, the `.tma` additions, core's
+arch-agnostic assembly rules, and — the fifth surface — the linker's own
+link-warning codes (`docs/tmt/cli.md (link warnings)`). One allow-list
+therefore works for a batch mixing both languages — a `.tma`-only code
+named on a `.tmc` run is accepted and simply inert for that file, and a
+`.tmc`-only code on a `.tma` run likewise. That is what lets a single
+project file govern a directory holding both.
 
 Two codes appear in both catalogs — `leftover-debugger` and, on the
 `.tma` side only, the core rules' own names. `leftover-debugger` is one
@@ -176,6 +177,7 @@ still names it.
 |---|---|
 | `tmt lint` | Yes — per input file, unioned with `--allow`; `--no-config` opts out. |
 | `tmt lsp` (both `.tmc` and `.tma` services) | Yes — per document, mtime-cached, unioned with editor settings; both services watch `**/tmt.json` so an edit re-resolves. |
+| `tmt build` (manifest mode) | Partially — the same file its own project-section discovery already located, unioned with `--allow`, for the link stage only (`docs/tmt/cli.md (link warnings)`); no per-file walk, and compile warnings are unaffected. |
 | `tmt fmt` | No. |
 | every other subcommand | No. |
 

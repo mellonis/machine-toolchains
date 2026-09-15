@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mtc_core::formats::object::ObjectFile;
-use mtc_core::linker::{CallMech, LinkOptions};
+use mtc_core::linker::{CallMech, LinkOptions, LinkReport};
 
 use crate::compiler::{CompileOptions, CompileReport, compile as compile_source};
 use crate::optimizer::OptLevel;
@@ -48,6 +48,85 @@ pub(super) fn render_warnings(stderr: &mut String, input: &Path, report: &Compil
             d.message
         );
     }
+}
+
+/// Every non-allowed link warning, in the compile-warning format
+/// (docs/tmt/cli.md (link warnings)). A link diagnostic has no path and
+/// no column, so its location is the function and blob offset, or the
+/// source line when the objects carried debug data. Returns how many
+/// were printed, which is what `-Werror` counts.
+pub(super) fn render_link_diagnostics(
+    stderr: &mut String,
+    report: &LinkReport,
+    allow: &[String],
+) -> usize {
+    let mut n = 0;
+    for d in &report.diagnostics {
+        if allow.iter().any(|a| a == d.code) {
+            continue;
+        }
+        n += 1;
+        match d.line {
+            Some(line) => {
+                let _ = writeln!(
+                    stderr,
+                    "{}:{line}: warning: {} [{}]",
+                    d.function, d.message, d.code
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    stderr,
+                    "{}+0x{:04x}: warning: {} [{}]",
+                    d.function, d.offset, d.message, d.code
+                );
+            }
+        }
+    }
+    n
+}
+
+/// The link report's structural lines, `-v` only. Mirrors PM's renderer
+/// of the same name so the two CLIs do not drift
+/// (docs/core.md (the link report)).
+pub(super) fn render_link_report(stderr: &mut String, prefix: &str, report: &LinkReport) {
+    let _ = writeln!(
+        stderr,
+        "{prefix}link: dropped [{}]; {} site(s) relaxed short, {} far",
+        report.dropped.join(", "),
+        report.relaxed_calls,
+        report.far_calls
+    );
+    if report.composites > 0 || report.instantiations > 0 {
+        let _ = writeln!(
+            stderr,
+            "{prefix}frames: {} composite(s), {} stamp(s), {} B compose table; \
+             {} deduped, {} trap row(s), {} expanded row(s)",
+            report.composites,
+            report.instantiations,
+            report.compose_table_bytes,
+            report.dedup_savings,
+            report.synthesized_trap_rows,
+            report.expanded_rows
+        );
+    }
+    for fold in &report.folds {
+        let _ = writeln!(
+            stderr,
+            "{prefix}fold: `{}` {} site(s), body {} B, descriptors {} B — {}",
+            fold.routine,
+            fold.sites,
+            fold.body_bytes,
+            fold.descriptor_bytes,
+            if fold.shared { "shared" } else { "spliced" }
+        );
+    }
+}
+
+/// The one spelling of the strict-mode refusal, shared by `tmt link` and
+/// both of `tmt build`'s modes (docs/tmt/cli.md (link warnings)).
+pub(super) fn werror_message(stderr: &str, warned: usize) -> String {
+    format!("{stderr}-Werror: {warned} link warning(s) treated as errors")
 }
 
 pub(super) fn render_opt_report(stderr: &mut String, report: &CompileReport) {
@@ -261,6 +340,8 @@ FLAGS:
   --entry NAME      link NAME as the program entry (default: main)
   --call-mech MECH  bound-call lowering: mono | frames | hybrid (default: hybrid)
   --nostdlib        do not auto-link the embedded standard library
+  --allow CODE      suppress a link warning code (repeatable)
+  -Werror           treat link warnings as errors
   -L DIR            add a library search directory (repeatable, in order)
   -l NAME           link NAME.tmo from the search path (repeatable)
   -v                render the link report (dropped functions, relaxation)
@@ -292,6 +373,9 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let entry = args.value("--entry")?;
     let call_mech = parse_call_mech(args.value("--call-mech")?)?;
     let nostdlib = args.flag("--nostdlib");
+    let allow = args.values("--allow")?;
+    crate::lint::validate_allow(&allow).map_err(|e| e.to_string())?;
+    let werror = args.flag("-Werror");
     let verbose = args.flag("-v");
     let search_dirs = args.values("-L")?;
     let lib_names = args.values("-l")?;
@@ -331,6 +415,18 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     )
     .map_err(|e| e.to_string())?;
 
+    let mut stderr = String::new();
+    // A link warning prints always, in the compile-warning format — the
+    // report's structural lines stay behind `-v`
+    // (docs/tmt/cli.md (link warnings)).
+    let warned = render_link_diagnostics(&mut stderr, &linked.report, &allow);
+    if verbose {
+        render_link_report(&mut stderr, "", &linked.report);
+    }
+    if werror && warned > 0 {
+        return Err(werror_message(&stderr, warned));
+    }
+
     let target = out_path(Path::new(&inputs[0]), explicit_out, "tmx");
     fs::write(&target, linked.executable.to_bytes())
         .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
@@ -338,33 +434,6 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     fs::write(&map_path, linked.map.to_json())
         .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
 
-    let mut stderr = String::new();
-    if verbose {
-        let r = &linked.report;
-        let _ = writeln!(
-            stderr,
-            "link: dropped [{}]; {} site(s) relaxed short, {} far",
-            r.dropped.join(", "),
-            r.relaxed_calls,
-            r.far_calls
-        );
-        // The composition-engine counters follow only when the image carries
-        // frames content, so a frameless link keeps the single-line report
-        // (docs/core.md (the link report)).
-        if r.composites > 0 || r.instantiations > 0 {
-            let _ = writeln!(
-                stderr,
-                "frames: {} composite(s), {} stamp(s), {} B compose table; \
-                 {} deduped, {} trap row(s), {} expanded row(s)",
-                r.composites,
-                r.instantiations,
-                r.compose_table_bytes,
-                r.dedup_savings,
-                r.synthesized_trap_rows,
-                r.expanded_rows
-            );
-        }
-    }
     Ok(CliOutput::ok(String::new(), stderr))
 }
 
@@ -388,4 +457,112 @@ pub(crate) fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, St
         }
     }
     Err(format!("library `{name}` not found on the -L search path"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mtc_core::linker::LinkDiagnostic;
+
+    /// A `LinkReport` carrying only `diagnostics`, every other counter at
+    /// its zero/empty value — the renderer under test reads only
+    /// `diagnostics`, so the rest need not vary.
+    fn blank_report(diagnostics: Vec<LinkDiagnostic>) -> LinkReport {
+        LinkReport {
+            dropped: Vec::new(),
+            relaxed_calls: 0,
+            far_calls: 0,
+            instantiations: 0,
+            composites: 0,
+            compose_table_bytes: 0,
+            dedup_savings: 0,
+            synthesized_trap_rows: 0,
+            expanded_rows: 0,
+            variant_fallbacks: Vec::new(),
+            folds: Vec::new(),
+            diagnostics,
+            program_volatile: false,
+        }
+    }
+
+    /// Mutation it catches: swap the `line` branch for the offset branch
+    /// (or drop it) and a line-numbered diagnostic stops naming its
+    /// source line.
+    #[test]
+    fn render_link_diagnostics_with_a_line_renders_the_source_line() {
+        let report = blank_report(vec![LinkDiagnostic {
+            code: "narrow-alphabet",
+            message: "`sub` reads a narrower alphabet".to_string(),
+            function: "main".to_string(),
+            offset: 4,
+            line: Some(7),
+        }]);
+        let mut out = String::new();
+        let n = render_link_diagnostics(&mut out, &report, &[]);
+        assert_eq!(n, 1);
+        assert_eq!(
+            out,
+            "main:7: warning: `sub` reads a narrower alphabet [narrow-alphabet]\n"
+        );
+    }
+
+    /// Mutation it catches: drop the offset branch (or print it in
+    /// decimal) and a debug-less diagnostic stops naming its `+0xNNNN`
+    /// blob offset.
+    #[test]
+    fn render_link_diagnostics_without_a_line_renders_the_offset() {
+        let report = blank_report(vec![LinkDiagnostic {
+            code: "glyph-mismatch",
+            message: "`sub` spells different glyphs".to_string(),
+            function: "main".to_string(),
+            offset: 0x2a,
+            line: None,
+        }]);
+        let mut out = String::new();
+        let n = render_link_diagnostics(&mut out, &report, &[]);
+        assert_eq!(n, 1);
+        assert_eq!(
+            out,
+            "main+0x002a: warning: `sub` spells different glyphs [glyph-mismatch]\n"
+        );
+    }
+
+    /// Mutation it catches: ignore the allow list and an allowed code
+    /// still prints, or still counts toward what `-Werror` promotes.
+    #[test]
+    fn render_link_diagnostics_skips_an_allowed_code_and_excludes_it_from_the_count() {
+        let report = blank_report(vec![
+            LinkDiagnostic {
+                code: "narrow-alphabet",
+                message: "a".to_string(),
+                function: "f".to_string(),
+                offset: 0,
+                line: None,
+            },
+            LinkDiagnostic {
+                code: "glyph-mismatch",
+                message: "b".to_string(),
+                function: "f".to_string(),
+                offset: 1,
+                line: None,
+            },
+        ]);
+        let mut out = String::new();
+        let n = render_link_diagnostics(&mut out, &report, &["narrow-alphabet".to_string()]);
+        assert_eq!(n, 1, "one of two diagnostics is allowed");
+        assert!(!out.contains("narrow-alphabet"));
+        assert!(out.contains("glyph-mismatch"));
+    }
+
+    /// Mutation it catches: change the wording, drop the count, or lose
+    /// the caller's already-rendered `stderr` prefix, and a promoted
+    /// strict-mode refusal drifts between `tmt link` and `tmt build`.
+    #[test]
+    fn werror_message_appends_the_trailer_to_the_given_stderr() {
+        let msg = werror_message("main+0x0000: warning: x [y]\n", 2);
+        assert_eq!(
+            msg,
+            "main+0x0000: warning: x [y]\n-Werror: 2 link warning(s) treated as errors"
+        );
+    }
 }

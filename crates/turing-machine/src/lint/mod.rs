@@ -176,15 +176,21 @@ pub(crate) const OPT_IN_RULES: &[(&str, Rule)] = &[
 ];
 
 /// True when `code` names any rule in this crate's `.tmc` tables, its `.tma`
-/// additions ([`tma::TMA_RULES`]), OR core's arch-agnostic asm rule table
-/// (`mtc_core::asm::lint::RULES`) — the shared allow namespace. One `tmt.json`
-/// serves both languages, so a `.tma`-only code must not error when validated
-/// for a `.tmc` file, and vice versa.
+/// additions ([`tma::TMA_RULES`]), core's arch-agnostic asm rule table
+/// (`mtc_core::asm::lint::RULES`), OR core's link-warning catalog
+/// (`mtc_core::linker::DIAGNOSTIC_CODES`) — the shared allow namespace, five
+/// surfaces wide. One `tmt.json` serves both languages, so a `.tma`-only
+/// code must not error when validated for a `.tmc` file, and vice versa.
 pub(crate) fn known_code(code: &str) -> bool {
     RULES.iter().any(|(c, _)| *c == code)
         || OPT_IN_RULES.iter().any(|(c, _)| *c == code)
         || tma::TMA_RULES.iter().any(|(c, _)| *c == code)
         || mtc_core::asm::lint::RULES.iter().any(|(c, _)| *c == code)
+        // The fifth surface: link warnings share the one allow namespace,
+        // so `lint.allow` in `tmt.json` and `--allow` on `link`/`build`
+        // suppress them with no new key (docs/tmt/lint.md (the allow
+        // namespace)).
+        || mtc_core::linker::DIAGNOSTIC_CODES.iter().any(|(c, _)| *c == code)
 }
 
 /// `--allow`/`--warn` codes must each name a real rule (typo protection), over
@@ -357,5 +363,20 @@ machine {
                 .any(|(c, _)| *c == "unreachable-code")
         );
         assert!(validate_allow(&["unreachable-code".to_string()]).is_ok());
+    }
+
+    /// The fifth surface of the allow namespace: a link-warning code is a
+    /// known code. Mutation it catches: drop the `DIAGNOSTIC_CODES` arm of
+    /// `known_code` and `--allow narrow-alphabet` on `link`/`build` starts
+    /// rejecting a legal code.
+    #[test]
+    fn validate_allow_also_accepts_link_warning_codes() {
+        for (code, _) in mtc_core::linker::DIAGNOSTIC_CODES {
+            assert!(
+                !RULES.iter().any(|(c, _)| c == code),
+                "{code} is not a lint rule"
+            );
+            assert!(validate_allow(&[(*code).to_string()]).is_ok(), "{code}");
+        }
     }
 }

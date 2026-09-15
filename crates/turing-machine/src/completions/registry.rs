@@ -310,6 +310,13 @@ fn link_spec() -> CommandSpec {
             ),
             FlagSpec::boolean("--nostdlib", "do not link the embedded standard library"),
             FlagSpec::value(
+                "--allow",
+                "suppress a link warning code (repeatable)",
+                ValueHint::Text,
+            )
+            .repeatable(),
+            FlagSpec::boolean("-Werror", "treat link warnings as errors"),
+            FlagSpec::value(
                 "-L",
                 "add a library search directory (repeatable, in order)",
                 ValueHint::Directory,
@@ -332,12 +339,15 @@ fn link_spec() -> CommandSpec {
 }
 
 /// `tmt build`'s flag table (docs/tmt/cli.md (tmt build)): the
-/// `pmt build` shape plus TM-1's own three additions — `--foutline`
+/// `pmt build` shape plus TM-1's own four additions — `--foutline`
 /// (the default-off pass's flag-only enable switch, no manifest-schema
 /// equivalent), `--entry` (argv-mode-only, rejected in manifest mode
-/// because the manifest already declares each target's entry), and
+/// because the manifest already declares each target's entry),
 /// `--call-mech` (COMMON to both modes — unlike `--entry`, manifest mode
-/// accepts it as a per-invocation override of the declared lowering).
+/// accepts it as a per-invocation override of the declared lowering),
+/// and `--allow` (COMMON to both modes too — argv mode reads it alone,
+/// manifest mode unions it with the manifest's own `lint.allow`
+/// (docs/tmt/lint.md (the allow namespace))).
 fn build_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["build"]),
@@ -359,6 +369,12 @@ fn build_spec() -> CommandSpec {
             ),
             FlagSpec::boolean("--foutline", "enable the default-off `outline` pass"),
             FlagSpec::boolean("-Werror", "treat post-refinement warnings as errors"),
+            FlagSpec::value(
+                "--allow",
+                "suppress a link warning code (repeatable)",
+                ValueHint::Text,
+            )
+            .repeatable(),
             FlagSpec::boolean("--no-relax", "keep every symbol site in far form"),
             FlagSpec::boolean("--nostdlib", "argv mode: do not link the built-in std"),
             FlagSpec::value(

@@ -282,6 +282,8 @@ FLAGS:
   --entry NAME      link NAME as the program entry (default: main)
   --call-mech MECH  bound-call lowering: mono | frames | hybrid (default: hybrid)
   --nostdlib        do not auto-link the embedded standard library
+  --allow CODE      suppress a link warning code (repeatable)
+  -Werror           treat link warnings as errors
   -L DIR            add a library search directory (repeatable, in order)
   -l NAME           link NAME.tmo from the search path (repeatable)
   -v                render the link report (dropped functions, relaxation)
@@ -301,7 +303,10 @@ site far. `docs/core.md (the linker)` has the mechanism.
 many sites relaxed short versus stayed far. When the image carries frames
 content, a second line reports the composition-engine counters — composites,
 stamps, compose-table bytes, dedup savings, synthesized trap rows, expanded
-rows — so a frameless link keeps the single-line report.
+rows — so a frameless link keeps the single-line report. One further line
+follows per hybrid exit-bearing fold decision — the callee, its site count,
+body and descriptor bytes, and whether the group was shared under frames or
+spliced as mono seeds — so a link with no such site prints none.
 
 ### `--call-mech`
 
@@ -352,6 +357,28 @@ order given, and errors if it is not found on any of them. There is no
 on-disk library directory to fall back to: the standard library is embedded
 in the toolchain binary itself.
 
+### Link warnings
+
+A link warning names a site the linker can see is suspect but will not
+refuse — a callee whose alphabet is narrower than the caller's band, or
+one whose glyphs differ at the same width. It prints always, in the same
+format a compile warning does, and carries a bracketed code:
+
+```
+main+0x0000: warning: `sub` reads a 3-symbol alphabet where `main`'s band is 5 wide [narrow-alphabet]
+```
+
+The codes share the one allow namespace `tmt lint` uses, so `--allow CODE`
+suppresses one here and `lint.allow` in `tmt.json` suppresses it for
+`tmt build`. `-Werror` promotes every unsuppressed warning to an error.
+Errors — a callee wider than the caller, a graft whose digest drifted —
+are outside the namespace and cannot be suppressed.
+
+| Code | Meaning |
+|---|---|
+| `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
+| `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
+
 ## `tmt build`
 
 ```
@@ -379,6 +406,7 @@ LINK FLAGS (argv mode only; the manifest declares these):
   -o OUT.tmx            output path
 
 COMMON:
+  --allow CODE          suppress a link warning code (repeatable)
   --no-relax            keep every symbol site in far form
   --call-mech MECH      bound-call lowering: mono | frames | hybrid
   --keep-objects        write each intermediate .tmo next to its source
@@ -424,7 +452,7 @@ a build is either fully argv-driven or fully manifest-driven.
   them — five flags, one more than the compile-side/link-side split
   alone would suggest, because a target's entry symbol is as much a
   manifest-declared fact as its output path or its libraries.
-- **Common to both modes** (`--no-relax`, `--call-mech`,
+- **Common to both modes** (`--allow`, `--no-relax`, `--call-mech`,
   `--keep-objects`, `-v`). `--call-mech` is the one link-side flag
   manifest mode does *not* reject: it is accepted there as a
   per-invocation override of the target's declared lowering, resolved
@@ -432,7 +460,14 @@ a build is either fully argv-driven or fully manifest-driven.
   default `call-mech` key, then the linker's own default when none of
   those set it. The manifest records the *committed* lowering for a
   target; the flag exists to experiment against that commitment for one
-  build without editing `tmt.json`.
+  build without editing `tmt.json`. `--allow` is likewise never
+  rejected: argv mode reads it alone, and manifest mode unions it with
+  the manifest's own `lint.allow` — `--allow` on the command line can
+  only suppress more, never fewer, of what the manifest already
+  suppresses. `-Werror` covers both stages in both modes: compile
+  warnings (refined against the declared name set first) and, since the
+  link stage now diagnoses too, link warnings — see
+  "### Link warnings" under `tmt link`.
 - **Manifest mode only** (`--run`, `--list-targets`): argv mode has no
   notion of a target or a declared run block for either flag to act on.
 

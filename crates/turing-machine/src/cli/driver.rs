@@ -5,7 +5,6 @@
 //! memory unless --keep-objects.
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,8 +17,9 @@ use crate::optimizer::OptLevel;
 use crate::stdlib;
 
 use super::build::{
-    find_library, out_path, parse_call_mech, read_object, render_opt_report, render_warnings,
-    sidecar_path, take_disabled_passes,
+    find_library, out_path, parse_call_mech, read_object, render_link_diagnostics,
+    render_link_report, render_opt_report, render_warnings, sidecar_path, take_disabled_passes,
+    werror_message,
 };
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
@@ -49,6 +49,7 @@ LINK FLAGS (argv mode only; the manifest declares these):
   -o OUT.tmx            output path
 
 COMMON:
+  --allow CODE          suppress a link warning code (repeatable)
   --no-relax            keep every symbol site in far form
   --call-mech MECH      bound-call lowering: mono | frames | hybrid
   --keep-objects        write each intermediate .tmo next to its source
@@ -66,6 +67,7 @@ struct Flags {
     strip_debugger: bool,
     outline: bool,
     werror: bool,
+    allow: Vec<String>,
     disabled_passes: Vec<String>,
     no_relax: bool,
     nostdlib: bool,
@@ -96,6 +98,7 @@ pub(super) fn build(raw: &[String]) -> Result<CliOutput, String> {
         strip_debugger: args.flag("--strip-debugger"),
         outline: args.flag("--foutline"),
         werror: args.flag("-Werror"),
+        allow: args.values("--allow")?,
         disabled_passes,
         no_relax: args.flag("--no-relax"),
         nostdlib: args.flag("--nostdlib"),
@@ -118,6 +121,10 @@ pub(super) fn build(raw: &[String]) -> Result<CliOutput, String> {
         list_targets: args.flag("--list-targets"),
         verbose: args.flag("-v"),
     };
+    // `--allow` draws from the same shared namespace `tmt lint` and
+    // `tmt link` validate against, so a typo aborts up front here too
+    // (docs/tmt/lint.md (the allow namespace)).
+    crate::lint::validate_allow(&flags.allow).map_err(|e| e.to_string())?;
     let positionals = args.positionals()?;
 
     let is_file = |s: &str| s.ends_with(".tmc") || s.ends_with(".tma") || s.ends_with(".tmo");
@@ -156,7 +163,7 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
         ));
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let (manifest_path, manifest) = discover_project(&cwd)?;
+    let (manifest_path, manifest, manifest_allow) = discover_project(&cwd)?;
     let root = manifest_path
         .parent()
         .expect("tmt.json has a parent")
@@ -200,8 +207,9 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
         // before this call — prefixed onto a failure here for the same
         // reason `build_one_target` prefixes its OWN warnings onto a
         // failing link (docs/tmt/cli.md (build)).
-        let (output, chunk) = build_one_target(&root, &manifest, name, target, flags)
-            .map_err(|e| format!("{stderr}{e}"))?;
+        let (output, chunk) =
+            build_one_target(&root, &manifest, name, target, flags, &manifest_allow)
+                .map_err(|e| format!("{stderr}{e}"))?;
         stderr.push_str(&chunk);
         built.push((name.to_string(), output));
     }
@@ -219,13 +227,24 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
 /// `manifest_mode` (CLI, always the process's own `current_dir`) and
 /// [`build_target_for_launch`] (the DAP seam, an explicit override or
 /// that same fallback), so the two callers can never drift on the
-/// "no manifest found" wording.
-fn discover_project(start: &Path) -> Result<(PathBuf, crate::project::Manifest), String> {
-    crate::project::discover_manifest(start)
+/// "no manifest found" wording. Also returns that same file's own
+/// `lint.allow` — read via one extra [`crate::project::load_file`] call
+/// against the already-located path rather than a second ancestor walk —
+/// which both callers union with their own `--allow` list to suppress
+/// link warnings (docs/tmt/lint.md (the allow namespace)).
+fn discover_project(
+    start: &Path,
+) -> Result<(PathBuf, crate::project::Manifest, Vec<String>), String> {
+    let (path, manifest) = crate::project::discover_manifest(start)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
-            "no tmt.json with a `project` section found from the current directory upward".into()
-        })
+            "no tmt.json with a `project` section found from the current directory upward"
+                .to_string()
+        })?;
+    let allow = crate::project::load_file(&path)
+        .map_err(|e| e.to_string())?
+        .allow;
+    Ok((path, manifest, allow))
 }
 
 /// The "no such target" error text, shared by `manifest_mode`'s
@@ -326,7 +345,7 @@ pub(crate) fn build_target_for_launch(
             &cwd
         }
     };
-    let (manifest_path, manifest) = discover_project(start)?;
+    let (manifest_path, manifest, manifest_allow) = discover_project(start)?;
     let root = manifest_path
         .parent()
         .expect("tmt.json has a parent")
@@ -345,6 +364,7 @@ pub(crate) fn build_target_for_launch(
         strip_debugger: false,
         outline: false,
         werror: false,
+        allow: Vec::new(),
         disabled_passes: Vec::new(),
         no_relax: false,
         nostdlib: false,
@@ -358,7 +378,14 @@ pub(crate) fn build_target_for_launch(
         list_targets: false,
         verbose: false,
     };
-    let (output, diagnostics) = build_one_target(&root, &manifest, target_name, target, &flags)?;
+    let (output, diagnostics) = build_one_target(
+        &root,
+        &manifest,
+        target_name,
+        target,
+        &flags,
+        &manifest_allow,
+    )?;
     // One line per diagnostic is `render_warnings`' own contract (every
     // diagnostic is exactly one `writeln!`, `verbose: false` above keeps
     // `render_opt_report`'s multi-line entries out of this string
@@ -394,6 +421,7 @@ fn build_one_target(
     name: &str,
     target: &crate::project::Target,
     flags: &Flags,
+    manifest_allow: &[String],
 ) -> Result<(PathBuf, String), String> {
     // In manifest mode --debug/--release are PURE profile selectors
     // (docs/tmt/cli.md (build)): only the individual flags (-g, -O*,
@@ -433,6 +461,16 @@ fn build_one_target(
         options.opt_level = OptLevel::O1;
     }
     let werror = profile.werror || flags.werror;
+    // The link stage's allow list is `--allow` unioned with this same
+    // manifest file's own `lint.allow` — no second discovery walk, since
+    // `manifest_allow` already came off the file `discover_project`
+    // located (docs/tmt/lint.md (the allow namespace)).
+    let allow: Vec<String> = flags
+        .allow
+        .iter()
+        .chain(manifest_allow.iter())
+        .cloned()
+        .collect();
 
     let resolve = |raw: &str| -> Result<PathBuf, String> {
         Ok(root.join(crate::project::normalize_rel(raw)?))
@@ -492,18 +530,28 @@ fn build_one_target(
     let output = crate::project::normalize_rel(&manifest.output_of(name, target))
         .map(|rel| root.join(rel))
         .map_err(|e| format!("{stderr}{e}"))?;
-    let tail = link_and_write(
+    let (tail, link_warnings) = link_and_write(
         manifest,
         name,
         target,
         &objects,
         &libraries,
         flags,
+        werror,
+        &allow,
         &output,
         &unit_sources,
     )
     .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
+    // The inner refusal above already kept the write from happening; this
+    // outer check is what actually turns the strict build into an error,
+    // carrying the FULL accumulated stderr — compile warnings plus link
+    // ones — into the message the user sees (docs/tmt/cli.md (link
+    // warnings)).
+    if werror && link_warnings > 0 {
+        return Err(werror_message(&stderr, link_warnings));
+    }
     Ok((output, stderr))
 }
 
@@ -512,9 +560,13 @@ fn build_one_target(
 /// tail of `build_one_target` past the point its compile-stage warnings
 /// are already rendered, factored out so that whole sequence is one
 /// fallible unit its caller can prefix with those warnings at a single
-/// site (docs/tmt/cli.md (build)). Returns the (possibly empty) `-v`
-/// chunk; the caller owns concatenating it onto its own accumulated
-/// stderr.
+/// site (docs/tmt/cli.md (build)). Returns the rendered chunk — the link
+/// warnings, then the `-v` lines — and the count of link warnings it
+/// printed; the caller owns concatenating the chunk onto its own
+/// accumulated stderr. Under strict mode with a non-zero count this
+/// function writes NOTHING and still returns `Ok`: the caller is obliged
+/// to turn that count into the error, so the message carries the whole
+/// accumulated stderr (docs/tmt/cli.md (link warnings)).
 #[allow(clippy::too_many_arguments)]
 fn link_and_write(
     manifest: &crate::project::Manifest,
@@ -523,9 +575,11 @@ fn link_and_write(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
     flags: &Flags,
+    werror: bool,
+    allow: &[String],
     output: &Path,
     unit_sources: &[Option<PathBuf>],
-) -> Result<String, String> {
+) -> Result<(String, usize), String> {
     // The sidecar path anchors the provenance strings, so it is resolved
     // BEFORE the link (docs/formats.md (map sidecar)).
     let map_path = sidecar_path(output);
@@ -545,27 +599,30 @@ fn link_and_write(
         },
     )
     .map_err(|e| format!("target `{name}`: {e}"))?;
-    if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-    }
-    fs::write(output, linked.executable.to_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
-    fs::write(&map_path, linked.map.to_json())
-        .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
 
     let mut tail = String::new();
+    // A link warning prints always; the write below runs only when the
+    // caller's effective `-Werror` does NOT promote it — a strict build
+    // that fails must leave no artifact, exactly as a link error does
+    // today (docs/tmt/cli.md (link warnings)). `werror` is the CALLER's
+    // effective value (profile.werror || flags.werror in manifest mode),
+    // not `flags.werror` alone.
+    let warned = render_link_diagnostics(&mut tail, &linked.report, allow);
     if flags.verbose {
-        let r = &linked.report;
-        let _ = writeln!(
-            tail,
-            "{name}: link: dropped [{}]; {} site(s) relaxed short, {} far",
-            r.dropped.join(", "),
-            r.relaxed_calls,
-            r.far_calls
-        );
+        render_link_report(&mut tail, &format!("{name}: "), &linked.report);
     }
-    Ok(tail)
+    if !(werror && warned > 0) {
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        fs::write(output, linked.executable.to_bytes())
+            .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
+        fs::write(&map_path, linked.map.to_json())
+            .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
+    }
+
+    Ok((tail, warned))
 }
 
 /// Runs a just-built target under `--run` (docs/tmt/cli.md (run)): the
@@ -737,24 +794,37 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     // failure anywhere in it carries the warnings already rendered above
     // rather than dropping them on an early `?` return
     // (docs/tmt/cli.md (build)).
-    let tail = link_and_write_argv(&objects, &libraries, flags, &files[0], &unit_sources)
-        .map_err(|e| format!("{stderr}{e}"))?;
+    let (tail, link_warnings) =
+        link_and_write_argv(&objects, &libraries, flags, &files[0], &unit_sources)
+            .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
+    // The inner refusal already kept the write from happening; this outer
+    // check carries the accumulated stderr — compile warnings plus link
+    // ones — into the message the user sees (docs/tmt/cli.md (link
+    // warnings)). Argv mode has no profile, so `flags.werror` is the
+    // effective value directly.
+    if flags.werror && link_warnings > 0 {
+        return Err(werror_message(&stderr, link_warnings));
+    }
     Ok(CliOutput::ok(String::new(), stderr))
 }
 
 /// The link + write tail of argv-mode `build`, factored out for the same
 /// reason as manifest mode's [`link_and_write`]: one fallible unit whose
 /// error a single call site can prefix with the already-rendered warnings
-/// (docs/tmt/cli.md (build)). Returns the (possibly empty) `-v` chunk; the
-/// output path itself is not needed past this point in argv mode.
+/// (docs/tmt/cli.md (build)). Returns the rendered chunk and the count of
+/// link warnings it printed; the output path itself is not needed past
+/// this point in argv mode. As in manifest mode, a strict build with a
+/// non-zero count writes NOTHING here and still returns `Ok` — the caller
+/// is obliged to raise the error from that count
+/// (docs/tmt/cli.md (link warnings)).
 fn link_and_write_argv(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
     flags: &Flags,
     first_file: &str,
     unit_sources: &[Option<PathBuf>],
-) -> Result<String, String> {
+) -> Result<(String, usize), String> {
     let target = out_path(Path::new(first_file), flags.out.clone(), "tmx");
     let map_path = sidecar_path(&target);
     // Argv mode threads relax / entry / call_mech explicitly — there is
@@ -773,23 +843,24 @@ fn link_and_write_argv(
     )
     .map_err(|e| e.to_string())?;
 
-    fs::write(&target, linked.executable.to_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
-    fs::write(&map_path, linked.map.to_json())
-        .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
-
     let mut tail = String::new();
+    // A link warning prints always; the write below runs only when
+    // `-Werror` does NOT promote it — a strict build that fails must
+    // leave no artifact, exactly as a link error does today
+    // (docs/tmt/cli.md (link warnings)). Argv mode has no manifest, so
+    // the allow list is `--allow` alone.
+    let warned = render_link_diagnostics(&mut tail, &linked.report, &flags.allow);
     if flags.verbose {
-        let r = &linked.report;
-        let _ = writeln!(
-            tail,
-            "link: dropped [{}]; {} site(s) relaxed short, {} far",
-            r.dropped.join(", "),
-            r.relaxed_calls,
-            r.far_calls
-        );
+        render_link_report(&mut tail, "", &linked.report);
     }
-    Ok(tail)
+    if !(flags.werror && warned > 0) {
+        fs::write(&target, linked.executable.to_bytes())
+            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        fs::write(&map_path, linked.map.to_json())
+            .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
+    }
+
+    Ok((tail, warned))
 }
 
 /// The map sidecar's per-unit provenance strings (docs/formats.md (map
