@@ -1514,12 +1514,22 @@ machine {
         // thing, not merely name-resolvable: run the actual linker over
         // the SAME `objects`/`libraries` this test compares provenance
         // against.
-        crate::asm::link(
+        let linked = crate::asm::link(
             &objects,
             &libraries,
             mtc_core::linker::LinkOptions::default(),
         )
         .expect("this fixture's link set must actually link, not just resolve names");
+        // The claim above APP, pinned rather than asserted in prose.
+        // Mutation it catches: narrow one unit's alphabet (or widen the
+        // machine's) and a site starts warning — the fixture would still
+        // link and still compare provenance, having quietly become a
+        // fixture about something else (docs/core.md (link warnings)).
+        assert!(
+            linked.report.diagnostics.is_empty(),
+            "every unit here shares the width, so no site warns: {:?}",
+            linked.report.diagnostics
+        );
 
         let resolved = resolve_names(&objects, &libraries, "main")
             .expect("every reachable call in this fixture resolves");

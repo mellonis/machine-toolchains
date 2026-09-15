@@ -666,10 +666,16 @@ fn parse_lint(path: &Path, value: &Value) -> Result<Vec<String>, ConfigError> {
 /// candidate is an error, not a skip: we cannot know whether it had a
 /// project section.
 ///
-/// Not yet called outside this module's own tests — the manifest-driven
-/// `tmt build` driver and `tmt lint`/`tmt fmt`'s per-section source-set
-/// discovery are the future production consumers.
-pub(crate) fn discover_manifest(start: &Path) -> Result<Option<(PathBuf, Manifest)>, ConfigError> {
+/// Returns the file's own `lint.allow` alongside the manifest, from the
+/// SAME load: the `tmt build` driver unions it with `--allow` to suppress
+/// link warnings (docs/tmt/lint.md (the allow namespace)), and re-reading
+/// the located path for it would parse the file twice and leave a window
+/// in which the two halves came from different contents. A caller that
+/// wants only the manifest — bare `tmt lint`/`tmt fmt`, whose allow list
+/// comes from the lint walk instead — drops the third element.
+pub(crate) fn discover_manifest(
+    start: &Path,
+) -> Result<Option<(PathBuf, Manifest, Vec<String>)>, ConfigError> {
     let start = if start.as_os_str().is_empty() {
         Path::new(".")
     } else {
@@ -684,7 +690,7 @@ pub(crate) fn discover_manifest(start: &Path) -> Result<Option<(PathBuf, Manifes
         if candidate.is_file() {
             let file = load_file(&candidate)?;
             if let Some(manifest) = file.manifest {
-                return Ok(Some((candidate, manifest)));
+                return Ok(Some((candidate, manifest, file.allow)));
             }
         }
         dir = d.parent();
@@ -726,7 +732,8 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(
             root.join("tmt.json"),
-            r#"{ "project": { "targets": { "app": { "sources": ["m.tmc"] } } } }"#,
+            r#"{ "lint": { "allow": ["dead-rule"] },
+                "project": { "targets": { "app": { "sources": ["m.tmc"] } } } }"#,
         )
         .unwrap();
         std::fs::write(
@@ -736,9 +743,15 @@ mod tests {
         .unwrap();
 
         // Project walk: the nested lint-only file is transparent.
-        let (found, manifest) = discover_manifest(&sub).unwrap().expect("project above");
+        let (found, manifest, allow) = discover_manifest(&sub).unwrap().expect("project above");
         assert_eq!(found, root.join("tmt.json"));
         assert!(manifest.targets.contains_key("app"));
+        // Mutation it catches: take the allow list from the nearest LINT
+        // file (`config::discover`'s answer) instead of the one the project
+        // walk stopped at, and the build driver suppresses
+        // `leftover-debugger` rather than the `dead-rule` the project file
+        // declares.
+        assert_eq!(allow, vec!["dead-rule".to_string()]);
 
         // Lint walk: unchanged — nearest file wins, even lint-only.
         assert_eq!(crate::config::discover(&sub), Some(sub.join("tmt.json")));

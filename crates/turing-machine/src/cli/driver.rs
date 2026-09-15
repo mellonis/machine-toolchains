@@ -228,23 +228,19 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
 /// [`build_target_for_launch`] (the DAP seam, an explicit override or
 /// that same fallback), so the two callers can never drift on the
 /// "no manifest found" wording. Also returns that same file's own
-/// `lint.allow` — read via one extra [`crate::project::load_file`] call
-/// against the already-located path rather than a second ancestor walk —
-/// which both callers union with their own `--allow` list to suppress
-/// link warnings (docs/tmt/lint.md (the allow namespace)).
+/// `lint.allow` — from the SAME load the walk already did, never a
+/// second parse of the located path — which both callers union with
+/// their own `--allow` list to suppress link warnings (docs/tmt/lint.md
+/// (the allow namespace)).
 fn discover_project(
     start: &Path,
 ) -> Result<(PathBuf, crate::project::Manifest, Vec<String>), String> {
-    let (path, manifest) = crate::project::discover_manifest(start)
+    crate::project::discover_manifest(start)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
             "no tmt.json with a `project` section found from the current directory upward"
                 .to_string()
-        })?;
-    let allow = crate::project::load_file(&path)
-        .map_err(|e| e.to_string())?
-        .allow;
-    Ok((path, manifest, allow))
+        })
 }
 
 /// The "no such target" error text, shared by `manifest_mode`'s

@@ -73,7 +73,12 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
             ));
         }
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-        let Some((manifest_path, manifest)) =
+        // The manifest file's own `lint.allow` is dropped here: a lint run
+        // takes its allow list from the LINT walk (the nearest ancestor
+        // `tmt.json`, which may be a nearer, lint-only one), not from the
+        // file the project walk stopped at (docs/tmt/lint.md (the allow
+        // namespace)).
+        let Some((manifest_path, manifest, _)) =
             crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
         else {
             return Err(

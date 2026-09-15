@@ -118,7 +118,10 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     // refused is discoverable in `--help` and useful never.
     if paths.is_empty() {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-        let Some((manifest_path, manifest)) =
+        // The manifest file's own `lint.allow` is dropped here: `tmt fmt`
+        // reads no lint configuration at all, and only wants the declared
+        // source set.
+        let Some((manifest_path, manifest, _)) =
             crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
         else {
             return Err(
