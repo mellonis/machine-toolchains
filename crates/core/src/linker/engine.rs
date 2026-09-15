@@ -614,6 +614,37 @@ pub(super) fn bad_binding(callee: &str, e: &super::compose::ComposeError) -> Lin
     }
 }
 
+/// Build a link diagnostic for a site inside function `fi`. The source
+/// line is the largest `-g` line-table offset at or below the site — the
+/// same "innermost preceding line" rule the map sidecar uses
+/// (docs/formats.md (map sidecar)); `None` without debug data.
+// No call site raises a diagnostic yet — the site checks that call this
+// land separately (docs/core.md (link warnings)); retained (hence the
+// allow) so this helper and its tests are already in place for them.
+#[allow(dead_code)]
+pub(super) fn diag_at(
+    order: &[FuncRef],
+    fi: usize,
+    offset: u32,
+    code: &'static str,
+    message: String,
+) -> super::LinkDiagnostic {
+    let line = order[fi].debug.as_ref().and_then(|d| {
+        d.lines
+            .iter()
+            .filter(|(off, _)| *off <= offset)
+            .max_by_key(|(off, _)| *off)
+            .map(|&(_, line)| line)
+    });
+    super::LinkDiagnostic {
+        code,
+        message,
+        function: order[fi].name.to_string(),
+        offset,
+        line,
+    }
+}
+
 /// Decode a routine's ORIGINAL blob into its ordered control sites, and
 /// validate every bound call's binding once against the caller and callee
 /// signatures (docs/formats.md (bound calls)).
@@ -1285,13 +1316,79 @@ fn shift_frame_descriptor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formats::object::{BoundCall, MapPair, RoutineSig, TapeBinding};
+    use crate::formats::object::{BlobDebug, BoundCall, MapPair, RoutineSig, TapeBinding};
 
     fn sig(cards: &[u32]) -> RoutineSig {
         RoutineSig {
             arity: u8::try_from(cards.len()).unwrap(),
             cardinalities: cards.to_vec(),
         }
+    }
+
+    /// A minimal `FuncRef` fixture for `diag_at`: everything empty except
+    /// the name and the optional debug info under test.
+    fn func_ref_with_debug(name: &str, debug: Option<BlobDebug>) -> FuncRef<'static> {
+        FuncRef {
+            name: Cow::Owned(name.to_string()),
+            blob: Cow::Owned(Vec::new()),
+            debug: debug.map(Cow::Owned),
+            calls: Vec::new(),
+            bound: Vec::new(),
+            table: Cow::Owned(Vec::new()),
+            table_fixups: Vec::new(),
+            site_fixups: Vec::new(),
+            signature: None,
+            interface: None,
+            origin: 0,
+        }
+    }
+
+    /// `diag_at` picks the largest debug line offset AT OR BELOW the
+    /// site, not the nearest by absolute distance and not the first
+    /// entry: with lines at 0, 8, 16, a site at offset 12 must resolve to
+    /// line 20 (the entry at 8) — this fails under `min_by_key`, under
+    /// `*off >= offset`, and under "always the first/last entry" alike.
+    /// Also pins that `function`/`offset`/`code`/`message` are filled
+    /// straight from the call's own arguments.
+    #[test]
+    fn diag_at_picks_the_largest_line_offset_at_or_below_the_site() {
+        let debug = BlobDebug {
+            labels: Vec::new(),
+            lines: vec![(0, 10), (8, 20), (16, 30)],
+        };
+        let order = vec![func_ref_with_debug("f", Some(debug))];
+        let diag = diag_at(&order, 0, 12, "glyph-mismatch", "bad".to_string());
+        assert_eq!(diag.line, Some(20));
+        assert_eq!(diag.function, "f");
+        assert_eq!(diag.offset, 12);
+        assert_eq!(diag.code, "glyph-mismatch");
+        assert_eq!(diag.message, "bad");
+    }
+
+    /// A site strictly before every line-table entry has no preceding
+    /// line, so `diag_at` reports `None` rather than falling back to the
+    /// nearest (or first) entry regardless of direction.
+    #[test]
+    fn diag_at_reports_no_line_before_the_first_entry() {
+        let debug = BlobDebug {
+            labels: Vec::new(),
+            lines: vec![(8, 20), (16, 30)],
+        };
+        let order = vec![func_ref_with_debug("f", Some(debug))];
+        let diag = diag_at(&order, 0, 4, "narrow-alphabet", "narrow".to_string());
+        assert_eq!(diag.line, None);
+    }
+
+    /// Without `-g` debug data at all, `diag_at` still fills the rest of
+    /// the diagnostic from the site and leaves `line` `None` — an absent
+    /// line table is a normal case, not a decode failure.
+    #[test]
+    fn diag_at_reports_no_line_without_debug_data() {
+        let order = vec![func_ref_with_debug("g", None)];
+        let diag = diag_at(&order, 0, 3, "glyph-mismatch", "no debug".to_string());
+        assert_eq!(diag.line, None);
+        assert_eq!(diag.function, "g");
+        assert_eq!(diag.offset, 3);
     }
 
     fn one_tape(pairs: Vec<MapPair>) -> BoundCall {

@@ -75,3 +75,23 @@ fn every_capability_cell_names_a_real_assembler_capability() {
         );
     }
 }
+
+/// The published link-warning catalog lists exactly the registry's codes.
+/// Mutation it catches: add a code to `DIAGNOSTIC_CODES` without a docs
+/// row (or the reverse) and the set-compare fails — which is the intent,
+/// not friction.
+#[test]
+fn the_published_link_warning_catalog_lists_exactly_the_registry_codes() {
+    let doc = doc();
+    let mut published: Vec<String> = table_rows(&section(&doc, "### Link warnings"))
+        .into_iter()
+        .map(|(code, _)| code)
+        .collect();
+    published.sort();
+    let mut registry: Vec<String> = mtc_core::linker::DIAGNOSTIC_CODES
+        .iter()
+        .map(|(c, _)| (*c).to_string())
+        .collect();
+    registry.sort();
+    assert_eq!(published, registry, "docs/core.md (### Link warnings)");
+}

@@ -261,6 +261,25 @@ pub struct LinkDiagnostic {
     pub line: Option<u32>,
 }
 
+/// Every link-time warning code, with its one-line meaning
+/// (docs/core.md (link warnings)). The published catalog is
+/// set-compared against this table in both directions, and a
+/// consumer's allow namespace joins it here rather than maintaining a
+/// copy.
+pub const DIAGNOSTIC_CODES: &[(&str, &str)] = &[
+    (
+        "glyph-mismatch",
+        "A call site binds by index into a callee whose alphabet is the same size \
+         but spells different glyphs, so the callee reads the caller's symbols as \
+         other symbols.",
+    ),
+    (
+        "narrow-alphabet",
+        "A call site binds by index into a callee whose alphabet is narrower, so \
+         the caller's high symbols have no image in it.",
+    ),
+];
+
 /// One hybrid exit-bearing fold decision, for the link report
 /// (docs/core.md (call mechanisms)).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +488,12 @@ pub struct LinkReport {
     /// mechanisms)). Empty under `mono` and `frames`, and for any image
     /// with no exit-bearing site.
     pub folds: Vec<FoldDecision>,
+    /// Link-time WARNINGS, in site order (function order, then blob
+    /// offset): findings that do not stop the link
+    /// (docs/core.md (link warnings)). A consumer suppresses them
+    /// through its own allow namespace and promotes them with its own
+    /// `-Werror`; the linker itself never prints and never decides.
+    pub diagnostics: Vec<LinkDiagnostic>,
     /// The volatile bit this link resolved with: the bit carried by the
     /// object defining the entry symbol, which selects the column every
     /// name resolves to (docs/core.md (linking)). Reported so a consumer
@@ -545,7 +570,7 @@ pub fn link(
         plan: frames_plan,
         stats,
         orphaned,
-        diagnostics: _diagnostics,
+        diagnostics,
         folds,
     } = lowered;
 
@@ -652,6 +677,7 @@ pub fn link(
             variant_fallbacks,
             program_volatile,
             folds,
+            diagnostics,
         },
     })
 }

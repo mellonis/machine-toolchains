@@ -783,6 +783,25 @@ missing without guessing a direction.
 Debug names travel out of band in the map sidecar, keeping the image
 itself a pure binary.
 
+### Link warnings
+
+A link error stops the link; a link **warning** does not. The report
+carries them in `diagnostics`, one per site, each with a stable
+kebab-case **code**, the finding, the function and blob offset it was
+raised at, and the source line when the objects carried debug data. The
+linker never prints and never decides what a warning means: a consumer
+renders them, suppresses them through its own allow list, and promotes
+them to errors under its own strict-mode flag.
+
+Codes are permanent identifiers: they never change meaning.
+
+| Code | Meaning |
+|---|---|
+| `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
+| `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
+
+Errors are outside this catalog and cannot be suppressed.
+
 ## The composition engine
 
 An architecture with the frames profile may let a call carry a
