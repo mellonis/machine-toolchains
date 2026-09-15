@@ -3,9 +3,10 @@
 //! stamped copy, an open binding, a mixed splice-and-frame caller, a
 //! cross-object bound call, a shared fold group reached only through a
 //! frame (no identity-world member at all), a lone exit-bearing site
-//! inside a framed callee (no fold group at all), and a tail-position
-//! framed call observation. Driven from `.tma`, because the `.tmc` front
-//! end has no `state` parameters yet (docs/core.md (call mechanisms)).
+//! inside a framed callee (no fold group at all), one callee spliced
+//! twice with a site inside each copy, and a tail-position framed call
+//! observation. Driven from `.tma`, because the `.tmc` front end has no
+//! `state` parameters yet (docs/core.md (call mechanisms)).
 //!
 //! Mono splices a per-site copy of an exit-bearing callee, entered by a
 //! jump and leaving through jumps; frames gives every site a descriptor
@@ -13,6 +14,12 @@
 //! image that does BOTH — a stamped copy reaching a shared generic body
 //! through a framed call. The three images differ by construction; what
 //! must not differ is what they compute.
+//!
+//! One shape runs two of the three, and says so at its own test: a
+//! framed call nested inside an EXIT-BEARING framed callee takes its
+//! compose column from the identity row today, so the twice-spliced
+//! callee's pure-frames image traps and only mono and hybrid are
+//! compared there.
 //!
 //! This is where that claim is EXECUTED. Core's `link_exits.rs` proves the
 //! byte arithmetic and the jump displacements against a fake dialect it
@@ -540,6 +547,146 @@ fn a_shared_group_under_an_active_frame_agrees_across_mechanisms() {
             (&r.0, &r.1),
             "mono vs {m} diverged on a shared group reached only through a frame"
         );
+    }
+}
+
+// ── one callee spliced twice, and the sites inside both copies ────────────
+
+/// The same `(routine, composite)` reached through TWO distinct splice
+/// sites, each copy carrying an exit-bearing site of its own. `body` is
+/// `big`'s `nop` padding — the knob that moves ITS group across the byte
+/// rule while everything above stays fixed.
+///
+/// `outer` is the only exit-free bijection seed (a swap at the machine
+/// identity), so everything under it is met inside a copy. Its two calls
+/// to `mid` agree on callee and composite — both bindings are the
+/// identity under the swap — so they are ONE group; they differ in where
+/// they return to, which is what makes them two distinct splices. That
+/// group is refused (`(2 - 1) * 10 = 10` is not more than the `2 * 28 =
+/// 56` its descriptors would cost, each descriptor being the 28 bytes
+/// `closure_fold` derives for this swap and one exit), so `mid` is copied
+/// once per site and each copy carries its own splice of `big`.
+///
+/// `big`'s group therefore has TWO members, one per `mid` copy. A walk
+/// that stopped at a `(routine, composite)` it had already seen would
+/// find only the first — it walks `mid` once where the builder builds it
+/// twice — and at 60 `nop`s that is the difference between a group that
+/// shares a body and a lone site that cannot.
+fn twice_spliced_callee(body: usize) -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine outer, tapes=1, alpha=(4)
+.param u, ('_', 'x', 'y', 'z')
+.routine mid, tapes=1, alpha=(4), exits=1
+.param v, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.section code
+.func main
+        call    outer [0{{1->2, 2->1}}]
+        stp
+.func outer
+        call    mid [0] exits=(p)
+        ret
+p:      call    mid [0] exits=(q)
+        ret
+q:      ret
+.func mid
+        call    big [0] exits=(r)
+        retx    #0
+r:      retx    #0
+.func big
+        wrmv    [1], [>]
+{}        retx    #0
+",
+        nops(body)
+    )
+}
+
+/// Mutation it catches: key the closure walk on `(routine, composite)`
+/// rather than on the stamp intern key, and the site inside the SECOND
+/// copy of `mid` goes uncounted — `big`'s group reports one site where
+/// two are built, and at the 60-`nop` sizing below it splices twice
+/// instead of sharing one body.
+///
+/// Pure frames is not in the comparison, alone in this file: a framed
+/// call nested inside an EXIT-BEARING framed callee takes its compose
+/// column from the identity row today and the image traps there. That is
+/// a frames-path defect this shape exposes, not something the fold count
+/// steers — mono and hybrid are the two mechanisms it does steer.
+#[test]
+fn a_site_inside_each_copy_of_a_twice_spliced_callee_is_counted() {
+    let small = twice_spliced_callee(20);
+    let out = build_full(&small, CallMech::Hybrid);
+    let fold = |out: &LinkOutput, name: &str| {
+        out.report
+            .folds
+            .iter()
+            .find(|f| f.routine == name)
+            .unwrap_or_else(|| panic!("no fold decision for `{name}`: {:?}", out.report))
+            .clone()
+    };
+    let mid = fold(&out, "mid");
+    assert_eq!(mid.sites, 2, "both calls inside outer's copy: {mid:?}");
+    assert_eq!(
+        mid.body_bytes, 10,
+        "1 ent + 5 call + 2 retx + 2 retx: {mid:?}"
+    );
+    assert_eq!(mid.descriptor_bytes, 56, "two 28-byte descriptors: {mid:?}");
+    assert!(
+        !mid.shared,
+        "10 is not more than 56, so mid splices: {mid:?}"
+    );
+
+    let big = fold(&out, "big");
+    assert_eq!(
+        big.sites, 2,
+        "one inside each copy of mid, not one for the pair: {big:?}"
+    );
+    assert_eq!(
+        big.body_bytes, 26,
+        "1 ent + 3 wrmv + 20 nop + 2 retx: {big:?}"
+    );
+    assert_eq!(big.descriptor_bytes, 56, "two 28-byte descriptors: {big:?}");
+    assert!(
+        !big.shared,
+        "26 is not more than 56, so big splices: {big:?}"
+    );
+    assert_eq!(
+        out.report.instantiations, 5,
+        "one outer, two mids, one big per mid: {:?}",
+        out.report
+    );
+
+    // The count is not cosmetic. At 60 `nop`s the same shape crosses the
+    // byte rule — `(2 - 1) * 66 = 66 > 56` — and hybrid shares ONE `big`,
+    // framed from inside each spliced copy of `mid`. A one-site group
+    // could never get there, whatever its body size.
+    let large = twice_spliced_callee(60);
+    let out = build_full(&large, CallMech::Hybrid);
+    let big = fold(&out, "big");
+    assert_eq!(big.sites, 2, "the same two sites: {big:?}");
+    assert_eq!(
+        big.body_bytes, 66,
+        "1 ent + 3 wrmv + 60 nop + 2 retx: {big:?}"
+    );
+    assert!(big.shared, "66 > 56, so hybrid shares: {big:?}");
+
+    for src in [&small, &large] {
+        let mono = run(&build(src, CallMech::Mono), &[4]);
+        let hybrid = run(&build(src, CallMech::Hybrid), &[4]);
+        assert_eq!(
+            (&mono.0, &mono.1),
+            (&hybrid.0, &hybrid.1),
+            "mono vs hybrid diverged on a twice-spliced callee"
+        );
+        // What they agree ON: `big` runs once per `mid` call, writing its
+        // virtual 1 — physical 2 under the swap — and stepping right.
+        assert_eq!(mono.0, Outcome::Stopped, "the program runs to a stop");
+        let seen: Vec<u8> = (0..3).map(|p| cell_at(&mono.1[0], p)).collect();
+        assert_eq!(seen, vec![2, 2, 0], "two swapped writes, then a blank");
     }
 }
 

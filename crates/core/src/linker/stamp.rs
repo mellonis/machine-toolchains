@@ -449,6 +449,12 @@ pub(super) fn lower_hybrid<'a>(
     // Every member of a group reaches the key's composite by
     // construction, so the first member's is the group's.
     let mut group_composite: HashMap<GroupKey, Composite> = HashMap::new();
+    // The decision phase drives the same [`Closure`] the probe below
+    // walks: a group key is `compose(identity, binding)` for a site at the
+    // machine's own frame, which is the very composition the walk does for
+    // a seed — taken from the one place that owns it.
+    let mut closure = Closure::new(&order, machine_sig);
+    let id = closure.identity();
     for (fi, in_world) in id_world.iter().enumerate() {
         if !in_world {
             continue;
@@ -468,14 +474,7 @@ pub(super) fn lower_hybrid<'a>(
                         seeds.push((fi, *addr, *callee, record));
                         mono_holes[fi].insert(*addr);
                     } else {
-                        let composite = compose(
-                            &identity_composite(machine_sig.arity as usize, 0),
-                            caller_sig.cardinalities.as_slice(),
-                            *callee,
-                            &record.binding,
-                            callee_sig,
-                        )
-                        .map_err(|e| bad_binding(&order[*callee].name, &e))?;
+                        let (composite, _) = closure.bound_child(&id, fi, *callee, record)?;
                         let key = (*callee, canonical_key(&composite));
                         group_composite.entry(key.clone()).or_insert(composite);
                         groups.entry(key).or_default().push(GroupSite::Identity {
@@ -496,7 +495,7 @@ pub(super) fn lower_hybrid<'a>(
     // site met while a routine is copied under composite `C` joins its
     // group, and a shared group is reached from inside that copy through
     // a descriptor `compose(C, binding)` plus the site's exits.
-    for cs in mono_closure_probe(&order, sites, machine_sig, &seeds) {
+    for cs in mono_closure_probe(&mut closure, sites, &seeds) {
         let key = (cs.callee, canonical_key(&cs.composite));
         group_composite.entry(key.clone()).or_insert(cs.composite);
         groups
@@ -724,10 +723,207 @@ pub(super) fn lower_hybrid<'a>(
     })
 }
 
-/// Enumerate the `(routine, composite)` closure from the identity-world
-/// mono seeds WITHOUT building any body, reporting every exit-bearing
-/// bijection site met inside a copy with its binding already composed
-/// against the enclosing composite (docs/core.md (call mechanisms)).
+// -- the one closure walk ----------------------------------------------------
+
+/// The stamp closure's walk, driven by both the fold probe and the stamp
+/// builder (docs/core.md (the composition engine)). It owns the queue, the
+/// node table and its intern key, and the ONE place a child composite is
+/// composed from a call site under the composite its caller runs under.
+///
+/// The two drivers ask different questions of the same closure — the
+/// probe only counts what it meets, the builder emits bodies and refuses
+/// what mono cannot lower — but they must agree on its SHAPE: which pairs
+/// are distinct, which sites descend, and what each child composes to. A
+/// walk copied into both is a walk whose every difference has to be
+/// re-argued on every change; this is that walk, once.
+struct Closure<'a, 'o> {
+    order: &'o [FuncRef<'a>],
+    machine_sig: &'o RoutineSig,
+    /// The interned nodes, in intern order: slot `i` is `nodes[i]`, and a
+    /// node nested inside another always interns after it.
+    nodes: Vec<StampNode>,
+    key_to_slot: HashMap<Vec<u8>, usize>,
+    worklist: VecDeque<usize>,
+    /// Every name already in play — every hand-written routine `order`
+    /// carries, then every stamp minted as the walk runs — so `intern`
+    /// can refuse a freshly computed name that collides with either.
+    used_names: HashSet<String>,
+}
+
+impl<'a, 'o> Closure<'a, 'o> {
+    fn new(order: &'o [FuncRef<'a>], machine_sig: &'o RoutineSig) -> Self {
+        Closure {
+            order,
+            machine_sig,
+            nodes: Vec::new(),
+            key_to_slot: HashMap::new(),
+            worklist: VecDeque::new(),
+            used_names: order.iter().map(|f| f.name.to_string()).collect(),
+        }
+    }
+
+    /// The composite the machine's own frame runs under — where a seed
+    /// composes from.
+    fn identity(&self) -> Composite {
+        identity_composite(self.machine_sig.arity as usize, 0)
+    }
+
+    /// The composite a BOUND site's callee runs under: `compose(enclosing,
+    /// binding)`, where `enclosing` is the composite the CALLER runs under
+    /// — the machine identity for a seed, the enclosing copy's own
+    /// composite for a site met inside one. The caller's declared
+    /// cardinalities carry the closed-on-unequal binding rule
+    /// (docs/formats.md (bound calls)). The callee's signature comes back
+    /// alongside because every caller needs both and neither driver should
+    /// look it up a second way.
+    fn bound_child(
+        &self,
+        enclosing: &Composite,
+        caller: usize,
+        callee: usize,
+        record: &BoundCall,
+    ) -> Result<(Composite, &'a RoutineSig), LinkError> {
+        let callee_sig = routine_sig(self.order, callee)?;
+        let caller_cards = self.order[caller]
+            .signature
+            .map(|s| s.cardinalities.as_slice())
+            .unwrap_or(self.machine_sig.cardinalities.as_slice());
+        let child = compose(enclosing, caller_cards, callee, &record.binding, callee_sig)
+            .map_err(|e| bad_binding(&self.order[callee].name, &e))?;
+        Ok((child, callee_sig))
+    }
+
+    /// The composite a PLAIN call's callee runs under: the caller's own,
+    /// re-pointed at the callee — a plain call changes no frame.
+    fn plain_child(&self, enclosing: &Composite, callee: usize) -> Composite {
+        let mut child = enclosing.clone();
+        child.routine = callee;
+        child
+    }
+
+    /// Whether a bound site needs no copy at all: a binding that composes
+    /// back to a genuine full pass-through — identity placement and maps
+    /// AND the callee alphabet as wide as the machine's on every tape —
+    /// reaches the original routine. A narrower or wider callee keeps a
+    /// cardinality hole, so it is stamped instead (its trap rows are
+    /// synthesized from the alphabet gap in `build_stamp`). An
+    /// EXIT-BEARING site never collapses either, whatever its binding: a
+    /// plain call returns through the pushed return address and has
+    /// nowhere to put the other exits (docs/core.md (call mechanisms)) —
+    /// it is a SPLICE, and a splice is never a plain call into the
+    /// generic.
+    fn collapses(&self, child: &Composite, callee_sig: &RoutineSig, record: &BoundCall) -> bool {
+        record.exits.is_empty() && is_full_passthrough(child, self.machine_sig, callee_sig)
+    }
+
+    /// The pending splice site of a bound call met INSIDE the copy at
+    /// `slot`: its offsets are the ORIGINAL routine's, translated through
+    /// that copy's own offset map when it is built (docs/core.md (call
+    /// mechanisms)). `None` for an exit-free site, which splices nothing.
+    fn nested_site(&self, slot: usize, addr: u32, record: &BoundCall) -> Option<PendingSite> {
+        (!record.exits.is_empty()).then(|| PendingSite::InStamp {
+            slot,
+            then: addr + 5,
+            exits: record.exits.clone(),
+        })
+    }
+
+    /// The next node to walk, in FIFO order.
+    fn pop(&mut self) -> Option<usize> {
+        self.worklist.pop_front()
+    }
+
+    /// A slot's index in the final order, where the stamps follow the
+    /// hand-written routines.
+    fn stamp_index(&self, slot: usize) -> usize {
+        self.order.len() + slot
+    }
+
+    /// Intern a (routine, composite) into the node table, deduped by
+    /// canonical key. Returns its ORDER index and whether it resolved to
+    /// an ALREADY-interned node (a stamp the dedup avoids building).
+    ///
+    /// An EXIT-BEARING node widens the KEY — never the digest — with its
+    /// call site's `(caller, then, exits)`: two sites into the same
+    /// routine under the same composite are different splices, returning
+    /// to different places, and must not share a copy. The caller index is
+    /// in the key because `then` and the exit offsets are
+    /// caller-blob-relative and mean nothing without it. Widening the
+    /// DIGEST instead would rename every existing stamp and move every
+    /// existing mono image, so an exit-free node's key, and therefore its
+    /// `<routine>.<digest8>` name, is unchanged.
+    ///
+    /// This is the ONE identity policy for the closure: the probe counts
+    /// nodes by exactly the key the builder builds them by, so a pair
+    /// reached through two distinct splices is walked twice because it IS
+    /// built twice. A consequence worth naming: a cycle of exit-bearing
+    /// bound calls mints a fresh node per turn, here exactly as in the
+    /// builder — such a program has no mono lowering, and neither walk
+    /// terminates on one.
+    ///
+    /// The map-visible name is `<routine>.<digest8>` — a period, not the
+    /// `$` an earlier scheme used, because `.tma` identifiers cannot
+    /// contain `$` at all (docs/formats.md (assembly text)) and a
+    /// disassembled stamp must re-lex. A period IS legal in a hand-written
+    /// routine name, so unlike the `$` scheme this one cannot rule out a
+    /// collision by character choice alone; `used_names` is what makes
+    /// collision-freedom a checked guarantee instead of an assumption — a
+    /// freshly minted name is rejected with a typed [`LinkError`] if it
+    /// already names another routine or an earlier stamp (astronomically
+    /// unlikely: it needs either a hand-written name that happens to match
+    /// `<routine>.<digest8>` exactly, or two distinct composites whose
+    /// 32-bit digests collide — docs/core.md (the composition engine)).
+    fn intern(
+        &mut self,
+        routine: usize,
+        mut composite: Composite,
+        site: Option<PendingSite>,
+    ) -> Result<(usize, bool), LinkError> {
+        composite.routine = routine;
+        let mut key = canonical_key(&composite);
+        if let Some(s) = &site {
+            let (caller, then, exits) = s.key_parts(self.order.len());
+            key.extend_from_slice(&(caller as u64).to_le_bytes());
+            key.extend_from_slice(&then.to_le_bytes());
+            for e in exits {
+                key.extend_from_slice(&e.to_le_bytes());
+            }
+        }
+        if let Some(&slot) = self.key_to_slot.get(&key) {
+            return Ok((self.stamp_index(slot), true));
+        }
+        let slot = self.nodes.len();
+        let mut name = format!("{}.{:08x}", self.order[routine].name, digest(&composite));
+        if site.is_some() {
+            // Two exit-bearing splices of one (routine, composite) share a
+            // digest by construction — the exits are not in it. Number them
+            // rather than refuse (docs/core.md (the composition engine)).
+            let base = name.clone();
+            let mut n = 1u32;
+            while self.used_names.contains(&name) {
+                name = format!("{base}.{n}");
+                n += 1;
+            }
+        }
+        if !self.used_names.insert(name.clone()) {
+            return Err(LinkError::StampNameCollision(name));
+        }
+        self.nodes.push(StampNode {
+            routine,
+            composite,
+            name,
+            site,
+        });
+        self.key_to_slot.insert(key, slot);
+        self.worklist.push_back(slot);
+        Ok((self.stamp_index(slot), false))
+    }
+}
+
+/// Enumerate the stamp closure from the identity-world mono seeds
+/// WITHOUT building any body, reporting every exit-bearing bijection
+/// site met inside a copy with its binding already composed against the
+/// enclosing composite (docs/core.md (call mechanisms)).
 ///
 /// Hybrid needs this before it can size a fold group: a group's members
 /// are not all visible at the machine's own frame, and a stamp that
@@ -735,26 +931,27 @@ pub(super) fn lower_hybrid<'a>(
 /// the closure's own shape depends on the decision. Probing first, then
 /// deciding, then building is what breaks that circle.
 ///
-/// The probe is purely ADDITIVE and never fails: a site it cannot compose,
-/// or a raw framed call inside a copy, is skipped rather than reported as
-/// an error, so it can never turn a linkable program into a refusal. A
-/// refusal belongs in `mono_stamps`, which walks the authoritative
-/// closure; one raised here would be raised over a walk that is
-/// deliberately **neither a subset nor a superset** of what gets built.
+/// It drives the SAME [`Closure`] the builder does — one composition of a
+/// child from a site, one intern key — so a pair the builder builds twice
+/// is walked twice here, and the sites inside both copies are counted.
+/// What is left is its own failure policy, its seeds, and one deliberate
+/// one-way drift:
 ///
-/// That phrase is exact, and both directions matter:
-///
-/// - **It UNDER-reports, two ways.** The seeds are the EXIT-FREE bijection
-///   sites alone, because those are the copies that exist whatever the
-///   decision is — an exit-bearing site nested inside a copy that only
-///   exists because another exit-bearing site was REFUSED sharing is
-///   invisible here. And `visited` keys on `(routine, composite)` while
-///   `intern` keys on `(composite, caller, then, exits)`, so one
-///   `(routine, composite)` reached through two distinct splice sites is
-///   built TWICE and walked once; the sites inside its second copy are not
-///   counted. Sound either way: an under-counted group is likelier to fall
-///   under the byte rule and splice, and splicing is available to every
-///   exit-bearing site.
+/// - **It never FAILS.** A site it cannot compose, a name it cannot mint,
+///   or a raw framed call inside a copy is skipped rather than reported as
+///   an error, so the probe can never turn a linkable program into a
+///   refusal. A refusal belongs in `mono_stamps`, which walks the
+///   authoritative closure; one raised here would be raised over a walk
+///   that is deliberately neither a subset nor a superset of what gets
+///   built, for the two reasons below.
+/// - **It UNDER-reports from its seeds.** The seeds are the EXIT-FREE
+///   bijection sites alone, because those are the copies that exist
+///   whatever the decision is — an exit-bearing site nested inside a copy
+///   that only exists because another exit-bearing site was REFUSED
+///   sharing is invisible here, and cannot be otherwise: whether that copy
+///   exists is the very thing being decided. Sound: an under-counted group
+///   is likelier to fall under the byte rule and splice, and splicing is
+///   available to every exit-bearing site.
 /// - **It OVER-reports one way.** After an exit-bearing site it keeps
 ///   descending, exactly as the builder does when that site splices — but
 ///   if the site's group ends up SHARED the builder frames the call and
@@ -765,38 +962,28 @@ pub(super) fn lower_hybrid<'a>(
 ///   correct image for any site. The visible cost is a `FoldDecision` for
 ///   a group whose members are not all in the emitted image.
 fn mono_closure_probe<'a>(
-    order: &[FuncRef<'a>],
+    closure: &mut Closure<'a, '_>,
     sites: &[Vec<SiteKind<'a>>],
-    machine_sig: &RoutineSig,
     seeds: &[(usize, u32, usize, &'a BoundCall)],
 ) -> Vec<ClosureSite<'a>> {
-    let ma = machine_sig.arity as usize;
-    let id = identity_composite(ma, 0);
-    let mut visited: HashSet<(usize, Vec<u8>)> = HashSet::new();
-    let mut queue: VecDeque<(usize, Composite)> = VecDeque::new();
+    // The caller composed its own group keys with this same walk and
+    // interned nothing, so the node table starts empty here.
+    debug_assert!(closure.nodes.is_empty(), "the probe walks a fresh closure");
+    let order = closure.order;
+    let machine_sig = closure.machine_sig;
+    let id = closure.identity();
     let mut met: Vec<ClosureSite<'a>> = Vec::new();
 
-    let caller_cards = |fi: usize| -> &[u32] {
-        order[fi]
-            .signature
-            .map(|s| s.cardinalities.as_slice())
-            .unwrap_or(machine_sig.cardinalities.as_slice())
-    };
-
     for &(fi, _, callee, record) in seeds {
-        let Ok(callee_sig) = routine_sig(order, callee) else {
+        let Ok((child, _)) = closure.bound_child(&id, fi, callee, record) else {
             continue;
         };
-        let Ok(child) = compose(&id, caller_cards(fi), callee, &record.binding, callee_sig) else {
-            continue;
-        };
-        queue.push_back((callee, child));
+        let _ = closure.intern(callee, child, None);
     }
 
-    while let Some((routine, comp)) = queue.pop_front() {
-        if !visited.insert((routine, canonical_key(&comp))) {
-            continue;
-        }
+    while let Some(slot) = closure.pop() {
+        let routine = closure.nodes[slot].routine;
+        let comp = closure.nodes[slot].composite.clone();
         for site in &sites[routine] {
             match site {
                 // A raw framed call inside a copy is the mono refusal
@@ -804,21 +991,18 @@ fn mono_closure_probe<'a>(
                 // probe never changes which error a link reports.
                 SiteKind::RawCallM { .. } => {}
                 SiteKind::Plain { callee, .. } => {
-                    let mut child = comp.clone();
-                    child.routine = *callee;
-                    queue.push_back((*callee, child));
+                    let child = closure.plain_child(&comp, *callee);
+                    let _ = closure.intern(*callee, child, None);
                 }
-                SiteKind::Bound { callee, record, .. } => {
-                    let Ok(callee_sig) = routine_sig(order, *callee) else {
-                        continue;
-                    };
-                    let Ok(child) = compose(
-                        &comp,
-                        caller_cards(routine),
-                        *callee,
-                        &record.binding,
-                        callee_sig,
-                    ) else {
+                SiteKind::Bound {
+                    addr,
+                    callee,
+                    record,
+                    ..
+                } => {
+                    let Ok((child, callee_sig)) =
+                        closure.bound_child(&comp, routine, *callee, record)
+                    else {
                         continue;
                     };
                     // An exit-bearing bijection site is a fold-group
@@ -837,11 +1021,11 @@ fn mono_closure_probe<'a>(
                             composite: child.clone(),
                         });
                     }
-                    if !(record.exits.is_empty()
-                        && is_full_passthrough(&child, machine_sig, callee_sig))
-                    {
-                        queue.push_back((*callee, child));
+                    if closure.collapses(&child, callee_sig, record) {
+                        continue;
                     }
+                    let site = closure.nested_site(slot, *addr, record);
+                    let _ = closure.intern(*callee, child, site);
                 }
             }
         }
@@ -1138,37 +1322,16 @@ fn mono_stamps<'a>(
     widened: &[HashSet<u32>],
     shared: &HashSet<GroupKey>,
 ) -> Result<(Vec<FuncRef<'a>>, HashMap<(usize, u32), usize>, StampStats), LinkError> {
-    let ma = machine_sig.arity as usize;
-    let id = identity_composite(ma, 0);
-
-    let mut nodes: Vec<StampNode> = Vec::new();
-    let mut key_to_slot: HashMap<Vec<u8>, usize> = HashMap::new();
-    let mut worklist: VecDeque<usize> = VecDeque::new();
+    let mut closure = Closure::new(order, machine_sig);
+    let id = closure.identity();
     let mut seed_target: HashMap<(usize, u32), usize> = HashMap::new();
     let mut stats = StampStats::default();
-    // Every name already in play — every hand-written routine `order`
-    // carries, then every stamp minted as the closure below runs — so
-    // `intern` can refuse a freshly computed name that collides with either
-    // (docs/core.md (the composition engine)).
-    let mut used_names: HashSet<String> = order.iter().map(|f| f.name.to_string()).collect();
 
-    // Seed: compose each site's binding at the machine identity.
+    // Seed: compose each site's binding at the machine identity, the
+    // composite the seed's caller (routine `fi`) runs under.
     for &(fi, addr, callee, record) in seeds {
-        let callee_sig = routine_sig(order, callee)?;
-        // The seed's caller (routine `fi`) runs at the machine identity; its
-        // per-tape cardinalities carry the closed-on-unequal binding rule.
-        let caller_cards = order[fi]
-            .signature
-            .map(|s| s.cardinalities.as_slice())
-            .unwrap_or(machine_sig.cardinalities.as_slice());
-        let child = compose(&id, caller_cards, callee, &record.binding, callee_sig)
-            .map_err(|e| bad_binding(&order[callee].name, &e))?;
-        let (idx, dup) = intern(
-            &mut nodes,
-            &mut key_to_slot,
-            &mut worklist,
-            &mut used_names,
-            order,
+        let (child, _) = closure.bound_child(&id, fi, callee, record)?;
+        let (idx, dup) = closure.intern(
             callee,
             child,
             site_for(fi, addr, record, widened).map(PendingSite::Resolved),
@@ -1186,9 +1349,9 @@ fn mono_stamps<'a>(
     // Per stamp slot: the copy-blob address of each call site and what the
     // copy does there (docs/core.md (call mechanisms)).
     let mut stamp_targets: Vec<HashMap<u32, StampTarget>> = Vec::new();
-    while let Some(slot) = worklist.pop_front() {
-        let routine = nodes[slot].routine;
-        let comp = nodes[slot].composite.clone();
+    while let Some(slot) = closure.pop() {
+        let routine = closure.nodes[slot].routine;
+        let comp = closure.nodes[slot].composite.clone();
         let mut targets: HashMap<u32, StampTarget> = HashMap::new();
         for site in &sites[routine] {
             match site {
@@ -1196,18 +1359,8 @@ fn mono_stamps<'a>(
                     return Err(LinkError::MonoRawFrame(order[routine].name.to_string()));
                 }
                 SiteKind::Plain { addr, callee } => {
-                    let mut child = comp.clone();
-                    child.routine = *callee;
-                    let (idx, dup) = intern(
-                        &mut nodes,
-                        &mut key_to_slot,
-                        &mut worklist,
-                        &mut used_names,
-                        order,
-                        *callee,
-                        child,
-                        None,
-                    )?;
+                    let child = closure.plain_child(&comp, *callee);
+                    let (idx, dup) = closure.intern(*callee, child, None)?;
                     if dup {
                         stats.dedup_savings += 1;
                     }
@@ -1234,15 +1387,10 @@ fn mono_stamps<'a>(
                     // jump opcode nor a `then` — it returns through the
                     // frame, exactly as the identity-world members of the
                     // same group do.
-                    let callee_sig = routine_sig(order, *callee)?;
-                    // The caller is this stamp's own routine; its declared
-                    // cardinalities carry the closed-on-unequal binding rule.
-                    let caller_cards = order[routine]
-                        .signature
-                        .map(|s| s.cardinalities.as_slice())
-                        .unwrap_or(machine_sig.cardinalities.as_slice());
-                    let child = compose(&comp, caller_cards, *callee, &record.binding, callee_sig)
-                        .map_err(|e| bad_binding(&order[*callee].name, &e))?;
+                    // The caller is this stamp's own routine, running under
+                    // this stamp's own composite.
+                    let (child, callee_sig) =
+                        closure.bound_child(&comp, routine, *callee, record)?;
                     if shared.contains(&(*callee, canonical_key(&child))) {
                         targets.insert(
                             *addr,
@@ -1260,43 +1408,18 @@ fn mono_stamps<'a>(
                     // ORIGINAL routine's, translated through the copy's own
                     // offset map when it is built (docs/core.md (call
                     // mechanisms)).
-                    let site = if record.exits.is_empty() {
-                        None
-                    } else {
+                    if !record.exits.is_empty() {
                         check_splice_site(syntax, &order[routine], *addr, &order[*callee].name)?;
-                        Some(PendingSite::InStamp {
-                            slot,
-                            then: *addr + 5,
-                            exits: record.exits.clone(),
-                        })
-                    };
+                    }
+                    let site = closure.nested_site(slot, *addr, record);
                     let splice = site.is_some();
-                    // A binding that composes back to a genuine full
-                    // pass-through — identity placement and maps AND the callee
-                    // alphabet as wide as the machine's on every tape — lowers
-                    // to the original routine. A narrower or wider callee keeps
-                    // a cardinality hole, so it is stamped instead (its trap
-                    // rows are synthesized from the alphabet gap in build_stamp).
-                    // An EXIT-BEARING site never collapses either, whatever its
-                    // binding: a plain call returns through the pushed return
-                    // address and has nowhere to put the other exits
-                    // (docs/core.md (call mechanisms)) — it is a SPLICE, and
-                    // a splice is never a plain call into the generic.
-                    let idx = if record.exits.is_empty()
-                        && is_full_passthrough(&child, machine_sig, callee_sig)
-                    {
+                    // A site that collapses onto the generic mints no child
+                    // and is not walked into: the generic itself already is
+                    // that copy.
+                    let idx = if closure.collapses(&child, callee_sig, record) {
                         *callee
                     } else {
-                        let (idx, dup) = intern(
-                            &mut nodes,
-                            &mut key_to_slot,
-                            &mut worklist,
-                            &mut used_names,
-                            order,
-                            *callee,
-                            child,
-                            site,
-                        )?;
+                        let (idx, dup) = closure.intern(*callee, child, site)?;
                         if dup {
                             stats.dedup_savings += 1;
                         }
@@ -1317,6 +1440,7 @@ fn mono_stamps<'a>(
         }
         stamp_targets[slot] = targets;
     }
+    let nodes = closure.nodes;
     stamp_targets.resize_with(nodes.len(), HashMap::new);
 
     // Materialize each stamp's body, in slot order. A node nested inside
@@ -1404,82 +1528,6 @@ fn resolve_site(
             }))
         }
     }
-}
-
-/// Intern a (routine, composite) into the stamp set, deduped by canonical
-/// key. Returns its ORDER index (`order.len() + slot`) and whether it
-/// resolved to an ALREADY-built stamp (a stamp the dedup avoided).
-///
-/// An EXIT-BEARING node widens the KEY — never the digest — with its call
-/// site's `(caller, then, exits)`: two sites into the same routine under
-/// the same composite are different splices, returning to different
-/// places, and must not share a copy. The caller index is in the key
-/// because `then` and the exit offsets are caller-blob-relative and mean
-/// nothing without it. Widening the DIGEST instead would rename every
-/// existing stamp and move every existing mono image, so an exit-free
-/// node's key, and therefore its `<routine>.<digest8>` name, is unchanged.
-///
-/// The map-visible name is `<routine>.<digest8>` — a period, not the `$`
-/// an earlier scheme used, because `.tma` identifiers cannot contain `$` at
-/// all (docs/formats.md (assembly text)) and a disassembled stamp must
-/// re-lex. A period IS legal in a hand-written routine name, so unlike the
-/// `$` scheme this one cannot rule out a collision by character choice
-/// alone; `used_names` is what makes collision-freedom a checked guarantee
-/// instead of an assumption — a freshly minted name is rejected with a
-/// typed [`LinkError`] if it already names another routine or an earlier
-/// stamp (astronomically unlikely: it needs either a hand-written name that
-/// happens to match `<routine>.<digest8>` exactly, or two distinct
-/// composites whose 32-bit digests collide — docs/core.md (the composition
-/// engine)).
-#[allow(clippy::too_many_arguments)]
-fn intern(
-    nodes: &mut Vec<StampNode>,
-    key_to_slot: &mut HashMap<Vec<u8>, usize>,
-    worklist: &mut VecDeque<usize>,
-    used_names: &mut HashSet<String>,
-    order: &[FuncRef],
-    routine: usize,
-    mut composite: Composite,
-    site: Option<PendingSite>,
-) -> Result<(usize, bool), LinkError> {
-    composite.routine = routine;
-    let mut key = canonical_key(&composite);
-    if let Some(s) = &site {
-        let (caller, then, exits) = s.key_parts(order.len());
-        key.extend_from_slice(&(caller as u64).to_le_bytes());
-        key.extend_from_slice(&then.to_le_bytes());
-        for e in exits {
-            key.extend_from_slice(&e.to_le_bytes());
-        }
-    }
-    if let Some(&slot) = key_to_slot.get(&key) {
-        return Ok((order.len() + slot, true));
-    }
-    let slot = nodes.len();
-    let mut name = format!("{}.{:08x}", order[routine].name, digest(&composite));
-    if site.is_some() {
-        // Two exit-bearing splices of one (routine, composite) share a
-        // digest by construction — the exits are not in it. Number them
-        // rather than refuse (docs/core.md (the composition engine)).
-        let base = name.clone();
-        let mut n = 1u32;
-        while used_names.contains(&name) {
-            name = format!("{base}.{n}");
-            n += 1;
-        }
-    }
-    if !used_names.insert(name.clone()) {
-        return Err(LinkError::StampNameCollision(name));
-    }
-    nodes.push(StampNode {
-        routine,
-        composite,
-        name,
-        site,
-    });
-    key_to_slot.insert(key, slot);
-    worklist.push_back(slot);
-    Ok((order.len() + slot, false))
 }
 
 // -- one stamp body ----------------------------------------------------------
@@ -2256,6 +2304,16 @@ mod tests {
         }
     }
 
+    /// A one-tape, one-symbol machine — enough for a [`Closure`], which
+    /// reads the signature only to compose children these name-minting
+    /// tests never ask for.
+    fn machine_sig() -> RoutineSig {
+        RoutineSig {
+            arity: 1,
+            cardinalities: vec![1],
+        }
+    }
+
     /// A fresh, non-colliding stamp mints as `<routine>.<digest8>` — the
     /// period separator, never the reserved-and-unlexable `$` the earlier
     /// scheme used. Pinning this at the unit level means a regression back
@@ -2264,34 +2322,24 @@ mod tests {
     #[test]
     fn a_fresh_stamp_name_is_dot_separated() {
         let order = vec![func_ref("main"), func_ref("sub")];
-        let mut used_names: HashSet<String> = order.iter().map(|f| f.name.to_string()).collect();
-        let mut nodes = Vec::new();
-        let mut key_to_slot = HashMap::new();
-        let mut worklist = VecDeque::new();
+        let sig = machine_sig();
+        let mut closure = Closure::new(&order, &sig);
 
-        let (idx, dup) = intern(
-            &mut nodes,
-            &mut key_to_slot,
-            &mut worklist,
-            &mut used_names,
-            &order,
-            1,
-            identity_composite(1, 1),
-            None,
-        )
-        .expect("a fresh name mints cleanly");
+        let (idx, dup) = closure
+            .intern(1, identity_composite(1, 1), None)
+            .expect("a fresh name mints cleanly");
         assert!(!dup);
         assert_eq!(idx, order.len(), "the stamp lands right past order");
-        assert_eq!(nodes.len(), 1);
+        assert_eq!(closure.nodes.len(), 1);
         assert!(
-            nodes[0].name.starts_with("sub."),
+            closure.nodes[0].name.starts_with("sub."),
             "stamp name should be `sub.<digest>`: {}",
-            nodes[0].name
+            closure.nodes[0].name
         );
         assert!(
-            !nodes[0].name.contains('$'),
+            !closure.nodes[0].name.contains('$'),
             "must not regress to the unlexable `$` separator: {}",
-            nodes[0].name
+            closure.nodes[0].name
         );
     }
 
@@ -2309,25 +2357,15 @@ mod tests {
         let expected_name = format!("sub.{:08x}", digest(&keyed));
 
         let order = vec![func_ref("main"), func_ref("sub"), func_ref(&expected_name)];
-        let mut used_names: HashSet<String> = order.iter().map(|f| f.name.to_string()).collect();
-        let mut nodes = Vec::new();
-        let mut key_to_slot = HashMap::new();
-        let mut worklist = VecDeque::new();
+        let sig = machine_sig();
+        let mut closure = Closure::new(&order, &sig);
 
-        let err = intern(
-            &mut nodes,
-            &mut key_to_slot,
-            &mut worklist,
-            &mut used_names,
-            &order,
-            1,
-            identity_composite(1, 1),
-            None,
-        )
-        .expect_err("the reserved name is already taken by a hand-written routine");
+        let err = closure
+            .intern(1, identity_composite(1, 1), None)
+            .expect_err("the reserved name is already taken by a hand-written routine");
         assert_eq!(err, LinkError::StampNameCollision(expected_name));
         assert!(
-            nodes.is_empty(),
+            closure.nodes.is_empty(),
             "a refused intern must not leave a partial node behind"
         );
     }
