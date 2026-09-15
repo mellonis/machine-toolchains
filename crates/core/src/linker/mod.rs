@@ -70,6 +70,19 @@ pub enum LinkError {
         tape: usize,
         param: Option<String>,
     },
+    /// A call site binds by index into a callee that is WIDER than the
+    /// caller's bands: more tapes than the caller has, or an alphabet a
+    /// caller band cannot hold. Either would let the callee touch what
+    /// the caller lacks — address a band that does not exist, or write an
+    /// index past the band's width — so it is an error, not a warning
+    /// (docs/core.md (link warnings)). `what` names the dimension:
+    /// `"tape count"`, or `"the alphabet of tape N"`.
+    CalleeWider {
+        callee: String,
+        caller: String,
+        offset: u32,
+        what: String,
+    },
     /// A frame descriptor is inconsistent with the entry signature: a
     /// physical-tape index at or past the machine's arity, or an
     /// undecodable hand-authored descriptor. Carries the owning function's
@@ -177,6 +190,17 @@ impl std::fmt::Display for LinkError {
                      opaque; every state that reads it must have a `*` row"
                 )
             }
+            Self::CalleeWider {
+                callee,
+                caller,
+                offset,
+                what,
+            } => write!(
+                f,
+                "`{callee}`, called from `{caller}`+0x{offset:04x}, is wider than the \
+                 caller in {what}; a call binding by index cannot reach what the \
+                 caller does not have"
+            ),
             Self::BadFrameDescriptor { symbol, message } => {
                 write!(f, "bad frame descriptor in `{symbol}`: {message}")
             }

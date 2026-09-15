@@ -108,10 +108,16 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     if !record.exits.is_empty() {
         let iface = require_interface(callee, "an exit vector")?;
         if record.exits.len() != usize::from(iface.exits) {
-            return Err(bad(callee, exit_count_mismatch(callee, record, declared)));
+            return Err(bad(
+                callee,
+                exit_count_mismatch(&callee.name, record.exits.len(), declared),
+            ));
         }
     } else if declared != 0 {
-        return Err(bad(callee, exit_count_mismatch(callee, record, declared)));
+        return Err(bad(
+            callee,
+            exit_count_mismatch(&callee.name, record.exits.len(), declared),
+        ));
     }
     Ok(BoundCall {
         binding,
@@ -119,16 +125,13 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     })
 }
 
-/// The exit-arity refusal's text, shared by both arms that raise it — a
-/// site that spells the wrong number of exits and one that spells none
-/// into a callee that declares some. One format string, so the two read
-/// identically ("supplies 0 exit(s), but `sub` declares 2").
-fn exit_count_mismatch(callee: &FuncRef, record: &BoundCall, declared: usize) -> String {
-    format!(
-        "the call site supplies {} exit(s), but `{}` declares {declared}",
-        record.exits.len(),
-        callee.name,
-    )
+/// The exit-arity refusal's text, shared by every site that raises it — a
+/// bound site that spells the wrong number of exits, one that spells none
+/// into a callee that declares some, and a PLAIN site (`engine::check_sites`),
+/// which always supplies zero. One format string, so no two spellings can
+/// drift ("supplies 0 exit(s), but `sub` declares 2").
+pub(super) fn exit_count_mismatch(callee_name: &str, supplied: usize, declared: usize) -> String {
+    format!("the call site supplies {supplied} exit(s), but `{callee_name}` declares {declared}")
 }
 
 /// Turn every `dst_label` into the glyph's position in the callee's

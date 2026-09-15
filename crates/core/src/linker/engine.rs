@@ -178,6 +178,11 @@ pub(super) fn lower<'a>(
         .iter()
         .map(|f| scan_sites(syntax, f, machine_sig, &order))
         .collect::<Result<_, _>>()?;
+    // Index-binding sites are graded once, here, over the one scan every
+    // mechanism shares (docs/core.md (link warnings)) — before the
+    // bindingless early-out below, so a plain-call-only link is graded
+    // too.
+    let diagnostics = check_sites(&order, &sites, machine_sig)?;
     let has_bound = sites
         .iter()
         .any(|s| s.iter().any(|k| matches!(k, SiteKind::Bound { .. })));
@@ -187,7 +192,7 @@ pub(super) fn lower<'a>(
             plan: None,
             stats: EngineStats::default(),
             orphaned: Vec::new(),
-            diagnostics: Vec::new(),
+            diagnostics,
             folds: Vec::new(),
         });
     }
@@ -195,8 +200,16 @@ pub(super) fn lower<'a>(
     // Mono stamps rewritten copies; hybrid classifies per site. FRAMES keeps
     // one generic copy and a runtime compose table (`lower_frames`).
     match call_mech {
-        CallMech::Mono => super::stamp::lower_mono(syntax, order, &sites, machine_sig),
-        CallMech::Hybrid => super::stamp::lower_hybrid(syntax, order, &sites, machine_sig),
+        CallMech::Mono => {
+            let mut lowered = super::stamp::lower_mono(syntax, order, &sites, machine_sig)?;
+            lowered.diagnostics = diagnostics;
+            Ok(lowered)
+        }
+        CallMech::Hybrid => {
+            let mut lowered = super::stamp::lower_hybrid(syntax, order, &sites, machine_sig)?;
+            lowered.diagnostics = diagnostics;
+            Ok(lowered)
+        }
         CallMech::Frames => {
             let (order, plan, stats) = lower_frames(syntax, order, &sites, machine_sig)?;
             Ok(Lowered {
@@ -204,7 +217,7 @@ pub(super) fn lower<'a>(
                 plan,
                 stats,
                 orphaned: Vec::new(),
-                diagnostics: Vec::new(),
+                diagnostics,
                 folds: Vec::new(),
             })
         }
@@ -618,10 +631,6 @@ pub(super) fn bad_binding(callee: &str, e: &super::compose::ComposeError) -> Lin
 /// line is the largest `-g` line-table offset at or below the site — the
 /// same "innermost preceding line" rule the map sidecar uses
 /// (docs/formats.md (map sidecar)); `None` without debug data.
-// No call site raises a diagnostic yet — the site checks that call this
-// land separately (docs/core.md (link warnings)); retained (hence the
-// allow) so this helper and its tests are already in place for them.
-#[allow(dead_code)]
 pub(super) fn diag_at(
     order: &[FuncRef],
     fi: usize,
@@ -731,6 +740,180 @@ pub(super) fn scan_sites<'a>(
         }
     }
     Ok(out)
+}
+
+/// Grade every index-binding call site against the callee's declared
+/// shape (docs/core.md (link warnings)): a plain call (or a relocated
+/// tail jump/branch — `SiteKind::Plain` covers both, and the tail-call
+/// pass turns calls into jumps, so restricting this to `call` opcodes
+/// would let the same hazard back in whenever the optimizer had run),
+/// and each tape of a bound call whose map is OMITTED. An explicit map
+/// — the empty `{}` included — is the author's statement that the
+/// re-labelling is meant, and is never graded.
+///
+/// A plain site into a callee that declares exits > 0 is graded first,
+/// before its width: the site supplies no exit vector at all, so the
+/// callee's `retx #k` would index one that is not there. Shares its
+/// wording with the resolution pre-pass's identical bound-site refusal
+/// through `interface::exit_count_mismatch`, so the two spellings cannot
+/// drift.
+///
+/// Runs ONCE, from `lower`, over the single site scan every mechanism
+/// shares: hybrid's second scan (`stamp::lower_hybrid`) exists to
+/// classify stamps, and a check living there would report every finding
+/// twice. `order`'s index order is layout order (main first, then BFS
+/// discovery order — docs/core.md (linking)), and `scan_sites` pushes
+/// each function's sites in ascending blob-offset order (it walks
+/// `decode::decode_stream` front to back), so iterating `sites` in
+/// index order with each function's list in its own order already
+/// yields diagnostics in (function order, then blob offset) — the order
+/// `LinkReport.diagnostics` promises.
+pub(super) fn check_sites(
+    order: &[FuncRef],
+    sites: &[Vec<SiteKind>],
+    machine_sig: &RoutineSig,
+) -> Result<Vec<super::LinkDiagnostic>, LinkError> {
+    let mut out = Vec::new();
+    for (fi, func_sites) in sites.iter().enumerate() {
+        let caller_sig = order[fi].signature.unwrap_or(machine_sig);
+        for site in func_sites {
+            match site {
+                SiteKind::Plain { addr, callee } => {
+                    let Some(callee_sig) = order[*callee].signature else {
+                        continue; // nothing declared, nothing to compare
+                    };
+                    let declared = usize::from(order[*callee].interface.map_or(0, |i| i.exits));
+                    if declared != 0 {
+                        return Err(LinkError::BadBinding {
+                            callee: order[*callee].name.to_string(),
+                            message: super::interface::exit_count_mismatch(
+                                &order[*callee].name,
+                                0,
+                                declared,
+                            ),
+                        });
+                    }
+                    if callee_sig.arity > caller_sig.arity {
+                        return Err(wider(order, fi, *callee, *addr, "tape count".to_string()));
+                    }
+                    for k in 0..usize::from(callee_sig.arity) {
+                        grade_tape(
+                            order, fi, *callee, *addr, k, k, caller_sig, callee_sig, &mut out,
+                        )?;
+                    }
+                }
+                SiteKind::Bound {
+                    addr,
+                    callee,
+                    record,
+                    ..
+                } => {
+                    let Some(callee_sig) = order[*callee].signature else {
+                        continue;
+                    };
+                    for (k, tb) in record.binding.iter().enumerate() {
+                        if tb.map_written {
+                            continue; // the author said what they meant
+                        }
+                        grade_tape(
+                            order,
+                            fi,
+                            *callee,
+                            *addr,
+                            usize::from(tb.caller_tape),
+                            k,
+                            caller_sig,
+                            callee_sig,
+                            &mut out,
+                        )?;
+                    }
+                }
+                SiteKind::RawCallM { .. } => {}
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// One tape of one index-binding site: caller band `ct` against callee
+/// tape `k`.
+#[allow(clippy::too_many_arguments)]
+fn grade_tape(
+    order: &[FuncRef],
+    fi: usize,
+    callee: usize,
+    addr: u32,
+    ct: usize,
+    k: usize,
+    caller_sig: &RoutineSig,
+    callee_sig: &RoutineSig,
+    out: &mut Vec<super::LinkDiagnostic>,
+) -> Result<(), LinkError> {
+    let Some(&caller_card) = caller_sig.cardinalities.get(ct) else {
+        return Ok(()); // the caller-tape range is the composition algebra's to police
+    };
+    let Some(&callee_card) = callee_sig.cardinalities.get(k) else {
+        return Ok(());
+    };
+    if callee_card > caller_card {
+        return Err(wider(
+            order,
+            fi,
+            callee,
+            addr,
+            format!("the alphabet of tape {ct}"),
+        ));
+    }
+    if callee_card < caller_card {
+        out.push(diag_at(
+            order,
+            fi,
+            addr,
+            "narrow-alphabet",
+            format!(
+                "`{}` reads a {callee_card}-symbol alphabet where `{}`'s tape {ct} \
+                 is {caller_card} wide",
+                order[callee].name, order[fi].name
+            ),
+        ));
+        return Ok(());
+    }
+    // Equal width: compare the glyphs themselves, when both sides declare
+    // them. This is the only mechanism that detects a REORDERING
+    // (docs/tmt/language.md (symbol maps)).
+    let (Some(caller_if), Some(callee_if)) = (order[fi].interface, order[callee].interface) else {
+        return Ok(());
+    };
+    let (Some(cg), Some(eg)) = (caller_if.glyphs.get(ct), callee_if.glyphs.get(k)) else {
+        return Ok(());
+    };
+    if let Some(pos) = cg.iter().zip(eg).position(|(a, b)| a != b) {
+        out.push(diag_at(
+            order,
+            fi,
+            addr,
+            "glyph-mismatch",
+            format!(
+                "`{}` declares ({}) where `{}`'s tape {ct} declares ({}); they first \
+                 differ at position {pos}",
+                order[callee].name,
+                eg.join(", "),
+                order[fi].name,
+                cg.join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Build the `CalleeWider` error for a graded site.
+fn wider(order: &[FuncRef], fi: usize, callee: usize, addr: u32, what: String) -> LinkError {
+    LinkError::CalleeWider {
+        callee: order[callee].name.to_string(),
+        caller: order[fi].name.to_string(),
+        offset: addr,
+        what,
+    }
 }
 
 /// Validate one binding once (docs/formats.md (bound calls)) and return its
