@@ -2,9 +2,10 @@
 //! exit-bearing call (from one site and from three), a fold inside a
 //! stamped copy, an open binding, a mixed splice-and-frame caller, a
 //! cross-object bound call, a shared fold group reached only through a
-//! frame (no identity-world member at all), and a tail-position framed
-//! call observation. Driven from `.tma`, because the `.tmc` front end has
-//! no `state` parameters yet (docs/core.md (call mechanisms)).
+//! frame (no identity-world member at all), a lone exit-bearing site
+//! inside a framed callee (no fold group at all), and a tail-position
+//! framed call observation. Driven from `.tma`, because the `.tmc` front
+//! end has no `state` parameters yet (docs/core.md (call mechanisms)).
 //!
 //! Mono splices a per-site copy of an exit-bearing callee, entered by a
 //! jump and leaving through jumps; frames gives every site a descriptor
@@ -209,7 +210,10 @@ fn a_closure_fold_program_agrees_across_mechanisms() {
 
 /// ONE exit-bearing site: hybrid splices it (one site never pays to
 /// share), mono splices it, frames descriptors it. All three must leave
-/// the same tape.
+/// the same tape. `main` seeds physical `1` before the call so the
+/// dispatch hits `T0` row 1 and `retx #1` (exit index 1, `lost`) — the
+/// exit an unseeded blank tape would never reach, since a blank read
+/// always matches row 0 and `retx #0` (`won`).
 const ONE_EXIT_SITE: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
@@ -222,6 +226,7 @@ T0:     .row    [0]
 T1:     .targets zero, one, two
 .section code
 .func main
+        wrmv    [1], [.]
         call    pick [n: 0] exits=(won, lost)
         stp
 won:    wrmv    [1], [.]
@@ -269,7 +274,11 @@ rest:   ret
 
 /// An open binding: a 5-symbol band into a 3-symbol callee that declares
 /// its tape opaque and carries a `*` row. Modelled on the probe's
-/// hand-authored descriptor, written declaratively.
+/// hand-authored descriptor, written declaratively. `main` seeds three
+/// cells before the call — physical `a`, `b`, then an opaque symbol
+/// (`c`, with no image in `swapABopen`'s alphabet) — so the callee's walk
+/// actually reaches `swapA`, `swapB`, and the `*`-row opaque passthrough,
+/// not just the blank-read `done` exit.
 const OPEN: &str = "\
 .routine main, tapes=1, alpha=(5)
 .param t, ('_', 'a', 'b', 'c', 'd')
@@ -283,6 +292,10 @@ T0:     .row    [0]
 T1:     .targets done, swapA, swapB, pass
 .section code
 .func main
+        wrmv    [1], [>]
+        wrmv    [2], [>]
+        wrmv    [3], [<]
+        wrmv    [-], [<]
         call    swapABopen [0{1->1, 2->2, *}]
         stp
 .func swapABopen
@@ -326,7 +339,7 @@ const XO_CALLEE: &str = "\
 fn an_exit_bearing_program_agrees_across_mechanisms() {
     for src in [ONE_EXIT_SITE, THREE_EXIT_SITES] {
         let results: Vec<_> = MECHS.iter().map(|&m| run(&build(src, m), &[3])).collect();
-        for (m, r) in MECHS.iter().zip(&results[1..]) {
+        for (m, r) in MECHS.iter().zip(&results).skip(1) {
             assert_eq!(
                 (&results[0].0, &results[0].1),
                 (&r.0, &r.1),
@@ -342,7 +355,7 @@ fn an_exit_bearing_program_agrees_across_mechanisms() {
 #[test]
 fn an_open_binding_program_agrees_across_mechanisms() {
     let results: Vec<_> = MECHS.iter().map(|&m| run(&build(OPEN, m), &[5])).collect();
-    for (m, r) in MECHS.iter().zip(&results[1..]) {
+    for (m, r) in MECHS.iter().zip(&results).skip(1) {
         assert_eq!(
             (&results[0].0, &results[0].1),
             (&r.0, &r.1),
@@ -374,7 +387,7 @@ fn a_cross_object_program_agrees_across_mechanisms() {
         })
         .collect();
     let results: Vec<_> = images.iter().map(|e| run(e, &[5])).collect();
-    for (m, r) in MECHS.iter().zip(&results[1..]) {
+    for (m, r) in MECHS.iter().zip(&results).skip(1) {
         assert_eq!(
             (&results[0].0, &results[0].1),
             (&r.0, &r.1),
@@ -426,7 +439,7 @@ fn a_mixed_splice_and_frame_caller_agrees_across_mechanisms() {
         .iter()
         .map(|&m| run(&build(MIXED_SPLICE_AND_FRAME, m), &[5]))
         .collect();
-    for (m, r) in MECHS.iter().zip(&results[1..]) {
+    for (m, r) in MECHS.iter().zip(&results).skip(1) {
         assert_eq!(
             (&results[0].0, &results[0].1),
             (&r.0, &r.1),
@@ -521,11 +534,71 @@ fn a_shared_group_under_an_active_frame_agrees_across_mechanisms() {
     assert!(fold.shared, "112 > 84, so hybrid shares: {fold:?}");
 
     let results: Vec<_> = MECHS.iter().map(|&m| run(&build(&src, m), &[4])).collect();
-    for (m, r) in MECHS.iter().zip(&results[1..]) {
+    for (m, r) in MECHS.iter().zip(&results).skip(1) {
         assert_eq!(
             (&results[0].0, &results[0].1),
             (&r.0, &r.1),
             "mono vs {m} diverged on a shared group reached only through a frame"
+        );
+    }
+}
+
+// ── an exit-bearing site inside a framed callee ────────────────────────────
+
+/// `outer` is reached only through a holey (unequal-cardinality) binding
+/// from `main`, so — like `shared_under_frame`'s `holey` — it is never in
+/// `identity_world` and never a mono seed: its own `call pick [0]
+/// exits=(a)` is never grouped by the byte rule at all (no `FoldDecision`
+/// is ever produced for `pick`). It becomes an ordinary framed call from
+/// inside `outer`'s own already-framed, ungrouped body — the shape where
+/// the exit's landing address has to be computed relative to a caller
+/// that is ITSELF visited under a non-identity `fr_row`, not the machine's
+/// own frame. `pick` dispatches and returns through its exit exactly as
+/// `ONE_EXIT_SITE`'s does.
+const EXITS_UNDER_FRAME: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', 'c', 'd')
+.routine outer, tapes=1, alpha=(3)
+.param u, ('_', 'x', 'y')
+.routine pick, tapes=1, alpha=(3), exits=1
+.param n, ('_', 'x', 'y')
+.section tables
+T0:     .row    [0]
+        .row    [*]
+T1:     .targets zero, rest
+.section code
+.func main
+        call    outer [0{1->1, 2->2}]
+        stp
+.func outer
+        call    pick [0] exits=(a)
+        ret
+a:      wrmv    [1], [.]
+        ret
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+rest:   ret
+";
+
+/// Mutation it catches: drop the exit shift into post-rewrite offsets for
+/// a site visited under a non-identity `fr_row` in `build_plan`, and the
+/// framed exit lands on the wrong instruction under frames/hybrid — no
+/// fold decision exists for this site to check instead, so the tape
+/// compare is the only signal.
+#[test]
+fn an_exit_bearing_site_inside_a_framed_callee_agrees_across_mechanisms() {
+    let results: Vec<_> = MECHS
+        .iter()
+        .map(|&m| run(&build(EXITS_UNDER_FRAME, m), &[5]))
+        .collect();
+    for (m, r) in MECHS.iter().zip(&results).skip(1) {
+        assert_eq!(
+            (&results[0].0, &results[0].1),
+            (&r.0, &r.1),
+            "mono vs {m} diverged on an exit-bearing site inside a framed callee"
         );
     }
 }
@@ -607,7 +680,11 @@ fn a_tail_position_framed_call_is_observed() {
     let first = &observed[0].1;
     let all_agree = observed.iter().all(|(_, r)| match (first, r) {
         (Ok(a), Ok(b)) => outcome_kind_only(a, b),
-        (Err(_), Err(_)) => true,
+        // Two refusals agree only when they say the SAME thing — comparing
+        // by `Display` text catches one mechanism refusing for a
+        // different reason than another, which a blanket `(Err, Err) =>
+        // true` would hide.
+        (Err(ea), Err(eb)) => ea == eb,
         _ => false,
     });
 

@@ -778,15 +778,18 @@ q:      ret
     )
 }
 
-// The four fixed-size fixtures below are copied verbatim from
-// `link_matrix.rs` (each integration test binary is its own crate, so no
-// cross-import): an exit-bearing call from one site and from three, an
-// open binding, and a mixed splice-and-frame caller. `link_matrix.rs`
-// runs them; this file only re-links them, to prove the fold decision and
-// the intern keys behind them are deterministic.
+// The fixed-size fixtures below are copied verbatim from `link_matrix.rs`
+// (each integration test binary is its own crate, so no cross-import): an
+// exit-bearing call from one site and from three, an open binding, a
+// mixed splice-and-frame caller, and a lone exit-bearing site inside a
+// framed callee. `link_matrix.rs` runs them; this file only re-links
+// them, to prove the fold decision and the intern keys behind them are
+// deterministic.
 
 /// ONE exit-bearing site: hybrid splices it (one site never pays to
-/// share), mono splices it, frames descriptors it.
+/// share), mono splices it, frames descriptors it. `main` seeds physical
+/// `1` before the call so dispatch hits `T0` row 1 and `retx #1` (exit
+/// index 1, `lost`) rather than the blank-read exit 0.
 const ONE_EXIT_SITE: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
@@ -799,6 +802,7 @@ T0:     .row    [0]
 T1:     .targets zero, one, two
 .section code
 .func main
+        wrmv    [1], [.]
         call    pick [n: 0] exits=(won, lost)
         stp
 won:    wrmv    [1], [.]
@@ -844,7 +848,9 @@ rest:   ret
 ";
 
 /// An open binding: a 5-symbol band into a 3-symbol callee that declares
-/// its tape opaque and carries a `*` row.
+/// its tape opaque and carries a `*` row. `main` seeds three cells before
+/// the call so the callee's walk actually reaches `swapA`, `swapB`, and
+/// the `*`-row opaque passthrough, not just the blank-read `done` exit.
 const OPEN: &str = "\
 .routine main, tapes=1, alpha=(5)
 .param t, ('_', 'a', 'b', 'c', 'd')
@@ -858,6 +864,10 @@ T0:     .row    [0]
 T1:     .targets done, swapA, swapB, pass
 .section code
 .func main
+        wrmv    [1], [>]
+        wrmv    [2], [>]
+        wrmv    [3], [<]
+        wrmv    [-], [<]
         call    swapABopen [0{1->1, 2->2, *}]
         stp
 .func swapABopen
@@ -943,6 +953,39 @@ r:      ret
     )
 }
 
+/// The lone-exit-under-a-frame shape (`link_matrix.rs`'s
+/// `EXITS_UNDER_FRAME`): `outer` is reached only through a holey binding,
+/// so its own exit-bearing call to `pick` is never grouped by the byte
+/// rule at all — no fold decision exists for it — and lowers as an
+/// ordinary framed call from inside an already-framed, ungrouped body.
+const EXITS_UNDER_FRAME: &str = "\
+.routine main, tapes=1, alpha=(5)
+.param t, ('_', 'a', 'b', 'c', 'd')
+.routine outer, tapes=1, alpha=(3)
+.param u, ('_', 'x', 'y')
+.routine pick, tapes=1, alpha=(3), exits=1
+.param n, ('_', 'x', 'y')
+.section tables
+T0:     .row    [0]
+        .row    [*]
+T1:     .targets zero, rest
+.section code
+.func main
+        call    outer [0{1->1, 2->2}]
+        stp
+.func outer
+        call    pick [0] exits=(a)
+        ret
+a:      wrmv    [1], [.]
+        ret
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+rest:   ret
+";
+
 #[test]
 fn every_program_relinks_byte_identically_in_every_mode() {
     // Reproducible builds: the closure BFS is deterministic, so linking the
@@ -964,6 +1007,7 @@ fn every_program_relinks_byte_identically_in_every_mode() {
         OPEN,
         MIXED_SPLICE_AND_FRAME,
         shared_frame.as_str(),
+        EXITS_UNDER_FRAME,
     ] {
         for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
             let a = build_full(src, mech);
