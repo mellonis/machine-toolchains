@@ -165,6 +165,31 @@ fn directory(exe: &mtc_core::formats::executable::Executable) -> Vec<u32> {
         .collect()
 }
 
+/// The frames region's COMPOSE MATRIX, decoded positionally from the
+/// region header rather than searched for (docs/formats.md (frames
+/// region)): `K u16`, `S u16`, `K × u32` directory, then `(K + 1) × S`
+/// little-endian `u16`s — row = active frame `0..=K`, column = framed-call
+/// site in emission order.
+fn compose_matrix(exe: &mtc_core::formats::executable::Executable) -> Vec<Vec<u16>> {
+    assert_ne!(exe.frames_offset, 0, "no frames region in the image");
+    let t = &exe.tables;
+    let mut p = exe.frames_offset as usize;
+    let k = usize::from(u16::from_le_bytes([t[p], t[p + 1]]));
+    let s = usize::from(u16::from_le_bytes([t[p + 2], t[p + 3]]));
+    p += 4 + 4 * k;
+    (0..=k)
+        .map(|_| {
+            (0..s)
+                .map(|_| {
+                    let v = u16::from_le_bytes([t[p], t[p + 1]]);
+                    p += 2;
+                    v
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// One frame descriptor's EXIT VECTOR, decoded from its own header rather
 /// than searched for (docs/formats.md (frame descriptors)): `arity u8`,
 /// `exit_count u16`, then per tape `phys u8` + two length-prefixed `u16`
@@ -355,6 +380,34 @@ k:      wr      [1]
         ret
 .func inner
         ret
+";
+
+/// A framed bound site NESTED inside an EXIT-BEARING framed callee.
+/// `main`'s swap into `mid` carries an exit, so under frames `mid` runs
+/// under a composite whose directory entry is interned with that site's
+/// exit vector in its key — and `mid`'s own exit-bearing call into `big`
+/// must compose in THAT composite's row, not the identity row.
+///
+/// Two framed sites, in emission order: `main`'s (column 0) and `mid`'s
+/// (column 1); two composites, `mid`'s (row 1) and `big`'s (row 2).
+const NESTED_UNDER_EXIT_BEARING: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine mid, tapes=1, alpha=(3), exits=1
+.param m, ('_', '0', '1')
+.routine big, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    mid [0{1->2, 2->1}] exits=(p)
+        stp
+p:      stp
+.func mid
+        call    big [0] exits=(r)
+        retx    #0
+r:      retx    #0
+.func big
+        retx    #0
 ";
 
 /// An exit-bearing site whose binding is the full identity — the exact
@@ -1946,4 +1999,33 @@ fn a_table_bearing_callee_counts_its_table_and_folds_report_in_sorted_order() {
         assert_eq!(f.descriptor_bytes, 24, "two 12-byte descriptors: {f:?}");
         assert!(f.shared, "{f:?}");
     }
+}
+
+/// Mutation it catches: derive a nested site's active-frame row by looking
+/// its enclosing composite up under the BARE canonical key instead of
+/// carrying the index it was interned under, and `mid`'s compose column
+/// lands in row 0 while row 1 — the row `mid` actually runs under — keeps
+/// the reserved-invalid 0. The link still reports success; the image traps
+/// on a bad operand the first time `mid` calls `big`.
+#[test]
+fn a_site_nested_under_an_exit_bearing_frame_composes_in_its_own_row() {
+    let out = link(
+        &fake_syntax(),
+        &[asm(NESTED_UNDER_EXIT_BEARING)],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect("links under frames");
+    assert_eq!(
+        directory(&out.executable).len(),
+        2,
+        "one composite for `mid`, one for `big`"
+    );
+    assert_eq!(
+        compose_matrix(&out.executable),
+        vec![vec![1, 0], vec![0, 2], vec![0, 0]],
+        "row 0 is the machine frame, where only `main`'s site is live and \
+         selects `mid`'s composite; row 1 is inside `mid`, where its own \
+         site selects `big`'s; row 2 is inside `big`, which frames nothing"
+    );
 }

@@ -4,7 +4,8 @@
 //! cross-object bound call, a shared fold group reached only through a
 //! frame (no identity-world member at all), a lone exit-bearing site
 //! inside a framed callee (no fold group at all), one callee spliced
-//! twice with a site inside each copy, and a tail-position framed call
+//! twice with a site inside each copy, a bound call nested inside an
+//! EXIT-BEARING framed callee, and a tail-position framed call
 //! observation. Driven from `.tma`, because the `.tmc` front end has no
 //! `state` parameters yet (docs/core.md (call mechanisms)).
 //!
@@ -14,12 +15,6 @@
 //! image that does BOTH — a stamped copy reaching a shared generic body
 //! through a framed call. The three images differ by construction; what
 //! must not differ is what they compute.
-//!
-//! One shape runs two of the three, and says so at its own test: a
-//! framed call nested inside an EXIT-BEARING framed callee takes its
-//! compose column from the identity row today, so the twice-spliced
-//! callee's pure-frames image traps and only mono and hybrid are
-//! compared there.
 //!
 //! This is where that claim is EXECUTED. Core's `link_exits.rs` proves the
 //! byte arithmetic and the jump displacements against a fake dialect it
@@ -610,12 +605,6 @@ r:      retx    #0
 /// copy of `mid` goes uncounted — `big`'s group reports one site where
 /// two are built, and at the 60-`nop` sizing below it splices twice
 /// instead of sharing one body.
-///
-/// Pure frames is not in the comparison, alone in this file: a framed
-/// call nested inside an EXIT-BEARING framed callee takes its compose
-/// column from the identity row today and the image traps there. That is
-/// a frames-path defect this shape exposes, not something the fold count
-/// steers — mono and hybrid are the two mechanisms it does steer.
 #[test]
 fn a_site_inside_each_copy_of_a_twice_spliced_callee_is_counted() {
     let small = twice_spliced_callee(20);
@@ -675,19 +664,78 @@ fn a_site_inside_each_copy_of_a_twice_spliced_callee_is_counted() {
     assert!(big.shared, "66 > 56, so hybrid shares: {big:?}");
 
     for src in [&small, &large] {
-        let mono = run(&build(src, CallMech::Mono), &[4]);
-        let hybrid = run(&build(src, CallMech::Hybrid), &[4]);
-        assert_eq!(
-            (&mono.0, &mono.1),
-            (&hybrid.0, &hybrid.1),
-            "mono vs hybrid diverged on a twice-spliced callee"
-        );
+        let results: Vec<_> = MECHS.iter().map(|&m| run(&build(src, m), &[4])).collect();
+        for (m, r) in MECHS.iter().zip(&results).skip(1) {
+            assert_eq!(
+                (&results[0].0, &results[0].1),
+                (&r.0, &r.1),
+                "mono vs {m} diverged on a twice-spliced callee"
+            );
+        }
         // What they agree ON: `big` runs once per `mid` call, writing its
         // virtual 1 — physical 2 under the swap — and stepping right.
-        assert_eq!(mono.0, Outcome::Stopped, "the program runs to a stop");
-        let seen: Vec<u8> = (0..3).map(|p| cell_at(&mono.1[0], p)).collect();
+        assert_eq!(results[0].0, Outcome::Stopped, "the program runs to a stop");
+        let seen: Vec<u8> = (0..3).map(|p| cell_at(&results[0].1[0], p)).collect();
         assert_eq!(seen, vec![2, 2, 0], "two swapped writes, then a blank");
     }
+}
+
+// ── a bound call nested inside an exit-bearing framed callee ───────────────
+
+/// `main`'s swap into `mid` carries an exit, so under FRAMES `mid` runs
+/// under a composite whose directory entry is keyed by that site's exit
+/// vector — and `mid`'s own exit-bearing call into `big` has to compose in
+/// THAT composite's row. `big` writes its virtual 1 (physical 2 under the
+/// swap) and steps right, then both exits unwind: `big`'s `retx #0` lands
+/// on `mid`'s `r`, whose `retx #0` lands on `main`'s `p`.
+const NESTED_UNDER_EXIT_BEARING: &str = "\
+.routine main, tapes=1, alpha=(4)
+.param t, ('_', 'x', 'y', 'z')
+.routine mid, tapes=1, alpha=(4), exits=1
+.param v, ('_', 'x', 'y', 'z')
+.routine big, tapes=1, alpha=(4), exits=1
+.param n, ('_', 'x', 'y', 'z')
+.section code
+.func main
+        call    mid [0{1->2, 2->1}] exits=(p)
+        stp
+p:      stp
+.func mid
+        call    big [0] exits=(r)
+        retx    #0
+r:      retx    #0
+.func big
+        wrmv    [1], [>]
+        retx    #0
+";
+
+/// Mutation it catches: re-derive a nested site's active-frame row from
+/// its enclosing composite's bare canonical key instead of carrying the
+/// index it was interned under, and the frames image writes `mid`'s
+/// compose column into the identity row while `mid`'s own row keeps the
+/// reserved-invalid 0 — the link reports success and the run traps on a
+/// bad operand. Core's `link_exits.rs` pins the matrix itself; this is the
+/// same defect seen from the tape.
+#[test]
+fn a_bound_call_nested_under_an_exit_bearing_frame_agrees_across_mechanisms() {
+    let results: Vec<_> = MECHS
+        .iter()
+        .map(|&m| run(&build(NESTED_UNDER_EXIT_BEARING, m), &[4]))
+        .collect();
+    for (m, r) in MECHS.iter().zip(&results).skip(1) {
+        assert_eq!(
+            (&results[0].0, &results[0].1),
+            (&r.0, &r.1),
+            "mono vs {m} diverged on a call nested under an exit-bearing frame"
+        );
+    }
+    assert_eq!(
+        results[0].0,
+        Outcome::Stopped,
+        "both exits unwind to `main`'s `stp`"
+    );
+    let seen: Vec<u8> = (0..2).map(|p| cell_at(&results[0].1[0], p)).collect();
+    assert_eq!(seen, vec![2, 0], "one swapped write, then a blank");
 }
 
 // ── an exit-bearing site inside a framed callee ────────────────────────────

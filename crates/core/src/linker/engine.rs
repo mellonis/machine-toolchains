@@ -254,19 +254,24 @@ pub(super) fn lower_frames<'a>(
     // (function, bound-site addr) -> active-frame row -> child composite index.
     let mut site_columns: HashMap<(usize, u32), HashMap<u16, u16>> = HashMap::new();
 
-    let mut visited: HashSet<(usize, Vec<u8>)> = HashSet::new();
-    let mut queue: VecDeque<(usize, Composite)> = VecDeque::new();
-    queue.push_back((0, identity_composite(machine_arity, 0)));
+    // A queued node is `(routine, its composite, the row that composite
+    // occupies)`. The row TRAVELS with the node rather than being looked
+    // up again from the composite: an exit-bearing composite is interned
+    // under a key the composite alone does not spell (the site's exits
+    // widen it), so re-deriving the row from the composite would miss and
+    // silently read as the identity row — the nested site's column would
+    // be written into row 0 and its own row left reserved-invalid
+    // (docs/core.md (call mechanisms)). `visited` keys on the same
+    // identity, so two composites that differ only in their exits are two
+    // nodes here exactly as they are two directory entries.
+    let mut visited: HashSet<(usize, u16)> = HashSet::new();
+    let mut queue: VecDeque<(usize, Composite, u16)> = VecDeque::new();
+    queue.push_back((0, identity_composite(machine_arity, 0), 0));
 
-    while let Some((fi, ctx)) = queue.pop_front() {
-        let ckey = canonical_key(&ctx);
-        if !visited.insert((fi, ckey.clone())) {
+    while let Some((fi, ctx, fr_row)) = queue.pop_front() {
+        if !visited.insert((fi, fr_row)) {
             continue;
         }
-        // Row of the active frame: 0 for identity, else the composite's
-        // 1-based engine index (every non-identity context was interned
-        // before it was enqueued).
-        let fr_row = comp_index.get(&ckey).copied().unwrap_or(0);
 
         // The caller's per-virtual-tape cardinalities: the routine's own
         // signature (the invariant carrier), else the machine signature at
@@ -279,7 +284,7 @@ pub(super) fn lower_frames<'a>(
         for site in &sites[fi] {
             match site {
                 SiteKind::Plain { callee, .. } => {
-                    queue.push_back((*callee, ctx.clone()));
+                    queue.push_back((*callee, ctx.clone(), fr_row));
                 }
                 SiteKind::Bound {
                     callee,
@@ -290,7 +295,7 @@ pub(super) fn lower_frames<'a>(
                     // A full pass-through inherits the active frame — the
                     // plain-call semantics, in every context.
                     let _ = record;
-                    queue.push_back((*callee, ctx.clone()));
+                    queue.push_back((*callee, ctx.clone(), fr_row));
                 }
                 SiteKind::Bound {
                     addr,
@@ -325,7 +330,9 @@ pub(super) fn lower_frames<'a>(
                         .entry((fi, *addr))
                         .or_default()
                         .insert(fr_row, idx);
-                    queue.push_back((*callee, child));
+                    // `idx` is the row the callee will run under — the same
+                    // number this site's compose entry selects at run time.
+                    queue.push_back((*callee, child, idx));
                 }
                 SiteKind::RawCallM { .. } => {
                     // Opaque absolute placement: no composition, no closure
