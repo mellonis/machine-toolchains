@@ -273,7 +273,11 @@ fn reorder_named(
         .collect()
 }
 
-fn bad(callee: &FuncRef, message: String) -> LinkError {
+/// The ONE construction path for [`LinkError::BadBinding`] against a
+/// named callee — this module's own refusals and the site-grading pass
+/// in `engine` alike, so a variant that gains a field cannot be filled
+/// two ways.
+pub(super) fn bad(callee: &FuncRef, message: String) -> LinkError {
     LinkError::BadBinding {
         callee: callee.name.to_string(),
         message,

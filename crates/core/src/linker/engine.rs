@@ -751,12 +751,14 @@ pub(super) fn scan_sites<'a>(
 /// — the empty `{}` included — is the author's statement that the
 /// re-labelling is meant, and is never graded.
 ///
-/// A plain site into a callee that declares exits > 0 is graded first,
-/// before its width: the site supplies no exit vector at all, so the
-/// callee's `retx #k` would index one that is not there. Shares its
-/// wording with the resolution pre-pass's identical bound-site refusal
-/// through `interface::exit_count_mismatch`, so the two spellings cannot
-/// drift.
+/// A plain site into a callee that declares exits > 0 is graded first —
+/// before its width, and before the callee's own signature is even
+/// looked up: the site supplies no exit vector at all, so the callee's
+/// `retx #k` would index one that is not there, whatever the two widths
+/// are. Shares its wording with the resolution pre-pass's identical
+/// bound-site refusal through `interface::exit_count_mismatch`, and its
+/// error construction with every other `BadBinding` through
+/// `interface::bad`, so neither can drift.
 ///
 /// Runs ONCE, from `lower`, over the single site scan every mechanism
 /// shares: hybrid's second scan (`stamp::lower_hybrid`) exists to
@@ -779,20 +781,26 @@ pub(super) fn check_sites(
         for site in func_sites {
             match site {
                 SiteKind::Plain { addr, callee } => {
-                    let Some(callee_sig) = order[*callee].signature else {
-                        continue; // nothing declared, nothing to compare
-                    };
+                    // The exit count is read off the INTERFACE record, so
+                    // it is graded before the signature guard below: an
+                    // interface presupposes a `.routine` line today
+                    // (docs/formats.md (routine interfaces)), and a check
+                    // sitting after the guard would quietly depend on that
+                    // presupposition holding forever.
                     let declared = usize::from(order[*callee].interface.map_or(0, |i| i.exits));
                     if declared != 0 {
-                        return Err(LinkError::BadBinding {
-                            callee: order[*callee].name.to_string(),
-                            message: super::interface::exit_count_mismatch(
+                        return Err(super::interface::bad(
+                            &order[*callee],
+                            super::interface::exit_count_mismatch(
                                 &order[*callee].name,
                                 0,
                                 declared,
                             ),
-                        });
+                        ));
                     }
+                    let Some(callee_sig) = order[*callee].signature else {
+                        continue; // nothing declared, nothing to compare
+                    };
                     if callee_sig.arity > caller_sig.arity {
                         return Err(wider(order, fi, *callee, *addr, "tape count".to_string()));
                     }
