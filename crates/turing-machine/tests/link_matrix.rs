@@ -5,7 +5,8 @@
 //! frame (no identity-world member at all), a lone exit-bearing site
 //! inside a framed callee (no fold group at all), one callee spliced
 //! twice with a site inside each copy, a bound call nested inside an
-//! EXIT-BEARING framed callee, and a tail-position framed call
+//! EXIT-BEARING framed callee, an exit-bearing cycle broken by a plain
+//! call (finite under every mechanism), and a tail-position framed call
 //! observation. Driven from `.tma`, because the `.tmc` front end has no
 //! `state` parameters yet (docs/core.md (call mechanisms)).
 //!
@@ -708,6 +709,104 @@ r:      retx    #0
         wrmv    [1], [>]
         retx    #0
 ";
+
+/// An exit-bearing cycle BROKEN by a plain call, so the copy path is
+/// finite: `outer` splices `b`, `b` plain-calls `c`, and `c` splices `b`
+/// again. `c` is minted on a plain edge, so it keys on its composite alone
+/// and the second lap dedups onto the first — four copies under mono, not
+/// an endless chain.
+///
+/// The recursion is bounded at RUN time by the tape, not by the linker:
+/// `b` dispatches on what it reads, marks a blank cell in place and goes
+/// round once, and on the marked cell takes the other branch instead. So
+/// the second `b` is entered, overwrites the mark with its own symbol,
+/// steps right and unwinds — `retx #0` to `c`'s `q`, `ret` back into the
+/// first `b`, `retx #0` to `outer`'s `p`, `ret` to `main`'s `stp`.
+/// Without that branch every mechanism would loop forever and the
+/// comparison would pin nothing.
+///
+/// The final tape is what makes BOTH laps observable: cell 0 holds the
+/// second lap's symbol, which is only written on a non-blank read, which
+/// only the first lap's mark can produce.
+const BROKEN_CYCLE: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', 'x', 'y')
+.routine outer, tapes=1, alpha=(3)
+.param u, ('_', 'x', 'y')
+.routine b, tapes=1, alpha=(3), exits=1
+.param n, ('_', 'x', 'y')
+.routine c, tapes=1, alpha=(3)
+.param m, ('_', 'x', 'y')
+.section tables
+Tb:     .row    [0]
+        .row    [*]
+Db:     .targets first, done
+.section code
+.func main
+        call    outer [0{1->2, 2->1}]
+        stp
+.func outer
+        call    b [0] exits=(p)
+        ret
+p:      ret
+.func b
+        rd
+        mtc     Tb
+        djmp    Db
+first:  wrmv    [1], [.]
+        call    c
+        retx    #0
+done:   wrmv    [2], [>]
+        retx    #0
+.func c
+        call    b [0] exits=(q)
+        ret
+q:      ret
+";
+
+/// Mutation it catches: stop resetting the splice chain at a non-splice
+/// node, and mono and hybrid refuse this program outright — the link fails
+/// instead of producing the four-copy image the three mechanisms agree on
+/// here. The tape is what proves that image is RIGHT and not merely
+/// emitted: core's link-level pin counts the copies, this one runs them.
+#[test]
+fn an_exit_bearing_cycle_broken_by_a_plain_call_agrees_across_mechanisms() {
+    // Asserted first, so a change that quietly stopped copying would fail
+    // here rather than leave a three-way tape compare green over three
+    // images that no longer include a spliced one.
+    assert_eq!(
+        build_full(BROKEN_CYCLE, CallMech::Mono)
+            .report
+            .instantiations,
+        4,
+        "one `outer`, one `b` per splice site, and ONE `c` — the second \
+         lap's `c` dedups by composite"
+    );
+    let results: Vec<_> = MECHS
+        .iter()
+        .map(|&m| run(&build(BROKEN_CYCLE, m), &[3]))
+        .collect();
+    for (m, r) in MECHS.iter().zip(&results).skip(1) {
+        assert_eq!(
+            (&results[0].0, &results[0].1),
+            (&r.0, &r.1),
+            "mono vs {m} diverged on an exit-bearing cycle broken by a plain call"
+        );
+    }
+    assert_eq!(
+        results[0].0,
+        Outcome::Stopped,
+        "the second lap reads the first lap's mark and unwinds"
+    );
+    let seen: Vec<u8> = (0..2).map(|p| cell_at(&results[0].1[0], p)).collect();
+    assert_eq!(
+        seen,
+        vec![1, 0],
+        "cell 0 carries the SECOND lap's virtual 2 (physical 1 under the \
+         swap), which is only written on a non-blank read — so the first \
+         lap's mark was made and read back"
+    );
+}
 
 /// Mutation it catches: re-derive a nested site's active-frame row from
 /// its enclosing composite's bare canonical key instead of carrying the

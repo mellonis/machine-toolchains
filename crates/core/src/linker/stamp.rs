@@ -865,14 +865,17 @@ impl<'a, 'o> Closure<'a, 'o> {
     /// This is the ONE identity policy for the closure: the probe counts
     /// nodes by exactly the key the builder builds them by, so a pair
     /// reached through two distinct splices is walked twice because it IS
-    /// built twice. That is also why a cycle of exit-bearing bound calls
-    /// has no copy-path lowering at all — a splice key names the enclosing
-    /// node, which is fresh every turn, so the key can never repeat and
-    /// the minting never ends. `enclosing` is what makes that detectable
-    /// before it happens: a splice into a routine already in its own
-    /// splice chain is refused with
+    /// built twice. That is also why an UNBROKEN chain of exit-bearing
+    /// bound calls back into a routine it already copies has no copy-path
+    /// lowering at all — a splice key names the enclosing node, which is
+    /// fresh every turn, so the key can never repeat and the minting never
+    /// ends. `enclosing` is what makes that detectable before it happens:
+    /// such a splice is refused with
     /// [`LinkError::RecursiveExitBearingCall`], on the copy path only
-    /// (docs/core.md (call mechanisms)).
+    /// (docs/core.md (call mechanisms)). A node minted on a PLAIN or
+    /// exit-free edge keys on its composite alone and so closes a cycle
+    /// rather than growing one — [`Closure::in_unbroken_splice_chain`]
+    /// carries the exact statement and both halves of its argument.
     ///
     /// The map-visible name is `<routine>.<digest8>` — a period, not the
     /// `$` an earlier scheme used, because `.tma` identifiers cannot
@@ -906,7 +909,7 @@ impl<'a, 'o> Closure<'a, 'o> {
         if let Some(&slot) = self.key_to_slot.get(&key) {
             return Ok((self.stamp_index(slot), true));
         }
-        if site.is_some() && self.in_splice_chain(enclosing, routine) {
+        if site.is_some() && self.in_unbroken_splice_chain(enclosing, routine) {
             return Err(LinkError::RecursiveExitBearingCall(
                 self.order[routine].name.to_string(),
             ));
@@ -939,25 +942,45 @@ impl<'a, 'o> Closure<'a, 'o> {
         Ok((self.stamp_index(slot), false))
     }
 
-    /// Whether `routine` is already in the splice chain of the node at
-    /// `enclosing` — walking the back-pointers and asking, of every
-    /// ancestor that is itself a splice, whether it copies `routine`.
+    /// Whether `routine` already appears in the UNBROKEN splice chain
+    /// above `enclosing`: walk the back-pointers while every node is
+    /// itself a splice, and stop at the first node that is not. A
+    /// non-splice node RESETS the chain — it is not a weaker check, it is
+    /// the exact one (docs/core.md (call mechanisms)).
     ///
-    /// A `true` here is exactly a copy path that cannot terminate, not a
-    /// heuristic: a splice's intern key names the node it sits inside, and
-    /// that node is fresh on every turn of the loop, so the key can never
-    /// dedup onto an earlier one and the walk would mint forever. Nothing
-    /// that links today can reach it — a program with such a cycle has no
-    /// finite copy-path lowering, so there is nothing for the refusal to
-    /// take away (docs/core.md (call mechanisms)).
+    /// **Sound** — a `true` here is a copy path that provably cannot
+    /// terminate. A splice's intern key names the enclosing node's slot,
+    /// which is fresh every turn, so no node in an unbroken splice chain
+    /// can ever dedup onto an earlier one; and an exit-bearing site never
+    /// collapses, so nothing cuts the descent. A chain that returns to a
+    /// routine therefore mints one more copy per lap, forever.
     ///
-    /// Bounded by construction: the first repeat refuses, so no chain is
-    /// ever longer than the routine count.
-    fn in_splice_chain(&self, enclosing: Option<usize>, routine: usize) -> bool {
+    /// **Complete** — every non-terminating walk contains one. Composites
+    /// are finite and a NON-splice node keys on its composite alone, so
+    /// only finitely many non-splice nodes exist in a walk at all; a walk
+    /// that mints infinitely many nodes is an infinite finitely-branching
+    /// tree, so it has an infinite path, and that path has only finitely
+    /// many non-splice nodes — hence an all-splice suffix of unbounded
+    /// length. Routines being finite, one repeats there and this fires.
+    ///
+    /// The reset is what a shape like `outer -splice-> b -plain-> c
+    /// -splice-> b` needs: `c` is minted on a plain edge, so it keys on
+    /// its composite, so the second lap's `c` dedups onto the first and
+    /// the walk closes with four copies. Refusing that would take away a
+    /// program the copy path lowers perfectly well.
+    ///
+    /// Bounded by construction: the first repeat refuses, so no chain
+    /// walked here is ever longer than the routine count.
+    fn in_unbroken_splice_chain(&self, enclosing: Option<usize>, routine: usize) -> bool {
         let mut cursor = enclosing;
         while let Some(slot) = cursor {
             let node = &self.nodes[slot];
-            if node.site.is_some() && node.routine == routine {
+            if node.site.is_none() {
+                // The chain breaks here: this node dedups by composite, so
+                // a cycle through it closes instead of minting.
+                return false;
+            }
+            if node.routine == routine {
                 return true;
             }
             cursor = node.enclosing;

@@ -2049,6 +2049,75 @@ s:      retx    #0
     )
 }
 
+/// A cycle of exit-bearing calls BROKEN by a plain call, which the copy
+/// path lowers perfectly well: `outer` splices `b`, `b` PLAIN-calls `c`,
+/// and `c` splices `b` again. `c` is minted on a plain edge, so it keys on
+/// its composite alone — the second lap reaches the same composite of `c`
+/// and dedups onto the first, and the walk closes with four copies
+/// (`outer`, `b`, `c`, and `b` again for `c`'s own splice).
+///
+/// The shape is deliberately minimal: one non-splice hop is all it takes
+/// to make an exit-bearing cycle finite, so this is the boundary between
+/// what the refusal must catch and what it must leave alone.
+const BROKEN_CYCLE: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine outer, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine b, tapes=1, alpha=(3), exits=1
+.param n, ('_', '0', '1')
+.routine c, tapes=1, alpha=(3)
+.param m, ('_', '0', '1')
+.section code
+.func main
+        call    outer [0{1->2, 2->1}]
+        stp
+.func outer
+        call    b [0] exits=(p)
+        ret
+p:      ret
+.func b
+        call    c
+        retx    #0
+.func c
+        call    b [0] exits=(q)
+        ret
+q:      ret
+";
+
+/// Mutation it catches: stop resetting the splice chain at a non-splice
+/// node — walk past `c` to the `b` above it — and this legal program is
+/// refused `RecursiveExitBearingCall`, which is the over-refusal the
+/// exact rule exists to avoid.
+#[test]
+fn an_exit_bearing_cycle_broken_by_a_plain_call_still_copies() {
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let out = link_bounded(BROKEN_CYCLE, mech)
+            .unwrap_or_else(|e| panic!("{mech} refused a finite copy path: {e}"));
+        assert_eq!(
+            out.report.instantiations, 4,
+            "one `outer`, one `b` per splice site, and ONE `c` — the \
+             second lap's `c` dedups by composite: {:?}",
+            out.report
+        );
+    }
+    // Hybrid reaches the copy path here rather than sharing `b`: two sites
+    // at 24 bytes of descriptor each against a body far under 48, so the
+    // byte rule refuses the group and both sites splice.
+    let out = link_bounded(BROKEN_CYCLE, CallMech::Hybrid).expect("links under hybrid");
+    let fold = out
+        .report
+        .folds
+        .iter()
+        .find(|f| f.routine == "b")
+        .unwrap_or_else(|| panic!("no fold decision for `b`: {:?}", out.report));
+    assert_eq!(fold.sites, 2, "`outer`'s site and `c`'s: {fold:?}");
+    assert!(
+        !fold.shared,
+        "the group splices, so copies are made: {fold:?}"
+    );
+}
+
 /// The same cycle closed through a THIRD routine: `a` splices `b` and `b`
 /// splices back into `a`, so no node's immediate parent ever names the
 /// routine it is about to copy — only the chain does.
