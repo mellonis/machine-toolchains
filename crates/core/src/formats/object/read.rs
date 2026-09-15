@@ -435,10 +435,22 @@ impl ObjectFile {
                         digest: r.u32()?,
                     });
                 }
+                let import_count = r.u32()? as usize;
+                let mut imports = Vec::new();
+                for _ in 0..import_count {
+                    let name = name_of(r.u32()?)?;
+                    let glyph_count = r.u32()? as usize;
+                    let mut glyphs = Vec::new();
+                    for _ in 0..glyph_count {
+                        glyphs.push(name_of(r.u32()?)?);
+                    }
+                    imports.push(ImportedAlphabet { name, glyphs });
+                }
                 Some(Interface {
                     routines,
                     alphabets,
                     graphs,
+                    imports,
                 })
             } else {
                 None

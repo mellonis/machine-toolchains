@@ -519,12 +519,33 @@ fn v4_sample() -> ObjectFile {
             name: "lib::findA".into(),
             digest: 0xDEAD_BEEF,
         }],
+        imports: Vec::new(),
     });
     obj.grafts = vec![GraftProvenance {
         graph: "other::g".into(),
         digest: 0x1234_5678,
     }];
     obj
+}
+
+/// An imported alphabet survives its own bytes, next to an exported
+/// one. Mutation it catches: write the list and forget to read it (or
+/// the reverse) and the value does not come home.
+#[test]
+fn imported_alphabets_round_trip() {
+    // `v4_sample()` already carries an exported alphabet (`bits`), so
+    // this exercises exports and imports side by side without adding
+    // one.
+    let mut obj = v4_sample();
+    let iface = obj.interface.as_mut().expect("v4_sample carries one");
+    iface.imports.push(ImportedAlphabet {
+        name: "other::wide".to_string(),
+        glyphs: vec!["_".to_string(), "a".to_string()],
+    });
+    assert_eq!(
+        ObjectFile::from_bytes(&obj.to_bytes()).expect("reads back"),
+        obj
+    );
 }
 
 #[test]
@@ -859,6 +880,7 @@ fn minimal_v4_interface() -> ObjectFile {
         }],
         alphabets: Vec::new(),
         graphs: Vec::new(),
+        imports: Vec::new(),
     });
     obj
 }
@@ -870,13 +892,13 @@ fn minimal_v4_interface() -> ObjectFile {
 fn empty_present_head_clause_rejected() {
     let mut bytes = minimal_v4_interface().to_bytes();
     // Tail, after the writes count: tape flags, enters count, one glyph
-    // index, the exits and returns bytes, then the three empty counts.
+    // index, the exits and returns bytes, then the four empty counts.
     assert_eq!(
-        &bytes[bytes.len() - 12..],
-        [0u8; 12],
-        "layout assumption: empty alphabet, graph and graft counts"
+        &bytes[bytes.len() - 16..],
+        [0u8; 16],
+        "layout assumption: empty alphabet, graph, import and graft counts"
     );
-    let pos = bytes.len() - 19;
+    let pos = bytes.len() - 23;
     assert_eq!(bytes[pos], 1, "layout assumption: the enters glyph count");
     bytes[pos] = 0;
     crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
@@ -889,7 +911,7 @@ fn empty_present_head_clause_rejected() {
 #[test]
 fn reserved_interface_tape_flags_rejected() {
     let mut bytes = minimal_v4_interface().to_bytes();
-    let pos = bytes.len() - 20;
+    let pos = bytes.len() - 24;
     assert_eq!(
         bytes[pos], 0b001,
         "layout assumption: the per-tape flags byte (enters present)"

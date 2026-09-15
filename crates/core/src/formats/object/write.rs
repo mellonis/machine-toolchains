@@ -215,6 +215,12 @@ impl ObjectFile {
                 for graph in &iface.graphs {
                     pool.intern(&graph.name);
                 }
+                for import in &iface.imports {
+                    pool.intern(&import.name);
+                    for glyph in &import.glyphs {
+                        pool.intern(glyph);
+                    }
+                }
             }
             for graft in &self.grafts {
                 pool.intern(&graft.graph);
@@ -515,6 +521,20 @@ impl ObjectFile {
                 for graph in &iface.graphs {
                     put_u32(&mut out, pool.intern(&graph.name));
                     put_u32(&mut out, graph.digest);
+                }
+                put_u32(
+                    &mut out,
+                    u32::try_from(iface.imports.len()).expect("import count fits u32"),
+                );
+                for import in &iface.imports {
+                    put_u32(&mut out, pool.intern(&import.name));
+                    put_u32(
+                        &mut out,
+                        u32::try_from(import.glyphs.len()).expect("import glyph count fits u32"),
+                    );
+                    for glyph in &import.glyphs {
+                        put_u32(&mut out, pool.intern(glyph));
+                    }
                 }
             }
             put_u32(

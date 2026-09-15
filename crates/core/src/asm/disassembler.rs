@@ -890,6 +890,15 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                     render_glyph_list(&alphabet.glyphs)
                 ));
             }
+            // An imported alphabet has no directive either — same
+            // compiler-fact reasoning, printed right after the exports.
+            for import in &iface.imports {
+                text.push_str(&format!(
+                    "; import alphabet {}: ({})\n",
+                    import.name,
+                    render_glyph_list(&import.glyphs)
+                ));
+            }
         }
     }
     // reloc lookup: (blob, hole offset) -> symbol name
@@ -3061,7 +3070,7 @@ A:      stp
         // a comment after the digest lines — visible in the listing, and
         // still assembling to the object the rest of the file describes.
         // Hand-built: the assembler authors none (a compiler fills them).
-        use crate::formats::object::{ExportedAlphabet, ExportedGraph};
+        use crate::formats::object::{ExportedAlphabet, ExportedGraph, ImportedAlphabet};
         let syntax = iface_syntax();
         let src =
             ".routine main, tapes=1, alpha=(2)\n.param ctl, ('_', '1')\n.func main\n        stp\n";
@@ -3076,10 +3085,17 @@ A:      stp
                 name: "lib::g".to_string(),
                 digest: 7,
             });
+            iface.imports.push(ImportedAlphabet {
+                name: "other::wide".to_string(),
+                glyphs: vec!["_".to_string(), "a".to_string()],
+            });
         }
         let dis = disassemble_object(&syntax, &obj);
         assert!(
-            dis.starts_with(".graph lib::g, 7\n; alphabet bits: ('_', '1')\n"),
+            dis.starts_with(
+                ".graph lib::g, 7\n; alphabet bits: ('_', '1')\n\
+                 ; import alphabet other::wide: ('_', 'a')\n"
+            ),
             "{dis}"
         );
         // The comment block sits on the grid like every other own-line
@@ -3090,9 +3106,10 @@ A:      stp
             "{dis}"
         );
         // The comment is trivia: the text reassembles to the object
-        // MINUS the alphabets, which no directive can state.
+        // MINUS the alphabets and imports, which no directive can state.
         let reasm = assemble(&syntax, 0x7E, &dis, false).unwrap();
         assert!(reasm.interface.as_ref().unwrap().alphabets.is_empty());
+        assert!(reasm.interface.as_ref().unwrap().imports.is_empty());
         assert_eq!(
             reasm.interface.as_ref().unwrap().graphs,
             obj.interface.as_ref().unwrap().graphs
@@ -3116,7 +3133,7 @@ A:      stp
         // (the reason sits at the rendering site). Nothing here has a
         // bound call, so the `exits=` row below is about the `.routine`
         // tail, not an exit vector.
-        use crate::formats::object::{ExportedAlphabet, ExportedGraph};
+        use crate::formats::object::{ExportedAlphabet, ExportedGraph, ImportedAlphabet};
         let src = concat!(
             ".grafted other::h, 42\n",
             ".routine main, tapes=1, alpha=(2), exits=1, noreturn\n",
@@ -3133,6 +3150,10 @@ A:      stp
                 name: "bits".to_string(),
                 glyphs: vec!["_".to_string()],
             });
+            iface.imports.push(ImportedAlphabet {
+                name: "other::wide".to_string(),
+                glyphs: vec!["_".to_string()],
+            });
         }
         let dis = disassemble_object(&fake_syntax(), &obj);
         for absent in [
@@ -3140,6 +3161,7 @@ A:      stp
             ".graph",
             ".grafted",
             "; alphabet",
+            "; import alphabet",
             "exits=",
             "noreturn",
         ] {
@@ -3152,6 +3174,7 @@ A:      stp
             ".graph lib::g, 7\n",
             ".grafted other::h, 42\n",
             "; alphabet bits: ('_')\n",
+            "; import alphabet other::wide: ('_')\n",
             ".routine main, tapes=1, alpha=(2), exits=1, noreturn\n",
             ".param ctl, ('_', '1')\n",
         ] {

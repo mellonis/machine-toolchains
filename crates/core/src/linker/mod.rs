@@ -94,6 +94,19 @@ pub enum LinkError {
         consumer: String,
         library: String,
     },
+    /// A unit imported an alphabet whose glyph list does not match the
+    /// one the exporting object declares: the consumer compiled against a
+    /// header that has drifted from its object, so it would read the
+    /// exporter's tape through the wrong glyphs
+    /// (docs/core.md (graft drift)). `position` is the first index at
+    /// which the two lists differ, or the shorter list's length when one
+    /// is a prefix of the other.
+    AlphabetDrift {
+        alphabet: String,
+        consumer: String,
+        library: String,
+        position: usize,
+    },
     /// A frame descriptor is inconsistent with the entry signature: a
     /// physical-tape index at or past the machine's arity, or an
     /// undecodable hand-authored descriptor. Carries the owning function's
@@ -220,6 +233,16 @@ impl std::fmt::Display for LinkError {
                 f,
                 "`{graph}` was grafted into {consumer} from a header that does not \
                  match {library}"
+            ),
+            Self::AlphabetDrift {
+                alphabet,
+                consumer,
+                library,
+                position,
+            } => write!(
+                f,
+                "`{alphabet}` as imported by {consumer} differs from {library}'s own \
+                 declaration, first at position {position}"
             ),
             Self::BadFrameDescriptor { symbol, message } => {
                 write!(f, "bad frame descriptor in `{symbol}`: {message}")
@@ -568,6 +591,9 @@ pub fn link(
     // a unit either spliced that body or it did not
     // (docs/core.md (graft drift)).
     interface::check_graft_drift(objects, libraries, &options.sources)?;
+    // Same header-only rule, over imported alphabets instead of grafted
+    // graphs (docs/core.md (graft drift)).
+    interface::check_imported_alphabets(objects, libraries, &options.sources)?;
 
     let arch = objects
         .first()

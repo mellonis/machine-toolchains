@@ -816,6 +816,12 @@ A graph no input exports is not checked. That is a header-only library,
 and it is the one place a header is trusted; the trust is deliberate and
 recorded here rather than discovered.
 
+An imported alphabet is verified the same way: a unit that imports an
+alphabet by name records the glyph list it compiled against, the link
+stage compares it against the exporting object's own declaration, and a
+mismatch stops the link — first-wins over the same namespace order, and
+unchecked when no input exports that alphabet.
+
 ## The composition engine
 
 An architecture with the frames profile may let a call carry a

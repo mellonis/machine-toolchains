@@ -259,6 +259,17 @@ pub struct ExportedAlphabet {
     pub glyphs: Vec<String>,
 }
 
+/// An alphabet the unit IMPORTED by name from another unit, with the
+/// glyph list it compiled against. The linker compares it with the
+/// exporting object's own list: a header that drifted from its object
+/// would otherwise re-label a tape silently
+/// (docs/formats.md (routine interfaces)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedAlphabet {
+    pub name: String,
+    pub glyphs: Vec<String>,
+}
+
 /// A graph the unit exports, with the digest of the body a grafting unit
 /// must have spliced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +285,11 @@ pub struct Interface {
     pub routines: Vec<RoutineInterface>,
     pub alphabets: Vec<ExportedAlphabet>,
     pub graphs: Vec<ExportedGraph>,
+    /// Alphabets this unit imported from another, with the glyphs it
+    /// compiled against. Written by the compiler; `.tma` has no spelling
+    /// for one, and `tmt dis` prints them as comments like exported
+    /// alphabets.
+    pub imports: Vec<ImportedAlphabet>,
 }
 
 /// A library graph this unit spliced, with the digest of the body it

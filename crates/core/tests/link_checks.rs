@@ -619,3 +619,92 @@ fn a_user_export_shadows_a_library_export_for_the_check() {
     )
     .expect("the user object's export wins, and it agrees");
 }
+
+/// Mutation it catches: compare only the alphabet NAMES and a drifted
+/// glyph list links silently — the exact hazard item 4 demonstrated.
+#[test]
+fn a_drifted_imported_alphabet_is_refused() {
+    let mut lib = asm(&exporter(1));
+    lib.interface
+        .as_mut()
+        .expect("the exporter declares an interface")
+        .alphabets
+        .push(mtc_core::formats::object::ExportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into(), "1".into()],
+        });
+    let mut app = asm(&consumer(1));
+    app.interface
+        .as_mut()
+        .expect("the consumer declares an interface")
+        .imports
+        .push(mtc_core::formats::object::ImportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "1".into(), "0".into()],
+        });
+    let err = link(&fake_syntax(), &[app], &[lib], opts(CallMech::Frames))
+        .expect_err("a drifted import must stop the link");
+    assert!(
+        matches!(&err, LinkError::AlphabetDrift { position: 1, .. }),
+        "{err:?}"
+    );
+}
+
+/// Mutation it catches: compare with `!=` inverted and the agreeing pair
+/// is refused instead.
+#[test]
+fn an_agreeing_imported_alphabet_links() {
+    let mut lib = asm(&exporter(1));
+    lib.interface
+        .as_mut()
+        .expect("the exporter declares an interface")
+        .alphabets
+        .push(mtc_core::formats::object::ExportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into(), "1".into()],
+        });
+    let mut app = asm(&consumer(1));
+    app.interface
+        .as_mut()
+        .expect("the consumer declares an interface")
+        .imports
+        .push(mtc_core::formats::object::ImportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into(), "1".into()],
+        });
+    link(&fake_syntax(), &[app], &[lib], opts(CallMech::Frames))
+        .expect("agreeing imported alphabets link");
+}
+
+/// The imported list is a strict PREFIX of the exported one: `zip` stops
+/// at the shorter list and reports no difference, so `position` must
+/// come from the `.or_else` arm — the shorter list's length — rather
+/// than `None`. Mutation it catches: drop the `.or_else` arm and a
+/// truncated import links silently instead of being refused.
+#[test]
+fn a_prefix_imported_alphabet_is_refused() {
+    let mut lib = asm(&exporter(1));
+    lib.interface
+        .as_mut()
+        .expect("the exporter declares an interface")
+        .alphabets
+        .push(mtc_core::formats::object::ExportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into(), "1".into()],
+        });
+    let mut app = asm(&consumer(1));
+    app.interface
+        .as_mut()
+        .expect("the consumer declares an interface")
+        .imports
+        .push(mtc_core::formats::object::ImportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into()],
+        });
+    let err = link(&fake_syntax(), &[app], &[lib], opts(CallMech::Frames))
+        .expect_err("a truncated import must stop the link");
+    assert!(
+        matches!(&err, LinkError::AlphabetDrift { position: 2, .. }),
+        "{err:?}"
+    );
+}

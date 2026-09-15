@@ -1,7 +1,8 @@
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::object::{
-    BlobVariant, BoundCall, ExportedAlphabet, ExportedGraph, GraftProvenance, Interface, MapPair,
-    ObjectFile, Relocation, RoutineInterface, RoutineSig, Symbol, SymbolDef, TapeBinding,
+    BlobVariant, BoundCall, ExportedAlphabet, ExportedGraph, GraftProvenance, ImportedAlphabet,
+    Interface, MapPair, ObjectFile, Relocation, RoutineInterface, RoutineSig, Symbol, SymbolDef,
+    TapeBinding,
 };
 use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use proptest::prelude::*;
@@ -207,6 +208,14 @@ proptest! {
                 }],
                 alphabets: vec![ExportedAlphabet { name: "ab".into(), glyphs: glyphs[0].clone() }],
                 graphs: vec![ExportedGraph { name: "g".into(), digest }],
+                // A fresh name and glyphs that appear nowhere else in the
+                // object, so a missed intern in the pool pass (as opposed
+                // to reusing `glyphs[0]`, which the export/routine passes
+                // already interned) would fail this round trip.
+                imports: vec![ImportedAlphabet {
+                    name: "other::import".into(),
+                    glyphs: vec!["%".into(), "^".into()],
+                }],
             }),
             grafts: vec![GraftProvenance { graph: "lib::g".into(), digest }],
         };

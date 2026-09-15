@@ -356,6 +356,64 @@ pub(super) fn check_graft_drift(
     Ok(())
 }
 
+/// Compare every recorded alphabet import against the exporting object's
+/// own declaration (docs/core.md (graft drift)): same first-wins,
+/// object-level, header-only-is-unchecked shape as `check_graft_drift`,
+/// over `Interface::imports`/`Interface::alphabets` instead of
+/// `ObjectFile::grafts`/`Interface::graphs`.
+pub(super) fn check_imported_alphabets(
+    objects: &[ObjectFile],
+    libraries: &[ObjectFile],
+    sources: &[Option<String>],
+) -> Result<(), LinkError> {
+    let inputs: Vec<&ObjectFile> = objects.iter().chain(libraries).collect();
+    let name_of = |i: usize| -> String {
+        sources
+            .get(i)
+            .and_then(Option::as_ref)
+            .cloned()
+            .unwrap_or_else(|| format!("input #{i}"))
+    };
+    // First-wins exporter map, in the namespace's own order.
+    let mut exporter: HashMap<&str, (usize, &Vec<String>)> = HashMap::new();
+    for (i, obj) in inputs.iter().enumerate() {
+        let Some(iface) = obj.interface.as_ref() else {
+            continue;
+        };
+        for a in &iface.alphabets {
+            exporter.entry(a.name.as_str()).or_insert((i, &a.glyphs));
+        }
+    }
+    for (i, obj) in inputs.iter().enumerate() {
+        let Some(iface) = obj.interface.as_ref() else {
+            continue;
+        };
+        for imported in &iface.imports {
+            let Some(&(lib, exported_glyphs)) = exporter.get(imported.name.as_str()) else {
+                continue; // header-only library: nothing to check against
+            };
+            let differs = imported
+                .glyphs
+                .iter()
+                .zip(exported_glyphs)
+                .position(|(a, b)| a != b)
+                .or_else(|| {
+                    (imported.glyphs.len() != exported_glyphs.len())
+                        .then_some(imported.glyphs.len().min(exported_glyphs.len()))
+                });
+            if let Some(position) = differs {
+                return Err(LinkError::AlphabetDrift {
+                    alphabet: imported.name.clone(),
+                    consumer: name_of(i),
+                    library: name_of(lib),
+                    position,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

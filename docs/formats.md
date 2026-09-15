@@ -250,7 +250,9 @@ interface (present iff flags bit 5 is set; requires flags bit 1), once
                 u8 returns (0 = noreturn)
                 then once: u32 alphabet count, per alphabet: u32 name,
                 u8 glyph count, count × u32 glyph;
-                u32 graph count, per graph: u32 name, u32 digest
+                u32 graph count, per graph: u32 name, u32 digest;
+                u32 import count, per import: u32 name, u32 glyph count,
+                count × u32 glyph
 graft provenance (unconditional at version 4):
                 u32 count, then per record: u32 graph name, u32 digest
 ```
@@ -362,10 +364,13 @@ case, which is exactly the case that forces version 4.
   One record per code blob, parallel to the blobs like the signatures,
   which is why the section is **all-or-none**: an object describes every
   function's interface or none at all.
-- **Exported alphabets and graphs** close the interface section: an
-  alphabet is a name plus its glyphs in band order; a graph is a name
-  plus the `u32` **digest** of the body a grafting unit must have
-  spliced.
+- **Exported alphabets, graphs, and imported alphabets** close the
+  interface section: an exported alphabet is a name plus its glyphs in
+  band order; a graph is a name plus the `u32` **digest** of the body a
+  grafting unit must have spliced; an **imported alphabet** is a name
+  plus the glyph list the unit compiled against, for the linker to
+  compare against the exporting object's own declaration
+  (`docs/core.md (graft drift)`).
 - **Graft provenance** is its own version-4 section, written
   unconditionally and outside the interface: one record per library graph
   this unit spliced, naming the graph and the digest of the body it
@@ -712,11 +717,13 @@ are both canonical, each for its own input.
 hold do not survive a full text round trip, and it is better to know
 which:
 
-- **Exported alphabets have no directive.** They are a compiler fact with
-  no assembly spelling, so a disassembly prints them as
-  `; alphabet <name>: (<glyphs>)` comment lines and reassembling that
-  text produces an object without them. They are the only part of the
-  section a listing can show but not put back.
+- **Exported and imported alphabets have no directive.** Both are
+  compiler facts with no assembly spelling, so a disassembly prints an
+  exported alphabet as `; alphabet <name>: (<glyphs>)` and an imported
+  one right after it as `; import alphabet <name>: (<glyphs>)`, and
+  reassembling that text produces an object without either list. They
+  are the only parts of the section a listing can show but not put
+  back.
 - **A glyph label must be one character to be written back as a
   literal.** A multi-character label that is a canonical decimal prints
   as the bare number and reads back identically; a multi-character label

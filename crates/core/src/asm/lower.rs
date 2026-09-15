@@ -526,6 +526,9 @@ pub(crate) fn lower_source(
         // source-language declaration the compiler fills in later.
         alphabets: Vec::new(),
         graphs: ctx.graphs,
+        // An imported alphabet has no assembly spelling either — same
+        // compiler-fact reasoning as `alphabets` above.
+        imports: Vec::new(),
     });
     Ok(LoweredSource {
         functions: ctx.functions,
