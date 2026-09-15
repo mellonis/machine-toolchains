@@ -628,8 +628,8 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
             target,
             binding,
             then,
-            // The `exits=(…)` operand (T11's codegen arm) — no call site
-            // carries one yet.
+            // The `exits=(…)` operand — no call site carries one yet; its
+            // codegen arm lands with the pass that first produces one.
             ..
         } => {
             let operand = if binding.is_empty() {
@@ -651,8 +651,8 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
         IrTransition::TailCall { target } => Term::TailCall(target.clone()),
         IrTransition::TrapRead => Term::TrapRead,
         IrTransition::TrapWrite => Term::TrapWrite,
-        // Never produced by any pass yet — `retx #k` (T11's codegen arm)
-        // lands with the pass that first emits this variant.
+        // Never produced by any pass yet — `retx #k`'s codegen arm lands
+        // with the pass that first emits this variant.
         IrTransition::ReturnExit { .. } => {
             unreachable!("ReturnExit is not yet produced by any pass")
         }

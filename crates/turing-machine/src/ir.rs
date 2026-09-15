@@ -1343,7 +1343,7 @@ machine {
                                         param: Some("k".into()),
                                     }],
                                     // A two-exit call: the exits= operand
-                                    // (T11) names the resume states.
+                                    // names the resume states.
                                     exits: vec![1, 2],
                                     then: IrThen::Goto { state: 1 },
                                 },
