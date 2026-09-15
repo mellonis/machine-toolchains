@@ -82,8 +82,11 @@ struct SpliceSite {
     /// The calling function's index in `order`.
     caller: usize,
     /// The blob offset of the instruction after the call — where `ret`
-    /// lands.
-    then: u32,
+    /// lands. `None` when the call is the LAST instruction of its caller,
+    /// so there is no such offset: only a copy whose body cannot reach the
+    /// dialect's return may splice there, and such a copy mints no `ret`
+    /// rewrite to spend it on.
+    then: Option<u32>,
     /// The blob offsets of the site's exits — where `retx #k` lands.
     exits: Vec<u32>,
 }
@@ -104,7 +107,7 @@ enum PendingSite {
     /// translated through that stamp's own offset map once it is built.
     InStamp {
         slot: usize,
-        then: u32,
+        then: Option<u32>,
         exits: Vec<u32>,
     },
 }
@@ -116,7 +119,7 @@ impl PendingSite {
     /// two distinct splices apart, never compare across variants — a site
     /// inside a stamp and a site inside a hand-written routine already
     /// differ in the caller index.
-    fn key_parts(&self, order_len: usize) -> (usize, u32, &[u32]) {
+    fn key_parts(&self, order_len: usize) -> (usize, Option<u32>, &[u32]) {
         match self {
             PendingSite::Resolved(s) => (s.caller, s.then, &s.exits),
             PendingSite::InStamp { slot, then, exits } => (order_len + slot, *then, exits),
@@ -234,7 +237,7 @@ pub(super) fn lower_mono<'a>(
                 // caller and the callee's name are still in hand, so the
                 // retarget loop below cannot fail.
                 if !record.exits.is_empty() {
-                    check_splice_site(syntax, &order[fi], *addr, &order[*callee].name)?;
+                    check_splice_site(syntax, &order[fi], *addr, &order[*callee])?;
                 }
                 seeds.push((fi, *addr, *callee, record));
             }
@@ -580,7 +583,7 @@ pub(super) fn lower_hybrid<'a>(
                 // in hand, so the promotion loop below cannot fail. A
                 // SHARED group needs neither a jump opcode nor a `then`,
                 // which is why the check sits on this branch alone.
-                check_splice_site(syntax, &order[fi], addr, &order[callee].name)?;
+                check_splice_site(syntax, &order[fi], addr, &order[callee])?;
                 seeds.push((fi, addr, callee, record));
                 mono_holes[fi].insert(addr);
                 // `mono_splices` moves WITH `mono_holes`: a site that is a
@@ -829,10 +832,16 @@ impl<'a, 'o> Closure<'a, 'o> {
     /// `slot`: its offsets are the ORIGINAL routine's, translated through
     /// that copy's own offset map when it is built (docs/core.md (call
     /// mechanisms)). `None` for an exit-free site, which splices nothing.
-    fn nested_site(&self, slot: usize, addr: u32, record: &BoundCall) -> Option<PendingSite> {
+    fn nested_site(
+        &self,
+        slot: usize,
+        addr: u32,
+        record: &BoundCall,
+        caller_len: usize,
+    ) -> Option<PendingSite> {
         (!record.exits.is_empty()).then(|| PendingSite::InStamp {
             slot,
-            then: addr + 5,
+            then: continuation(caller_len, addr),
             exits: record.exits.clone(),
         })
     }
@@ -901,7 +910,12 @@ impl<'a, 'o> Closure<'a, 'o> {
         if let Some(s) = &site {
             let (caller, then, exits) = s.key_parts(self.order.len());
             key.extend_from_slice(&(caller as u64).to_le_bytes());
-            key.extend_from_slice(&then.to_le_bytes());
+            // A tag byte ahead of the continuation keeps the encoding
+            // injective: a site with no continuation contributes a shape
+            // no real offset can spell, rather than borrowing a sentinel
+            // value out of the offset space.
+            key.push(u8::from(then.is_some()));
+            key.extend_from_slice(&then.unwrap_or(0).to_le_bytes());
             for e in exits {
                 key.extend_from_slice(&e.to_le_bytes());
             }
@@ -1099,7 +1113,7 @@ fn mono_closure_probe<'a, 'o>(
                     if closure.collapses(&child, callee_sig, record) {
                         continue;
                     }
-                    let site = closure.nested_site(slot, *addr, record);
+                    let site = closure.nested_site(slot, *addr, record, order[routine].blob.len());
                     // A recursive splice refuses here exactly as it does in
                     // the builder; the probe swallows it and simply stops
                     // descending, so the count it reports is bounded and
@@ -1303,13 +1317,58 @@ fn enter_jump_opcode(syntax: &ArchSyntax, name: &str) -> Result<u8, LinkError> {
     })
 }
 
+/// The blob offset a call at `addr` returns to — the instruction after
+/// it — or `None` when the call is the last instruction of a blob
+/// `caller_len` bytes long, where that offset is one past the end and
+/// names nothing.
+fn continuation(caller_len: usize, addr: u32) -> Option<u32> {
+    (addr as usize + 5 < caller_len).then(|| addr + 5)
+}
+
+/// Whether a copy of `callee` can reach the dialect's return — the ONE
+/// thing a splice needs a continuation for, since `retx #k` goes to the
+/// site's exit vector instead (docs/core.md (call mechanisms)).
+///
+/// A routine's interface carries a `returns` bit, false for a `noreturn`
+/// routine (docs/formats.md (routine interfaces)) — but that bit is a
+/// DECLARATION the assembler never checks against the body: nothing
+/// rejects a `noreturn` routine whose body holds the return opcode. So a
+/// cleared bit only earns a look at the body, and a body carrying the
+/// return is treated as returning whatever its header claims. An absent
+/// interface says nothing at all, and is read as "can return".
+fn callee_can_return(syntax: &ArchSyntax, callee: &FuncRef) -> bool {
+    match callee.interface {
+        Some(i) if !i.returns => body_has_return(syntax, &callee.blob),
+        _ => true,
+    }
+}
+
+/// Whether `blob` holds the dialect's declared return opcode anywhere —
+/// the same test `build_stamp` applies per instruction when it rewrites a
+/// copied `ret` into a jump.
+fn body_has_return(syntax: &ArchSyntax, blob: &[u8]) -> bool {
+    let Some(ret) = syntax.return_opcode else {
+        return false;
+    };
+    decode::decode_stream(syntax, blob, 0, blob.len() as u32)
+        .iter()
+        .any(|d| match &d.body {
+            Body::Instr { mnemonic, .. } => syntax
+                .by_mnemonic(mnemonic)
+                .is_some_and(|e| e.opcode == ret),
+            Body::Raw(_) => false,
+        })
+}
+
 /// What an exit-bearing site needs before a mono path commits to splicing
 /// it (docs/core.md (call mechanisms)): the dialect's far jump to enter
-/// the copy with, and an instruction AFTER the call for the copy's plain
-/// `ret` to land on. A site in tail position has no such instruction —
-/// `then` would be the offset one past the end of the caller's blob — and
-/// is named here rather than left to surface downstream as a malformed
-/// blob at an offset nothing in the source points at.
+/// the copy with, and — for a callee that CAN return — an instruction
+/// AFTER the call for the copy's plain `ret` to land on. A site in tail
+/// position has no such instruction, and is named here rather than left
+/// to surface downstream as a malformed blob at an offset nothing in the
+/// source points at. A callee that cannot return mints no `ret` rewrite,
+/// so its splice is complete with its `retx #k → jmp exit_k` rewrites
+/// alone and tail position costs it nothing.
 ///
 /// Called at the three points a mono path first commits to copying a
 /// site: the seed loop, hybrid's classifier, and the stamp closure's own
@@ -1320,10 +1379,10 @@ fn check_splice_site(
     syntax: &ArchSyntax,
     caller: &FuncRef,
     addr: u32,
-    callee_name: &str,
+    callee: &FuncRef,
 ) -> Result<(), LinkError> {
-    enter_jump_opcode(syntax, callee_name)?;
-    if addr as usize + 5 >= caller.blob.len() {
+    enter_jump_opcode(syntax, &callee.name)?;
+    if continuation(caller.blob.len(), addr).is_none() && callee_can_return(syntax, callee) {
         return Err(LinkError::ExitBearingTailCall(caller.name.to_string()));
     }
     Ok(())
@@ -1359,11 +1418,16 @@ fn splice_shift(widened: &HashSet<u32>, old: u32) -> u32 {
 /// Under HYBRID it is not: `lower_frames` runs afterwards and widens every
 /// bound site that is still framed, shifting exactly the caller offsets
 /// these fixups name (docs/core.md (call mechanisms)).
+///
+/// `caller_len` is the caller's PRE-rewrite blob length, which is the
+/// length the tail-position question was asked against: a site with no
+/// instruction after it has no continuation to shift.
 fn site_for(
     caller: usize,
     addr: u32,
     record: &BoundCall,
     widened: &[HashSet<u32>],
+    caller_len: usize,
 ) -> Option<SpliceSite> {
     if record.exits.is_empty() {
         return None;
@@ -1371,7 +1435,7 @@ fn site_for(
     let w = &widened[caller];
     Some(SpliceSite {
         caller,
-        then: splice_shift(w, addr + 5),
+        then: continuation(caller_len, addr).map(|t| splice_shift(w, t)),
         exits: record.exits.iter().map(|&e| splice_shift(w, e)).collect(),
     })
 }
@@ -1414,7 +1478,7 @@ fn mono_stamps<'a>(
             None,
             callee,
             child,
-            site_for(fi, addr, record, widened).map(PendingSite::Resolved),
+            site_for(fi, addr, record, widened, order[fi].blob.len()).map(PendingSite::Resolved),
         )?;
         if dup {
             stats.dedup_savings += 1;
@@ -1489,9 +1553,9 @@ fn mono_stamps<'a>(
                     // offset map when it is built (docs/core.md (call
                     // mechanisms)).
                     if !record.exits.is_empty() {
-                        check_splice_site(syntax, &order[routine], *addr, &order[*callee].name)?;
+                        check_splice_site(syntax, &order[routine], *addr, &order[*callee])?;
                     }
-                    let site = closure.nested_site(slot, *addr, record);
+                    let site = closure.nested_site(slot, *addr, record, order[routine].blob.len());
                     let splice = site.is_some();
                     // A site that collapses onto the generic mints no child
                     // and is not walked into: the generic itself already is
@@ -1593,7 +1657,7 @@ fn resolve_site(
                 .get(*slot)
                 .ok_or_else(|| LinkError::MalformedBlob {
                     symbol: node.name.clone(),
-                    at: *then,
+                    at: then.or_else(|| exits.first().copied()).unwrap_or(0),
                 })?;
             let xlat = |off: u32| -> Result<u32, LinkError> {
                 map.get(&off).copied().ok_or(LinkError::MalformedBlob {
@@ -1603,7 +1667,10 @@ fn resolve_site(
             };
             Ok(Some(SpliceSite {
                 caller: order_len + slot,
-                then: xlat(*then)?,
+                // A site with no continuation translates none: the
+                // one-past-the-end offset is in no copy's offset map, and
+                // a copy that cannot return never asks for it.
+                then: then.map(xlat).transpose()?,
                 exits: exits.iter().map(|&e| xlat(e)).collect::<Result<_, _>>()?,
             }))
         }
@@ -1826,8 +1893,21 @@ fn build_stamp(
                 if let Some(s) = site
                     && Some(entry.opcode) == syntax.return_opcode
                 {
+                    // A site with no continuation reached this body only
+                    // because the body could not return, so a return here
+                    // means the two disagree. Defensive: `check_splice_site`
+                    // reads the body itself, never the `noreturn` bit alone.
+                    let Some(then) = s.then else {
+                        return Err(LinkError::BadBinding {
+                            callee: callee.name.to_string(),
+                            message: "the body returns, but the call site it is copied into \
+                                      is the last instruction of its function and has no \
+                                      continuation for the return to land on"
+                                .to_string(),
+                        });
+                    };
                     let jmp = splice_jump_opcode(syntax, &callee.name)?;
-                    emit_splice_jump(&mut blob, jmp, s.caller, s.then, &mut site_fixups);
+                    emit_splice_jump(&mut blob, jmp, s.caller, then, &mut site_fixups);
                     continue;
                 }
                 blob.extend_from_slice(&blob_bytes[old_addr as usize..(old_addr + d.len) as usize]);

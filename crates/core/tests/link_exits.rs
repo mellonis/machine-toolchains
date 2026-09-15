@@ -683,8 +683,7 @@ lost:   wr      [2]
 /// An exit-bearing site that is the LAST instruction of its function, so
 /// the copy's `ret` would have no instruction to return to. `sub` comes
 /// back through a plain `ret`, which is the return that actually has
-/// nowhere to land — the refusal itself is unconditional, because whether
-/// a callee reaches `ret` is a property of its body, not of the site.
+/// nowhere to land.
 const TAIL_POSITION: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
@@ -701,6 +700,76 @@ won:    wr      [1]
         call    sub [0] exits=(won)
 .func sub
         ret
+";
+
+/// The same tail-position site, into a callee that CANNOT return: `sub`
+/// declares `noreturn` and leaves only through `retx`. The copy rewrites
+/// that into a jump to the site's own exit, so it needs no instruction
+/// after the call and the site is legal on every mechanism.
+const TAIL_POSITION_NORETURN: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine mid, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1, noreturn
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    mid
+        stp
+.func mid
+won:    wr      [1]
+        call    sub [0] exits=(won)
+.func sub
+        retx    #0
+";
+
+/// A callee whose header says `noreturn` and whose BODY returns anyway.
+/// Nothing in the assembler checks one against the other — the bit is a
+/// declaration — so the linker reads the body, and this site keeps the
+/// tail-position refusal.
+const TAIL_POSITION_LYING_NORETURN: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine mid, tapes=1, alpha=(3)
+.param u, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1, noreturn
+.param n, ('_', '0', '1')
+.section code
+.func main
+        call    mid
+        stp
+.func mid
+won:    wr      [1]
+        call    sub [0] exits=(won)
+.func sub
+        ret
+";
+
+/// A tail-position site into a `noreturn` callee NESTED inside a routine
+/// that is itself stamped: `main`'s swap into `outer` is an exit-free
+/// bijection, so `outer` is copied, and `outer`'s own last instruction is
+/// the exit-bearing call into `inner`. The splice's coordinates are then
+/// the ORIGINAL `outer`'s, translated through the copy's offset map — and
+/// the continuation one past the end of `outer` is in no such map, which
+/// is why a site with no continuation must carry none rather than a
+/// number.
+const TAIL_POSITION_IN_STAMP: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine outer, tapes=1, alpha=(3)
+.param o, ('_', '0', '1')
+.routine inner, tapes=1, alpha=(3), exits=1, noreturn
+.param i, ('_', '0', '1')
+.section code
+.func main
+        call    outer [0{1->2, 2->1}]
+        stp
+.func outer
+k:      wr      [1]
+        call    inner [0] exits=(k)
+.func inner
+        retx    #0
 ";
 
 /// The absolute targets of every far `jmp` in `[start, end)` of the
@@ -1070,14 +1139,21 @@ fn retx_lands_on_the_exit_its_index_names() {
     );
 }
 
-/// An exit-bearing call in TAIL position has no instruction after it, so
-/// the copy's `ret` would have nowhere to land. Refused by name rather
-/// than left to surface as a malformed blob at an offset the author cannot
-/// trace back to this line.
+/// An exit-bearing call in TAIL position into a callee that CAN return has
+/// no instruction after it for that return, so the copy's `ret` would have
+/// nowhere to land. Refused by name rather than left to surface as a
+/// malformed blob at an offset the author cannot trace back to this line.
+///
+/// The FRAMES arm is the other half of the claim: the same program links
+/// there, because a framed site returns through its descriptor and not
+/// through the instruction after the call. Without it the refusal reads as
+/// a property of tail position itself rather than of the copy path.
 ///
 /// Mutation it catches: drop the tail check from `check_splice_site` and
-/// the link still fails — but as `MalformedBlob` naming an offset one past
-/// the end of `mid`, which says nothing about the cause.
+/// the copy-path arms still fail — but as `MalformedBlob` naming an offset
+/// one past the end of `mid`, which says nothing about the cause. Move the
+/// check into the mechanism-independent site scan instead and the frames
+/// arm goes red.
 #[test]
 fn an_exit_bearing_call_in_tail_position_is_refused_by_name() {
     for mech in [CallMech::Mono, CallMech::Hybrid] {
@@ -1092,6 +1168,100 @@ fn an_exit_bearing_call_in_tail_position_is_refused_by_name() {
             err.to_string()
                 .contains("cannot be the last instruction of `mid`"),
             "the message must name the cause: {err}"
+        );
+    }
+    link(
+        &fake_syntax(),
+        &[asm(TAIL_POSITION)],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect("frames reaches the callee through a descriptor, so it links the same program");
+}
+
+/// The same site into a callee that cannot return links on EVERY
+/// mechanism, and under the copy path the copy's one jump lands on the
+/// site's own exit: there is no plain return to need a continuation for.
+///
+/// Mutation it catches: make the tail refusal unconditional again (drop
+/// the `callee_can_return` conjunct) and the two copy-path arms go red.
+#[test]
+fn a_tail_position_call_into_a_callee_that_cannot_return_is_not_refused() {
+    let obj = assemble(&fake_syntax(), ARCH, TAIL_POSITION_NORETURN, true)
+        .expect("assembles with -g, so the sidecar carries `won`");
+    for mech in MECHS {
+        let out = link(&fake_syntax(), std::slice::from_ref(&obj), &[], opts(mech))
+            .unwrap_or_else(|e| panic!("under {mech}: {e}"));
+        if mech == CallMech::Frames {
+            continue;
+        }
+        let mid = func(&out, "mid");
+        let copy = copy_of(&out, "sub");
+        assert_eq!(
+            jump_targets(&out.executable.code, copy.start, copy.end),
+            vec![label_addr(mid, "won")],
+            "under {mech} the copy's `retx #0` must jump to the site's own exit"
+        );
+    }
+}
+
+/// `noreturn` is a DECLARATION the assembler never checks against the
+/// body, so the linker reads the body: a routine that says `noreturn` and
+/// returns anyway keeps the refusal.
+///
+/// Mutation it catches: gate the tail arm on the interface's `returns` bit
+/// alone, without looking at the body, and this link succeeds — emitting a
+/// copy whose `ret` jumps to an offset one past the end of `mid`.
+#[test]
+fn a_noreturn_header_does_not_excuse_a_body_that_returns() {
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let err = link(
+            &fake_syntax(),
+            &[asm(TAIL_POSITION_LYING_NORETURN)],
+            &[],
+            opts(mech),
+        )
+        .expect_err("the body returns, so the site is still refused");
+        assert_eq!(
+            err,
+            LinkError::ExitBearingTailCall("mid".to_string()),
+            "under {mech}"
+        );
+    }
+}
+
+/// A tail-position site into a `noreturn` callee NESTED inside a routine
+/// that is itself copied. The splice's offsets are the generic `outer`'s,
+/// translated through that copy's own offset map — and the continuation
+/// one past the end of `outer` is in no map, so a site with no
+/// continuation must carry none rather than an offset. The copy's exit
+/// jump must still land inside the CALLER COPY, not in the orphaned
+/// generic.
+///
+/// Mutation it catches: carry the one-past-the-end offset as a number and
+/// translate it anyway, and the link fails with `MalformedBlob` naming
+/// `outer`.
+#[test]
+fn a_nested_tail_position_call_into_a_callee_that_cannot_return_links() {
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let out = link(
+            &fake_syntax(),
+            &[asm(TAIL_POSITION_IN_STAMP)],
+            &[],
+            opts(mech),
+        )
+        .unwrap_or_else(|e| panic!("under {mech}: {e}"));
+        let outer_copy = copy_of(&out, "outer");
+        let inner_copy = copy_of(&out, "inner");
+        let landed = jump_targets(&out.executable.code, inner_copy.start, inner_copy.end);
+        assert_eq!(landed.len(), 1, "under {mech}: one exit, one jump");
+        assert!(
+            landed[0] >= outer_copy.start && landed[0] < outer_copy.end,
+            "under {mech}: the exit must land inside the caller COPY \
+             [{}, {}), not at {}",
+            outer_copy.start,
+            outer_copy.end,
+            landed[0]
         );
     }
 }

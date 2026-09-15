@@ -1100,11 +1100,16 @@ into a callee that returns, links under every mechanism and traps
 continuation, and that is equally true of a stamped copy's return
 address and of a framed call's own bookkeeping. The linker does not
 refuse it. The one exception is an **exit-bearing** site in tail
-position on the copy path: it is refused by name, because a splice's
-plain return is a jump to the instruction after the call and there is no
-such instruction. That refusal too is splice-specific — a site whose
-hybrid fold group shares one generic body returns through its frame and
-is never refused.
+position on the copy path, into a callee that can return: it is refused
+by name, because a splice's plain return is a jump to the instruction
+after the call and there is no such instruction. A callee that cannot
+return is not refused — its copy rewrites only the multi-exit returns,
+each into a jump to an exit the site itself names, so it needs no
+instruction after the call. Whether a callee can return is read off its
+body: the `noreturn` field of its interface is a declaration nothing
+checks the body against. That refusal too is splice-specific — a site
+whose hybrid fold group shares one generic body returns through its
+frame and is never refused.
 
 ## Syntax trees
 

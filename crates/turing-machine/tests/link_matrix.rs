@@ -1016,3 +1016,75 @@ fn a_tail_position_framed_call_is_observed() {
         );
     }
 }
+
+// ── a tail-position exit-bearing call into a callee that cannot return ─────
+
+/// `main`'s LAST instruction is an exit-bearing bound call, and `pick`
+/// declares `noreturn` and leaves only through `retx`. A copy of such a
+/// body rewrites no plain return, so it needs no instruction after the
+/// call and the site is legal on every mechanism — where a callee that
+/// CAN return is refused on the copy path by name.
+///
+/// Seeded so the exit actually fires: `main` writes physical `1` without
+/// moving, so `pick`'s dispatch hits row 1 and comes back through
+/// `retx #1` — exit 1, `b`, which writes `2`. A blank read would take row
+/// 0 and exit 0 instead, and the two exits would be indistinguishable
+/// from a copy that jumped to the wrong one.
+const TAIL_POSITION_NORETURN: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine pick, tapes=1, alpha=(3), exits=2, noreturn
+.param n, ('_', '0', '1')
+.section tables
+T0:     .row    [0]
+        .row    [1]
+        .row    [2]
+T1:     .targets zero, one, two
+.section code
+.func main
+        wrmv    [1], [.]
+        jmp     go
+a:      wrmv    [1], [.]
+        stp
+b:      wrmv    [2], [.]
+        stp
+go:     call    pick [n: 0] exits=(a, b)
+.func pick
+        rd
+        mtc     T0
+        djmp    T1
+zero:   retx    #0
+one:    retx    #1
+two:    retx    #0
+";
+
+/// The tail-position `noreturn` shape, executed: all three mechanisms
+/// link it and all three leave the same tape. Before the tail refusal
+/// learned to read the callee, mono and hybrid — hybrid being the
+/// DEFAULT — refused this program while frames linked and ran it.
+///
+/// Mutation it catches: make the tail refusal unconditional again and the
+/// mono and hybrid links fail outright; keep the refusal exact but let a
+/// copy jump to the wrong exit and the final tape reads `1`, not `2`.
+#[test]
+fn a_tail_position_call_into_a_callee_that_cannot_return_agrees_across_mechanisms() {
+    let results: Vec<_> = MECHS
+        .iter()
+        .map(|&m| run(&build(TAIL_POSITION_NORETURN, m), &[3]))
+        .collect();
+    for (m, r) in MECHS.iter().zip(&results).skip(1) {
+        assert_eq!(
+            (&results[0].0, &results[0].1),
+            (&r.0, &r.1),
+            "mono vs {m} diverged on a tail-position call into a \
+             non-returning callee"
+        );
+    }
+    let (outcome, snaps) = &results[0];
+    assert_eq!(*outcome, Outcome::Stopped, "the program runs to a stop");
+    assert_eq!(
+        cell_at(&snaps[0], 0),
+        2,
+        "exit 1 was taken, so `b` wrote physical 2 over the seed"
+    );
+}

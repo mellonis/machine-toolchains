@@ -154,14 +154,21 @@ pub enum LinkError {
     /// two mono refusals above — it mints no stamp names, so it cannot
     /// collide.
     StampNameCollision(String),
-    /// An exit-bearing declarative bound call is the LAST instruction of
-    /// its function. Such a site is lowered as a jump into a per-site copy
-    /// whose plain `ret` becomes a jump to the instruction after the call
-    /// (docs/core.md (call mechanisms)) — and here there is no instruction
-    /// after it, so the return has nowhere to land. Carries the owning
-    /// function's name. Named rather than left to surface as a malformed
-    /// blob at some offset, because the cause is a property of the source
-    /// the author can act on.
+    /// An exit-bearing declarative bound call into a callee that CAN
+    /// return is the LAST instruction of its function. Such a site is
+    /// lowered as a jump into a per-site copy whose plain `ret` becomes a
+    /// jump to the instruction after the call (docs/core.md (call
+    /// mechanisms)) — and here there is no instruction after it, so the
+    /// return has nowhere to land. Carries the owning function's name.
+    /// Named rather than left to surface as a malformed blob at some
+    /// offset, because the cause is a property of the source the author
+    /// can act on.
+    ///
+    /// A callee that cannot return is not refused: its copy rewrites only
+    /// `retx #k`, each into a jump to exit `k` of the site's own vector,
+    /// and so needs no continuation at all. "Cannot return" is read off
+    /// the callee's body, not off the `noreturn` bit in its interface —
+    /// that bit is a declaration nothing checks the body against.
     ///
     /// The refusal is SPLICE-specific, not a property of tail position
     /// itself: a site whose hybrid fold group shares one generic body is
@@ -288,9 +295,11 @@ impl std::fmt::Display for LinkError {
             Self::ExitBearingTailCall(symbol) => write!(
                 f,
                 "an exit-bearing call COPIED into its call site needs an \
-                 instruction after it for the return to land on; it cannot \
-                 be the last instruction of `{symbol}` — a site reached \
-                 through a frame descriptor instead is unaffected"
+                 instruction after it for the return to land on, so a call \
+                 into a callee that can return cannot be the last \
+                 instruction of `{symbol}` — a callee that never returns, \
+                 and a site reached through a frame descriptor instead, \
+                 are both unaffected"
             ),
             Self::RecursiveExitBearingCall(name) => write!(
                 f,
