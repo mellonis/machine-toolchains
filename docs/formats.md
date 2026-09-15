@@ -970,20 +970,39 @@ counting positions, and an exit vector:
 Every one of these needs the dialect's interface capability; PM-1 never
 enables it, so `.pma` accepts none of them.
 
-**What resolves them, and when.** The format and the assembler carry all
-four spellings today: a symbolic call site assembles, round-trips through
-the object, and disassembles back to the same text. Turning them into an
-image is a separate step — matching a name to a `.param`, a glyph to a
-callee symbol, completing what an open map leaves out, wiring exits to
-their targets — and it belongs to the link stage, which is where the
-callee's interface is in hand. Until the interface-aware linker lands,
-the link **refuses** a bound call carrying any of the four — a *reached*
-one, since the linker drops unreachable functions and those may reference
-anything — rather than link it on the numeric reading of fields it cannot
-resolve: a named entry would silently be taken positionally, a labelled
-destination would map onto the placeholder index, an open map would
-close, and exits would vanish. A written-empty map is not in that set —
-it needs nothing resolved, and links as the identity it is.
+**What resolves them, and when.** A symbolic bound site — a parameter
+name instead of a list position, a glyph label instead of a callee symbol
+index — is resolved at LINK time, against the callee's interface section,
+before the composition engine reads a binding. The parameter name gives
+the callee tape, the entries are reordered into the callee's own tape
+order, and each glyph label becomes that glyph's position in the callee's
+declared alphabet for that tape. A callee that describes no interface can
+be reached only by a transparent call: there is nothing to resolve
+against, and the link says so rather than guessing. The resolution
+produces a fresh numeric binding; the object is never rewritten, because
+a labelled pair carries `dst` 0 on the wire and filling it in would make
+the value one the writer refuses to re-encode. A written-empty map needs
+none of this — it resolves to nothing and links as the identity it is.
+
+An **open** map (`{…, *}`) is not symbolic and is not resolved away: it
+is read by the composition algebra itself, which sends every unlisted
+caller symbol one-way onto the index equal to the callee's cardinality —
+an index no callee row names, so only a `*` cell matches it and only a
+keep preserves it. The link refuses an open binding into a tape the
+callee does not declare opaque. Only the READ half opens: an opaque
+symbol is read-only by construction, exactly like a one-way `=>` pair, so
+the write half stays closed whatever the two cardinalities are — equal
+alphabets included, where an ordinary binding would identity-complete it.
+
+An **exit vector** is likewise carried through rather than resolved away.
+Its entries are blob-relative offsets in the CALLING function; under
+frames they become absolute code addresses in the site's descriptor,
+under mono the call site jumps into a per-site copy whose returns jump to
+them instead. Its LENGTH is checked here against the callee's declared
+exit count, in both directions: a site supplying a vector the callee did
+not ask for is refused, and so is a site supplying none into a callee
+that declares exits, whose `retx` would otherwise index a vector that is
+not there.
 
 **Canonical spelling.** The parser accepts any spacing on input — the
 first example above writes its pairs `1->3, 2=>0`, and that assembles —

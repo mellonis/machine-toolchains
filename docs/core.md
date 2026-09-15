@@ -721,6 +721,42 @@ stamping, by design — it backs an editor overlay reasoning about
 cross-file, exported-symbol visibility, a question the resolve phase
 alone answers, not final image membership.
 
+### Symbolic resolution
+
+An object records a bound call in a **symbolic** form wherever the
+compiler could not spell a number: a parameter name instead of a list
+position, a glyph label instead of a callee symbol index
+(`docs/formats.md (bound calls)`). Turning those into numbers is a
+pre-pass of its own, run once between name resolution and the
+composition engine — after the reachability walk has settled which
+callees exist, and before any mechanism reads a single binding.
+
+It is the one place a symbolic form can fail, and every failure is an
+error that names the callee: a parameter the callee does not declare,
+one bound twice, one the binding leaves unbound, a binding mixing named
+and positional entries, a glyph outside the callee's declared alphabet
+for that tape, an open binding into a tape the callee does not declare
+opaque, and an exit vector whose length disagrees with the callee's
+declared exit count. Because they are all raised here, no mechanism can
+mis-lower one — the three call mechanisms pass through a single gate,
+rather than each re-deriving the same checks.
+
+The pass **never mutates an object**. The numeric records it produces
+live beside the originals for the length of the link: a labelled pair
+carries `dst` 0 on the wire by the writer's own invariant, so writing a
+resolved index back into it would make the object one the writer refuses
+to re-encode, and the format's round-trip promise would be a casualty of
+linking. Only the two symbolic fields are consumed; everything else the
+record carried — the caller tape, the written-map bit, the open bit,
+one-way pairs, the exit vector — survives verbatim, because `open` in
+particular is semantic rather than symbolic and a pass that normalized
+it away would silently close every open binding.
+
+It is placed here rather than inside name resolution deliberately. Name
+resolution is shared with the standalone name-resolution query editors
+run (Linking above), which reasons about exported-symbol visibility and
+has no business failing over a binding.
+
 ### Relaxation
 
 **Layout** places the surviving functions and patches their call sites.
@@ -772,6 +808,15 @@ image-level aggregates:
 | `expanded_rows` | extra match rows from one-way collapse expansion |
 | `variant_fallbacks` | sorted names that linked the build column NOT matching the program's bit, because the wanted one was absent |
 | `program_volatile` | the volatile bit this link resolved with — the column every name was selected by |
+| `diagnostics` | the link warnings raised, one per site (Link warnings below) |
+| `folds` | one record per hybrid exit-bearing fold decision: the callee, its site count, the body and would-be-descriptor byte counts the rule compared, and whether the group was shared under frames or spliced |
+
+`diagnostics` and `folds` are both lists rather than counters, because
+each entry names a site or a routine a consumer has to render: a CLI
+prints the warnings unconditionally and the fold decisions under its own
+verbose flag (`docs/tmt/cli.md (link warnings)`). Both are empty on a
+link with nothing to report — a program with no bound call has no fold
+decision at all.
 
 `variant_fallbacks` names what SHIPPED, not what the namespace held:
 every name on it is in the image. It is empty precisely when every
@@ -792,6 +837,46 @@ raised at, and the source line when the objects carried debug data. The
 linker never prints and never decides what a warning means: a consumer
 renders them, suppresses them through its own allow list, and promotes
 them to errors under its own strict-mode flag.
+
+**What gets graded.** A site that binds **by index** — a plain call, a
+relocated tail jump or conditional branch into another function, or a
+bound site's tape whose map was OMITTED — is compared against the
+callee's declared signature, tape by tape. A relocated jump or branch is
+graded exactly like a call because the tail-call pass turns one into the
+other: a call-only rule would let the identical hazard through on any
+optimized program. An **explicit** map is never graded, `{}` included:
+the author said what they meant, and a hole they wrote is a hole they
+own.
+
+The grading has one error tier and one warning tier, and which side a
+finding lands on follows from what the callee can reach:
+
+- A callee declaring **more tapes** than the caller, or an alphabet
+  **wider** than the caller's band on a tape they share, is an **error**
+  — it would address a band that does not exist, or write an index past
+  the band's width. The message names the dimension, and a wider
+  alphabet names the CALLER's tape index, the band the author can look
+  at.
+- A callee declaring **fewer tapes** is silent: the surplus bands are
+  simply not reached.
+- A **narrower** alphabet is `narrow-alphabet` — the caller's high
+  symbols have no image in the callee, which is suspect rather than
+  unsound.
+- **Equal** widths, with both sides declaring their glyphs, are compared
+  glyph by glyph; a difference is `glyph-mismatch` naming the first
+  position that differs. This is the only check that detects a
+  reordering.
+- A plain site into a callee whose interface declares **exits** is an
+  error too: the callee returns through a vector the site never
+  supplied.
+
+Every finding is raised once, in the composition engine, so a hybrid
+link — which consults two lowering paths — still reports each one
+exactly once. A link whose ENTRY function carries no signature is graded
+not at all: there is no machine signature to compare against, and the
+engine does not run. Hand-assembled files with no routine signatures are
+therefore unaffected, and so is every architecture whose toolchain emits
+none.
 
 Codes are permanent identifiers: they never change meaning.
 
@@ -847,6 +932,19 @@ with holds three laws the implementation is property-tested against:
   inner holes. A one-way pair participates in the read direction only,
   and is excluded from the bidirectional bijectivity check.
 
+**One walk, two drivers.** The copy-path closure is enumerated once, and
+both the hybrid fold probe and the stamp builder run it. A node is a
+`(routine, composite)` pair; an **exit-bearing** node is additionally
+keyed by its call site — the caller, the continuation, and the exit
+offsets — so two splices of one pair are two copies, and the fold count
+counts the sites inside both. The probe is that same walk run without
+building anything: it never fails, seeds only from the exit-free
+bijection sites (the copies that exist whatever the fold rule decides),
+and keeps descending past an exit-bearing site whose group may yet be
+shared. That last is a deliberate over-report — a phantom member can
+only push its group into sharing, and sharing is a correct lowering for
+any site.
+
 ### Call mechanisms
 
 `LinkOptions::call_mech` selects how a lowered site runs. The three
@@ -877,10 +975,56 @@ produce different images from the same objects:
 - **frames** compiles for the frames profile: one generic copy of each
   routine, every binding site a framed call, composites resolved through
   the frames region's directory and compose table at run time. A crossed
-  hole traps through the descriptor's hole sentinel.
+  hole traps through the descriptor's hole sentinel. A routine's own
+  bound-call sites compose in the **row of the composite that routine is
+  entered under**, never in the identity row, and an exit-bearing
+  composite occupies a row of its own per call site — its descriptor
+  carries that site's exits, so two sites reaching one routine under the
+  same binding are still two rows.
 - **hybrid** classifies per site: a completed bijection stamps like
   mono, anything holey or one-way frames. An image with at least one
   framed site carries a frames region; an all-stamped one has none.
+
+An **exit-bearing** site — one whose callee takes state parameters —
+lowers differently under each mechanism, and never collapses to a plain
+call whatever its binding: a plain call returns through the address it
+pushed and has nowhere to put the other exits.
+
+- **Frames** puts the site's exit vector in its descriptor, alongside the
+  composed placement. The vector holds absolute code addresses, so an
+  exit-bearing descriptor is address-dependent where an exit-free one is
+  not, and the link rebases it when the calling function is placed.
+- **Mono** splices. The site jumps into a per-site copy of the callee in
+  which the plain return becomes a jump to the instruction after the
+  call, and each multi-exit return becomes a jump to its exit. Nothing is
+  pushed, so nothing has to be popped — which matters because the
+  architecture has no pop.
+- **Hybrid** groups the exit-bearing sites reaching one routine under one
+  composite and decides by byte count: with `k` sites, a body of `B`
+  bytes and would-be descriptors of `d` bytes in total, the group is
+  shared under frames when `k` is at least two and `(k − 1) · B` exceeds
+  `d`; otherwise each site splices. Two sites over a large body share;
+  two over a small one splice, because two copies cost less than a body
+  plus two descriptor loads. Every input to that comparison is a
+  link-time count, and the descriptor size comes from the emitter itself
+  rather than a second formula, so the decision is deterministic and a
+  relink is byte-identical. The link report prints each decision.
+
+  The count runs over the whole reachable set, not only the sites
+  visible at the machine's own frame. A site met while a routine is
+  being copied under some composite joins the group its composed
+  binding lands in, and when that group is shared the copy reaches the
+  one shared body through a framed call whose descriptor is that
+  composed binding plus the site's own exits. So a routine can be
+  shared on the strength of sites that only exist inside copies — which
+  is the case the rule is worth having for.
+
+  The scope stops where splicing does. A group's members are the
+  exit-bearing bijection sites reachable at the machine frame plus those
+  met inside a **stamped copy**; a site inside a frames-lowered callee —
+  one reached holey or one-way — is never grouped, because inside a
+  framed body every site is already a framed site and the byte rule has
+  nothing to trade.
 
 All three are **observably equivalent** on the same program and inputs —
 same outcome, same final device state, and the **same trap kind** on a
@@ -892,16 +1036,42 @@ calls)`), which is also why a callee may never declare more tapes than
 its caller has to bind them to. A hand-authored raw `.frame` descriptor
 sits outside that check: it is never built from a binding, and mono
 never stamps one, so it carries none of the divergence risk the check
-exists to rule out.
+exists to rule out. Two matrices hold the claim: one runs every shipped
+program at both optimization levels under all three mechanisms, trap
+kinds included, and one runs an assembly-level set built for the
+declarative forms — exits from one site and from several, open
+bindings, and a call crossing an object boundary — under the three
+mechanisms and compares what each image does.
 
-Two restrictions bind the **mono lowering path**. A raw hand-authored
-framed call cannot be lowered onto the base profile, which has no
-compose machinery to activate a descriptor with. And a holey binding
-whose synthesized trap rows would be consumed by a conditional branch
-rather than a dispatch jump is refused, since a synthesized trap row
-still sets MR to a nonzero value that a conditional branch would misread
-as an ordinary match, wherever in the table it sorts. Both errors name
-the offending routine.
+Three restrictions bind the **mono lowering path**, which is to say the
+copy path: whatever splices, rather than whatever is spelled `mono`.
+
+- A raw hand-authored framed call cannot be lowered onto the base
+  profile, which has no compose machinery to activate a descriptor with.
+- A holey binding whose synthesized trap rows would be consumed by a
+  conditional branch rather than a dispatch jump is refused, since a
+  synthesized trap row still sets MR to a nonzero value that a
+  conditional branch would misread as an ordinary match, wherever in the
+  table it sorts.
+- An exit-bearing bound call that reaches, through an **unbroken** chain
+  of copied exit-bearing calls, an exit-bearing call back into a routine
+  the copy already sits inside has no lowering on the copy path at all.
+  Each turn of such a loop returns somewhere new, so it needs its own
+  copy, and the minting never ends. The word "unbroken" is load-bearing
+  and the refusal is exact rather than conservative: a cycle passing
+  through a plain (transparent) call is closed by the copy already made
+  for that composite — a node minted on a plain or exit-free edge is
+  keyed by its composite alone, so the second lap meets the first
+  instead of growing past it — and such a program links normally.
+
+Each error names the offending routine, and **all three advise
+`frames`**. Frames lowers every one of them: a raw descriptor is what it
+runs on, a holey binding traps through the hole sentinel rather than
+through a synthesized row, and a recursive exit-bearing call becomes one
+body with a descriptor per site, the loop closed at run time through the
+frame register. `hybrid` links the recursive case exactly when its own
+byte rule shares the group, which is not a property a caller can be told
+to rely on — so the advice never sends one in a circle.
 
 `hybrid` inherits those restrictions only where it actually stamps.
 Because an identity binding collapses to a plain call, it never seeds a
@@ -912,7 +1082,23 @@ and none is holey or one-way. With no such site it is pure frames, and a
 raw framed call elsewhere in the image links fine. With both kinds
 present it takes the mixed path, where the restrictions bind only the
 stamped closure reached from the bijection seeds, not the image at
-large.
+large. A **shared** fold group counts as a framed site for that
+classification: sharing is what puts a frames region in the image, so a
+link whose exit-bearing bijections were all folded into shared groups
+takes the mixed path rather than delegating wholesale.
+
+**A bound call in tail position is the author's hazard, not the
+linker's.** A bound call that is the last instruction of its function,
+into a callee that returns, links under every mechanism and traps
+`stack-underflow` at run time under every mechanism: the return has no
+continuation, and that is equally true of a stamped copy's return
+address and of a framed call's own bookkeeping. The linker does not
+refuse it. The one exception is an **exit-bearing** site in tail
+position on the copy path: it is refused by name, because a splice's
+plain return is a jump to the instruction after the call and there is no
+such instruction. That refusal too is splice-specific — a site whose
+hybrid fold group shares one generic body returns through its frame and
+is never refused.
 
 ## Syntax trees
 

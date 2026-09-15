@@ -371,8 +371,12 @@ main+0x0000: warning: `sub` reads a 3-symbol alphabet where `main`'s band is 5 w
 The codes share the one allow namespace `tmt lint` uses, so `--allow CODE`
 suppresses one here and `lint.allow` in `tmt.json` suppresses it for
 `tmt build`. `-Werror` promotes every unsuppressed warning to an error.
-Errors — a callee wider than the caller, a graft whose digest drifted —
-are outside the namespace and cannot be suppressed.
+Errors are outside the namespace and cannot be suppressed — a callee
+wider than the caller or declaring exits the site does not supply, a
+binding naming a parameter or a glyph the callee does not declare, an
+open binding into a tape the callee does not declare opaque, a graft or
+an imported alphabet whose digest drifted, and the copy path's own
+refusals (`docs/core.md (call mechanisms)`).
 
 | Code | Meaning |
 |---|---|

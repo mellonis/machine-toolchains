@@ -6420,3 +6420,65 @@ Every point where this plan had to choose. None is settled by the spec.
 - **(Diagnostics catalog)** Two codes: `glyph-mismatch` and `narrow-alphabet`. The spec writes "(`glyph-mismatch`, `narrow-alphabet`, …)" — the ellipsis is not filled, and the checks in this phase need no third code. Every other finding here is an error and outside the namespace.
 - **(Task 1 prior, not a substitute for the sweep)** The TM compiler emits no `.param`, so no compiled object carries an interface in phase 2 and the glyph-level checks are structurally dormant on the shipped corpus until phase 3; the only live plain-site comparison is arity/cardinality from `RoutineSig`. The four shipped plain `call std::` sites (`docs/examples/rpn/rpn.tmc:75,82,90,99`) are cardinality-equal. The sweep still runs.
 
+---
+
+## Behaviour changes in phase 2
+
+**One. An index-binding site into a callee wider than the caller — in
+tape count, or in the alphabet of a shared tape — is now a link error.**
+It was unchecked: the linker inspected nothing at a plain site, not even
+arity.
+
+Two things sharpen that sentence, and both are deliberate:
+
+- **"Site" is wider than "call".** The rule grades every relocated edge
+  into another function — a plain call, and also a tail jump or
+  conditional branch, which the linker classifies identically because
+  the tail-call pass turns one into the other. A call-only rule would
+  miss the same hazard on any optimized program. A bound site's tape is
+  graded the same way when its map is OMITTED; an explicit map, `{}`
+  included, is never graded.
+- **A program whose entry function carries no signature is graded not at
+  all.** There is no machine signature to grade against, and the whole
+  composition engine is skipped for such a link. Hand-assembled files
+  without `.routine` lines are therefore unaffected, and so is every
+  `pmt` program.
+
+**Blast radius, measured (Task 1, recorded in full above).** The on-disk
+sweep over `docs/examples/`, `crates/turing-machine/tests/golden/` and
+the TM stdlib compared **4 plain sites, 0 unresolved, 0 wider and 0
+narrow** — every one of them a `call std::binaryNumbers::*` in
+`docs/examples/rpn/rpn.tmc`, which is what confirms the external-callee
+lookup worked rather than reporting a vacuous clean. The step-3 hand
+audit of the core and TM link fixtures found **9 plain sites, 0 wider**
+(92 call sites in all; 82 carry an explicit binding map and are not
+candidates, and one is a hand-authored `call.m`, graded by the
+composition algebra rather than by this check). Read the two numbers
+with their scopes: 4 is the on-disk `.tmc`/`.tma` corpus, 9 is the
+in-repo test fixtures, and neither contains a wider callee. One
+test-constructed source **was** wider and was corrected in flight — the
+LSP overlay faithfulness fixture, whose caller band was widened to hold
+what it calls (commit `2402ea2`); the sweep instrument never saw it,
+because it walks on-disk sources only.
+
+**Two. A nested exit-bearing frames site now composes in its own row.**
+It used to compose in row 0 and leave its own row reserved-invalid, so
+the link reported success and the image trapped. Images with that shape
+change; every other frames image is byte-identical, verified over the
+fixture corpus (`8c5129b`).
+
+**Three. An unbroken recursive exit-bearing bound call is now refused on
+the copy path.** Such a program did not link before either — it drove
+the stamp minter forever. Programs that linked before are unaffected;
+what changes is that the non-termination is now a named error advising
+`--call-mech=frames` (`f2556ec`, narrowed to the unbroken chain in
+`b39b8e5`).
+
+Everything else the phase adds is either a resolution of a form that was
+previously REFUSED (named entries, glyph labels, open maps, exit
+vectors), a new WARNING that does not stop a link, or an error on a form
+that could not be written before. No program in the corpus changes
+image: the standing gates — PM-1 byte identity, the everything-matrix,
+the three-mechanism `.tma` matrix, and `mode_equivalence`'s relink
+byte-identity sweep — all hold.
+
