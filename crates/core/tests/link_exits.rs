@@ -1704,9 +1704,14 @@ fn a_shared_closure_site_frames_instead_of_stamping_a_child() {
         "only `outer` is stamped; `big` stays generic: {:?}",
         out.report
     );
-    assert!(
-        out.report.composites >= 2,
-        "the shared body needs a directory entry per site: {:?}",
+    // One directory entry PER SITE, exactly as the identity-world sibling
+    // pins: the engine composite for `main`'s own site, plus one raw
+    // descriptor for each of the copy's two framed calls. `>= 2` would
+    // also be satisfied by two sites sharing one entry, which is the
+    // wrong lowering — the exits differ, so they must not dedup.
+    assert_eq!(
+        out.report.composites, 3,
+        "one entry per site: 1 engine + 2 raw: {:?}",
         out.report
     );
     // `big` survives as a generic routine — a shared group's whole point.
@@ -1743,10 +1748,20 @@ fn the_closure_fold_program_links_and_relinks_under_every_mechanism() {
 
 /// The same shape with `main`'s own exit-bearing site REMOVED: `big`'s
 /// only two sites both sit inside `outer`'s stamped copy, so the group
-/// has no identity-world member at all. With 10 `nop`s, `B` = 13 against
-/// `sum(d_i)` = 56 and `13 > 56` is false — the group splices, and
-/// `mono_stamps` is what splices it, since the decision loop has nothing
-/// to seed.
+/// has no identity-world member at all — and with 60 `nop`s it SHARES.
+///
+/// `B` = 1 `ent` + 60 `nop` + 2 `retx` = **63** against two 28-byte
+/// descriptors, `sum(d_i)` = **56**; `(2 - 1) * 63 = 63 > 56`, with the
+/// flip point at 54 `nop`s. That makes this the one program where the
+/// shared body is reached from NOWHERE but inside a stamped copy, which
+/// is a corner in two places at once:
+///
+/// - **the prune**: nothing in `main` points at `big` any more, so the
+///   only edge keeping it in the image is the stamp's own framed-call
+///   displacement relocation, and `prune_unreachable` has to follow it;
+/// - **the frames path**: the closure from the entry meets no bound site
+///   at all, so `engine_count` is 0 and the whole directory is raw
+///   descriptors from inside a stamp.
 fn closure_only_fold() -> String {
     format!(
         "\
@@ -1769,22 +1784,28 @@ q:      ret
 .func big
 {}        retx    #0
 ",
-        nops(10)
+        nops(60)
     )
 }
 
-/// A group whose members are ALL closure sites is still decided, and a
-/// refused group is spliced by the stamp closure itself rather than
-/// seeded by the decision loop.
+/// A group whose members are ALL closure sites is decided like any other,
+/// and the body it shares survives on the strength of the stamp's own
+/// framed call.
 ///
 /// Mutation it catches: leave `group_composite` unpopulated in the probe
 /// merge and the decision loop's `group_composite[key]` index panics —
 /// `closure_fold` masks that, because its identity-world member fills the
-/// key first. Also: the splice branch seeding a non-`Identity` member has
-/// no caller or address to seed WITH, which is why the branch skips them
-/// and this fixture is the one that proves the skip still links.
+/// key first. Drop the framed call's `calls.push` (the displacement
+/// relocation into the shared body) and `prune_unreachable` finds no edge
+/// to `big` at all: it is dropped from the image and the link fails on
+/// the dangling framed call. The splice branch seeding a non-`Identity`
+/// member has no caller or address to seed WITH; the skip that avoids it
+/// is exercised by the closure-only groups in
+/// `a_nested_pass_through_site_with_exits_still_splices` and
+/// `an_exit_vector_links_under_mono_and_hybrid`, which are refused rather
+/// than shared.
 #[test]
-fn a_group_with_only_closure_sites_is_decided_and_spliced() {
+fn a_group_with_only_closure_sites_is_decided_and_shared() {
     let out = link(
         &fake_syntax(),
         &[asm(&closure_only_fold())],
@@ -1799,17 +1820,36 @@ fn a_group_with_only_closure_sites_is_decided_and_spliced() {
         .find(|f| f.routine == "big")
         .unwrap_or_else(|| panic!("no fold decision for `big`: {:?}", out.report.folds));
     assert_eq!(fold.sites, 2, "both sites sit inside the copy: {fold:?}");
-    assert_eq!(fold.body_bytes, 13, "1 ent + 10 nop + 2 retx: {fold:?}");
+    assert_eq!(fold.body_bytes, 63, "1 ent + 60 nop + 2 retx: {fold:?}");
     assert_eq!(
         fold.descriptor_bytes, 56,
         "two 28-byte descriptors: {fold:?}"
     );
-    assert!(!fold.shared, "13 > 56 is false: {fold:?}");
-    // `outer`'s copy plus one per-site copy of `big` each.
+    assert!(fold.shared, "63 > 56, so the group shares: {fold:?}");
+    // Only `outer` is stamped; `big` keeps its single generic body.
     assert_eq!(
-        out.report.instantiations, 3,
-        "the refused group splices inside the copy: {:?}",
+        out.report.instantiations, 1,
+        "the shared body is not copied: {:?}",
         out.report
+    );
+    // The whole directory is raw descriptors emitted from inside the
+    // stamp: the closure from the entry meets no bound site at all, so
+    // `engine_count` is 0 and these two are all there is.
+    assert_eq!(
+        out.report.composites, 2,
+        "one raw descriptor per framed site: {:?}",
+        out.report
+    );
+    // And the body survived the prune on the strength of the stamp's
+    // framed-call edge alone — nothing else in the image names it.
+    assert!(
+        out.map.functions.iter().any(|f| f.name == "big"),
+        "the shared body must survive the prune: {:?}",
+        out.map
+            .functions
+            .iter()
+            .map(|f| &f.name)
+            .collect::<Vec<_>>()
     );
 }
 

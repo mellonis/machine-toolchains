@@ -696,7 +696,11 @@ pub(super) fn lower_hybrid<'a>(
     );
 
     // The frames path re-scans the mono-rewritten order; the stamps carry no
-    // bound calls, so they flow through as ordinary functions.
+    // bound calls, so they flow through as ordinary functions — except that
+    // a stamp reaching a SHARED body carries a raw framed call, which the
+    // re-scan reports as `RawCallM` and the frames path gives a directory
+    // entry and a constant compose column, exactly as it does a
+    // hand-authored one (docs/core.md (call mechanisms)).
     let new_sites: Vec<Vec<SiteKind>> = new_order
         .iter()
         .map(|f| scan_sites(syntax, f, machine_sig, &new_order))
@@ -733,16 +737,33 @@ pub(super) fn lower_hybrid<'a>(
 ///
 /// The probe is purely ADDITIVE and never fails: a site it cannot compose,
 /// or a raw framed call inside a copy, is skipped rather than reported as
-/// an error, so a probe walking one step further than the builder will
-/// (past a site whose group ends up shared, which the builder does not
-/// descend through) can never turn a linkable program into a refusal. The
-/// seeds are the EXIT-FREE bijection sites alone — the copies those mint
-/// exist whatever the decision — so the count can only ever under-report,
-/// and an under-reported group splices, which is always sound.
+/// an error, so it can never turn a linkable program into a refusal. A
+/// refusal belongs in `mono_stamps`, which walks the authoritative
+/// closure; one raised here would be raised over a walk that is
+/// deliberately **neither a subset nor a superset** of what gets built.
 ///
-/// Keep it that way: a refusal belongs in `mono_stamps`, which walks the
-/// authoritative closure. One raised here would be raised over a walk that
-/// is deliberately neither a subset nor a superset of what gets built.
+/// That phrase is exact, and both directions matter:
+///
+/// - **It UNDER-reports, two ways.** The seeds are the EXIT-FREE bijection
+///   sites alone, because those are the copies that exist whatever the
+///   decision is — an exit-bearing site nested inside a copy that only
+///   exists because another exit-bearing site was REFUSED sharing is
+///   invisible here. And `visited` keys on `(routine, composite)` while
+///   `intern` keys on `(composite, caller, then, exits)`, so one
+///   `(routine, composite)` reached through two distinct splice sites is
+///   built TWICE and walked once; the sites inside its second copy are not
+///   counted. Sound either way: an under-counted group is likelier to fall
+///   under the byte rule and splice, and splicing is available to every
+///   exit-bearing site.
+/// - **It OVER-reports one way.** After an exit-bearing site it keeps
+///   descending, exactly as the builder does when that site splices — but
+///   if the site's group ends up SHARED the builder frames the call and
+///   never copies the subtree, so sites the probe met down there belong to
+///   no copy at all. Sound too: a phantom member can only push its group
+///   over the byte rule into sharing, sharing only sets `any_frames` and a
+///   `shared` pair the builder never reaches, and a frames image is a
+///   correct image for any site. The visible cost is a `FoldDecision` for
+///   a group whose members are not all in the emitted image.
 fn mono_closure_probe<'a>(
     order: &[FuncRef<'a>],
     sites: &[Vec<SiteKind<'a>>],
