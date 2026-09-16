@@ -282,14 +282,14 @@ fn render_glyph(glyph: &str) -> String {
     out
 }
 
-/// One element of a glyph LIST. A one-character glyph is a quoted
-/// literal; a longer one cannot be, because the assembly lexer's glyph
-/// token is exactly one character wide and an unlexable token makes the
-/// whole line unassemblable. The only multi-character label a glyph list
-/// can hold is a NUMBER's decimal label — a list element lexes as a
-/// glyph literal or as a number, and nothing else — so that label prints
-/// as the bare number it came from and reads back identical
-/// (docs/formats.md (assembly text)).
+/// One element of a glyph LIST. A glyph literal spells any non-empty
+/// content, so a multi-character, non-numeric label prints as a quoted
+/// literal like any other (docs/formats.md (glyph literals and glyph
+/// lists)). The one label that still prints bare is a canonical
+/// decimal's — `10` rather than `'10'` — because a bare number's
+/// identity is its VALUE, not its character content, and that identity
+/// is what a re-parse must land back on; quoting it would instead label
+/// the two-character string `"10"`, a different glyph.
 fn render_glyph_element(glyph: &str) -> String {
     let multi_char = glyph.chars().count() != 1;
     if multi_char && glyph.parse::<u32>().is_ok_and(|n| n.to_string() == glyph) {
@@ -3031,9 +3031,10 @@ A:      stp
         // is its decimal label. Both reprint elementwise and re-parse to
         // the identical list — so the object is unchanged even though
         // the text is not the one that was written. `10` stays a bare
-        // number because `'10'` would not LEX (a glyph token is one
-        // character wide), and an unlexable token makes the whole line
-        // unassemblable.
+        // number rather than the quoted literal `'10'` because the two
+        // spell different labels: the bare number's identity is its
+        // VALUE, while a quoted `'10'` would be the two-character glyph
+        // `"10"` (docs/formats.md (glyph literals and glyph lists)).
         let syntax = iface_syntax();
         let src = concat!(
             ".routine main, tapes=2, alpha=(4, 3)\n",
