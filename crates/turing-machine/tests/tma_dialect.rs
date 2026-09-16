@@ -121,6 +121,52 @@ fn interface_object_round_trips_byte_identically() {
     assert_eq!(text, INTERFACE_OBJECT, "the fixture is already canonical");
 }
 
+/// A `.param` glyph group carrying a multi-character label — the notation
+/// `docs/tmt/language.md (glyph literal)` already allows in `.tmc` source
+/// and `parse_glyph_list` already accepts (docs/formats.md (glyph literals
+/// and glyph lists)).
+const MULTI_CHAR_PARAM: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param d, ('_', 'ab', 'x')
+.func main
+        stp
+";
+
+#[test]
+fn a_multi_character_label_round_trips_through_param() {
+    // Mutation: printing the label unquoted, or quoting only its first
+    // character, turns the byte compare red — this is the test the whole
+    // task exists for.
+    let obj = assemble(MULTI_CHAR_PARAM, false).expect("assembles");
+    let text = disassemble_object(&obj);
+    let again = assemble(&text, false)
+        .unwrap_or_else(|e| panic!("rendered text must re-assemble: {e:?}\n{text}"));
+    assert_eq!(again.to_bytes(), obj.to_bytes(), "{text}");
+}
+
+/// Widening the literal must not widen the `..` range rule: an endpoint
+/// still has to be a single character or a bare number. `alpha=(24)`
+/// matches what an over-widened endpoint check WOULD expand `'ab'..'x'`
+/// to (taking `'ab'`'s first scalar, `'a'`, through `'x'`: 24 letters) —
+/// chosen so the endpoint rule is the only thing standing between pass and
+/// fail; an `alpha` mismatch alone must not be why this stays an error.
+const MULTI_CHAR_RANGE_ENDPOINT: &str = "\
+.routine main, tapes=1, alpha=(24)
+.param d, ('ab'..'x')
+.func main
+        stp
+";
+
+#[test]
+fn a_multi_character_range_endpoint_is_still_an_error() {
+    // Mutation: widening the range's same-kind/single-scalar check along
+    // with the literal — the easy over-correction this task must avoid.
+    // Cross-checked against `glyph_notation_parity.rs`'s `'ab'..'z'` pin,
+    // which already holds the `.tmc`/`parse_glyph_list` halves of this
+    // rule; this is the `.tma`-side twin.
+    assert!(assemble(MULTI_CHAR_RANGE_ENDPOINT, false).is_err());
+}
+
 /// The 0.3 fused write+move `wrmv [w…], [m…]`: the write vector then the
 /// move vector in one instruction (all writes precede all moves).
 const WRMV_PROGRAM: &str = "\

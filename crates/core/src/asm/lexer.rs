@@ -315,33 +315,59 @@ pub(crate) fn lex_line(text: &str, line_no: u32, caps: AsmCaps) -> Vec<AsmToken>
         }
 
         if c == '\'' && caps.interface {
-            // '<char>' or '\'' or '\\' — anything else stays Junk.
+            // Any non-empty content up to the closing quote, decoding the
+            // two escapes `\'` and `\\` — matching the `.tmc` glyph
+            // literal's own rule (docs/tmt/language.md (glyph literal))
+            // and `formats::glyphs`' scanner. An empty literal (`''`) or
+            // an unterminated one (no closing quote before EOL) both fall
+            // through to Junk('\''), exactly as before this content was
+            // accepted.
             let rest = &chars[pos + 1..];
-            let (decoded, consumed) = match rest {
-                ['\\', '\'', '\'', ..] => ("'".to_string(), 4),
-                ['\\', '\\', '\'', ..] => ("\\".to_string(), 4),
-                [ch, '\'', ..] if *ch != '\\' && *ch != '\'' => (ch.to_string(), 3),
-                _ => {
-                    tokens.push(AsmToken {
-                        kind: AsmTokenKind::Junk('\''),
-                        line: line_no,
-                        col,
-                        len: 1,
-                    });
-                    pos += 1;
-                    col += 1;
-                    continue;
+            let mut decoded = String::new();
+            let mut i = 0;
+            let mut closed = false;
+            while i < rest.len() {
+                match rest[i] {
+                    '\'' => {
+                        i += 1;
+                        closed = true;
+                        break;
+                    }
+                    '\\' if rest.get(i + 1) == Some(&'\'') => {
+                        decoded.push('\'');
+                        i += 2;
+                    }
+                    '\\' if rest.get(i + 1) == Some(&'\\') => {
+                        decoded.push('\\');
+                        i += 2;
+                    }
+                    ch => {
+                        decoded.push(ch);
+                        i += 1;
+                    }
                 }
-            };
-            let len = consumed as u32;
+            }
+            if closed && !decoded.is_empty() {
+                let consumed = 1 + i;
+                let len = consumed as u32;
+                tokens.push(AsmToken {
+                    kind: AsmTokenKind::Glyph(decoded),
+                    line: line_no,
+                    col,
+                    len,
+                });
+                pos += consumed;
+                col += len;
+                continue;
+            }
             tokens.push(AsmToken {
-                kind: AsmTokenKind::Glyph(decoded),
+                kind: AsmTokenKind::Junk('\''),
                 line: line_no,
                 col,
-                len,
+                len: 1,
             });
-            pos += consumed;
-            col += len;
+            pos += 1;
+            col += 1;
             continue;
         }
 
@@ -951,19 +977,48 @@ mod tests {
     }
 
     #[test]
-    fn glyph_rejects_multi_char_content() {
+    fn an_empty_glyph_literal_is_still_a_lex_error() {
+        // Mutation: treating `''` as a zero-length Glyph instead of
+        // falling through to Junk — the widened scanner must keep this
+        // rule even though it no longer stops at one character
+        // (docs/formats.md (glyph literals)).
+        let caps = AsmCaps {
+            interface: true,
+            ..AsmCaps::default()
+        };
+        let kinds = kinds_for_test("''", caps);
+        assert_eq!(
+            kinds,
+            vec![AsmTokenKind::Junk('\''), AsmTokenKind::Junk('\'')]
+        );
+    }
+
+    #[test]
+    fn glyph_accepts_multi_char_content() {
+        // Mutation: restoring the single-character guard — a `.tma` glyph
+        // literal is any non-empty content in single quotes, matching
+        // `.tmc`'s own rule (docs/tmt/language.md (glyph literal)).
         let caps = AsmCaps {
             interface: true,
             ..AsmCaps::default()
         };
         let kinds = kinds_for_test("'ab'", caps);
-        assert_eq!(
-            kinds,
-            vec![
-                AsmTokenKind::Junk('\''),
-                AsmTokenKind::Word("ab".into()),
-                AsmTokenKind::Junk('\''),
-            ]
-        );
+        assert_eq!(kinds, vec![AsmTokenKind::Glyph("ab".into())]);
+    }
+
+    #[test]
+    fn the_two_escapes_still_work_in_a_multi_character_literal() {
+        // Mutation: a widened scanner that stops at the first quote
+        // without honouring the escape — `'a\'b'` would then decode as
+        // `a\` with the `b'` left dangling, going red on the first case.
+        let caps = AsmCaps {
+            interface: true,
+            ..AsmCaps::default()
+        };
+        let kinds = kinds_for_test(r"'a\'b'", caps);
+        assert_eq!(kinds, vec![AsmTokenKind::Glyph("a'b".into())]);
+
+        let kinds = kinds_for_test(r"'a\\b'", caps);
+        assert_eq!(kinds, vec![AsmTokenKind::Glyph("a\\b".into())]);
     }
 }

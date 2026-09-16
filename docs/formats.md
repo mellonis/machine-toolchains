@@ -690,20 +690,25 @@ object-level, not per-function, but they still oblige the all-or-none
 rule above — a digest is meaningless without the interface it is checked
 against.
 
-**Glyph literals and glyph lists.** A glyph literal is a **single**
-character in single quotes — `'x'` — with exactly two escapes, `'\''`
-for the quote and `'\\'` for the backslash; nothing else is a glyph
-literal, and a multi-character one does not lex at all. The literal
-itself rides the interface capability: a dialect without it never sees a
-quote as anything but junk. A glyph **list** — the `(…)` group of a
-`.param` line — is the notation `tmt tape-block` uses
-(`docs/formats.md (glyph tables)`): comma-separated elements, each a
-glyph literal or a bare decimal number, with inclusive `..` ranges
-between two endpoints of the same kind (`'0'..'9'`, `1..4`), duplicates
-rejected and at most 127 glyphs. A bare number's identity is its value,
-so a wide numeric label is written — and printed back — without quotes,
-`10` rather than `'10'`, which is the one spelling that survives the
-one-character literal rule.
+**Glyph literals and glyph lists.** A glyph literal is any **non-empty**
+content in single quotes — `'x'`, `'ab'`, `'->'` — so one grapheme, an
+emoji, or a multi-scalar sequence are each a single glyph, with exactly
+two escapes, `'\''` for the quote and `'\\'` for the backslash; any
+other backslash sequence, an empty `''`, or a literal that reaches
+end-of-line unclosed is a lex error — the identical rule `.tmc` source
+states for its own glyph literal (`docs/tmt/language.md (glyph
+literal)`). The literal itself rides the interface capability: a
+dialect without it never sees a quote as anything but junk. A glyph
+**list** — the `(…)` group of a `.param` line — is the notation `tmt
+tape-block` uses (`docs/formats.md (glyph tables)`): comma-separated
+elements, each a glyph literal or a bare decimal number, with inclusive
+`..` ranges between two endpoints of the same kind — **a range endpoint
+must still be a single character or a bare number** (`'0'..'9'`,
+`1..4`); a multi-character endpoint (`'ab'..'z'`) is rejected even
+though the literal itself lexes. Duplicates are rejected and at most 127
+glyphs are allowed. A bare number's identity is its value, so `05` and
+`5` both label `5`, while a numeric label is written — and printed back
+— without quotes, `10` rather than `'10'`.
 
 **Canonical spelling.** These object-level directives print at column 0,
 outside the instruction grid, with exactly **one space** after the
@@ -713,7 +718,7 @@ list with its ranges expanded — the elements are data by then, not text
 hand-written range and the disassembler's expansion of the same object
 are both canonical, each for its own input.
 
-**Text-expressibility caveats.** Three things the interface section can
+**Text-expressibility caveats.** Two things the interface section can
 hold do not survive a full text round trip, and it is better to know
 which:
 
@@ -724,10 +729,6 @@ which:
   reassembling that text produces an object without either list. They
   are the only parts of the section a listing can show but not put
   back.
-- **A glyph label must be one character to be written back as a
-  literal.** A multi-character label that is a canonical decimal prints
-  as the bare number and reads back identically; a multi-character label
-  that is not a number has no assembly spelling at all.
 - **An object with grafts but no interface has no text form.** That
   combination — graft records *and* functions, with the interface section
   absent — is representable on the wire, but its disassembly is text the
