@@ -23,6 +23,7 @@ mod dap;
 pub(crate) mod driver;
 mod fmt;
 mod inspect;
+mod interface;
 mod lint;
 mod lsp;
 mod man;
@@ -58,6 +59,7 @@ SUBCOMMANDS:
   link         .tmo objects -> .tmx executable (+ .tmx.map sidecar)
   build        compile+link driver: .tmc/.tma/.tmo inputs or manifest targets
   dis          disassemble a .tmo or .tmx (--listing for the address view)
+  interface    print a unit's exported declarations as a header
   run          execute a .tmx on a multi-tape .tmt block
   tape-block   new/set/show .tmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid, ir footprints -> write sets)
@@ -85,6 +87,7 @@ pub(crate) fn usage_text(path: &[&str]) -> Option<&'static str> {
         ["link"] => build::LINK_USAGE,
         ["build"] => driver::BUILD_USAGE,
         ["dis"] => inspect::DIS_USAGE,
+        ["interface"] => interface::INTERFACE_USAGE,
         ["tape-block"] => inspect::TAPE_USAGE,
         ["ir"] => inspect::IR_USAGE,
         ["run"] => run::RUN_USAGE,
@@ -125,6 +128,7 @@ pub fn execute_with(
         Some("link") => build::link(&args[1..]),
         Some("build") => driver::build(&args[1..]),
         Some("dis") => inspect::dis(&args[1..]),
+        Some("interface") => interface::interface(&args[1..]),
         Some("tape-block") => inspect::tape_block(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),

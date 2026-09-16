@@ -93,6 +93,7 @@ const EXPECTED_TOP_LEVEL: &[&str] = &[
     "link",
     "build",
     "dis",
+    "interface",
     "run",
     "tape-block",
     "ir",

@@ -1,0 +1,621 @@
+//! The `tmt interface` printer (docs/tmt/language.md (headers)): one
+//! canonical rendering of a unit's EXPORTED declarations, reachable from
+//! two inputs — a `.tmc` source (the complete arm: exported alphabets,
+//! exported maps in a later round (none exist in the language yet, and a
+//! header is a valid, total rendering without them), `export routine`
+//! signatures with their contracts and `?` doc lines, and `export graph`
+//! bodies in full) or a compiled `.tmo` object (the reduced arm:
+//! signatures, contracts, and exported alphabets only — an object carries
+//! no graph body, no map, and no doc line to print).
+//!
+//! **The printer never emits `volatile` either**, for the identical
+//! reason: the language reference states outright that the modifier is
+//! compile-time-only and leaves no trace in the generated assembly
+//! (docs/tmt/language.md (volatile tapes)), so an object has no bit to
+//! read it back from, and it fixes only how a routine's OWN body
+//! compiles — never checked at a call site — so it is not part of what a
+//! caller may rely on either. Without this, std.tmc's volatile-twin
+//! namespaces (`binaryNumbersVolatile`, `binaryNumbersBareVolatile`)
+//! would break the two-arm agreement below on every routine they declare.
+//!
+//! **The printer never emits `preserves`.** A contract clause always
+//! prints as `writes { … }` carrying the EFFECTIVE set
+//! (`compiler::declared_effective` — `writes`, or the whole alphabet
+//! absent that clause, minus `preserves`): `preserves` is source-level
+//! sugar with no representation on the wire, so an object-arm render
+//! could not reproduce it even in principle, and the two arms would
+//! diverge on any routine that used it.
+//!
+//! **This is the canonical rendering** — deterministic, and independent
+//! of the input's whitespace and comments — which is why it renders from
+//! parsed/resolved data structures throughout, never by slicing or
+//! echoing source text. That independence is what lets a later graph
+//! digest be computed over this printer's own output. Two determinism
+//! hazards worth naming because they are easy to reintroduce: this module
+//! never iterates `Resolved::alphabets` (a `HashMap`) directly — the
+//! source arm walks the flat, source-order `Program::alphabets` /
+//! `routines` / `graphs` vectors instead, exactly as `compiler::compile`
+//! already does when it fills an object's own `Interface::alphabets`;
+//! and every namespace/declaration grouping below
+//! is built from those same source-order vectors, never from a hash
+//! table's iteration order.
+//!
+//! **Section order is canonicalized, not source-preserved, at two
+//! levels.** Within one namespace, every exported alphabet prints first,
+//! then every exported routine, then every exported graph — the three
+//! `Program` vectors are walked one after another rather than interleaved
+//! by source position. Within one graph's body, `state` blocks print
+//! first, then `graft` instances, then `bind` instances — the shape
+//! `Graph` already splits them into (`states`, `grafts`, `binds`), so
+//! printing in that fixed order needs no interleaved source-position
+//! bookkeeping. A signature's own parameter order IS preserved
+//! (`Signature::params`, tape and state parameters mixed as written),
+//! since nothing else records it.
+//!
+//! Grafts and binds print without their own doc lines: only `alphabet`,
+//! `routine`, and `graph` declarations carry one here, even though
+//! `docs/tmt/language.md` (doc lines and attention lines) lists more
+//! declaration kinds that may accept a doc run in general — the shipped
+//! corpus never docs an individual graft or bind instance, and this
+//! printer's header shape does not need to.
+//!
+//! **The object arm has no alphabet NAME to read per tape** — the wire's
+//! `RoutineInterface` carries a tape's glyph list, never an identifier
+//! for it (`Interface::imports` would carry cross-unit alphabet names,
+//! but nothing populates it yet). The only reconstruction available is
+//! matching a tape's glyph list, by content, against this same object's
+//! own `Interface::alphabets`; the first match wins, and two exported
+//! alphabets sharing one glyph list are genuinely indistinguishable from
+//! the object alone. A tape whose alphabet the object does not export at
+//! all cannot be named, and `from_object` reports that rather than
+//! inventing an unreparseable placeholder.
+
+use std::collections::HashMap;
+use std::fmt::Write as _;
+
+use mtc_core::formats::object::{ExportedAlphabet, ObjectFile, RoutineInterface, SymbolDef};
+
+use crate::codegen::{render_glyph_element, render_glyph_list};
+use crate::compiler::{self, CompileError, Resolved, ResolvedWorld, declared_effective, full_name};
+use crate::parser::{
+    Bind, BindingArg, BindingValue, Doc, FoldExprKind, FoldExprNode, FoldOp, Graft, Graph,
+    MapArrow, MoveDir, Pattern, PatternCellKind, Program, Routine, Rule, SigParam, SigParamKind,
+    Signature, State, SymLit, SymMap, TermKind, Transition, WriteCellKind,
+};
+
+/// Render every exported declaration of a `.tmc` source as a header — the
+/// complete arm.
+pub(crate) fn from_source(source: &str) -> Result<String, CompileError> {
+    let analysis = compiler::analyze(source)?;
+    Ok(render_source(&analysis.program, &analysis.resolved))
+}
+
+/// Render the exported declarations a compiled object still carries — the
+/// reduced arm: routine signatures and exported alphabets, no graphs, no
+/// maps, no doc lines (docs/formats.md (routine interfaces): the wire has
+/// no doc-line field at all).
+pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
+    let interface = obj
+        .interface
+        .as_ref()
+        .ok_or_else(|| "carries no interface section".to_string())?;
+
+    let mut root = NsNode::default();
+    for alphabet in &interface.alphabets {
+        let (ns, short) = split_ns(&alphabet.name);
+        root.insert(&ns, alphabet_lines(short, &alphabet.glyphs));
+    }
+    for symbol in &obj.symbols {
+        if let SymbolDef::Defined { blob } = symbol.def {
+            let routine = interface.routines.get(blob as usize).ok_or_else(|| {
+                format!("`{}`: no interface record for its own blob", symbol.name)
+            })?;
+            let (ns, short) = split_ns(&symbol.name);
+            let lines = object_routine_lines(short, routine, &interface.alphabets)?;
+            root.insert(&ns, lines);
+        }
+    }
+
+    let mut out = String::new();
+    root.render(0, &mut out);
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// A namespace tree: children print as `namespace NAME { … }` blocks in the
+// order their first item was inserted, interleaved with this level's own
+// items in that same first-seen order — reconstructing the nesting
+// `Alphabet`/`Routine`/`Graph::ns` paths imply without a second pass over
+// source spans.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct NsNode {
+    order: Vec<NsEntry>,
+    children: HashMap<String, NsNode>,
+}
+
+enum NsEntry {
+    /// One declaration's rendered lines, unindented — `NsNode::render`
+    /// applies the namespace-depth indent uniformly.
+    Item(Vec<String>),
+    Child(String),
+}
+
+impl NsNode {
+    fn insert(&mut self, ns: &[String], lines: Vec<String>) {
+        let Some((head, rest)) = ns.split_first() else {
+            self.order.push(NsEntry::Item(lines));
+            return;
+        };
+        if !self.children.contains_key(head) {
+            self.children.insert(head.clone(), NsNode::default());
+            self.order.push(NsEntry::Child(head.clone()));
+        }
+        self.children
+            .get_mut(head)
+            .expect("just inserted")
+            .insert(rest, lines);
+    }
+
+    fn render(&self, depth: usize, out: &mut String) {
+        let pad = "  ".repeat(depth);
+        for entry in &self.order {
+            match entry {
+                NsEntry::Item(lines) => {
+                    for line in lines {
+                        if line.is_empty() {
+                            let _ = writeln!(out);
+                        } else {
+                            let _ = writeln!(out, "{pad}{line}");
+                        }
+                    }
+                }
+                NsEntry::Child(name) => {
+                    let _ = writeln!(out, "{pad}namespace {name} {{");
+                    self.children[name].render(depth + 1, out);
+                    let _ = writeln!(out, "{pad}}}");
+                }
+            }
+        }
+    }
+}
+
+/// Split a mangled `a::b::c` name into its namespace path and local name;
+/// an unnamespaced name splits to an empty path.
+fn split_ns(full: &str) -> (Vec<String>, &str) {
+    match full.rsplit_once("::") {
+        Some((ns, short)) => (ns.split("::").map(String::from).collect(), short),
+        None => (Vec::new(), full),
+    }
+}
+
+fn short_name(full: &str) -> &str {
+    full.rsplit_once("::").map_or(full, |(_, short)| short)
+}
+
+// ---------------------------------------------------------------------------
+// Doc lines
+// ---------------------------------------------------------------------------
+
+/// `?` doc lines for one declaration: one paragraph per line, a blank `?`
+/// between paragraphs (the same shape a run of consecutive `?` lines
+/// followed by a blank `?` line parses back into —
+/// docs/tmt/language.md (doc lines and attention lines)). Attention lines
+/// (`!`) are out of scope here (see the module doc).
+fn doc_lines(doc: Option<&Doc>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(doc) = doc {
+        for (i, paragraph) in doc.paragraphs.iter().enumerate() {
+            if i > 0 {
+                lines.push("?".to_string());
+            }
+            lines.push(format!("? {paragraph}"));
+        }
+    }
+    lines
+}
+
+// ---------------------------------------------------------------------------
+// Source arm
+// ---------------------------------------------------------------------------
+
+fn render_source(program: &Program, resolved: &Resolved) -> String {
+    let worlds: HashMap<&str, &ResolvedWorld> = resolved
+        .worlds
+        .iter()
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+
+    let mut root = NsNode::default();
+    for alphabet in &program.alphabets {
+        if !alphabet.exported {
+            continue;
+        }
+        let full = full_name(&alphabet.ns, &alphabet.name);
+        let glyphs = &resolved
+            .alphabets
+            .get(&full)
+            .expect("resolution guarantees every declared alphabet is resolved")
+            .glyphs;
+        root.insert(&alphabet.ns, alphabet_lines(&alphabet.name, glyphs));
+    }
+    for routine in &program.routines {
+        if !routine.exported {
+            continue;
+        }
+        let full = full_name(&routine.ns, &routine.name);
+        let world = worlds[full.as_str()];
+        root.insert(&routine.ns, routine_lines(routine, world, resolved));
+    }
+    for graph in &program.graphs {
+        if !graph.exported {
+            continue;
+        }
+        let full = full_name(&graph.ns, &graph.name);
+        let world = worlds[full.as_str()];
+        root.insert(&graph.ns, graph_lines(graph, world, resolved));
+    }
+
+    let mut out = String::new();
+    root.render(0, &mut out);
+    out
+}
+
+fn alphabet_lines(name: &str, glyphs: &[String]) -> Vec<String> {
+    vec![format!("export alphabet {name} {}", braced_list(glyphs))]
+}
+
+/// `{ … }` with the elements space-padded, or the bare `{}` a genuinely
+/// empty set (a routine's `writes {}`, or an alphabet — never empty by
+/// grammar, but the helper stays total) collapses to, matching how this
+/// printer renders every brace-delimited glyph list.
+fn braced_list(glyphs: &[String]) -> String {
+    if glyphs.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", render_glyph_list(glyphs))
+    }
+}
+
+fn routine_lines(routine: &Routine, world: &ResolvedWorld, resolved: &Resolved) -> Vec<String> {
+    let mut lines = doc_lines(routine.doc.as_ref());
+    let sig = signature_text(&routine.sig, world, resolved);
+    lines.push(format!("export routine {}({});", routine.name, sig));
+    lines
+}
+
+fn graph_lines(graph: &Graph, world: &ResolvedWorld, resolved: &Resolved) -> Vec<String> {
+    let mut lines = doc_lines(graph.doc.as_ref());
+    let sig = signature_text(&graph.sig, world, resolved);
+    lines.push(format!("export graph {}({}) {{", graph.name, sig));
+    for state in &graph.states {
+        lines.extend(indented(state_lines(state)));
+    }
+    for graft in &graph.grafts {
+        lines.push(indent_one(graft_text(graft)));
+    }
+    for bind in &graph.binds {
+        lines.push(indent_one(bind_text(bind)));
+    }
+    lines.push("}".to_string());
+    lines
+}
+
+fn signature_text(sig: &Signature, world: &ResolvedWorld, resolved: &Resolved) -> String {
+    sig.params
+        .iter()
+        .map(|p| sig_param_text(p, world, resolved))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn sig_param_text(param: &SigParam, world: &ResolvedWorld, resolved: &Resolved) -> String {
+    match &param.kind {
+        SigParamKind::State => format!("state {}", param.name),
+        // `volatile` is deliberately NOT printed here, on either arm: the
+        // language reference states it plainly — the modifier is
+        // compile-time-only, dropped at codegen, so "the generated
+        // assembly carries no trace of it at all" (docs/tmt/language.md
+        // (volatile tapes)). It fixes how the routine's OWN body compiles
+        // and is never checked at a call site (binding a volatile machine
+        // tape into a non-volatile-declared parameter "is not
+        // diagnosed"), so it is not part of what a caller may rely on —
+        // exactly the line the module doc draws for `preserves`. The
+        // object arm has no wire bit to read it back from either way, so
+        // dropping it here is what keeps the two arms in agreement over
+        // std.tmc's volatile-twin routines.
+        SigParamKind::Tape { alphabet, .. } => {
+            let tape = world
+                .tapes
+                .iter()
+                .find(|t| t.name == param.name)
+                .expect("every signature tape parameter resolves to a ResolvedTape");
+            let effective = declared_effective(tape);
+            let alphabet_glyphs = &resolved
+                .alphabets
+                .get(&tape.alphabet)
+                .expect("resolution guarantees every tape alphabet is resolved")
+                .glyphs;
+            let writes: Vec<String> = effective
+                .iter()
+                .filter_map(|index| alphabet_glyphs.get(index as usize).cloned())
+                .collect();
+            format!(
+                "tape {}: {alphabet} writes {}",
+                param.name,
+                braced_list(&writes)
+            )
+        }
+    }
+}
+
+fn state_lines(state: &State) -> Vec<String> {
+    let mut lines = doc_lines(state.doc.as_ref());
+    let entry = if state.entry { "entry " } else { "" };
+    lines.push(format!("{entry}state {} {{", state.name));
+    for rule in &state.rules {
+        lines.push(indent_one(rule_text(rule)));
+    }
+    lines.push("}".to_string());
+    lines
+}
+
+fn rule_text(rule: &Rule) -> String {
+    let pattern = pattern_text(&rule.pattern);
+    let mut action = Vec::new();
+    if rule.debugger {
+        action.push("debugger".to_string());
+    }
+    if let Some(write) = &rule.write {
+        action.push(format!(
+            "write [{}]",
+            write
+                .cells
+                .iter()
+                .map(|c| match &c.kind {
+                    WriteCellKind::Keep => "-".to_string(),
+                    WriteCellKind::Lit(s) => sym_lit_text(s),
+                    WriteCellKind::Subst { expr } => format!("{{{}}}", fold_expr_text(expr)),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(mov) = &rule.mov {
+        action.push(format!(
+            "move [{}]",
+            mov.cells
+                .iter()
+                .map(|c| match c.dir {
+                    MoveDir::Left => "<",
+                    MoveDir::Right => ">",
+                    MoveDir::Stay => ".",
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(text) = transition_text(&rule.transition) {
+        action.push(text);
+    }
+    format!("{pattern} -> {};", action.join(" "))
+}
+
+fn pattern_text(pattern: &Pattern) -> String {
+    format!(
+        "[{}]",
+        pattern
+            .cells
+            .iter()
+            .map(|cell| {
+                let base = match &cell.kind {
+                    PatternCellKind::Wildcard => "*".to_string(),
+                    PatternCellKind::Single(s) => sym_lit_text(s),
+                    PatternCellKind::Range { lo, hi } => {
+                        format!("{}..{}", sym_lit_text(lo), sym_lit_text(hi))
+                    }
+                };
+                match &cell.binding {
+                    Some(b) => format!("{base} as {}", b.name),
+                    None => base,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn sym_lit_text(sym: &SymLit) -> String {
+    match sym {
+        SymLit::Glyph { value, .. } => render_glyph_element(value),
+        SymLit::Number { value, .. } => value.to_string(),
+    }
+}
+
+/// A write-cell fold expression, precedence-climbed so parentheses appear
+/// exactly where evaluation order would otherwise change (`*`/`%` bind
+/// tighter than `+`/`-`; all four are left-associative —
+/// docs/tmt/language.md (substitution)).
+fn fold_expr_text(expr: &FoldExprNode) -> String {
+    fold_expr_text_at(expr, 0, false)
+}
+
+fn fold_expr_text_at(expr: &FoldExprNode, min_prec: u8, is_right: bool) -> String {
+    match &expr.kind {
+        FoldExprKind::Var(name) => name.clone(),
+        FoldExprKind::Int(n) => n.to_string(),
+        FoldExprKind::Bin { op, lhs, rhs } => {
+            let prec = fold_op_prec(*op);
+            let lhs_text = fold_expr_text_at(lhs, prec, false);
+            let rhs_text = fold_expr_text_at(rhs, prec, true);
+            let text = format!("{lhs_text} {} {rhs_text}", fold_op_symbol(*op));
+            if prec < min_prec || (prec == min_prec && is_right) {
+                format!("({text})")
+            } else {
+                text
+            }
+        }
+    }
+}
+
+fn fold_op_prec(op: FoldOp) -> u8 {
+    match op {
+        FoldOp::Add | FoldOp::Sub => 1,
+        FoldOp::Mul | FoldOp::Rem => 2,
+    }
+}
+
+fn fold_op_symbol(op: FoldOp) -> &'static str {
+    match op {
+        FoldOp::Add => "+",
+        FoldOp::Sub => "-",
+        FoldOp::Mul => "*",
+        FoldOp::Rem => "%",
+    }
+}
+
+/// `None` for `Transition::Stay` — an omitted transition prints nothing,
+/// same as the source that produced it (docs/tmt/language.md (rules)).
+fn transition_text(transition: &Transition) -> Option<String> {
+    Some(match transition {
+        Transition::Goto { name, .. } => format!("goto {name}"),
+        Transition::Call {
+            target, args, then, ..
+        } => format!(
+            "call {}({}) then {}",
+            target.joined(),
+            binding_args_text(args),
+            continuation_text(then)
+        ),
+        Transition::Return { .. } => "return".to_string(),
+        Transition::Stop { .. } => "stop".to_string(),
+        Transition::Halt { .. } => "halt".to_string(),
+        Transition::Stay { .. } => return None,
+    })
+}
+
+fn continuation_text(cont: &crate::parser::Continuation) -> String {
+    use crate::parser::Continuation;
+    match cont {
+        Continuation::State { name, .. } => name.clone(),
+        Continuation::Return { .. } => "return".to_string(),
+        Continuation::Stop { .. } => "stop".to_string(),
+        Continuation::Halt { .. } => "halt".to_string(),
+    }
+}
+
+fn binding_args_text(args: &[BindingArg]) -> String {
+    args.iter()
+        .map(|a| format!("{} = {}", a.name, binding_value_text(&a.value)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn binding_value_text(value: &BindingValue) -> String {
+    match value {
+        BindingValue::Named { target, map, .. } => match map {
+            Some(m) => format!("{target} with map {{ {} }}", map_pairs_text(m)),
+            None => target.clone(),
+        },
+        BindingValue::Terminator { kind, .. } => match kind {
+            TermKind::Return => "return".to_string(),
+            TermKind::Stop => "stop".to_string(),
+            TermKind::Halt => "halt".to_string(),
+        },
+    }
+}
+
+fn map_pairs_text(map: &SymMap) -> String {
+    map.pairs
+        .iter()
+        .map(|pair| {
+            let arrow = match pair.arrow {
+                MapArrow::Bidirectional => "->",
+                MapArrow::ReadOnly => "=>",
+            };
+            format!(
+                "{} {arrow} {}",
+                sym_lit_text(&pair.src),
+                sym_lit_text(&pair.dst)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn graft_text(graft: &Graft) -> String {
+    let entry = if graft.entry { "entry " } else { "" };
+    let as_part = graft
+        .as_name
+        .as_ref()
+        .map(|n| format!(" as {}", n.name))
+        .unwrap_or_default();
+    format!(
+        "{entry}graft {}({}){as_part};",
+        graft.target.joined(),
+        binding_args_text(&graft.args)
+    )
+}
+
+fn bind_text(bind: &Bind) -> String {
+    format!(
+        "bind {}({}) as {};",
+        bind.target.joined(),
+        binding_args_text(&bind.args),
+        bind.as_name.name
+    )
+}
+
+fn indent_one(line: String) -> String {
+    format!("  {line}")
+}
+
+fn indented(lines: Vec<String>) -> Vec<String> {
+    lines.into_iter().map(indent_one).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Object arm
+// ---------------------------------------------------------------------------
+
+fn object_routine_lines(
+    name: &str,
+    routine: &RoutineInterface,
+    alphabets: &[ExportedAlphabet],
+) -> Result<Vec<String>, String> {
+    let mut params = Vec::with_capacity(routine.params.len());
+    for ((param_name, glyphs), writes) in routine
+        .params
+        .iter()
+        .zip(&routine.glyphs)
+        .zip(&routine.writes)
+    {
+        // A tape's alphabet has no name on the wire (docs/formats.md
+        // (routine interfaces) records only its glyphs); resolving it back
+        // to the identifier a `.tmc` header must spell means matching this
+        // tape's full glyph list, by content, against an alphabet this
+        // same object exports. A tape whose alphabet the object does not
+        // export cannot be named at all — the object arm genuinely cannot
+        // render that routine's header, which is a real (if narrow) gap
+        // in the fallback arm rather than something to paper over with an
+        // invented, unreparseable name.
+        let alphabet_name = alphabets
+            .iter()
+            .find(|a| &a.glyphs == glyphs)
+            .map(|a| short_name(&a.name))
+            .ok_or_else(|| {
+                format!(
+                    "`{name}`'s tape `{param_name}` draws from an alphabet this object does not export"
+                )
+            })?;
+        params.push(format!(
+            "tape {param_name}: {alphabet_name} writes {}",
+            braced_list(writes)
+        ));
+    }
+    Ok(vec![format!(
+        "export routine {name}({});",
+        params.join(", ")
+    )])
+}

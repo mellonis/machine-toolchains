@@ -1,0 +1,80 @@
+//! `tmt interface`: the fifteenth subcommand, a thin renderer over
+//! `crate::header` (docs/tmt/cli.md (interface)). Mirrors `dis`'s shape in
+//! `cli/inspect.rs` — sniff the input, dispatch on the container kind,
+//! print the result.
+
+use std::fs;
+use std::path::Path;
+
+use mtc_core::formats::object::ObjectFile;
+use mtc_core::formats::{ARCH_TM1, ContainerKind, sniff};
+use mtc_core::vm::LoadError;
+
+use super::{Args, CliOutput};
+
+pub(super) const INTERFACE_USAGE: &str = "\
+USAGE: tmt interface INPUT [-o OUT.tmh]
+
+INPUT is told apart by its container magic, never by its extension: a
+.tmc source or a compiled .tmo object. Prints the unit's exported
+declarations — alphabets and routine signatures with their EFFECTIVE
+write contracts either way. From source the header is complete: it also
+carries exported graph bodies in full and every `?` doc line. From an
+object it carries signatures and alphabets only — no graph body, no map,
+no doc line, since none of those exist on the wire. Without -o the
+header goes to stdout.
+";
+
+pub(super) fn interface(raw: &[String]) -> Result<CliOutput, String> {
+    let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(INTERFACE_USAGE.into(), String::new()));
+    }
+    let explicit_out = args.value("-o")?;
+    let inputs = args.positionals()?;
+    let [input] = inputs.as_slice() else {
+        return Err(format!(
+            "interface takes exactly one input\n\n{INTERFACE_USAGE}"
+        ));
+    };
+    let path = Path::new(input);
+    let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+
+    let text = match sniff(&bytes) {
+        Some(ContainerKind::Object) => {
+            let obj = ObjectFile::from_bytes(&bytes).map_err(|e| e.to_string())?;
+            if obj.arch != ARCH_TM1 {
+                return Err(LoadError::UnknownArch(obj.arch).to_string());
+            }
+            crate::header::from_object(&obj).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        Some(_) => {
+            return Err(format!(
+                "{}: not a .tmc source or a .tmo object",
+                path.display()
+            ));
+        }
+        None => {
+            let source = String::from_utf8(bytes).map_err(|_| {
+                format!("{}: not a .tmo object and not UTF-8 source", path.display())
+            })?;
+            crate::header::from_source(&source).map_err(|e| {
+                format!(
+                    "{}:{}:{}: error: {} [{}]",
+                    path.display(),
+                    e.span.start.line,
+                    e.span.start.col,
+                    e.kind,
+                    e.kind.code()
+                )
+            })?
+        }
+    };
+
+    if let Some(out) = explicit_out {
+        fs::write(&out, &text).map_err(|e| format!("cannot write {out}: {e}"))?;
+        Ok(CliOutput::ok(String::new(), String::new()))
+    } else {
+        Ok(CliOutput::ok(text, String::new()))
+    }
+}

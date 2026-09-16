@@ -502,6 +502,17 @@ fn dis_spec() -> CommandSpec {
     }
 }
 
+fn interface_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["interface"]),
+        positional: Positional::One(PositionalHint::File(ext(&["tmc", "tmo"]))),
+        flags: vec![
+            FlagSpec::value("-o", "output path", ValueHint::File(any_file())),
+            FlagSpec::boolean("--help", "show subcommand help"),
+        ],
+    }
+}
+
 /// `tape new` takes no positional at all — the template is sized from
 /// `--from`. Every `tape`/`ir` child spec below carries a `--help` flag,
 /// same as any leaf — those parsers all consume `args.help()` before
@@ -766,11 +777,11 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 }
 
 /// The registry describing the real, currently-dispatched `tmt` surface:
-/// twelve top-level subcommands (`compile`/`asm`/`link`/`build`/`dis`/
-/// `run`/`tape-block`/`ir`/`lint`/`fmt`/`lsp`/`dap`, `tape-block` and `ir`
-/// nested) plus `completions` itself. Absent, permanently: `tape-block
-/// build`, which is PM-1-only glyph-pattern sugar (`cli/inspect.rs` says
-/// why TM-1 has no analogue).
+/// fourteen top-level subcommands (`compile`/`asm`/`link`/`build`/`dis`/
+/// `interface`/`run`/`tape-block`/`ir`/`lint`/`fmt`/`lsp`/`dap`/`man`,
+/// `tape-block` and `ir` nested) plus `completions` itself. Absent,
+/// permanently: `tape-block build`, which is PM-1-only glyph-pattern
+/// sugar (`cli/inspect.rs` says why TM-1 has no analogue).
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),
@@ -778,6 +789,7 @@ pub fn registry() -> Registry {
         link_spec(),
         build_spec(),
         dis_spec(),
+        interface_spec(),
         run_spec(),
         tape_new_spec(),
         tape_set_spec(),
@@ -861,6 +873,7 @@ mod tests {
                 "link",
                 "build",
                 "dis",
+                "interface",
                 "run",
                 "tape-block",
                 "ir",

@@ -16,6 +16,7 @@ mod declarations;
 pub mod expand;
 pub mod fmt;
 pub(crate) mod footprint;
+mod header;
 pub mod ir;
 pub mod lexer;
 pub mod lint;

@@ -24,6 +24,7 @@ SUBCOMMANDS:
   link         .tmo objects -> .tmx executable (+ .tmx.map sidecar)
   build        compile+link driver: .tmc/.tma/.tmo inputs or manifest targets
   dis          disassemble a .tmo or .tmx (--listing for the address view)
+  interface    print a unit's exported declarations as a header
   run          execute a .tmx on a multi-tape .tmt block
   tape-block   new/set/show .tmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid, ir footprints -> write sets)
@@ -576,6 +577,47 @@ element boundaries only when one vector alone still will not fit. The
 lane is wide enough that a sixteen-tape vector never breaks internally.
 Continuation lines carry neither the address nor the mnemonic, so the
 address column remains an exact index of where each instruction starts.
+
+## `tmt interface`
+
+```
+USAGE: tmt interface INPUT [-o OUT.tmh]
+
+INPUT is told apart by its container magic, never by its extension: a
+.tmc source or a compiled .tmo object. Prints the unit's exported
+declarations — alphabets and routine signatures with their EFFECTIVE
+write contracts either way. From source the header is complete: it also
+carries exported graph bodies in full and every `?` doc line. From an
+object it carries signatures and alphabets only — no graph body, no map,
+no doc line, since none of those exist on the wire. Without -o the
+header goes to stdout.
+```
+
+Renders a unit's exported declarations as one canonical, deterministic
+text — the same shape a header file carries (docs/tmt/language.md
+(headers)). Like `dis`, `INPUT` is told apart by its container magic
+rather than its extension (`docs/formats.md`): a `.tmc` renamed to
+`.tmo`, or the reverse, still runs the arm its bytes actually are.
+
+**Two arms, one printer.** From a `.tmc` source the header is complete:
+every exported alphabet, every exported routine's signature with its `?`
+doc lines, and every exported graph's body in full. From a compiled
+`.tmo` object the header carries routine signatures and exported
+alphabets only — an object's interface section has no graph body, no
+symbol map, and no doc line to read back (docs/formats.md (routine
+interfaces)), so those never appear on that arm. Both arms render the
+IDENTICAL signature line for the same routine: a contract clause always
+prints as the EFFECTIVE write set (`writes { … }`, computed as `writes`
+minus `preserves`, or the whole alphabet minus `preserves` when no
+`writes` clause was written) rather than the author's own spelling, since
+`preserves` has no representation on the wire and an object-arm render
+could not reproduce it otherwise. `volatile` is dropped from both arms
+for the same reason: the modifier is compile-time-only and leaves no
+trace in the generated assembly (docs/tmt/language.md (volatile tapes)),
+and it is never checked at a call site either, so it is not part of what
+a caller may rely on.
+
+Without `-o` the header goes to stdout; with it, to the named file.
 
 ## `tmt run`
 

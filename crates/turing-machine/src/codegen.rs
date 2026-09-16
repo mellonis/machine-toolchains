@@ -755,7 +755,7 @@ fn emit_table(t: &Table, e: &mut Emitter) {
 /// as an ordinary quoted literal like any other one-character glyph.
 /// Everything else prints as a quoted literal, escaping the two characters
 /// the notation itself uses (`'` and `\`).
-fn render_glyph_element(glyph: &str) -> String {
+pub(crate) fn render_glyph_element(glyph: &str) -> String {
     let multi_char = glyph.chars().count() != 1;
     if multi_char && glyph.parse::<u32>().is_ok_and(|n| n.to_string() == glyph) {
         return glyph.to_string();
@@ -774,8 +774,11 @@ fn render_glyph_element(glyph: &str) -> String {
 
 /// A glyph list as a `.param` line writes it — `, `-joined elements, no
 /// ranges collapsed, because the compiler holds data here, not text
-/// (docs/formats.md (canonical spelling)).
-fn render_glyph_list(glyphs: &[String]) -> String {
+/// (docs/formats.md (canonical spelling)). `pub(crate)`: `crate::header`
+/// reuses this exact spelling for a header's alphabet and `writes`
+/// clauses, so a header and a `.param` line quote the same glyph the same
+/// way.
+pub(crate) fn render_glyph_list(glyphs: &[String]) -> String {
     glyphs
         .iter()
         .map(|g| render_glyph_element(g))
