@@ -413,6 +413,16 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// The write-set suffix of a rendered signature line — from the `writes`
+/// keyword to the end — with the alphabet-name half elided. Used to check
+/// write-set agreement independently of which alphabet identifier a line
+/// spells, since the two can legitimately diverge (see
+/// `the_two_arms_agree_on_every_stdlib_routine`) while the write set
+/// itself never may.
+fn write_set_suffix(line: &str) -> &str {
+    line.find("writes").map(|i| &line[i..]).unwrap_or(line)
+}
+
 /// Mutation: printing `preserves` from the source arm — `invertNumber`
 /// (`std::binaryNumbersBare::invertNumber` and its volatile twin, each
 /// declaring `preserves { '_' }` with no `writes` clause) diverges,
@@ -423,6 +433,21 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
 /// instead of the effective set on the source arm's tape signature made
 /// this test fail on exactly the two `invertNumber` entries, restored
 /// afterward (see the task report).
+///
+/// The ALPHABET-NAME half of the line is compared separately from the
+/// WRITE-SET half, and only the write-set half is required to agree for
+/// EVERY routine. The two volatile namespaces (`binaryNumbersVolatile`,
+/// `binaryNumbersBareVolatile`) import their representation alphabet from
+/// a SIBLING namespace via an explicit `use std::binaryNumbers::symbols;`
+/// (or its bare twin) — reachable unqualified in source, but with no
+/// trace on the wire (`Interface::imports` is unpopulated), so the object
+/// arm cannot reconstruct it and synthesizes a
+/// `std_<owning-namespace>_<routine>__num` name instead
+/// (docs/tmt/cli.md (interface)). That is a deliberate, asserted
+/// divergence on the alphabet-name half for exactly those two namespaces
+/// — every other stdlib routine's alphabet is reachable unqualified
+/// (declared in its own namespace) and its object-arm name must match the
+/// source arm's exactly.
 #[test]
 fn the_two_arms_agree_on_every_stdlib_routine() {
     let dir = scratch("header_two_arms_stdlib");
@@ -458,7 +483,28 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
         source_routines.keys().collect::<Vec<_>>(),
         object_routines.keys().collect::<Vec<_>>()
     );
-    assert_eq!(source_routines, object_routines);
+
+    for (name, source_line) in &source_routines {
+        let object_line = &object_routines[name];
+        assert_eq!(
+            write_set_suffix(source_line),
+            write_set_suffix(object_line),
+            "write sets disagree for `{name}`:\n source: {source_line}\n object: {object_line}"
+        );
+        if name.contains("Volatile::") {
+            assert_ne!(
+                source_line, object_line,
+                "`{name}`: expected the object arm to synthesize a distinct \
+                 alphabet name for its sibling-namespace `use` import, but \
+                 it matched the source arm exactly: {object_line}"
+            );
+        } else {
+            assert_eq!(
+                source_line, object_line,
+                "`{name}`: the two arms disagree despite an unqualified-reachable alphabet"
+            );
+        }
+    }
 }
 
 /// Mutation: ignoring `-o` and printing to stdout regardless — the
@@ -495,6 +541,296 @@ fn the_o_flag_writes_the_header_to_a_file_instead_of_stdout() {
     assert!(
         written.contains("export routine plusOne(tape num: bits writes { '0', '1' });"),
         "{written}"
+    );
+}
+
+/// A tape with NEITHER `writes` nor `preserves` must publish the SAME
+/// write set on both arms: the compiler's own INFERRED set for that tape,
+/// never the whole alphabet. `touchA`'s body writes exactly one glyph
+/// (`'a'`) of a three-glyph alphabet unconditionally. Mutation: the source
+/// arm calling `compiler::declared_effective` directly instead of
+/// `compiler::published_writes` — with no clause written,
+/// `declared_effective` falls back to the WHOLE alphabet, so the source
+/// arm would print `writes { '_', 'a', 'b' }` while the object arm (fixed
+/// in the prior round) still prints the correctly inferred `writes { 'a' }`,
+/// and this test goes red on the mismatch.
+#[test]
+fn the_two_arms_agree_on_an_uncontracted_routine() {
+    const UNCONTRACTED_FIXTURE: &str = "\
+export alphabet tri { '_', 'a', 'b' }
+
+export routine touchA(tape t: tri) {
+  entry state s { [*] -> write ['a'] return; }
+}
+";
+    let dir = scratch("header_uncontracted_agree");
+    let src_path = dir.join("touch_a.tmc");
+    std::fs::write(&src_path, UNCONTRACTED_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+    assert!(
+        source_out
+            .stdout
+            .contains("export routine touchA(tape t: tri writes { 'a' });"),
+        "source arm did not publish the inferred write set: {}",
+        source_out.stdout
+    );
+
+    let object = compile(
+        UNCONTRACTED_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile UNCONTRACTED_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("touch_a.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+    let object_out = run_interface(&obj_path);
+
+    assert_eq!(
+        source_out.stdout, object_out.stdout,
+        "the two arms disagree on an uncontracted routine's write set"
+    );
+}
+
+/// The object arm must skip the entry world: a `machine` block is never a
+/// callee, so it has no interface entry to read and no declaration to
+/// render — printing it would falsely claim `main` "writes nothing".
+/// Mutation: printing every `SymbolDef::Defined` symbol including the one
+/// named `main` — the object-arm stdout would then contain a spurious
+/// `export routine main(...)` line naming the machine world.
+#[test]
+fn a_unit_with_a_machine_block_renders_identically_on_both_arms() {
+    const MACHINE_FIXTURE: &str = "\
+export alphabet bits { '_', '0', '1' }
+
+export routine plusOne(tape num: bits writes { '0', '1' }) {
+  entry state inc {
+    ['1'] -> write ['0'] move [<] goto inc;
+    [*]   -> write ['1'] return;
+  }
+}
+
+machine {
+  tape num: bits;
+
+  entry state s {
+    [*] -> call plusOne(num = num) then stop;
+  }
+}
+";
+    let dir = scratch("header_machine_block");
+    let src_path = dir.join("with_machine.tmc");
+    std::fs::write(&src_path, MACHINE_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+    assert!(
+        !source_out.stdout.contains("main"),
+        "the source arm must never mention `main`: {}",
+        source_out.stdout
+    );
+
+    let object = compile(
+        MACHINE_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile MACHINE_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("with_machine.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+    let object_out = run_interface(&obj_path);
+
+    assert!(
+        !object_out.stdout.contains("main"),
+        "the object arm printed the entry world: {}",
+        object_out.stdout
+    );
+    assert_eq!(
+        source_out.stdout, object_out.stdout,
+        "a unit with a machine block must render identically on both arms \
+         for its exported routine"
+    );
+    assert!(
+        object_out
+            .stdout
+            .contains("export routine plusOne(tape num: bits writes { '0', '1' });"),
+        "{}",
+        object_out.stdout
+    );
+}
+
+/// The object arm matches a tape's glyph list only against exported
+/// alphabets the routine could spell UNQUALIFIED in source (its own
+/// namespace, or an ENCLOSING one) — a content match in a SIBLING
+/// namespace, reachable only through an explicit `use` alias, must not be
+/// used, since the object carries no record of that alias to spell it
+/// with. `nsB::plusOne`'s tape draws from a LOCAL (unexported) alphabet
+/// whose content is byte-identical to `nsA::bits`, the object's only
+/// exported alphabet with that content, in a SIBLING namespace (`nsA` is
+/// not an ancestor of `nsB`). Mutation: matching across every exported
+/// alphabet in the object regardless of namespace — the reference would
+/// then read `bits` (`nsA`'s alphabet) instead of a synthesized name, and
+/// no synthesized declaration would appear.
+#[test]
+fn the_object_arm_does_not_match_alphabets_across_namespaces() {
+    const CROSS_NAMESPACE_FIXTURE: &str = "\
+namespace nsA {
+  export alphabet bits { '_', '0', '1' }
+}
+
+namespace nsB {
+  alphabet localBits { '_', '0', '1' }
+
+  export routine plusOne(tape num: localBits writes { '0', '1' }) {
+    entry state s { [*] -> write ['0'] return; }
+  }
+}
+";
+    let dir = scratch("header_cross_namespace");
+    let object = compile(
+        CROSS_NAMESPACE_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile CROSS_NAMESPACE_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("cross_ns.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+
+    let out = run_interface(&obj_path);
+    assert!(
+        out.stdout
+            .contains("alphabet nsB_plusOne__num { '_', '0', '1' }"),
+        "did not synthesize a name for the cross-namespace content match: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("export routine plusOne(tape num: nsB_plusOne__num writes { '0', '1' });"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("tape num: bits"),
+        "matched an exported alphabet across namespaces: {}",
+        out.stdout
+    );
+}
+
+/// A namespaced routine over a TOP-LEVEL (enclosing-namespace) exported
+/// alphabet must still match it on the object arm — enclosing scopes,
+/// unlike siblings, ARE reachable unqualified in source, so the
+/// namespace-scoping fix above must not narrow matching down to
+/// exact-namespace-only. Mutation: requiring exact namespace equality
+/// (`ns == alphabet_ns` instead of `ns.starts_with(alphabet_ns)`) — the
+/// top-level `bits` alphabet would then no longer match `mylib::touch`'s
+/// tape, and the object arm would synthesize `mylib_touch__num` instead of
+/// reusing `bits`.
+#[test]
+fn an_object_arm_routine_matches_an_alphabet_in_an_enclosing_namespace() {
+    const ENCLOSING_FIXTURE: &str = "\
+export alphabet bits { '_', '0', '1' }
+
+namespace mylib {
+  export routine touch(tape num: bits writes { '0', '1' }) {
+    entry state s { [*] -> write ['0'] return; }
+  }
+}
+";
+    let dir = scratch("header_enclosing_namespace");
+    let object = compile(
+        ENCLOSING_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile ENCLOSING_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("enclosing.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+
+    let out = run_interface(&obj_path);
+    assert!(
+        out.stdout
+            .contains("export routine touch(tape num: bits writes { '0', '1' });"),
+        "did not match the enclosing namespace's exported alphabet: {}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("mylib_touch__num"),
+        "synthesized a name despite an enclosing-namespace content match: {}",
+        out.stdout
+    );
+}
+
+/// `?` doc lines print VERBATIM, line-for-line — one output line per
+/// written source line, never joined into one paragraph-wide line — on
+/// the source arm; the object arm carries no doc line at all (no field on
+/// the wire). Mutation: printing `Doc::paragraphs` (the space-joined
+/// form) instead of `Doc::paragraph_lines` — the two written lines would
+/// collapse into one `? First line of doc. Second line of doc.` line.
+#[test]
+fn doc_lines_print_verbatim_on_the_source_arm_and_not_on_the_object_arm() {
+    const DOC_FIXTURE: &str = "\
+export alphabet bits { '_', '0', '1' }
+
+? First line of doc.
+? Second line of doc.
+export routine plusOne(tape num: bits writes { '0', '1' }) {
+  entry state s { [*] -> write ['0'] return; }
+}
+";
+    let dir = scratch("header_doc_verbatim");
+    let src_path = dir.join("doc.tmc");
+    std::fs::write(&src_path, DOC_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+    assert!(
+        source_out
+            .stdout
+            .contains("? First line of doc.\n? Second line of doc.\n"),
+        "doc lines were not printed verbatim, line-for-line: {}",
+        source_out.stdout
+    );
+    assert!(
+        !source_out
+            .stdout
+            .contains("First line of doc. Second line of doc."),
+        "doc lines were paragraph-joined: {}",
+        source_out.stdout
+    );
+
+    let object = compile(
+        DOC_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile DOC_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("doc.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+    let object_out = run_interface(&obj_path);
+    // A non-vacuous positive check first: the object arm must still render
+    // the routine's own signature line (so the absence of `?` below proves
+    // "no doc line", not merely "empty/broken output").
+    assert!(
+        object_out
+            .stdout
+            .contains("export routine plusOne(tape num: bits writes { '0', '1' });"),
+        "{}",
+        object_out.stdout
+    );
+    assert!(
+        !object_out.stdout.contains('?'),
+        "the object arm printed a doc line, which has no wire field: {}",
+        object_out.stdout
     );
 }
 

@@ -1748,6 +1748,7 @@ mod tests {
         let written_items = 3;
         let expected_doc = Some(crate::parser::Doc {
             paragraphs: vec!["doc line more doc".to_string()],
+            paragraph_lines: vec![vec!["doc line".to_string(), "more doc".to_string()]],
             attention: Vec::new(),
             deprecated: None,
         });

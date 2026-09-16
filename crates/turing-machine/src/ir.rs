@@ -163,28 +163,28 @@ pub struct IrTape {
     /// is a legitimate reading of old data, not a violated invariant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub glyphs: Vec<String>,
-    /// A ROUTINE tape's published write set, as glyphs: the declared
-    /// EFFECTIVE set (`writes` minus `preserves`,
-    /// `compiler::declared_effective`) for a contracted signature tape, or
-    /// — when the parameter declares NEITHER clause — the INFERRED write
-    /// set (`footprint::infer_resolved_with`, the same sound-upper-bound
-    /// analysis `check_contracts` runs to validate a declared contract).
-    /// The wire has no spelling for "no restriction declared" (an absent
-    /// `writes=` decodes as "writes nothing" —
+    /// A ROUTINE tape's published write set, as glyphs
+    /// (`compiler::published_writes`, the one function both this lowering
+    /// and the source arm of `tmt interface` call): the declared EFFECTIVE
+    /// set (`writes` minus `preserves`) for a contracted signature tape,
+    /// or — when the parameter declares NEITHER clause — the tape's
+    /// INFERRED write set (`footprint::infer_resolved_with`, the same
+    /// sound-upper-bound analysis `check_contracts` runs to validate a
+    /// declared contract). The wire has no spelling for "no restriction
+    /// declared" (an absent `writes=` decodes as "writes nothing" —
     /// docs/formats.md (routine interfaces)), so an uncontracted routine
     /// tape must still publish what it actually writes rather than an
     /// empty set that would understate it. `preserves` itself has no IR
     /// representation either way: it is source-level sugar the effective
     /// set already absorbs.
     ///
-    /// Always `None` on a MACHINE tape: `main` is never a callable,
-    /// composable routine another unit binds against — nothing reads its
-    /// interface entry — so it keeps the pre-existing behavior rather than
-    /// publishing an inferred set no consumer would ever look at, which
-    /// would only cost every `machine`-bearing program a new `.param
-    /// writes=` line and move its compiled bytes for no observable gain.
-    /// Also `None` for a tape on a synthesized world with no resolved
-    /// original (a graft-instance internal), independent of contracts.
+    /// Always `None` on a MACHINE tape — the one case that reaches this
+    /// field today: `main` is never a callable, composable routine another
+    /// unit binds against, its own interface entry is never read (the
+    /// object arm's printer skips the entry world outright), and computing
+    /// an inferred set nothing looks at would only cost every
+    /// `machine`-bearing program a new `.param writes=` line and move its
+    /// compiled bytes for no observable gain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writes: Option<Vec<String>>,
 }
@@ -672,24 +672,25 @@ fn lower_world(
                 let glyphs = expanded.alphabets[&t.alphabet].glyphs.clone();
                 // `rw.tapes` and `ew.tapes` are both vector-position order
                 // over the same signature (a machine's tape decls, or a
-                // routine's tape params), so index `i` names the same tape in
-                // both — but `rw` itself is `None` for a graft-instance world
-                // (synthesized, no resolved original), which never declares a
-                // contract, so `writes` is `None` there too.
+                // routine's tape params), so index `i` names the same tape
+                // in both.
                 let writes = rw.and_then(|w| {
                     let rt = w.tapes.get(i)?;
-                    let indices = if rt.writes.is_some() || rt.preserves.is_some() {
-                        crate::compiler::declared_effective(rt)
-                    } else if w.kind == WorldKind::Routine {
-                        // No declared clause: fall back to the INFERRED write
-                        // set rather than `None` (see [`IrTape::writes`]).
-                        // Machine worlds are excluded — nothing reads
-                        // `main`'s interface entry, so leave that path's
-                        // codegen and every `machine`-bearing golden alone.
-                        *footprint.worlds.get(&w.name)?.tapes.get(i)?
-                    } else {
+                    // Machine worlds are excluded — nothing reads `main`'s
+                    // own interface entry (the object arm's printer skips
+                    // the entry world outright — docs/tmt/cli.md
+                    // (interface)) — so this deliberately withholds an
+                    // inferred set rather than computing and discarding
+                    // one, leaving that path's codegen and every
+                    // `machine`-bearing golden alone.
+                    if w.kind != WorldKind::Routine {
                         return None;
-                    };
+                    }
+                    let inferred = footprint
+                        .worlds
+                        .get(&w.name)
+                        .and_then(|wf| wf.tapes.get(i).copied());
+                    let indices = crate::compiler::published_writes(rt, inferred);
                     Some(
                         indices
                             .iter()

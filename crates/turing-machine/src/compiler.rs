@@ -1124,6 +1124,31 @@ pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
     allowed
 }
 
+/// The write set a routine's tape PUBLISHES — to `IrTape::writes` (which
+/// becomes the compiled object's `RoutineInterface::writes`) and, on the
+/// source arm, to a `tmt interface` header. The declared EFFECTIVE set
+/// (`declared_effective`) when the tape declares `writes` or `preserves`;
+/// otherwise the tape's INFERRED write set, never the whole alphabet as a
+/// stand-in for "no restriction declared" — the wire has no way to spell
+/// that (an absent `writes=` decodes as "writes nothing" —
+/// docs/formats.md (routine interfaces)), so an uncontracted tape must
+/// still publish what it actually writes. `inferred` is the tape's own
+/// entry from `footprint::infer_resolved_with`'s table; `None` (no entry
+/// for this tape) collapses to the empty set, the same "writes nothing"
+/// default the wire itself uses.
+///
+/// This is the ONE place both `ir::lower` and `header::render_source`
+/// compute a tape's published write set — the two-arm identity
+/// `tmt interface` promises (docs/tmt/cli.md (interface)) depends on both
+/// going through here rather than each re-deriving the rule.
+pub(crate) fn published_writes(tape: &ResolvedTape, inferred: Option<SymSet>) -> SymSet {
+    if tape.writes.is_some() || tape.preserves.is_some() {
+        declared_effective(tape)
+    } else {
+        inferred.unwrap_or_else(SymSet::empty)
+    }
+}
+
 /// Check every declared write contract against the inferred write footprint.
 ///
 /// A contract states what a world's body — and everything it calls or grafts —

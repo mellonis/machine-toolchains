@@ -19,12 +19,18 @@
 //! would break the two-arm agreement below on every routine they declare.
 //!
 //! **The printer never emits `preserves`.** A contract clause always
-//! prints as `writes { … }` carrying the EFFECTIVE set
-//! (`compiler::declared_effective` — `writes`, or the whole alphabet
-//! absent that clause, minus `preserves`): `preserves` is source-level
-//! sugar with no representation on the wire, so an object-arm render
-//! could not reproduce it even in principle, and the two arms would
-//! diverge on any routine that used it.
+//! prints as `writes { … }` carrying the tape's PUBLISHED write set
+//! (`compiler::published_writes`, the one function both `ir::lower` and
+//! this module call): the declared EFFECTIVE set when the tape declares
+//! `writes` or `preserves`, or — when neither clause is written — the
+//! compiler's own INFERRED write set for that tape, never the whole
+//! alphabet as a stand-in for "no restriction declared" (the wire has no
+//! way to spell that — docs/formats.md (routine interfaces)). `preserves`
+//! itself is source-level sugar with no representation on the wire, so an
+//! object-arm render could not reproduce it even in principle, and using
+//! it as a stand-in for the uncontracted case would diverge from the
+//! object arm, which reads the compiler's already-resolved write set off
+//! the wire either way.
 //!
 //! **This is the canonical rendering** — deterministic, and independent
 //! of the input's whitespace and comments — which is why it renders from
@@ -72,17 +78,34 @@
 //! `RoutineInterface` carries a tape's glyph list, never an identifier
 //! for it (`Interface::imports` would carry cross-unit alphabet names,
 //! but nothing populates it yet). The reconstruction is matching a
-//! tape's glyph list, by content, against this same object's own
-//! `Interface::alphabets`; the first match (in wire order) wins, and two
+//! tape's glyph list, by content, against exported alphabets the routine
+//! could spell UNQUALIFIED in source — its own namespace, or any
+//! ENCLOSING namespace (an unqualified name resolves outward through
+//! enclosing scopes); the first match (in wire order) wins, and two such
 //! exported alphabets sharing one glyph list are genuinely
 //! indistinguishable from the object alone — the printer accepts that
-//! ambiguity rather than erroring on it. A tape whose alphabet the
-//! object does not export at all gets a SYNTHESIZED, deterministic
-//! plain-`alphabet` declaration instead of an error: `<routine>__<param>`
-//! (the routine's own mangled name with `::` replaced by `_`, joined to
-//! the parameter name), declared at the top level, before the namespace
-//! block that uses it. The object arm never fails to render a routine
-//! for want of an alphabet name.
+//! ambiguity rather than erroring on it. A content match in a SIBLING or
+//! otherwise unrelated namespace — reachable only through an explicit
+//! `use` alias, like std.tmc's volatile twins importing their
+//! representation alphabet from a sibling namespace — is deliberately not
+//! used: the wire records no `use` edge (`Interface::imports` is
+//! unpopulated), so nothing here could tell that content match apart from
+//! a coincidental one. A tape whose alphabet no reachable export matches
+//! — whether none matches at all, or only an unrelated one does — gets a
+//! SYNTHESIZED, deterministic plain-`alphabet` declaration instead of an
+//! error: `<routine>__<param>` (the routine's own mangled name with `::`
+//! replaced by `_`, joined to the parameter name), declared at the top
+//! level, before the namespace block that uses it. The object arm never
+//! fails to render a routine for want of an alphabet name.
+//!
+//! **The object arm skips the entry world.** A `machine` block always
+//! compiles to the literal symbol name `main` (a program cannot also
+//! declare a top-level `main` routine/graph), and unlike an exported
+//! routine it is never a CALLEE — nothing binds against it or reads its
+//! own interface entry — so it publishes no write set and has no
+//! declaration to render; printing it would falsely claim it writes
+//! nothing. The source arm never had this problem: a `machine` block has
+//! no `export` keyword to make it eligible in the first place.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -90,7 +113,9 @@ use std::fmt::Write as _;
 use mtc_core::formats::object::{ExportedAlphabet, ObjectFile, RoutineInterface, SymbolDef};
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
-use crate::compiler::{self, CompileError, Resolved, ResolvedWorld, declared_effective, full_name};
+use crate::compiler::{self, CompileError, Resolved, ResolvedWorld, full_name, published_writes};
+use crate::declarations::Declarations;
+use crate::footprint::{self, FootprintTable};
 use crate::parser::{
     Bind, BindingArg, BindingValue, Doc, FoldExprKind, FoldExprNode, FoldOp, Graft, Graph,
     MapArrow, MoveDir, Pattern, PatternCellKind, Program, Routine, Rule, SigParam, SigParamKind,
@@ -100,8 +125,20 @@ use crate::parser::{
 /// Render every exported declaration of a `.tmc` source as a header — the
 /// complete arm.
 pub(crate) fn from_source(source: &str) -> Result<String, CompileError> {
-    let analysis = compiler::analyze(source)?;
-    Ok(render_source(&analysis.program, &analysis.resolved))
+    // The SAME externals `compiler::analyze` resolves against (its own
+    // default) and the SAME inference `ir::lower` runs — computed here
+    // rather than threaded out of `analyze`, since `Analysis` does not
+    // retain the `Declarations` it resolved with. Both go through
+    // `compiler::published_writes`, the one function that decides a tape's
+    // published write set (docs/tmt/cli.md (interface)).
+    let externals = Declarations::stdlib();
+    let analysis = compiler::analyze_with(source, &externals)?;
+    let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
+    Ok(render_source(
+        &analysis.program,
+        &analysis.resolved,
+        &footprint,
+    ))
 }
 
 /// Render the exported declarations a compiled object still carries — the
@@ -120,22 +157,54 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
         root.insert(&ns, alphabet_lines(local, &alphabet.glyphs, true));
     }
     for symbol in &obj.symbols {
+        // The entry world is skipped on the object arm: a `machine` block
+        // always compiles to the literal symbol name `main` (a program
+        // cannot also declare a top-level `main` routine/graph —
+        // compiler.rs's machine/`main`-name clash check makes the two
+        // mutually exclusive), and unlike an exported routine it is never
+        // a CALLEE — nothing binds against `main` or reads its own
+        // interface entry — so it publishes no write set and has no
+        // declaration to render here. Printing it as an "exported
+        // routine" would falsely claim it writes nothing, when in truth
+        // nothing was ever asked.
+        if symbol.name == "main" {
+            continue;
+        }
         if let SymbolDef::Defined { blob } = symbol.def {
             let routine = interface.routines.get(blob as usize).ok_or_else(|| {
                 format!("`{}`: no interface record for its own blob", symbol.name)
             })?;
-            // A tape whose glyph list matches no exported alphabet gets a
-            // synthesized one, declared at the top level — BEFORE this
-            // routine's own namespace block prints, since insertion order
-            // is print order and the routine itself is inserted next.
+            let (ns, local) = split_ns(&symbol.name);
+            // A tape's glyph list is matched only against exported
+            // alphabets the routine could spell UNQUALIFIED in source: its
+            // own namespace, or any ENCLOSING namespace (an unqualified
+            // name resolves outward through enclosing scopes —
+            // docs/tmt/language.md (namespaces)), never a SIBLING or
+            // otherwise unrelated namespace reached only through an
+            // explicit `use` alias. A `use`-imported alphabet (like
+            // std.tmc's volatile twins importing their representation
+            // alphabet from a sibling namespace) is exactly the case this
+            // excludes: the wire has no record of that `use` edge
+            // (`Interface::imports` is unpopulated — see the module doc),
+            // so nothing here could tell that content match apart from a
+            // coincidental one, and it synthesizes instead.
+            let reachable_alphabets: Vec<&ExportedAlphabet> = interface
+                .alphabets
+                .iter()
+                .filter(|a| ns.starts_with(&split_ns(&a.name).0))
+                .collect();
+            // A tape whose glyph list matches no exported alphabet in its
+            // OWN namespace gets a synthesized one, declared at the top
+            // level — BEFORE this routine's own namespace block prints,
+            // since insertion order is print order and the routine itself
+            // is inserted next.
             for (param_name, glyphs) in routine.params.iter().zip(&routine.glyphs) {
-                if !interface.alphabets.iter().any(|a| &a.glyphs == glyphs) {
+                if !reachable_alphabets.iter().any(|a| &a.glyphs == glyphs) {
                     let synth = synthesized_alphabet_name(&symbol.name, param_name);
                     root.insert(&[], alphabet_lines(&synth, glyphs, false));
                 }
             }
-            let (ns, local) = split_ns(&symbol.name);
-            let lines = object_routine_lines(&symbol.name, local, routine, &interface.alphabets);
+            let lines = object_routine_lines(&symbol.name, local, routine, &reachable_alphabets);
             root.insert(&ns, lines);
         }
     }
@@ -222,19 +291,26 @@ fn short_name(full: &str) -> &str {
 // Doc lines
 // ---------------------------------------------------------------------------
 
-/// `?` doc lines for one declaration: one paragraph per line, a blank `?`
-/// between paragraphs (the same shape a run of consecutive `?` lines
-/// followed by a blank `?` line parses back into —
-/// docs/tmt/language.md (doc lines and attention lines)). Attention lines
-/// (`!`) are out of scope here (see the module doc).
+/// `?` doc lines for one declaration, printed VERBATIM line-for-line — each
+/// written `?` line becomes its own output line, never paragraph-joined —
+/// with a blank `?` between paragraphs (the same shape a run of consecutive
+/// `?` lines followed by a blank `?` line parses back into —
+/// docs/tmt/language.md (doc lines and attention lines)). Reads
+/// `Doc::paragraph_lines` (the per-line form) rather than `Doc::paragraphs`
+/// (the space-joined form other consumers, like hover text, want) for
+/// exactly this reason: `paragraphs` has already discarded the original
+/// line breaks, so it cannot round-trip them. Attention lines (`!`) are out
+/// of scope here (see the module doc).
 fn doc_lines(doc: Option<&Doc>) -> Vec<String> {
     let mut lines = Vec::new();
     if let Some(doc) = doc {
-        for (i, paragraph) in doc.paragraphs.iter().enumerate() {
+        for (i, paragraph) in doc.paragraph_lines.iter().enumerate() {
             if i > 0 {
                 lines.push("?".to_string());
             }
-            lines.push(format!("? {paragraph}"));
+            for line in paragraph {
+                lines.push(format!("? {line}"));
+            }
         }
     }
     lines
@@ -244,7 +320,7 @@ fn doc_lines(doc: Option<&Doc>) -> Vec<String> {
 // Source arm
 // ---------------------------------------------------------------------------
 
-fn render_source(program: &Program, resolved: &Resolved) -> String {
+fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTable) -> String {
     let worlds: HashMap<&str, &ResolvedWorld> = resolved
         .worlds
         .iter()
@@ -297,7 +373,10 @@ fn render_source(program: &Program, resolved: &Resolved) -> String {
         }
         let full = full_name(&routine.ns, &routine.name);
         let world = worlds[full.as_str()];
-        root.insert(&routine.ns, routine_lines(routine, world, resolved));
+        root.insert(
+            &routine.ns,
+            routine_lines(routine, world, resolved, footprint),
+        );
     }
     for graph in &program.graphs {
         if !graph.exported {
@@ -305,7 +384,7 @@ fn render_source(program: &Program, resolved: &Resolved) -> String {
         }
         let full = full_name(&graph.ns, &graph.name);
         let world = worlds[full.as_str()];
-        root.insert(&graph.ns, graph_lines(graph, world, resolved));
+        root.insert(&graph.ns, graph_lines(graph, world, resolved, footprint));
     }
 
     let mut out = String::new();
@@ -334,16 +413,26 @@ fn braced_list(glyphs: &[String]) -> String {
     }
 }
 
-fn routine_lines(routine: &Routine, world: &ResolvedWorld, resolved: &Resolved) -> Vec<String> {
+fn routine_lines(
+    routine: &Routine,
+    world: &ResolvedWorld,
+    resolved: &Resolved,
+    footprint: &FootprintTable,
+) -> Vec<String> {
     let mut lines = doc_lines(routine.doc.as_ref());
-    let sig = signature_text(&routine.sig, world, resolved);
+    let sig = signature_text(&routine.sig, world, resolved, footprint);
     lines.push(format!("export routine {}({});", routine.name, sig));
     lines
 }
 
-fn graph_lines(graph: &Graph, world: &ResolvedWorld, resolved: &Resolved) -> Vec<String> {
+fn graph_lines(
+    graph: &Graph,
+    world: &ResolvedWorld,
+    resolved: &Resolved,
+    footprint: &FootprintTable,
+) -> Vec<String> {
     let mut lines = doc_lines(graph.doc.as_ref());
-    let sig = signature_text(&graph.sig, world, resolved);
+    let sig = signature_text(&graph.sig, world, resolved, footprint);
     lines.push(format!("export graph {}({}) {{", graph.name, sig));
     for state in &graph.states {
         lines.extend(indented(state_lines(state)));
@@ -358,15 +447,25 @@ fn graph_lines(graph: &Graph, world: &ResolvedWorld, resolved: &Resolved) -> Vec
     lines
 }
 
-fn signature_text(sig: &Signature, world: &ResolvedWorld, resolved: &Resolved) -> String {
+fn signature_text(
+    sig: &Signature,
+    world: &ResolvedWorld,
+    resolved: &Resolved,
+    footprint: &FootprintTable,
+) -> String {
     sig.params
         .iter()
-        .map(|p| sig_param_text(p, world, resolved))
+        .map(|p| sig_param_text(p, world, resolved, footprint))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn sig_param_text(param: &SigParam, world: &ResolvedWorld, resolved: &Resolved) -> String {
+fn sig_param_text(
+    param: &SigParam,
+    world: &ResolvedWorld,
+    resolved: &Resolved,
+    footprint: &FootprintTable,
+) -> String {
     match &param.kind {
         SigParamKind::State => format!("state {}", param.name),
         // `volatile` is deliberately NOT printed here, on either arm: the
@@ -382,28 +481,46 @@ fn sig_param_text(param: &SigParam, world: &ResolvedWorld, resolved: &Resolved) 
         // dropping it here is what keeps the two arms in agreement over
         // std.tmc's volatile-twin routines.
         SigParamKind::Tape { alphabet, .. } => {
-            let tape = world
+            let (index, tape) = world
                 .tapes
                 .iter()
-                .find(|t| t.name == param.name)
+                .enumerate()
+                .find(|(_, t)| t.name == param.name)
                 .expect("every signature tape parameter resolves to a ResolvedTape");
-            let effective = declared_effective(tape);
+            // The SAME published write set `ir::lower` computes for this
+            // tape (`compiler::published_writes`): the declared effective
+            // set when a clause exists, else this world's own INFERRED
+            // entry from the footprint this function was handed — never
+            // `declared_effective` alone, which would ignore an
+            // uncontracted tape's real inferred writes and diverge from
+            // the object arm on every routine that has one
+            // (docs/tmt/cli.md (interface)).
+            let inferred = footprint
+                .worlds
+                .get(&world.name)
+                .and_then(|wf| wf.tapes.get(index).copied());
+            let published = published_writes(tape, inferred);
             let alphabet_glyphs = &resolved
                 .alphabets
                 .get(&tape.alphabet)
                 .expect("resolution guarantees every tape alphabet is resolved")
                 .glyphs;
-            let writes: Vec<String> = effective
+            let writes: Vec<String> = published
                 .iter()
                 .filter_map(|index| alphabet_glyphs.get(index as usize).cloned())
                 .collect();
-            format!(
-                "tape {}: {alphabet} writes {}",
-                param.name,
-                braced_list(&writes)
-            )
+            tape_param_text(&param.name, alphabet, &writes)
         }
     }
+}
+
+/// One tape parameter's rendered text — `tape NAME: ALPHABET writes { … }`
+/// — the ONE renderer both the source arm (`sig_param_text`) and the object
+/// arm (`object_routine_lines`) call, so the two can never drift apart on
+/// how a parameter is formatted, only on what write set they pass in (which
+/// `compiler::published_writes` also unifies — see the module doc).
+fn tape_param_text(name: &str, alphabet: &str, writes: &[String]) -> String {
+    format!("tape {name}: {alphabet} writes {}", braced_list(writes))
 }
 
 fn state_lines(state: &State) -> Vec<String> {
@@ -639,7 +756,7 @@ fn object_routine_lines(
     routine_full_name: &str,
     local_name: &str,
     routine: &RoutineInterface,
-    alphabets: &[ExportedAlphabet],
+    alphabets: &[&ExportedAlphabet],
 ) -> Vec<String> {
     let mut params = Vec::with_capacity(routine.params.len());
     for ((param_name, glyphs), writes) in routine
@@ -651,21 +768,21 @@ fn object_routine_lines(
         // A tape's alphabet has no name on the wire (docs/formats.md
         // (routine interfaces) records only its glyphs); resolving it back
         // to the identifier a `.tmc` header must spell means matching this
-        // tape's full glyph list, by content, against an alphabet this
-        // same object exports. A tape whose alphabet the object does not
-        // export at all gets the SAME synthesized name `from_object`
-        // already declared for it at the top level (see the module doc
-        // and `synthesized_alphabet_name`) — never an error, since a
-        // routine over a private alphabet is legal.
+        // tape's full glyph list, by content, against an alphabet in the
+        // routine's OWN namespace that this same object exports (`alphabets`
+        // is already filtered to that namespace by the caller — a
+        // cross-namespace content match is not usable without a qualified
+        // alphabet reference, which the language does not have yet). A tape
+        // whose alphabet no same-namespace export matches gets the SAME
+        // synthesized name `from_object` already declared for it at the top
+        // level (see the module doc and `synthesized_alphabet_name`) — never
+        // an error, since a routine over a private alphabet is legal.
         let alphabet_name = alphabets
             .iter()
             .find(|a| &a.glyphs == glyphs)
             .map(|a| short_name(&a.name).to_string())
             .unwrap_or_else(|| synthesized_alphabet_name(routine_full_name, param_name));
-        params.push(format!(
-            "tape {param_name}: {alphabet_name} writes {}",
-            braced_list(writes)
-        ));
+        params.push(tape_param_text(param_name, &alphabet_name, writes));
     }
     vec![format!(
         "export routine {local_name}({});",

@@ -535,6 +535,15 @@ pub enum MapArrow {
 pub struct Doc {
     /// `?` lines, joined into paragraphs (blank `?` splits paragraphs).
     pub paragraphs: Vec<String>,
+    /// The same paragraphs, each as its original `?` lines UNJOINED — one
+    /// entry per source line, in source order, one outer entry per
+    /// paragraph. `paragraphs` is the space-joined form most consumers
+    /// (hover text, lint tags) want; this is for a consumer that must
+    /// print each written `?` line verbatim and line-for-line
+    /// (`header::doc_lines`, the source arm of `tmt interface` —
+    /// docs/tmt/cli.md (interface)), since the joined form has already
+    /// discarded the original line breaks.
+    pub paragraph_lines: Vec<Vec<String>>,
     /// Bare-prose `!` lines (no `[attr]` prefix), verbatim, in source order.
     pub attention: Vec<String>,
     /// The `[deprecated]` message (possibly empty), or `None`.
@@ -749,6 +758,7 @@ pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
         return None;
     }
     let mut paragraphs = Vec::new();
+    let mut paragraph_lines = Vec::new();
     let mut current: Vec<&str> = Vec::new();
     let mut attention = Vec::new();
     let mut deprecated = None;
@@ -758,6 +768,7 @@ pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
                 if text.is_empty() {
                     if !current.is_empty() {
                         paragraphs.push(current.join(" "));
+                        paragraph_lines.push(current.iter().map(|s| s.to_string()).collect());
                         current.clear();
                     }
                 } else {
@@ -779,9 +790,11 @@ pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
     }
     if !current.is_empty() {
         paragraphs.push(current.join(" "));
+        paragraph_lines.push(current.iter().map(|s| s.to_string()).collect());
     }
     Some(Doc {
         paragraphs,
+        paragraph_lines,
         attention,
         deprecated,
     })

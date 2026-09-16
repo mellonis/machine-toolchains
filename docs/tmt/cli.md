@@ -608,11 +608,14 @@ alphabets only — an object's interface section has no graph body, no
 symbol map, and no doc line to read back (docs/formats.md (routine
 interfaces)), so those never appear on that arm. Both arms render the
 IDENTICAL signature line for the same routine: a contract clause always
-prints as the EFFECTIVE write set (`writes { … }`, computed as `writes`
-minus `preserves`, or the whole alphabet minus `preserves` when no
-`writes` clause was written) rather than the author's own spelling, since
-`preserves` has no representation on the wire and an object-arm render
-could not reproduce it otherwise. `volatile` is dropped from both arms
+prints the tape's PUBLISHED write set (`writes { … }`) — the declared
+EFFECTIVE set (`writes` minus `preserves`) when the tape declares either
+clause, or the compiler's own INFERRED write set for that tape when
+neither clause was written — rather than the author's own spelling, and
+never the whole alphabet as a stand-in for "no restriction declared" (the
+wire has no way to spell that). `preserves` itself never appears on
+either arm: it has no representation on the wire and an object-arm render
+could not reproduce it. `volatile` is dropped from both arms
 for the same reason: the modifier is compile-time-only and leaves no
 trace in the generated assembly (docs/tmt/language.md (volatile tapes)),
 and it is never checked at a call site either, so it is not part of what
@@ -622,17 +625,27 @@ a caller may rely on.
 it.** On the source arm, every alphabet an exported routine or graph
 references prints — as `export alphabet` when it is itself exported, as
 a plain `alphabet` (no `export`) when it is only referenced. On the
-object arm, a tape's glyph list is matched by content against the
-object's own exported alphabets; a list matching none of them gets a
-synthesized, deterministic `alphabet` declaration instead —
-`<routine>__<param>`, the routine's own mangled name with `::` replaced
-by `_`, joined to the parameter name — declared at the top level, before
-the namespace block that uses it. The object arm never fails to render a
-routine for want of an alphabet name. This is also why the two-arm
-identity above is a property of routines over EXPORTED alphabets (every
-tape in the standard library draws from one): a routine over a private
-alphabet still renders on both arms, but the object arm's synthesized
-name is not expected to match the source arm's own local spelling.
+object arm, a tape's glyph list is matched by content against exported
+alphabets the routine could spell UNQUALIFIED in source — its own
+namespace, or any enclosing one — only; a content match reachable only
+through an explicit `use` alias into a sibling namespace is not used,
+since the object carries no record of that alias to spell it with; a
+list matching no reachable export gets a synthesized, deterministic `alphabet`
+declaration instead — `<routine>__<param>`, the routine's own mangled
+name with `::` replaced by `_`, joined to the parameter name — declared
+at the top level, before the namespace block that uses it. The object arm
+never fails to render a routine for want of an alphabet name. This is
+also why the two-arm identity above is a property of routines over
+EXPORTED alphabets (every tape in the standard library draws from one):
+a routine over a private alphabet still renders on both arms, but the
+object arm's synthesized name is not expected to match the source arm's
+own local spelling.
+
+**The object arm skips the entry world.** A `machine` block always
+compiles to the symbol name `main`, but it is never a callee — nothing
+binds against it or reads its own interface entry — so it publishes no
+write set and prints no declaration on the object arm; the source arm
+never renders it either, since a `machine` block has no `export` keyword.
 
 Without `-o` the header goes to stdout; with it, to the named file.
 
