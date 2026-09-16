@@ -1585,20 +1585,33 @@ impl Scopes {
             );
         }
 
-        // A program's machine world mangles to `main` (the linker's default
-        // entry); a top-level `main` routine/graph would clash.
-        if program.machine.is_some()
-            && let Some(clash) = defs.get(&Vec::new()).and_then(|s| s.get("main"))
+        // `main` names the entry world by linker convention (`--entry`
+        // defaults to it — `linker::DEFAULT_ENTRY`), UNCONDITIONALLY: a
+        // top-level `main` routine/graph is never legal, whether or not
+        // this unit even declares a `machine` block — a later unit that
+        // links this one as a library, or links it at all, still needs
+        // `main` free for the entry symbol. A NAMESPACED `ns::main` stays
+        // legal: its own mangled symbol is never the bare name `main`
+        // (`header.rs`'s object-arm entry-world skip relies on exactly
+        // this — docs/tmt/cli.md (interface)). Reported at the offending
+        // declaration's own span; `defs` itself keeps no span, so it is
+        // looked back up out of `ents`.
+        if defs
+            .get(&Vec::new())
+            .is_some_and(|s| s.contains_key("main"))
         {
+            let span = ents
+                .iter()
+                .find(|e| e.ns.is_empty() && e.name == "main")
+                .map(|e| e.name_span)
+                .unwrap_or_else(|| Span::point(1, 1));
             return Err(CompileError {
-                span: program
-                    .machine
-                    .as_ref()
-                    .map(|m| Span::point(m.line, m.col))
-                    .unwrap_or_else(|| Span::point(1, 1)),
+                span,
                 kind: CompileErrorKind::DuplicateName {
                     name: "main".to_string(),
-                    what: clash.kind.noun(),
+                    what: "the linker's default entry symbol (`main` names \
+                           the entry world; no top-level routine or graph \
+                           may take it)",
                 },
             });
         }
@@ -3385,6 +3398,49 @@ machine {
             ),
             "duplicate-name"
         );
+    }
+
+    /// `main` names the entry world by linker convention, unconditionally —
+    /// a top-level routine named `main` is refused even when this unit
+    /// declares no `machine` block at all (a unit that never runs stand-alone
+    /// may still be linked as a library, where `main` must stay free for
+    /// whichever OTHER unit's `machine` block claims it). Mutation:
+    /// restoring the `program.machine.is_some() &&` guard the check used to
+    /// carry — with it back, this fixture (no `machine` block) would compile
+    /// clean instead of failing `duplicate-name`.
+    #[test]
+    fn a_top_level_routine_named_main_is_refused_without_a_machine() {
+        assert_eq!(
+            code(
+                "alphabet b { '_', '0' } routine main(tape t: b) { entry state s { [*] -> return; } }"
+            ),
+            "duplicate-name"
+        );
+        // A top-level GRAPH named `main` is refused the same way.
+        assert_eq!(
+            code(
+                "alphabet b { '_', '0' } graph main(tape t: b) { entry state s { [*] -> stop; } }"
+            ),
+            "duplicate-name"
+        );
+    }
+
+    /// A NAMESPACED `ns::main` is unaffected: its own mangled symbol is
+    /// never the bare name `main`, so it never collides with the entry
+    /// world. Mutation: comparing the UNQUALIFIED last segment (`e.name ==
+    /// "main"`) instead of requiring an EMPTY namespace path too — with
+    /// that mutation, this fixture would wrongly fail `duplicate-name`
+    /// despite compiling clean today.
+    #[test]
+    fn a_namespaced_routine_named_main_is_fine() {
+        let src = "\
+alphabet b { '_', '0' }
+namespace lib {
+  export routine main(tape t: b) { entry state s { [*] -> return; } }
+}
+";
+        let a = ok(src);
+        assert!(a.resolved.worlds.iter().any(|w| w.name == "lib::main"));
     }
 
     #[test]

@@ -790,13 +790,13 @@ pub(crate) fn render_glyph_list(glyphs: &[String]) -> String {
 /// `.routine` signature it describes (docs/formats.md (routine
 /// interfaces)): the parameter name, then its glyphs in BAND order (each
 /// tape's own `IrTape.glyphs`, never re-sorted by alphabet declaration
-/// order). `writes=` prints only the declared EFFECTIVE set (Task 2's
-/// `IrTape.writes`, `compiler::declared_effective`) and only when it
-/// carries something — an absent clause (`None`) and a written-but-empty
-/// one both decode to "no suffix" on the wire, so the shorter spelling is
-/// canonical either way and `writes=()` is never printed. `enters=`,
-/// `leaves=` and `opaque` are not emitted here: the IR carries no head
-/// contract or opacity fact yet.
+/// order). `writes=` prints only the tape's PUBLISHED write set
+/// (`IrTape.writes`, filled by `compiler::published_writes`) and only
+/// when it carries something — an absent clause (`None`) and a
+/// written-but-empty one both decode to "no suffix" on the wire, so the
+/// shorter spelling is canonical either way and `writes=()` is never
+/// printed. `enters=`, `leaves=` and `opaque` are not emitted here: the
+/// IR carries no head contract or opacity fact yet.
 fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
     for t in tapes {
         let mut code = format!(".param {}, ({})", t.name, render_glyph_list(&t.glyphs));

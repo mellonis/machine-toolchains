@@ -158,15 +158,21 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
     }
     for symbol in &obj.symbols {
         // The entry world is skipped on the object arm: a `machine` block
-        // always compiles to the literal symbol name `main` (a program
-        // cannot also declare a top-level `main` routine/graph —
-        // compiler.rs's machine/`main`-name clash check makes the two
-        // mutually exclusive), and unlike an exported routine it is never
-        // a CALLEE — nothing binds against `main` or reads its own
-        // interface entry — so it publishes no write set and has no
-        // declaration to render here. Printing it as an "exported
-        // routine" would falsely claim it writes nothing, when in truth
-        // nothing was ever asked.
+        // always compiles to the literal symbol name `main`, and unlike an
+        // exported routine it is never a CALLEE — nothing binds against
+        // `main` or reads its own interface entry — so it publishes no
+        // write set and has no declaration to render here. Printing it as
+        // an "exported routine" would falsely claim it writes nothing,
+        // when in truth nothing was ever asked.
+        //
+        // This skip is sound BY CONSTRUCTION, not just for a program that
+        // happens to declare a `machine` block: `compiler.rs`'s
+        // machine/`main`-name clash check is now UNCONDITIONAL — a
+        // top-level `main` routine or graph is never legal in any unit,
+        // with or without a `machine` block — so `symbol.name == "main"`
+        // can only ever be the entry world, never a routine this arm
+        // ought to have printed. A namespaced `ns::main` is unaffected:
+        // its own mangled symbol is never the bare name `main`.
         if symbol.name == "main" {
             continue;
         }
