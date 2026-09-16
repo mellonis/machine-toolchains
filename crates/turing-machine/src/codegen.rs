@@ -46,8 +46,8 @@ use std::collections::HashSet;
 use mtc_core::asm::grid_line as grid;
 
 use crate::ir::{
-    IrCell, IrDispatch, IrMapDst, IrMove, IrProgram, IrRule, IrState, IrTapeBinding, IrThen,
-    IrTransition, IrWorld, IrWrite,
+    IrCell, IrDispatch, IrMapDst, IrMove, IrProgram, IrRule, IrState, IrTape, IrTapeBinding,
+    IrThen, IrTransition, IrWorld, IrWrite,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -747,7 +747,67 @@ fn emit_table(t: &Table, e: &mut Emitter) {
     }
 }
 
-/// Emit one world's `.routine` signature + `.func` + laid-out blocks.
+/// One element of a glyph list, matching the assembler's own canonical
+/// spelling exactly (docs/formats.md (glyph literals and glyph lists;
+/// canonical spelling)): a multi-character canonical decimal prints bare —
+/// `10` rather than `'10'` — because a bare number's identity is its
+/// VALUE, not its character content, and a single-character digit prints
+/// as an ordinary quoted literal like any other one-character glyph.
+/// Everything else prints as a quoted literal, escaping the two characters
+/// the notation itself uses (`'` and `\`).
+fn render_glyph_element(glyph: &str) -> String {
+    let multi_char = glyph.chars().count() != 1;
+    if multi_char && glyph.parse::<u32>().is_ok_and(|n| n.to_string() == glyph) {
+        return glyph.to_string();
+    }
+    let mut out = String::with_capacity(glyph.len() + 2);
+    out.push('\'');
+    for c in glyph.chars() {
+        if c == '\'' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
+/// A glyph list as a `.param` line writes it — `, `-joined elements, no
+/// ranges collapsed, because the compiler holds data here, not text
+/// (docs/formats.md (canonical spelling)).
+fn render_glyph_list(glyphs: &[String]) -> String {
+    glyphs
+        .iter()
+        .map(|g| render_glyph_element(g))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One `.param` line per tape, in tape order, immediately after the
+/// `.routine` signature it describes (docs/formats.md (routine
+/// interfaces)): the parameter name, then its glyphs in BAND order (each
+/// tape's own `IrTape.glyphs`, never re-sorted by alphabet declaration
+/// order). `writes=` prints only the declared EFFECTIVE set (Task 2's
+/// `IrTape.writes`, `compiler::declared_effective`) and only when it
+/// carries something — an absent clause (`None`) and a written-but-empty
+/// one both decode to "no suffix" on the wire, so the shorter spelling is
+/// canonical either way and `writes=()` is never printed. `enters=`,
+/// `leaves=` and `opaque` are not emitted here: the IR carries no head
+/// contract or opacity fact yet.
+fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
+    for t in tapes {
+        let mut code = format!(".param {}, ({})", t.name, render_glyph_list(&t.glyphs));
+        if let Some(writes) = &t.writes
+            && !writes.is_empty()
+        {
+            code.push_str(&format!(", writes=({})", render_glyph_list(writes)));
+        }
+        e.push(code, 0);
+    }
+}
+
+/// Emit one world's `.routine` signature + its `.param` lines + `.func` +
+/// laid-out blocks.
 fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
     let alpha: Vec<String> = w.tapes.iter().map(|t| t.cardinality.to_string()).collect();
     e.push(
@@ -759,6 +819,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
         ),
         0,
     );
+    emit_params(&w.tapes, e);
     e.push(
         format!(".func {}{}", w.name, if w.local { " local" } else { "" }),
         w.line,
@@ -990,6 +1051,7 @@ T0:     .row    [0]
 D0:     .targets scan__2, scan__1, scan__0
 .section code
 .routine main, tapes=1, alpha=(3)
+.param main, ('_', 'a', 'b')
 .func main
 scan:
         rd
@@ -1020,6 +1082,7 @@ T0:     .row    [0]
 D0:     .targets inc__2, inc__1, inc__0
 .section code
 .routine main, tapes=1, alpha=(3)
+.param num, ('_', '0', '1')
 .func main
 inc:
         rd
@@ -1053,6 +1116,8 @@ T0:     .row    [1, *]
 D0:     .targets copy__0, copy__1, copy__2
 .section code
 .routine main, tapes=2, alpha=(3, 3)
+.param src, ('_', '0', '1')
+.param dst, ('_', '0', '1')
 .func main
 copy:
         rd
@@ -1089,6 +1154,7 @@ T1:     .row    [2, *]
 D1:     .targets main__0, main__1
 .section code
 .routine mylib::plusOne, tapes=1, alpha=(3)
+.param num, ('_', '0', '1')
 .func mylib::plusOne
 inc:
         rd
@@ -1101,6 +1167,8 @@ inc__1:
         wrmv    [2], [.]
         ret
 .routine main, tapes=2, alpha=(3, 5)
+.param ctl, ('_', '0', '1')
+.param data, ('_', 'a', 'b', '0', '1')
 .func main
 main:
         rd
@@ -1135,6 +1203,7 @@ T0:     .row    [0]
 D0:     .targets seek__1, seek__0, seek__2
 .section code
 .routine main, tapes=1, alpha=(4)
+.param work, ('_', 'x', 'y', 'z')
 .func main
 seek:
         rd
@@ -1282,6 +1351,7 @@ machine {
 T0:     .row    [1]
 .section code
 .routine main, tapes=1, alpha=(3)
+.param t, ('_', 'a', 'b')
 .func main
 scan:
         rd

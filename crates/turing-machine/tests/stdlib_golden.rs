@@ -480,14 +480,21 @@ machine {
         };
         let declared = compile(WITH_CLAUSES, opts()).expect("the clause-bearing source compiles");
         let bare = compile(&clause_free, opts()).expect("the clause-free source compiles");
+        // CODEGEN — the state-machine lowering (`rd`/`mtc`/`djmp`/`wrmv`
+        // chains) — stays inert to a contract clause; that is what this test
+        // pins. The INTERFACE section is not codegen and is no longer
+        // inert (docs/formats.md (routine interfaces)): `sweep`'s
+        // `preserves { '_' }` carries a different EFFECTIVE write set than
+        // no clause at all (the alphabet minus `'_'`, vs. every symbol), so
+        // its `.param` line's `writes=` suffix — and therefore the whole
+        // `.tma` text and object — legitimately differ between the two
+        // sources. `walk`'s `writes {}` happens to coincide with "no
+        // clause" (both print no suffix, per the ruling that `writes=()`
+        // and an absent clause are indistinguishable on the wire), which is
+        // why only `sweep`'s routine actually moves.
         assert_eq!(
-            declared.tma, bare.tma,
-            "{level:?}: a contract clause must not move the emitted assembly"
-        );
-        assert_eq!(
-            declared.object.to_bytes(),
-            bare.object.to_bytes(),
-            "{level:?}: a contract clause must not move the emitted object"
+            declared.object.blobs, bare.object.blobs,
+            "{level:?}: a contract clause must not move the emitted CODE"
         );
     }
 }

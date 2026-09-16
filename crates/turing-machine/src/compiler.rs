@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use mtc_core::diagnostics::{Diagnostic, Span};
-use mtc_core::formats::object::ObjectFile;
+use mtc_core::formats::object::{ExportedAlphabet, ObjectFile};
 use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
@@ -2306,6 +2306,30 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     };
     if options.debug_info {
         remap_debug_lines(&mut object, &tma.line_map);
+    }
+    // An exported alphabet has no assembly spelling (docs/formats.md
+    // (routine interfaces)), so the assembler always leaves
+    // `Interface.alphabets` empty; the compiler fills it in here from the
+    // source-level `export alphabet` declarations, once an interface exists
+    // to carry it at all.
+    if let Some(interface) = &mut object.interface {
+        interface.alphabets = analysis
+            .program
+            .alphabets
+            .iter()
+            .filter(|a| a.exported)
+            .map(|a| {
+                let full = full_name(&a.ns, &a.name);
+                let glyphs = analysis
+                    .resolved
+                    .alphabets
+                    .get(&full)
+                    .expect("resolution guarantees every declared alphabet is resolved")
+                    .glyphs
+                    .clone();
+                ExportedAlphabet { name: full, glyphs }
+            })
+            .collect();
     }
 
     let mut diagnostics = analysis.diagnostics;
