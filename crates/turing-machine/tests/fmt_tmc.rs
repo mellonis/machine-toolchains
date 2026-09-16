@@ -666,8 +666,9 @@ fn a_range_element_inside_a_clause_formats_canonically() {
 /// test once demanded `seen >= 6` against eight files) allows outright.
 /// The list is the floor; the scan below compares against it in both
 /// directions.
-const ADVERSARIAL: [&str; 8] = [
+const ADVERSARIAL: [&str; 9] = [
     "brace_comments",
+    "declarations_only",
     "divergence_semicolon_block_comment",
     "doc_run_interior_comment",
     "docs_and_attention",
@@ -678,11 +679,17 @@ const ADVERSARIAL: [&str; 8] = [
 ];
 
 /// The adversarial sources — shapes the shipped corpus does not carry, one
-/// per derived field the pre-green CST stored. They are deliberately NOT
-/// fmt-clean (seven of the eight change under the printer), so `corpus()`,
-/// whose dogfood lock demands exactly that, must never sweep them: each
-/// carries a committed `.fmt` sidecar holding its canonical output
-/// instead.
+/// per derived field the pre-green CST stored, plus `declarations_only`
+/// (`0.2`'s bodiless-signature alternative — docs/tmt/language.md
+/// (headers) — added to reach `render_reuse`'s printer path over a
+/// `WORLD`-less `Reuse` without touching `tests/golden/`, which several
+/// OTHER test files walk on the assumption every `.tmc` there is a full,
+/// compilable program). Most are deliberately NOT fmt-clean (six of the
+/// nine change under the printer; `declarations_only`,
+/// `brace_comments` and `doc_run_interior_comment` already print
+/// unchanged), so `corpus()`, whose dogfood lock demands exactly that,
+/// must never sweep them: each carries a committed `.fmt` sidecar
+/// holding its canonical output instead.
 ///
 /// The sidecars are what pins these files' bytes. They were generated from
 /// the printer that formatted them before the green-tree cutover, so the
@@ -723,6 +730,40 @@ fn every_adversarial_source_formats_to_its_committed_sidecar() {
         let out = format(&src).unwrap_or_else(|e| panic!("{name}.tmc does not format: {e:?}"));
         assert_eq!(out, expected, "{name}.tmc no longer formats to {name}.fmt");
     }
+}
+
+/// `0.2`'s bodiless-signature alternative (docs/tmt/language.md
+/// (headers)) reaches `render_reuse`'s printer path directly: a `Reuse`
+/// with no `WORLD` child. Before the fix, `render_reuse` unconditionally
+/// unwrapped `view.world()`, so `tmt fmt` on an ordinary `.tmc` file
+/// using this shape PANICKED rather than printing — this test pins all
+/// three properties the printer must hold for it: no panic, idempotence
+/// (format twice, compare), and token preservation (re-lex the formatted
+/// text and compare its token stream against the source's own). Reads
+/// the same fixture `every_adversarial_source_formats_to_its_committed_sidecar`
+/// pins, rather than duplicating the source text. Mutation: restoring
+/// `render_reuse`'s `expect` — `format` panics inside this test instead
+/// of returning, and the whole test aborts with it rather than merely
+/// failing an assertion.
+#[test]
+fn a_bodiless_signature_formats_without_panicking_and_is_idempotent() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fmt_adversarial/declarations_only.tmc"
+    ))
+    .expect("the declarations_only adversarial fixture is readable");
+
+    let once = format(&src).expect("a bodiless signature must format, not panic or error");
+    let twice = format(&once).expect("the second pass must format too");
+    assert_eq!(
+        once, twice,
+        "fmt is not idempotent over a bodiless signature"
+    );
+    assert_eq!(
+        token_signature(&src),
+        token_signature(&once),
+        "the formatted text does not lex to the same token stream as the source"
+    );
 }
 
 /// The dogfood lock's REACH, pinned in both directions. `corpus()` walks

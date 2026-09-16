@@ -2335,26 +2335,43 @@ fn render_reuse(
             entries[i] = t;
         }
     }
-    let world = view
-        .world()
-        .expect("a parsed REUSE always carries its WORLD body");
-    // A comment between the signature's `)` and the WORLD's `{` — a
-    // REUSE-level sibling of the WORLD node — prints in the tail, in
-    // place, instead of leading the body.
-    let world_idx = elems
-        .iter()
-        .position(|e| matches!(e, SyntaxElement::Node(n) if n.kind() == TmcKind::World.into()))
-        .expect("a parsed REUSE always carries its WORLD body");
-    let rparen_idx = elems[..world_idx]
+    // `0.2`'s bodiless alternative (`;` in place of `{ … }`,
+    // docs/tmt/language.md (headers)) leaves REUSE with no WORLD child —
+    // `view.world()` legitimately answers `None` for a tree the parser
+    // itself produces now, not only for one the error-resilient parser
+    // recovered without a body. The closing token this signature prints
+    // up to is WORLD's `{` when a body follows, or REUSE's own trailing
+    // `;` when none does.
+    let world = view.world();
+    // A comment between the signature's `)` and the closing token — a
+    // REUSE-level sibling of WORLD (or, bodiless, of the `;` itself) —
+    // prints in the tail, in place, instead of leading the body.
+    let close_idx = match &world {
+        Some(_) => elems
+            .iter()
+            .position(|e| matches!(e, SyntaxElement::Node(n) if n.kind() == TmcKind::World.into()))
+            .expect("a parsed REUSE with a body always carries its WORLD node"),
+        None => elems
+            .iter()
+            .position(|e| e.kind() == TmcKind::Semi.into())
+            .expect("a bodiless REUSE always carries its trailing `;`"),
+    };
+    let rparen_idx = elems[..close_idx]
         .iter()
         .rposition(|e| e.kind() == TmcKind::RParen.into())
         .expect("a REUSE signature closes with `)`");
-    let tail = if slice_has_comment(&elems[rparen_idx + 1..world_idx]) {
+    let tail = if slice_has_comment(&elems[rparen_idx + 1..close_idx]) {
         let (t, at_line_start) =
-            span_with_comments(&elems[rparen_idx + 1..world_idx], " ", &cont_pad, None);
-        format!("{t}{}", if at_line_start { "{" } else { " {" })
-    } else {
+            span_with_comments(&elems[rparen_idx + 1..close_idx], " ", &cont_pad, None);
+        match (&world, at_line_start) {
+            (Some(_), true) => format!("{t}{{"),
+            (Some(_), false) => format!("{t} {{"),
+            (None, _) => format!("{t};"),
+        }
+    } else if world.is_some() {
         " {".to_string()
+    } else {
+        ";".to_string()
     };
     let sig_interior =
         delimited_interior(view.syntax(), TmcKind::LParen, TmcKind::RParen, 0, false);
@@ -2366,7 +2383,9 @@ fn render_reuse(
         &tail,
         &bucket(&sig_interior, entries.len()),
     ));
-    code.push_str(&render_world_after_brace(&world, indent, source, index));
+    if let Some(world) = &world {
+        code.push_str(&render_world_after_brace(world, indent, source, index));
+    }
     Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
 }
 

@@ -834,15 +834,15 @@ export routine plusOne(tape num: bits writes { '0', '1' }) {
     );
 }
 
-/// Grammar delta for the reader Task 5 lands — a `.tmh` carrying the
-/// declaration-only signature shape `parse_reuse` cannot accept yet
-/// (`expected '{' to open the body, found ';'`). Un-ignored by Task 5's
-/// own reader (the declarations-only reader,
-/// docs/tmt/language.md (headers)): the generator/reader loop this test
-/// closes. Mutation: reverting the `.tmh`-extension dispatch in
-/// `cli/interface.rs` (so `interface` always reads full-program mode) —
-/// `run_interface` on `mylib.tmh` would then fail to parse the bodiless
-/// `plusOne` signature at all, instead of reproducing it.
+/// The declaration-only signature shape (`;` in place of a `{ … }` body,
+/// docs/tmt/language.md (headers)) closes the `tmt interface`
+/// generator/reader loop: the header `tmt interface` renders for a
+/// `.tmc` source reparses back to the identical text through the
+/// declarations-only reader. Mutation: reverting the `.tmh`-extension
+/// dispatch in `cli/interface.rs` (so `interface` always reads
+/// full-program mode) — `run_interface` on `mylib.tmh` would then fail
+/// to parse the bodiless `plusOne` signature at all, instead of
+/// reproducing it.
 #[test]
 fn interface_output_reparses_as_a_header() {
     let dir = scratch("header_reparses");
@@ -858,8 +858,9 @@ fn interface_output_reparses_as_a_header() {
     let header_path = dir.join("mylib.tmh");
     std::fs::write(&header_path, &header).unwrap();
 
-    // Placeholder for the reader this task hands off to: re-running
-    // `interface` over the header itself should reproduce it unchanged.
+    // Re-running `interface` over the header itself, through the
+    // declarations-only reader (`.tmh` extension dispatch), must
+    // reproduce it unchanged.
     let reparsed = run_interface(&header_path);
     assert_eq!(reparsed.stdout, header);
 }
@@ -889,10 +890,10 @@ fn a_bodiless_signature_parses_and_carries_its_contracts() {
     );
 }
 
-/// Fixture C1's own shape (Task 5's step 1): one exported alphabet, a
-/// namespace, a `?` doc line, and a bodiless routine signature — accepted
-/// by the declarations-only reader with no `machine` block present.
-/// Paired with `a_header_may_not_declare_a_machine` below.
+/// One exported alphabet, a namespace, a `?` doc line, and a bodiless
+/// routine signature — accepted by the declarations-only reader with no
+/// `machine` block present. Paired with `a_header_may_not_declare_a_machine`
+/// below.
 #[test]
 fn a_header_without_a_machine_is_fine() {
     let dir = scratch("header_no_machine");
@@ -996,8 +997,8 @@ fn a_header_may_carry_a_graph_body() {
     assert!(out.stdout.contains("entry state s {"), "{}", out.stdout);
 }
 
-/// The mode flag is real, not cosmetic: fixture C1's own bodiless
-/// routine, compiled as a PROGRAM (`compiler::compile`'s default
+/// The mode flag is real, not cosmetic: a namespaced bodiless routine,
+/// compiled as a PROGRAM (`compiler::compile`'s default
 /// `ReadMode::Program`), still requires a body — the declarations-only
 /// alternative does not leak into ordinary compilation. Mutation: making
 /// the `;` alternative unconditional (letting a `ReadMode::Program` world
@@ -1006,7 +1007,7 @@ fn a_header_may_carry_a_graph_body() {
 /// with no rules at all.
 #[test]
 fn a_bodiless_signature_in_a_tmc_program_is_an_error() {
-    const C1: &str = "\
+    const NAMESPACED_BODILESS_ROUTINE: &str = "\
 export alphabet bits { '_', '0', '1' }
 namespace mylib {
   ? adds one to a bits tape
@@ -1014,7 +1015,7 @@ namespace mylib {
 }
 ";
     let err = compile(
-        C1,
+        NAMESPACED_BODILESS_ROUTINE,
         CompileOptions {
             opt_level: OptLevel::O0,
             ..CompileOptions::default()
