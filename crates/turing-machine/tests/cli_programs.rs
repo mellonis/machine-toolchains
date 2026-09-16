@@ -112,7 +112,7 @@ fn version_reports_tool_language_and_dialect() {
             mtc_turing_machine::TM1_TMA_DIALECT_VERSION
         )
     );
-    assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.1");
+    assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.2");
     assert_eq!(mtc_turing_machine::TM1_TMA_DIALECT_VERSION, "0.4");
     assert_eq!(out.code, 0);
 }

@@ -195,6 +195,8 @@ graft-map family in the graft section of the same page.
 | `reserved-name` | A reserved keyword used where a name is expected (a state, alphabet, or path-segment name). |
 | `multiple-machines` | More than one `machine { … }` block in one file — a program has exactly one, a library has none. |
 | `tape-not-in-machine` | A `tape` declaration outside a `machine` block — routines and graphs take their tapes from the signature. |
+| `machine-in-declarations` | A `machine { … }` block read in a declarations-only reading — a header carries no program entry point. |
+| `routine-body-in-declarations` | A routine carries a body in a declarations-only reading — a header states its signature only. |
 | `naked-pattern` | A rule pattern written without its enclosing `[ … ]` — bare single-tape patterns are not supported. |
 | `wildcard-binding` | `* as v` — a wildcard cannot bind; write the range explicitly so the expansion cost is visible. |
 | `range-kind-mismatch` | A range whose endpoints are not the same kind (`'a'..3`) — `glyph..glyph` or `number..number` only. |
@@ -584,7 +586,10 @@ address column remains an exact index of where each instruction starts.
 USAGE: tmt interface INPUT [-o OUT.tmh]
 
 INPUT is told apart by its container magic, never by its extension: a
-.tmc source or a compiled .tmo object. Prints the unit's exported
+.tmc source or a compiled .tmo object. A .tmh extension (case-insensitive)
+additionally selects declarations-only reading of a text INPUT: a
+`machine` block or a routine body is rejected, and a bodiless routine
+signature is required instead. Prints the unit's exported
 declarations — alphabets and routine signatures with their EFFECTIVE
 write contracts either way; neither arm ever prints `volatile` (it
 leaves no trace past source and is never checked at a call site). From
@@ -646,6 +651,14 @@ compiles to the symbol name `main`, but it is never a callee — nothing
 binds against it or reads its own interface entry — so it publishes no
 write set and prints no declaration on the object arm; the source arm
 never renders it either, since a `machine` block has no `export` keyword.
+
+**A `.tmh` extension selects declarations-only reading of a text INPUT**
+(docs/tmt/language.md (headers)): the identical `.tmc` grammar, read in a
+mode that rejects a `machine` block and a routine WITH a body, and
+requires a graph to carry one — a graph's only form is its source, so a
+header cannot omit it. This is a mode on the one reader, not a second
+grammar: `tmt interface` run back over a header it just wrote reproduces
+that header's text unchanged.
 
 Without `-o` the header goes to stdout; with it, to the named file.
 

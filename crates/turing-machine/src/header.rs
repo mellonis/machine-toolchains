@@ -113,7 +113,9 @@ use std::fmt::Write as _;
 use mtc_core::formats::object::{ExportedAlphabet, ObjectFile, RoutineInterface, SymbolDef};
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
-use crate::compiler::{self, CompileError, Resolved, ResolvedWorld, full_name, published_writes};
+use crate::compiler::{
+    self, CompileError, ReadMode, Resolved, ResolvedWorld, full_name, published_writes,
+};
 use crate::declarations::Declarations;
 use crate::footprint::{self, FootprintTable};
 use crate::parser::{
@@ -125,6 +127,24 @@ use crate::parser::{
 /// Render every exported declaration of a `.tmc` source as a header — the
 /// complete arm.
 pub(crate) fn from_source(source: &str) -> Result<String, CompileError> {
+    render_from_source(source, ReadMode::Program)
+}
+
+/// [`from_source`]'s declarations-only twin: the SAME reader, in
+/// [`ReadMode::DeclarationsOnly`] (docs/tmt/language.md (headers)) — a
+/// `.tmh`, or (once `--extern` lands) a `.tmc` read as one. Every routine
+/// is bodiless and every graph carries its body, so rendering it back
+/// reproduces the identical text `from_source` would have printed for the
+/// program it was itself rendered from — the round-trip
+/// `tmt interface` promises.
+pub(crate) fn from_declarations(source: &str) -> Result<String, CompileError> {
+    render_from_source(source, ReadMode::DeclarationsOnly)
+}
+
+/// The shared body of [`from_source`]/[`from_declarations`]: the mode is a
+/// flag on this ONE reader, not a fork — same lexer, same green parse,
+/// same `extract_program` either way (docs/tmt/language.md (headers)).
+fn render_from_source(source: &str, mode: ReadMode) -> Result<String, CompileError> {
     // The SAME externals `compiler::analyze` resolves against (its own
     // default) and the SAME inference `ir::lower` runs — computed here
     // rather than threaded out of `analyze`, since `Analysis` does not
@@ -132,7 +152,7 @@ pub(crate) fn from_source(source: &str) -> Result<String, CompileError> {
     // `compiler::published_writes`, the one function that decides a tape's
     // published write set (docs/tmt/cli.md (interface)).
     let externals = Declarations::stdlib();
-    let analysis = compiler::analyze_with(source, &externals)?;
+    let analysis = compiler::analyze_with_mode(source, &externals, mode)?;
     let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
     Ok(render_source(
         &analysis.program,

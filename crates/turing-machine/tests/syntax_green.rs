@@ -431,6 +431,31 @@ fn corpus() -> Vec<(std::path::PathBuf, String)> {
             files.push((path, src));
         }
     }
+    // A `0.2` declarations-only header shape (docs/tmt/language.md
+    // (headers)): a bodiless routine signature (`;` in place of `{ … }`)
+    // alongside a graph that still carries its body. Added HERE, as a
+    // literal constant, rather than as a file under `tests/golden/` —
+    // that directory is walked independently by several OTHER test
+    // files (`golden_programs.rs`, `fmt_tmc.rs`, `lint_programs.rs`,
+    // `resilient_parse.rs`, `tmc_green_analyze.rs`, `plain_site_sweep.rs`)
+    // that all assume every `.tmc` there is a full, compilable program —
+    // a bodiless-routine fixture would fail every one of them, for a
+    // property this function alone needs to cover.
+    files.push((
+        std::path::PathBuf::from("<declarations-only fixture>"),
+        "\
+export alphabet bits { '_', '0', '1' }
+
+export routine plusOne(tape num: bits writes { '0', '1' });
+
+export graph g(tape t: bits, state d) {
+  entry state s {
+    [*] -> goto d;
+  }
+}
+"
+        .to_string(),
+    ));
     assert!(
         files.len() >= 9,
         "corpus unexpectedly small: {} files — did the walk break?",

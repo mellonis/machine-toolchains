@@ -16,7 +16,10 @@ pub(super) const INTERFACE_USAGE: &str = "\
 USAGE: tmt interface INPUT [-o OUT.tmh]
 
 INPUT is told apart by its container magic, never by its extension: a
-.tmc source or a compiled .tmo object. Prints the unit's exported
+.tmc source or a compiled .tmo object. A .tmh extension (case-insensitive)
+additionally selects declarations-only reading of a text INPUT: a
+`machine` block or a routine body is rejected, and a bodiless routine
+signature is required instead. Prints the unit's exported
 declarations — alphabets and routine signatures with their EFFECTIVE
 write contracts either way; neither arm ever prints `volatile` (it
 leaves no trace past source and is never checked at a call site). From
@@ -59,7 +62,21 @@ pub(super) fn interface(raw: &[String]) -> Result<CliOutput, String> {
             let source = String::from_utf8(bytes).map_err(|_| {
                 format!("{}: not a .tmo object and not UTF-8 source", path.display())
             })?;
-            crate::header::from_source(&source).map_err(|e| {
+            // A `.tmh` extension (case-insensitive, matching the repo's
+            // standing extension-routing rule) selects declarations-only
+            // reading (docs/tmt/language.md (headers)) — text has no
+            // container magic to sniff a header from a full source by, so
+            // this is the one place the extension itself IS the signal.
+            let is_header = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("tmh"));
+            let render = if is_header {
+                crate::header::from_declarations
+            } else {
+                crate::header::from_source
+            };
+            render(&source).map_err(|e| {
                 format!(
                     "{}:{}:{}: error: {} [{}]",
                     path.display(),

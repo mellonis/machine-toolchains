@@ -66,6 +66,15 @@ pub enum CompileErrorKind {
     /// take their tapes from the signature, never from tape decls (only the
     /// `machine` block declares tapes).
     TapeNotInMachine,
+    /// A `machine { … }` block read in [`ReadMode::DeclarationsOnly`] (a
+    /// header): a header carries no program entry point at all, since a
+    /// `machine` has no `export` keyword to make it eligible for one in the
+    /// first place.
+    MachineInDeclarations,
+    /// An `export? routine NAME(sig) { … }` WITH a body, read in
+    /// [`ReadMode::DeclarationsOnly`]: a header states a routine's callable
+    /// signature, never its implementation. `name` is the routine.
+    RoutineBodyInDeclarations(String),
     /// A rule pattern written without its enclosing `[ … ]`. Single-tape
     /// bracket-less pattern sugar is deliberately absent in 0.1 — the brackets
     /// carry the tuple semantics and keep the arity visible.
@@ -328,6 +337,8 @@ impl CompileErrorKind {
         CompileErrorKind::ReservedName { .. } => "reserved-name",
         CompileErrorKind::MultipleMachines => "multiple-machines",
         CompileErrorKind::TapeNotInMachine => "tape-not-in-machine",
+        CompileErrorKind::MachineInDeclarations => "machine-in-declarations",
+        CompileErrorKind::RoutineBodyInDeclarations(_) => "routine-body-in-declarations",
         CompileErrorKind::NakedPattern => "naked-pattern",
         CompileErrorKind::WildcardBinding => "wildcard-binding",
         CompileErrorKind::RangeKindMismatch => "range-kind-mismatch",
@@ -423,6 +434,18 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "a `tape` declaration is only allowed in a `machine` block — routines and graphs take their tapes from the signature"
+                )
+            }
+            CompileErrorKind::MachineInDeclarations => {
+                write!(
+                    f,
+                    "a `machine` block is not allowed in a declarations-only reading — a header carries no program entry point"
+                )
+            }
+            CompileErrorKind::RoutineBodyInDeclarations(name) => {
+                write!(
+                    f,
+                    "routine `{name}` carries a body, which is not allowed in a declarations-only reading — a header states its signature only (write `;` in place of the body)"
                 )
             }
             CompileErrorKind::NakedPattern => {
@@ -1035,6 +1058,26 @@ pub(crate) struct Analysis {
     pub green: Rc<GreenNode>,
 }
 
+/// Which declaration shape [`analyze_with_mode`]/[`resolve_program`] accept
+/// — a flag threaded from the reader that calls them, not a second grammar
+/// or a second front end (docs/tmt/language.md (headers)):
+///
+/// - `Program` (the default `analyze`/`analyze_with` use, and what
+///   [`compile`] always reads): every routine and graph carries a body; a
+///   `machine` block is allowed. A bodiless signature fails at
+///   `WorldCtx::check_entry` exactly as an explicit empty `{ }` body
+///   already does (`EntryCount(0)`) — there is no separate "missing body"
+///   error to keep in sync with that one.
+/// - `DeclarationsOnly` (a header — `.tmh`, or a future `--extern`
+///   `.tmc`): no `machine` block, every routine is BODILESS (a signature
+///   only), and every graph carries its body — a graph's only form is its
+///   source, so a header cannot omit one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadMode {
+    Program,
+    DeclarationsOnly,
+}
+
 /// lex → green parse → extract → duplicate-binding check → resolve alphabets
 /// → flatten + world checks. The `.tmc` analog of the `.pmc` compiler's
 /// `analyze`; `compile` composes it with codegen. Fatals stop at the first
@@ -1052,15 +1095,29 @@ pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
 }
 
 /// [`analyze`] with an explicit choice of the external modules whose
-/// declared write contracts the footprint inference believes.
+/// declared write contracts the footprint inference believes. Always
+/// [`ReadMode::Program`] — [`analyze_with_mode`] is the entry point that
+/// takes a mode.
 pub(crate) fn analyze_with(
     source: &str,
     externals: &Declarations,
 ) -> Result<Analysis, CompileError> {
+    analyze_with_mode(source, externals, ReadMode::Program)
+}
+
+/// [`analyze_with`] with an explicit [`ReadMode`] — the declarations-only
+/// reader's own entry point (`crate::header`), sharing the identical lex →
+/// green parse → extract route `analyze_with` runs; only the mode threaded
+/// into [`resolve_program`] differs.
+pub(crate) fn analyze_with_mode(
+    source: &str,
+    externals: &Declarations,
+    mode: ReadMode,
+) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(Rc::clone(&green)), source);
-    let (resolved, diagnostics) = resolve_program(&program, externals)?;
+    let (resolved, diagnostics) = resolve_program(&program, externals, mode)?;
     Ok(Analysis {
         resolved,
         diagnostics,
@@ -1071,7 +1128,7 @@ pub(crate) fn analyze_with(
 }
 
 /// The resolution stage shared by [`analyze`] and [`analyze_staged`]:
-/// everything after the parse — duplicate-binding check → scope build →
+/// declarations-only shape check → duplicate-binding check → scope build →
 /// alphabet resolution → module resolution → per-world checks → unused-import
 /// warnings. Returns the resolved module plus its accumulated non-fatal
 /// diagnostics, or the first fatal at its offending span.
@@ -1083,7 +1140,9 @@ pub(crate) fn analyze_with(
 fn resolve_program(
     program: &Program,
     externals: &Declarations,
+    mode: ReadMode,
 ) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
+    check_declarations_shape(program, mode)?;
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
     let alphabets = resolve_all_alphabets(program, &scopes)?;
@@ -1094,7 +1153,7 @@ fn resolve_program(
         warned_undeclared: HashSet::new(),
         diagnostics: Vec::new(),
     };
-    ctx.check_worlds(program, &resolved)?;
+    ctx.check_worlds(program, &resolved, mode)?;
     check_contracts(&resolved, externals)?;
     let WorldCtx {
         imports_used,
@@ -1103,6 +1162,40 @@ fn resolve_program(
     } = ctx;
     unused_import_warnings(program, &imports_used, &mut diagnostics);
     Ok((resolved, diagnostics))
+}
+
+/// [`ReadMode::DeclarationsOnly`]'s own shape rule, checked once per
+/// program before any resolution runs (structural only — no scopes, no
+/// alphabets): no `machine` block, and no routine carries a body — a
+/// header states a routine's callable SIGNATURE, never its implementation
+/// (docs/tmt/language.md (headers)). [`ReadMode::Program`] adds no rule
+/// here: see [`ReadMode`]'s own doc for where a bodiless PROGRAM-mode
+/// declaration fails instead.
+///
+/// A bodiless GRAPH is not rejected here: `WorldCtx::check_entry` already
+/// rejects it (a graph's body IS its rules — nothing exempts a
+/// zero-states graph from the exactly-one-entry check), so a second,
+/// differently-worded rejection would only be a message a test would have
+/// to keep in sync with that one for no behavioral gain.
+fn check_declarations_shape(program: &Program, mode: ReadMode) -> Result<(), CompileError> {
+    if mode != ReadMode::DeclarationsOnly {
+        return Ok(());
+    }
+    if let Some(m) = &program.machine {
+        return Err(CompileError {
+            span: Span::point(m.line, m.col),
+            kind: CompileErrorKind::MachineInDeclarations,
+        });
+    }
+    for r in &program.routines {
+        if r.has_body {
+            return Err(CompileError {
+                span: r.name_span,
+                kind: CompileErrorKind::RoutineBodyInDeclarations(r.name.clone()),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// A tape parameter's declared EFFECTIVE set (docs/tmt/language.md (contract
@@ -1399,7 +1492,7 @@ pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> Tmc
     };
     let green_retained = Some(Rc::clone(&green));
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
-    match resolve_program(&program, externals) {
+    match resolve_program(&program, externals, ReadMode::Program) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
@@ -1453,6 +1546,30 @@ pub(crate) fn full_name(ns: &[String], name: &str) -> String {
         name.to_string()
     } else {
         format!("{}::{}", ns.join("::"), name)
+    }
+}
+
+/// Whether a `ResolvedWorld` carries a body — the same source-lookup
+/// idiom `WorldCtx::check_signature_params` uses to read a field
+/// `ResolvedWorld` itself does not carry, because a bodiless world is
+/// otherwise indistinguishable at THIS layer from an explicit, genuinely
+/// empty `{ }` one (`WorldParts::default()` yields the same four empty
+/// vectors either way — see `syntax::extract::extract_world`'s doc). A
+/// `machine` block always carries a body (the grammar requires `{ … }`
+/// unconditionally), so `WorldKind::Machine` is always `true`.
+fn has_body(program: &Program, world: &ResolvedWorld) -> bool {
+    match world.kind {
+        WorldKind::Machine => true,
+        WorldKind::Routine => program
+            .routines
+            .iter()
+            .find(|r| full_name(&r.ns, &r.name) == world.name)
+            .is_none_or(|r| r.has_body),
+        WorldKind::Graph => program
+            .graphs
+            .iter()
+            .find(|g| full_name(&g.ns, &g.name) == world.name)
+            .is_none_or(|g| g.has_body),
     }
 }
 
@@ -2425,7 +2542,12 @@ struct WorldCtx<'a> {
 
 impl WorldCtx<'_> {
     /// Run every per-world check across all worlds, in source order.
-    fn check_worlds(&mut self, program: &Program, resolved: &Resolved) -> Result<(), CompileError> {
+    fn check_worlds(
+        &mut self,
+        program: &Program,
+        resolved: &Resolved,
+        mode: ReadMode,
+    ) -> Result<(), CompileError> {
         // Mark import usage for every reference (tape alphabets, call /
         // graft / bind targets) — `resolve_module` had no mutable context, so
         // usage is tallied here over the AST, which still carries the original
@@ -2440,7 +2562,7 @@ impl WorldCtx<'_> {
             self.check_tape_count(world)?;
             self.check_duplicate_tapes(world)?;
             self.check_duplicate_states(world)?;
-            self.check_entry(world)?;
+            self.check_entry(program, world, mode)?;
             self.check_rules(world, is_routine)?;
             self.check_reuse_targets(world)?;
         }
@@ -2581,8 +2703,27 @@ impl WorldCtx<'_> {
         Ok(())
     }
 
-    /// Exactly one `entry` per world.
-    fn check_entry(&self, world: &ResolvedWorld) -> Result<(), CompileError> {
+    /// Exactly one `entry` per world — except a [`ReadMode::DeclarationsOnly`]
+    /// routine, which carries no body at all to require one of
+    /// (`check_declarations_shape` already guarantees, before this ever
+    /// runs, that a DECLARATIONS_ONLY routine is bodiless and a
+    /// DECLARATIONS_ONLY graph is not — so this skip cannot let a
+    /// [`ReadMode::Program`] world through: `check_declarations_shape` is a
+    /// no-op there, and a PROGRAM-mode bodiless routine or graph instead
+    /// falls through to the `count == 0` case below, `EntryCount(0)`, the
+    /// same error an explicit empty `{ }` body already produces).
+    fn check_entry(
+        &self,
+        program: &Program,
+        world: &ResolvedWorld,
+        mode: ReadMode,
+    ) -> Result<(), CompileError> {
+        if mode == ReadMode::DeclarationsOnly
+            && world.kind == WorldKind::Routine
+            && !has_body(program, world)
+        {
+            return Ok(());
+        }
         let entry_states: Vec<&State> = world.states.iter().filter(|s| s.entry).collect();
         let entry_grafts: Vec<&ResolvedGraft> = world.grafts.iter().filter(|g| g.entry).collect();
         let count = entry_states.len() + entry_grafts.len();
@@ -3084,6 +3225,8 @@ mod tests {
             },
             CompileErrorKind::MultipleMachines,
             CompileErrorKind::TapeNotInMachine,
+            CompileErrorKind::MachineInDeclarations,
+            CompileErrorKind::RoutineBodyInDeclarations("x".into()),
             CompileErrorKind::NakedPattern,
             CompileErrorKind::WildcardBinding,
             CompileErrorKind::RangeKindMismatch,

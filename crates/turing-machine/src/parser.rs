@@ -28,10 +28,13 @@ use crate::syntax::{self, GreenSink, TmcKind};
 /// chapter). Pre-1.0 the version is `0.N` and N bumps on ANY grammar change;
 /// at a declared 1.0 the axes activate (major = breaking, minor = additive).
 /// There is no patch digit — spec-text corrections are errata and
-/// implementation-conformance fixes never move it. This is the language's
-/// first cut, so `0.1` (mirrors PM-1's `PMC_LANG_VERSION` discipline).
+/// implementation-conformance fixes never move it. `0.1` was the language's
+/// first cut (mirrors PM-1's `PMC_LANG_VERSION` discipline); `0.2` adds the
+/// declarations-only signature alternative — a `;` in place of a `{ … }`
+/// body after a routine or graph signature (docs/tmt/language.md
+/// (headers)).
 /// (An unreleased version amends in place; the bump discipline binds from the first release.)
-pub const TMC_LANG_VERSION: &str = "0.1";
+pub const TMC_LANG_VERSION: &str = "0.2";
 
 // ---------------------------------------------------------------------------
 // AST — the flat program the front end (resolution, IR, codegen) consumes.
@@ -177,7 +180,10 @@ pub enum SigParamKind {
     State,
 }
 
-/// An `export? routine NAME(sig) { … }` declaration.
+/// An `export? routine NAME(sig) { … }` declaration — or, since `0.2`, a
+/// bodiless `export? routine NAME(sig);` (`has_body` false): a
+/// declarations-only reading of the signature and its contracts, with no
+/// `states`/`grafts`/`binds` to carry (docs/tmt/language.md (headers)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Routine {
     pub name: String,
@@ -187,6 +193,11 @@ pub struct Routine {
     pub exported: bool,
     pub ns: Vec<String>,
     pub sig: Signature,
+    /// Whether a `{ … }` body followed the signature. `false` only for the
+    /// `0.2` bodiless alternative (`;`); `states`/`grafts`/`binds` are then
+    /// always empty, the same shape an explicit empty `{ }` body would also
+    /// produce — this flag is what tells the two apart.
+    pub has_body: bool,
     pub states: Vec<State>,
     pub grafts: Vec<Graft>,
     pub binds: Vec<Bind>,
@@ -195,7 +206,9 @@ pub struct Routine {
 
 /// An `export? graph NAME(sig) { … }` declaration — the same shape as
 /// [`Routine`], kept distinct because the front end treats the two reuse forms
-/// differently (routine → `call`, graph → `graft`).
+/// differently (routine → `call`, graph → `graft`). Unlike a routine, a
+/// bodiless graph (`has_body` false) is never valid past the parser: a
+/// graph's only form is its source (docs/tmt/language.md (headers)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Graph {
     pub name: String,
@@ -205,6 +218,9 @@ pub struct Graph {
     pub exported: bool,
     pub ns: Vec<String>,
     pub sig: Signature,
+    /// See [`Routine::has_body`] — the same grammar alternative parses for
+    /// both reuse forms; a program-level check rejects it on a graph.
+    pub has_body: bool,
     pub states: Vec<State>,
     pub grafts: Vec<Graft>,
     pub binds: Vec<Bind>,
@@ -1459,6 +1475,18 @@ impl Parser<'_> {
         };
         self.name(what)?;
         self.signature()?;
+        // `0.2`'s one grammar alternative (docs/tmt/language.md
+        // (headers)): a bare `;` in place of the `{ … }` body, yielding a
+        // REUSE with no WORLD child — a declarations-only reading of the
+        // signature. Legal here for both carriers; whether a bodiless
+        // ROUTINE or a bodied GRAPH is allowed in context is a
+        // program-level check (`compiler::check_declarations_shape`),
+        // not a grammar rule — the grammar accepts either carrier either
+        // way.
+        if matches!(self.peek().kind, TokenKind::Semi) {
+            self.bump(); // `;`
+            return Ok(());
+        }
         // WORLD wraps the `{ … }` body — the shape `machine`/`routine`/
         // `graph` share (docs/tmt/language.md (worlds)); see the
         // `syntax` module doc for why it gets its own node kind rather

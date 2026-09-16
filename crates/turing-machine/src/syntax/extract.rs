@@ -892,10 +892,11 @@ struct WorldParts {
     binds: Vec<Bind>,
 }
 
-/// `None` — a declaration with no WORLD child — yields four empty
-/// vectors rather than panicking: `ReuseView::world`'s own doc explains
-/// why a view answers absence instead of asserting a shape the parser
-/// always produces.
+/// `None` — a declaration with no WORLD child, either the `0.2` bodiless
+/// alternative or a tree the error-resilient parser recovered without
+/// one — yields four empty vectors rather than panicking:
+/// `ReuseView::world`'s own doc explains why a view answers absence
+/// instead of asserting a shape the parser always produces.
 fn extract_world(world: Option<WorldView>, source: &str, index: &TextLineIndex) -> WorldParts {
     let Some(world) = world else {
         return WorldParts::default();
@@ -930,6 +931,11 @@ struct ReuseParts {
     col: u32,
     exported: bool,
     sig: Signature,
+    /// See `crate::parser::Routine::has_body` — `view.world().is_none()`
+    /// is the ONLY signal: an empty `{ }` body and a bodiless `;` both
+    /// extract to four empty `WorldParts` vectors, so `has_body` cannot
+    /// be derived from their contents.
+    has_body: bool,
     states: Vec<State>,
     grafts: Vec<Graft>,
     binds: Vec<Bind>,
@@ -957,6 +963,7 @@ fn extract_reuse(view: &ReuseView, source: &str, index: &TextLineIndex) -> Reuse
     let close = sig_tokens_run
         .last()
         .expect("REUSE's signature run always closes on its own `)`");
+    let has_body = view.world().is_some();
     let parts = extract_world(view.world(), source, index);
     ReuseParts {
         name: name.text().to_string(),
@@ -974,6 +981,7 @@ fn extract_reuse(view: &ReuseView, source: &str, index: &TextLineIndex) -> Reuse
                 close.text_range().end,
             )),
         },
+        has_body,
         states: parts.states,
         grafts: parts.grafts,
         binds: parts.binds,
@@ -1046,6 +1054,7 @@ fn extract_items(
                         exported: parts.exported,
                         ns: ns.to_vec(),
                         sig: parts.sig,
+                        has_body: parts.has_body,
                         states: parts.states,
                         grafts: parts.grafts,
                         binds: parts.binds,
@@ -1059,6 +1068,7 @@ fn extract_items(
                         exported: parts.exported,
                         ns: ns.to_vec(),
                         sig: parts.sig,
+                        has_body: parts.has_body,
                         states: parts.states,
                         grafts: parts.grafts,
                         binds: parts.binds,

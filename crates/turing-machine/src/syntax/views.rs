@@ -419,11 +419,16 @@ impl ReuseView {
     /// flattening removed, this returned `["(", ")"]`. The parens are
     /// REUSE's own tokens, which is why the run still starts and ends
     /// with them.
+    ///
+    /// Stops at `Semi` as well as `World`: a bodiless (`0.2`) REUSE has
+    /// no WORLD child to stop the walk, so its own trailing `;` sits
+    /// directly among REUSE's remaining children — without this second
+    /// stop condition the run would swallow it too.
     pub fn signature(&self) -> Vec<SyntaxToken> {
         self.syntax()
             .children_with_tokens()
             .skip_while(|e| e.kind() != TmcKind::LParen.into())
-            .take_while(|e| e.kind() != TmcKind::World.into())
+            .take_while(|e| e.kind() != TmcKind::World.into() && e.kind() != TmcKind::Semi.into())
             .flat_map(|e| match e {
                 SyntaxElement::Token(t) => vec![t],
                 SyntaxElement::Node(n) => n.descendant_tokens().collect(),
@@ -439,11 +444,12 @@ impl ReuseView {
         children(self.syntax())
     }
 
-    /// This reuse's own body — `None` only for a tree that cannot come
-    /// from the parser, since `parse_reuse` always opens a WORLD node
-    /// around the `{ … }` body. Returning `Option` rather than
-    /// panicking anyway: a view's job is to answer what the tree
-    /// holds, and reporting absence is an answer, not a defect.
+    /// This reuse's own body — `None` for the `0.2` bodiless
+    /// alternative (`;` in place of `{ … }`, docs/tmt/language.md
+    /// (headers)), and also for a tree the error-resilient parser
+    /// recovered without ever opening a WORLD node. A view's job is to
+    /// answer what the tree holds, and reporting absence is an answer,
+    /// not a defect.
     pub fn world(&self) -> Option<WorldView> {
         child(self.syntax())
     }

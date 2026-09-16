@@ -836,11 +836,14 @@ export routine plusOne(tape num: bits writes { '0', '1' }) {
 
 /// Grammar delta for the reader Task 5 lands — a `.tmh` carrying the
 /// declaration-only signature shape `parse_reuse` cannot accept yet
-/// (`expected '{' to open the body, found ';'`). Un-ignored by that
-/// task's own reader (the declarations-only reader), which is why this
-/// stays a marker rather than a real assertion for now.
+/// (`expected '{' to open the body, found ';'`). Un-ignored by Task 5's
+/// own reader (the declarations-only reader,
+/// docs/tmt/language.md (headers)): the generator/reader loop this test
+/// closes. Mutation: reverting the `.tmh`-extension dispatch in
+/// `cli/interface.rs` (so `interface` always reads full-program mode) —
+/// `run_interface` on `mylib.tmh` would then fail to parse the bodiless
+/// `plusOne` signature at all, instead of reproducing it.
 #[test]
-#[ignore = "un-ignored by the declarations-only header reader that accepts this shape"]
 fn interface_output_reparses_as_a_header() {
     let dir = scratch("header_reparses");
     let src_path = dir.join("mylib.tmc");
@@ -859,4 +862,174 @@ fn interface_output_reparses_as_a_header() {
     // `interface` over the header itself should reproduce it unchanged.
     let reparsed = run_interface(&header_path);
     assert_eq!(reparsed.stdout, header);
+}
+
+/// A `0.2` bodiless routine signature (`;` in place of a `{ … }` body)
+/// still carries its `writes` contract when read in declarations-only
+/// mode. Mutation: skipping the signature when no body follows (e.g. a
+/// reader that treats a WORLD-less REUSE as an empty declaration) — the
+/// contract text below would then be absent from the output.
+#[test]
+fn a_bodiless_signature_parses_and_carries_its_contracts() {
+    let dir = scratch("header_bodiless_signature");
+    let path = dir.join("mylib.tmh");
+    std::fs::write(
+        &path,
+        "export alphabet bits { '_', '0', '1' }\n\
+         export routine plusOne(tape num: bits writes { '0', '1' });\n",
+    )
+    .unwrap();
+
+    let out = run_interface(&path);
+    assert!(
+        out.stdout
+            .contains("export routine plusOne(tape num: bits writes { '0', '1' });"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// Fixture C1's own shape (Task 5's step 1): one exported alphabet, a
+/// namespace, a `?` doc line, and a bodiless routine signature — accepted
+/// by the declarations-only reader with no `machine` block present.
+/// Paired with `a_header_may_not_declare_a_machine` below.
+#[test]
+fn a_header_without_a_machine_is_fine() {
+    let dir = scratch("header_no_machine");
+    let path = dir.join("mylib.tmh");
+    std::fs::write(
+        &path,
+        "export alphabet bits { '_', '0', '1' }\n\
+         namespace mylib {\n\
+         ? adds one to a bits tape\n\
+         export routine plusOne(tape num: bits writes { '0', '1' });\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = run_interface(&path);
+    assert!(
+        out.stdout
+            .contains("export routine plusOne(tape num: bits writes { '0', '1' });"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// A `machine { … }` block is rejected in declarations-only reading — a
+/// header carries no program entry point (a `machine` is never a callee,
+/// so it has nothing a header would state). Mutation: dropping the
+/// rejection in `check_declarations_shape` — `execute` would then return
+/// `Ok` instead of `Err`, and `expect_err` below would panic.
+#[test]
+fn a_header_may_not_declare_a_machine() {
+    let dir = scratch("header_machine_rejected");
+    let path = dir.join("with_machine.tmh");
+    std::fs::write(
+        &path,
+        "export alphabet bits { '_', '0', '1' }\n\
+         machine {\n\
+         tape num: bits;\n\
+         entry state s { [*] -> stop; }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let err = execute(&args(&["interface", path.to_str().unwrap()]))
+        .expect_err("a `machine` block must be rejected in declarations-only reading");
+    assert!(err.contains("machine-in-declarations"), "{err}");
+}
+
+/// A routine WITH a body is rejected in declarations-only reading — a
+/// header states a callable signature only. Paired with
+/// `a_header_may_carry_a_graph_body` below: together the pair catches the
+/// easy over-correction of banning every body regardless of carrier,
+/// which would also break graphs (a graph's only form is its source, so
+/// it cannot state one bodiless). Mutation: banning every body — this
+/// test stays green (a routine body is still rejected), but its sibling
+/// goes red.
+#[test]
+fn a_header_may_not_carry_a_routine_body() {
+    let dir = scratch("header_routine_body_rejected");
+    let path = dir.join("routine_body.tmh");
+    std::fs::write(
+        &path,
+        "export alphabet bits { '_', '0', '1' }\n\
+         export routine plusOne(tape num: bits writes { '0', '1' }) {\n\
+         entry state s { [*] -> write ['1'] return; }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let err = execute(&args(&["interface", path.to_str().unwrap()]))
+        .expect_err("a routine WITH a body must be rejected in declarations-only reading");
+    assert!(err.contains("routine-body-in-declarations"), "{err}");
+}
+
+/// A graph WITH a body is LEGAL in declarations-only reading — a graph's
+/// only form is its source, so a header cannot state one any other way.
+/// This is the fixture that catches the over-correction its sibling
+/// above cannot: banning every body in declarations-only mode would
+/// reject this too. Mutation: banning every body regardless of carrier —
+/// this test goes red (`execute` returns `Err` instead of the graph's
+/// rendered body).
+#[test]
+fn a_header_may_carry_a_graph_body() {
+    let dir = scratch("header_graph_body_allowed");
+    let path = dir.join("graph_body.tmh");
+    std::fs::write(
+        &path,
+        "export alphabet bits { '_', '0', '1' }\n\
+         export graph g(tape t: bits, state d) {\n\
+         entry state s { [*] -> goto d; }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let out = run_interface(&path);
+    assert!(
+        out.stdout
+            .contains("export graph g(tape t: bits writes {}, state d) {"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("entry state s {"), "{}", out.stdout);
+}
+
+/// The mode flag is real, not cosmetic: fixture C1's own bodiless
+/// routine, compiled as a PROGRAM (`compiler::compile`'s default
+/// `ReadMode::Program`), still requires a body — the declarations-only
+/// alternative does not leak into ordinary compilation. Mutation: making
+/// the `;` alternative unconditional (letting a `ReadMode::Program` world
+/// through the same declarations-only exemption `check_entry` grants a
+/// header's routine) — `compile` would then return `Ok` for a routine
+/// with no rules at all.
+#[test]
+fn a_bodiless_signature_in_a_tmc_program_is_an_error() {
+    const C1: &str = "\
+export alphabet bits { '_', '0', '1' }
+namespace mylib {
+  ? adds one to a bits tape
+  export routine plusOne(tape num: bits writes { '0', '1' });
+}
+";
+    let err = compile(
+        C1,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .expect_err("a bodiless routine must still fail to compile as a program");
+    assert_eq!(err.kind.code(), "entry-count", "{err}");
+    assert_eq!(err.span.start.line, 4);
+}
+
+/// `TMC_LANG_VERSION` moved `0.1` → `0.2` in this task — the first task
+/// in the binding arc's phase 3a to change the `.tmc` grammar (the
+/// bodiless-signature alternative). Pre-1.0, `N` bumps on ANY grammar
+/// change; there is no patch digit. Mutation: leaving it at `0.1`.
+#[test]
+fn the_language_version_is_two() {
+    assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.2");
 }
