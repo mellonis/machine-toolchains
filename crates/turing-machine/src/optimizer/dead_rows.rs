@@ -333,9 +333,13 @@ mod tests {
     fn ir_of(src: &str) -> IrProgram {
         let a = analyze(src).unwrap_or_else(|e| panic!("analyze: {e}"));
         let ex = expand(&a.resolved).unwrap_or_else(|e| panic!("expand: {e}"));
-        lower(&ex, &a.resolved)
-            .unwrap_or_else(|e| panic!("lower: {e}"))
-            .0
+        lower(
+            &ex,
+            &a.resolved,
+            &crate::declarations::Declarations::stdlib(),
+        )
+        .unwrap_or_else(|e| panic!("lower: {e}"))
+        .0
     }
 
     /// A concrete match cell at `index`.

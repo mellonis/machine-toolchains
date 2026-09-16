@@ -1022,7 +1022,12 @@ machine {
     fn ir_of(src: &str) -> IrProgram {
         let a = crate::compiler::analyze(src).expect("analyze");
         let ex = crate::expand::expand(&a.resolved).expect("expand");
-        let (ir, _) = crate::ir::lower(&ex, &a.resolved).expect("lower");
+        let (ir, _) = crate::ir::lower(
+            &ex,
+            &a.resolved,
+            &crate::declarations::Declarations::stdlib(),
+        )
+        .expect("lower");
         ir
     }
 
@@ -1147,6 +1152,11 @@ copy__2:
         // The cross-alphabet call renders the binding-call operand
         // `call mylib::plusOne [1{3->1, 4->2}]` (host tape 1 = data; wide '0'
         // = idx 3 → bits '0' = idx 1, wide '1' = idx 4 → bits '1' = idx 2).
+        // `num` declares neither `writes` nor `preserves`, so its `.param`
+        // publishes the INFERRED write set — the tape actually writes '0'
+        // and '1' — rather than omitting `writes=` (docs/formats.md
+        // (routine interfaces): an absent `writes=` decodes as "writes
+        // nothing", which would be false here).
         let expected = "\
 .section tables
 T0:     .row    [2]
@@ -1157,7 +1167,7 @@ T1:     .row    [2, *]
 D1:     .targets main__0, main__1
 .section code
 .routine mylib::plusOne, tapes=1, alpha=(3)
-.param num, ('_', '0', '1')
+.param num, ('_', '0', '1'), writes=('0', '1')
 .func mylib::plusOne
 inc:
         rd

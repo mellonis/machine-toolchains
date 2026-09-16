@@ -2248,7 +2248,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     let mut unreachable_diags = Vec::new();
     drop_unreachable_rules(&mut analysis.resolved, &mut unreachable_diags);
     let expanded = crate::expand::expand(&analysis.resolved)?;
-    let (mut ir, ir_warnings) = lower(&expanded, &analysis.resolved)?;
+    let (mut ir, ir_warnings) = lower(&expanded, &analysis.resolved, &options.externals)?;
 
     // Validate every compiler-produced world before codegen relies on the
     // invariants (dense ids, in-bounds indices, arity-wide rows, traps only on

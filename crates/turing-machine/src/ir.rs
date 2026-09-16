@@ -50,7 +50,9 @@ use serde::{Deserialize, Serialize};
 use mtc_core::diagnostics::{Diagnostic, Span};
 
 use crate::compiler::{CompileError, CompileErrorKind, Resolved, ResolvedWorld, WorldKind};
+use crate::declarations::Declarations;
 use crate::expand::{Cell, Expanded, ExpandedRule, ExpandedWorld, Transition2, WriteOut};
+use crate::footprint::FootprintTable;
 use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, SymLit};
 
 /// The TM IR encoding version. Bumps on any change to the serialized shape
@@ -161,12 +163,28 @@ pub struct IrTape {
     /// is a legitimate reading of old data, not a violated invariant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub glyphs: Vec<String>,
-    /// The declared EFFECTIVE write set (`writes` minus `preserves`,
-    /// `compiler::declared_effective`) of a contracted signature tape, as
-    /// glyphs — `None` when the parameter declares neither clause (every
-    /// symbol permitted; always `None` on a machine tape, which takes no
-    /// contract). `preserves` itself has no IR representation: it is
-    /// source-level sugar the effective set already absorbs.
+    /// A ROUTINE tape's published write set, as glyphs: the declared
+    /// EFFECTIVE set (`writes` minus `preserves`,
+    /// `compiler::declared_effective`) for a contracted signature tape, or
+    /// — when the parameter declares NEITHER clause — the INFERRED write
+    /// set (`footprint::infer_resolved_with`, the same sound-upper-bound
+    /// analysis `check_contracts` runs to validate a declared contract).
+    /// The wire has no spelling for "no restriction declared" (an absent
+    /// `writes=` decodes as "writes nothing" —
+    /// docs/formats.md (routine interfaces)), so an uncontracted routine
+    /// tape must still publish what it actually writes rather than an
+    /// empty set that would understate it. `preserves` itself has no IR
+    /// representation either way: it is source-level sugar the effective
+    /// set already absorbs.
+    ///
+    /// Always `None` on a MACHINE tape: `main` is never a callable,
+    /// composable routine another unit binds against — nothing reads its
+    /// interface entry — so it keeps the pre-existing behavior rather than
+    /// publishing an inferred set no consumer would ever look at, which
+    /// would only cost every `machine`-bearing program a new `.param
+    /// writes=` line and move its compiled bytes for no observable gain.
+    /// Also `None` for a tape on a synthesized world with no resolved
+    /// original (a graft-instance internal), independent of contracts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writes: Option<Vec<String>>,
 }
@@ -542,9 +560,16 @@ fn escape(s: &str) -> String {
 /// ids, resolves each `call`/`bind` site's binding record to alphabet indices,
 /// and emits reachability warnings (unreachable state, unused routine). The
 /// `resolved` context supplies visibility, world spans, and `bind` records.
+///
+/// `externals` feeds the write-footprint inference an uncontracted routine
+/// tape falls back to (see [`IrTape::writes`]) — the same declarations a
+/// compile's own `check_contracts` believes, so an uncontracted call into
+/// the standard library is credited its declared effective set rather than
+/// the whole alphabet.
 pub(crate) fn lower(
     expanded: &Expanded,
     resolved: &Resolved,
+    externals: &Declarations,
 ) -> Result<(IrProgram, Vec<Diagnostic>), CompileError> {
     let mut warnings = Vec::new();
 
@@ -555,10 +580,24 @@ pub(crate) fn lower(
         .map(|w| (w.name.as_str(), w))
         .collect();
 
+    // Computed unconditionally (unlike `check_contracts`'s own "an
+    // uncontracted module pays nothing" gate): a routine's write set has to
+    // be published whether or not ANY world in the module is contracted,
+    // because the interface section is all-or-none per compiled object —
+    // one record per blob, not one only where a contract happens to exist.
+    let footprint = crate::footprint::infer_resolved_with(resolved, &externals.modules());
+
     let mut worlds = Vec::with_capacity(expanded.worlds.len());
     for ew in &expanded.worlds {
         let rw = by_name.get(ew.name.as_str()).copied();
-        worlds.push(lower_world(ew, rw, expanded, resolved, &mut warnings)?);
+        worlds.push(lower_world(
+            ew,
+            rw,
+            expanded,
+            resolved,
+            &footprint,
+            &mut warnings,
+        )?);
     }
 
     let program = IrProgram {
@@ -579,6 +618,7 @@ fn lower_world(
     rw: Option<&ResolvedWorld>,
     expanded: &Expanded,
     resolved: &Resolved,
+    footprint: &FootprintTable,
     warnings: &mut Vec<Diagnostic>,
 ) -> Result<IrWorld, CompileError> {
     let arity = ew.tapes.len();
@@ -636,17 +676,26 @@ fn lower_world(
                 // both — but `rw` itself is `None` for a graft-instance world
                 // (synthesized, no resolved original), which never declares a
                 // contract, so `writes` is `None` there too.
-                let writes = rw.and_then(|w| w.tapes.get(i)).and_then(|rt| {
-                    if rt.writes.is_none() && rt.preserves.is_none() {
-                        None
+                let writes = rw.and_then(|w| {
+                    let rt = w.tapes.get(i)?;
+                    let indices = if rt.writes.is_some() || rt.preserves.is_some() {
+                        crate::compiler::declared_effective(rt)
+                    } else if w.kind == WorldKind::Routine {
+                        // No declared clause: fall back to the INFERRED write
+                        // set rather than `None` (see [`IrTape::writes`]).
+                        // Machine worlds are excluded — nothing reads
+                        // `main`'s interface entry, so leave that path's
+                        // codegen and every `machine`-bearing golden alone.
+                        *footprint.worlds.get(&w.name)?.tapes.get(i)?
                     } else {
-                        Some(
-                            crate::compiler::declared_effective(rt)
-                                .iter()
-                                .filter_map(|index| glyphs.get(index as usize).cloned())
-                                .collect(),
-                        )
-                    }
+                        return None;
+                    };
+                    Some(
+                        indices
+                            .iter()
+                            .filter_map(|index| glyphs.get(index as usize).cloned())
+                            .collect(),
+                    )
                 });
                 IrTape {
                     name: t.name.clone(),
@@ -1207,7 +1256,8 @@ mod tests {
     fn lower_of(src: &str) -> (IrProgram, Vec<Diagnostic>) {
         let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
         let ex = expand(&a.resolved).unwrap_or_else(|e| panic!("expand failed: {e}"));
-        lower(&ex, &a.resolved).unwrap_or_else(|e| panic!("lower failed: {e}"))
+        lower(&ex, &a.resolved, &Declarations::stdlib())
+            .unwrap_or_else(|e| panic!("lower failed: {e}"))
     }
 
     /// analyze → expand → lower, expecting the front end to pass and lowering
@@ -1215,7 +1265,7 @@ mod tests {
     fn lower_err_of(src: &str) -> CompileError {
         let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
         let ex = expand(&a.resolved).unwrap_or_else(|e| panic!("expand failed: {e}"));
-        lower(&ex, &a.resolved).expect_err("expected lowering to fail")
+        lower(&ex, &a.resolved, &Declarations::stdlib()).expect_err("expected lowering to fail")
     }
 
     const A1: &str = "\
@@ -1743,14 +1793,21 @@ machine {
             .expect("the byPreserves world");
         assert_eq!(by_preserves.tapes[0].writes, Some(vec!["1".to_string()]));
 
-        // Neither clause: every symbol permitted, so `None` — the only case
-        // that omits the `writes=` suffix.
+        // Neither clause: the routine's body (a bare `return`) writes
+        // nothing, so the INFERRED set is empty — `Some(vec![])`, never
+        // `None`, since a routine tape always lowers to `Some` (the wire
+        // has no spelling for "no restriction declared", so "no clause"
+        // and "declared to write nothing" would be indistinguishable on
+        // an object read back if this were `None` — docs/formats.md
+        // (routine interfaces)). `Some([])` and `None` decode identically
+        // at codegen (`emit_params` suppresses `writes=` for either), so
+        // this is a distinction only the IR itself still makes.
         let by_neither = ir
             .worlds
             .iter()
             .find(|w| w.name.ends_with("byNeither"))
             .expect("the byNeither world");
-        assert_eq!(by_neither.tapes[0].writes, None);
+        assert_eq!(by_neither.tapes[0].writes, Some(Vec::<String>::new()));
     }
 
     #[test]

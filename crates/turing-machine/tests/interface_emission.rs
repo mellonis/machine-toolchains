@@ -204,14 +204,23 @@ machine {
     );
 }
 
-/// The pair with [`the_writes_suffix_lists_the_effective_set`]. Mutation:
-/// defaulting an absent `writes` to the full alphabet — what
-/// `compiler::declared_effective` does internally for a `preserves`-only
-/// tape, and the easy mistake to make for a neither-clause one too. Under
-/// that mutation the `byNeither` tape's decoded `writes` would be the whole
+/// The wire has no spelling for "no restriction declared" — an absent
+/// `writes=` decodes as "writes nothing" (docs/formats.md (routine
+/// interfaces)) — so the ONLY thing that legitimately empties `writes[0]`
+/// is the tape actually writing nothing, never the mere absence of a
+/// `writes`/`preserves` clause: `byNeither` below writes nothing in its
+/// body (a bare `return`), so its INFERRED footprint is independently
+/// empty, and that — not the absent clause — is why no suffix prints. The
+/// pair with [`the_writes_suffix_lists_the_effective_set`] and with
+/// [`an_uncontracted_routine_publishes_its_inferred_write_set`], which
+/// pins the other half: an uncontracted tape that DOES write something
+/// still publishes it. Mutation: falling back to the whole alphabet for
+/// an uncontracted tape (what a naive "no clause -> unrestricted" reading
+/// of `compiler::declared_effective` would do) instead of its inferred
+/// footprint — `byNeither`'s decoded `writes` would then be the whole
 /// alphabet instead of empty, and this assertion goes red.
 #[test]
-fn the_writes_suffix_is_absent_only_when_neither_clause_is_written() {
+fn the_writes_suffix_is_absent_only_when_the_routine_writes_nothing() {
     let src = "\
 alphabet bits { '_', '0', '1' }
 export routine byNeither(tape a: bits) {
@@ -228,13 +237,44 @@ machine {
     let routine = routine_interface(&object, "byNeither");
     assert!(
         routine.writes[0].is_empty(),
-        "a tape declaring neither `writes` nor `preserves` must print no \
-         `writes=` suffix, decoding to an empty set: got {:?}",
+        "a tape that writes nothing must print no `writes=` suffix, \
+         decoding to an empty set: got {:?}",
         routine.writes[0]
     );
 }
 
-/// The pair with [`the_writes_suffix_is_absent_only_when_neither_clause_is_written`].
+/// A tape declaring NEITHER `writes` nor `preserves`, whose body
+/// unconditionally writes one glyph of a three-glyph alphabet: the object
+/// must publish exactly that glyph, never an empty set — an uncontracted
+/// routine still has to describe what it actually writes, because the
+/// wire's only spelling for "empty" means "writes nothing"
+/// (docs/formats.md (routine interfaces)). The inferred set comes from
+/// the same sound-upper-bound footprint analysis `check_contracts` runs
+/// to validate a DECLARED contract (`footprint::infer_resolved_with`),
+/// applied here in the absence of one. Mutation: leaving `IrTape.writes`
+/// as `None`/empty for an uncontracted tape instead of filling it from
+/// inference — the object would then claim `byInference` writes nothing,
+/// which is false.
+#[test]
+fn an_uncontracted_routine_publishes_its_inferred_write_set() {
+    let src = "\
+alphabet bits { '_', '0', '1' }
+export routine byInference(tape a: bits) {
+  entry state s { [*] -> write ['1'] return; }
+}
+machine {
+  tape m: bits;
+  entry state go { [*] -> stop; }
+}
+";
+    let object = compile(src, CompileOptions::default())
+        .expect("compiles")
+        .object;
+    let routine = routine_interface(&object, "byInference");
+    assert_eq!(routine.writes[0], vec!["1".to_string()]);
+}
+
+/// The pair with [`the_writes_suffix_is_absent_only_when_the_routine_writes_nothing`].
 #[test]
 fn the_writes_suffix_lists_the_effective_set() {
     let src = "\
