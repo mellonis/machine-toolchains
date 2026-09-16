@@ -586,11 +586,12 @@ USAGE: tmt interface INPUT [-o OUT.tmh]
 INPUT is told apart by its container magic, never by its extension: a
 .tmc source or a compiled .tmo object. Prints the unit's exported
 declarations — alphabets and routine signatures with their EFFECTIVE
-write contracts either way. From source the header is complete: it also
-carries exported graph bodies in full and every `?` doc line. From an
-object it carries signatures and alphabets only — no graph body, no map,
-no doc line, since none of those exist on the wire. Without -o the
-header goes to stdout.
+write contracts either way; neither arm ever prints `volatile` (it
+leaves no trace past source and is never checked at a call site). From
+source the header is complete: it also carries exported graph bodies in
+full and every `?` doc line. From an object it carries signatures and
+alphabets only — no graph body, no map, no doc line, since none of those
+exist on the wire. Without -o the header goes to stdout.
 ```
 
 Renders a unit's exported declarations as one canonical, deterministic
@@ -616,6 +617,22 @@ for the same reason: the modifier is compile-time-only and leaves no
 trace in the generated assembly (docs/tmt/language.md (volatile tapes)),
 and it is never checked at a call site either, so it is not part of what
 a caller may rely on.
+
+**A routine over a non-exported alphabet is legal, and both arms render
+it.** On the source arm, every alphabet an exported routine or graph
+references prints — as `export alphabet` when it is itself exported, as
+a plain `alphabet` (no `export`) when it is only referenced. On the
+object arm, a tape's glyph list is matched by content against the
+object's own exported alphabets; a list matching none of them gets a
+synthesized, deterministic `alphabet` declaration instead —
+`<routine>__<param>`, the routine's own mangled name with `::` replaced
+by `_`, joined to the parameter name — declared at the top level, before
+the namespace block that uses it. The object arm never fails to render a
+routine for want of an alphabet name. This is also why the two-arm
+identity above is a property of routines over EXPORTED alphabets (every
+tape in the standard library draws from one): a routine over a private
+alphabet still renders on both arms, but the object arm's synthesized
+name is not expected to match the source arm's own local spelling.
 
 Without `-o` the header goes to stdout; with it, to the named file.
 

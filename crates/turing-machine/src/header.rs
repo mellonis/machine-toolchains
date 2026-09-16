@@ -59,18 +59,32 @@
 //! corpus never docs an individual graft or bind instance, and this
 //! printer's header shape does not need to.
 //!
+//! **A routine over a non-exported alphabet is legal, and both arms
+//! render it.** On the source arm, every alphabet an EXPORTED routine or
+//! graph references prints — as `export alphabet` when the alphabet
+//! itself is exported, as a plain `alphabet` (no `export`) when it is
+//! only referenced, never exported on its own — alongside every alphabet
+//! that IS exported outright, whether referenced or not. An alphabet
+//! referenced by nothing exported (like a purely local routine's own
+//! private alphabet) still prints nothing, exactly as before.
+//!
 //! **The object arm has no alphabet NAME to read per tape** — the wire's
 //! `RoutineInterface` carries a tape's glyph list, never an identifier
 //! for it (`Interface::imports` would carry cross-unit alphabet names,
-//! but nothing populates it yet). The only reconstruction available is
-//! matching a tape's glyph list, by content, against this same object's
-//! own `Interface::alphabets`; the first match wins, and two exported
-//! alphabets sharing one glyph list are genuinely indistinguishable from
-//! the object alone. A tape whose alphabet the object does not export at
-//! all cannot be named, and `from_object` reports that rather than
-//! inventing an unreparseable placeholder.
+//! but nothing populates it yet). The reconstruction is matching a
+//! tape's glyph list, by content, against this same object's own
+//! `Interface::alphabets`; the first match (in wire order) wins, and two
+//! exported alphabets sharing one glyph list are genuinely
+//! indistinguishable from the object alone — the printer accepts that
+//! ambiguity rather than erroring on it. A tape whose alphabet the
+//! object does not export at all gets a SYNTHESIZED, deterministic
+//! plain-`alphabet` declaration instead of an error: `<routine>__<param>`
+//! (the routine's own mangled name with `::` replaced by `_`, joined to
+//! the parameter name), declared at the top level, before the namespace
+//! block that uses it. The object arm never fails to render a routine
+//! for want of an alphabet name.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use mtc_core::formats::object::{ExportedAlphabet, ObjectFile, RoutineInterface, SymbolDef};
@@ -102,16 +116,26 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
 
     let mut root = NsNode::default();
     for alphabet in &interface.alphabets {
-        let (ns, short) = split_ns(&alphabet.name);
-        root.insert(&ns, alphabet_lines(short, &alphabet.glyphs));
+        let (ns, local) = split_ns(&alphabet.name);
+        root.insert(&ns, alphabet_lines(local, &alphabet.glyphs, true));
     }
     for symbol in &obj.symbols {
         if let SymbolDef::Defined { blob } = symbol.def {
             let routine = interface.routines.get(blob as usize).ok_or_else(|| {
                 format!("`{}`: no interface record for its own blob", symbol.name)
             })?;
-            let (ns, short) = split_ns(&symbol.name);
-            let lines = object_routine_lines(short, routine, &interface.alphabets)?;
+            // A tape whose glyph list matches no exported alphabet gets a
+            // synthesized one, declared at the top level — BEFORE this
+            // routine's own namespace block prints, since insertion order
+            // is print order and the routine itself is inserted next.
+            for (param_name, glyphs) in routine.params.iter().zip(&routine.glyphs) {
+                if !interface.alphabets.iter().any(|a| &a.glyphs == glyphs) {
+                    let synth = synthesized_alphabet_name(&symbol.name, param_name);
+                    root.insert(&[], alphabet_lines(&synth, glyphs, false));
+                }
+            }
+            let (ns, local) = split_ns(&symbol.name);
+            let lines = object_routine_lines(&symbol.name, local, routine, &interface.alphabets);
             root.insert(&ns, lines);
         }
     }
@@ -227,18 +251,45 @@ fn render_source(program: &Program, resolved: &Resolved) -> String {
         .map(|w| (w.name.as_str(), w))
         .collect();
 
+    // Every alphabet an EXPORTED routine or graph's tape parameter draws
+    // from, by its mangled name — printed even when the alphabet itself is
+    // not exported (a plain `alphabet`, not `export alphabet`; see the
+    // module doc). A purely local routine's own alphabet never lands in
+    // this set, so it still prints nothing, same as before this rule
+    // existed.
+    let mut referenced_alphabets: HashSet<&str> = HashSet::new();
+    for routine in &program.routines {
+        if routine.exported {
+            let full = full_name(&routine.ns, &routine.name);
+            for tape in &worlds[full.as_str()].tapes {
+                referenced_alphabets.insert(tape.alphabet.as_str());
+            }
+        }
+    }
+    for graph in &program.graphs {
+        if graph.exported {
+            let full = full_name(&graph.ns, &graph.name);
+            for tape in &worlds[full.as_str()].tapes {
+                referenced_alphabets.insert(tape.alphabet.as_str());
+            }
+        }
+    }
+
     let mut root = NsNode::default();
     for alphabet in &program.alphabets {
-        if !alphabet.exported {
+        let full = full_name(&alphabet.ns, &alphabet.name);
+        if !alphabet.exported && !referenced_alphabets.contains(full.as_str()) {
             continue;
         }
-        let full = full_name(&alphabet.ns, &alphabet.name);
         let glyphs = &resolved
             .alphabets
             .get(&full)
             .expect("resolution guarantees every declared alphabet is resolved")
             .glyphs;
-        root.insert(&alphabet.ns, alphabet_lines(&alphabet.name, glyphs));
+        root.insert(
+            &alphabet.ns,
+            alphabet_lines(&alphabet.name, glyphs, alphabet.exported),
+        );
     }
     for routine in &program.routines {
         if !routine.exported {
@@ -262,8 +313,13 @@ fn render_source(program: &Program, resolved: &Resolved) -> String {
     out
 }
 
-fn alphabet_lines(name: &str, glyphs: &[String]) -> Vec<String> {
-    vec![format!("export alphabet {name} {}", braced_list(glyphs))]
+fn alphabet_lines(name: &str, glyphs: &[String], exported: bool) -> Vec<String> {
+    let keyword = if exported {
+        "export alphabet"
+    } else {
+        "alphabet"
+    };
+    vec![format!("{keyword} {name} {}", braced_list(glyphs))]
 }
 
 /// `{ … }` with the elements space-padded, or the bare `{}` a genuinely
@@ -580,10 +636,11 @@ fn indented(lines: Vec<String>) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 fn object_routine_lines(
-    name: &str,
+    routine_full_name: &str,
+    local_name: &str,
     routine: &RoutineInterface,
     alphabets: &[ExportedAlphabet],
-) -> Result<Vec<String>, String> {
+) -> Vec<String> {
     let mut params = Vec::with_capacity(routine.params.len());
     for ((param_name, glyphs), writes) in routine
         .params
@@ -596,26 +653,35 @@ fn object_routine_lines(
         // to the identifier a `.tmc` header must spell means matching this
         // tape's full glyph list, by content, against an alphabet this
         // same object exports. A tape whose alphabet the object does not
-        // export cannot be named at all — the object arm genuinely cannot
-        // render that routine's header, which is a real (if narrow) gap
-        // in the fallback arm rather than something to paper over with an
-        // invented, unreparseable name.
+        // export at all gets the SAME synthesized name `from_object`
+        // already declared for it at the top level (see the module doc
+        // and `synthesized_alphabet_name`) — never an error, since a
+        // routine over a private alphabet is legal.
         let alphabet_name = alphabets
             .iter()
             .find(|a| &a.glyphs == glyphs)
-            .map(|a| short_name(&a.name))
-            .ok_or_else(|| {
-                format!(
-                    "`{name}`'s tape `{param_name}` draws from an alphabet this object does not export"
-                )
-            })?;
+            .map(|a| short_name(&a.name).to_string())
+            .unwrap_or_else(|| synthesized_alphabet_name(routine_full_name, param_name));
         params.push(format!(
             "tape {param_name}: {alphabet_name} writes {}",
             braced_list(writes)
         ));
     }
-    Ok(vec![format!(
-        "export routine {name}({});",
+    vec![format!(
+        "export routine {local_name}({});",
         params.join(", ")
-    )])
+    )]
+}
+
+/// A deterministic stand-in name for a tape's alphabet when the object
+/// exports nothing with matching glyph content: the routine's own mangled
+/// name with `::` replaced by `_`, joined to the parameter name by `__`
+/// (docs/tmt/cli.md (interface)). Two different routines can never
+/// collide on this scheme — their mangled names differ — and reusing it
+/// consistently between the declaration `from_object` emits and the
+/// reference `object_routine_lines` prints is what keeps the two in sync
+/// without passing the synthesized name across the two call sites
+/// directly.
+fn synthesized_alphabet_name(routine_full_name: &str, param_name: &str) -> String {
+    format!("{}__{param_name}", routine_full_name.replace("::", "_"))
 }

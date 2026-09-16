@@ -155,6 +155,118 @@ fn the_object_arm_prints_signatures_and_alphabets_but_no_graphs() {
     );
 }
 
+/// A routine over a NON-exported alphabet is legal, and both arms must
+/// render it: the source arm as a plain `alphabet` (no `export`), the
+/// object arm as a synthesized `<routine>__<param>` declaration — never
+/// as an error. Mutation: erroring on the unmatched glyph list on the
+/// object arm (this task's own prior design) — the object arm would fail
+/// to render `touch`'s header at all instead of exiting 0 with a
+/// synthesized `alphabet touch__t { … }`.
+#[test]
+fn a_routine_over_a_local_alphabet_renders_on_both_arms() {
+    const LOCAL_ALPHABET_FIXTURE: &str = "\
+alphabet localBits { '_', '0', '1' }
+
+export routine touch(tape t: localBits writes { '1' }) {
+  entry state s { [*] -> write ['1'] return; }
+}
+";
+    let dir = scratch("header_local_alphabet");
+    let src_path = dir.join("touch.tmc");
+    std::fs::write(&src_path, LOCAL_ALPHABET_FIXTURE).unwrap();
+
+    let source_out = run_interface(&src_path);
+    assert!(
+        source_out
+            .stdout
+            .contains("alphabet localBits { '_', '0', '1' }")
+            && !source_out.stdout.contains("export alphabet localBits"),
+        "the source arm must print the referenced local alphabet WITHOUT \
+         `export`: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out
+            .stdout
+            .contains("export routine touch(tape t: localBits writes { '1' });"),
+        "{}",
+        source_out.stdout
+    );
+
+    let object = compile(
+        LOCAL_ALPHABET_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile LOCAL_ALPHABET_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("touch.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+
+    // The object arm must exit 0 — never error for want of an alphabet
+    // name — and synthesize a deterministic `<routine>__<param>` name.
+    let object_out = run_interface(&obj_path);
+    assert!(
+        object_out
+            .stdout
+            .contains("alphabet touch__t { '_', '0', '1' }"),
+        "{}",
+        object_out.stdout
+    );
+    assert!(
+        object_out
+            .stdout
+            .contains("export routine touch(tape t: touch__t writes { '1' });"),
+        "{}",
+        object_out.stdout
+    );
+}
+
+/// When a tape's glyph list DOES match one of the object's own exported
+/// alphabets by content, the object arm must reuse that alphabet's real
+/// name rather than synthesizing one — `plusOne`'s `num` tape draws from
+/// the exported `bits` alphabet, so its rendered signature must say
+/// `bits`, not a synthesized `plusOne__num`. Mutation: always
+/// synthesizing regardless of a content match — the object arm would
+/// then label the tape `plusOne__num` and this assertion goes red.
+#[test]
+fn the_object_arm_prefers_the_exported_name_when_the_content_matches() {
+    const EXPORTED_MATCH_FIXTURE: &str = "\
+export alphabet bits { '_', '0', '1' }
+
+export routine plusOne(tape num: bits writes { '0', '1' }) {
+  entry state s { [*] -> write ['0'] return; }
+}
+";
+    let dir = scratch("header_exported_name_preferred");
+    let object = compile(
+        EXPORTED_MATCH_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile EXPORTED_MATCH_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("plus_one.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+
+    let out = run_interface(&obj_path);
+    assert!(
+        out.stdout
+            .contains("export routine plusOne(tape num: bits writes { '0', '1' });"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("plusOne__num"),
+        "synthesized a name despite a content match: {}",
+        out.stdout
+    );
+}
+
 /// Mutation: dispatching on the input's EXTENSION instead of its
 /// container magic — pins the repo's standing `sniff()`-not-extension
 /// rule (the `tape-block new --from` precedent). A `.tmo` renamed to

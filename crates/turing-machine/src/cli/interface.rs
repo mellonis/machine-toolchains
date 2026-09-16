@@ -18,11 +18,12 @@ USAGE: tmt interface INPUT [-o OUT.tmh]
 INPUT is told apart by its container magic, never by its extension: a
 .tmc source or a compiled .tmo object. Prints the unit's exported
 declarations — alphabets and routine signatures with their EFFECTIVE
-write contracts either way. From source the header is complete: it also
-carries exported graph bodies in full and every `?` doc line. From an
-object it carries signatures and alphabets only — no graph body, no map,
-no doc line, since none of those exist on the wire. Without -o the
-header goes to stdout.
+write contracts either way; neither arm ever prints `volatile` (it
+leaves no trace past source and is never checked at a call site). From
+source the header is complete: it also carries exported graph bodies in
+full and every `?` doc line. From an object it carries signatures and
+alphabets only — no graph body, no map, no doc line, since none of those
+exist on the wire. Without -o the header goes to stdout.
 ";
 
 pub(super) fn interface(raw: &[String]) -> Result<CliOutput, String> {
