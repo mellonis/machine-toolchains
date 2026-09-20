@@ -991,7 +991,7 @@ machine {
 // ── compile flags: --emit-ir, -S, -Werror, ir graph ─────────────────────────
 
 #[test]
-fn compile_emit_ir_writes_a_version_5_sidecar() {
+fn compile_emit_ir_writes_a_version_4_sidecar() {
     let dir = scratch("tmc_emit_ir");
     let obj = dir.join("a1.tmo");
     execute(&args(&[
@@ -1006,7 +1006,7 @@ fn compile_emit_ir_writes_a_version_5_sidecar() {
     assert!(ir_path.exists(), "the --emit-ir sidecar is written");
     let text = fs::read_to_string(&ir_path).unwrap();
     let program = IrProgram::from_json(&text).expect("the sidecar parses as IR JSON");
-    assert_eq!(program.version, 5, "IR version 5");
+    assert_eq!(program.version, 4, "IR version 4");
     assert!(program.worlds.iter().any(|w| w.name == "main"));
 }
 
@@ -1047,12 +1047,12 @@ machine {
 }
 
 #[test]
-fn compile_emit_ir_after_a_real_pass_writes_a_version_5_snapshot() {
+fn compile_emit_ir_after_a_real_pass_writes_a_version_4_snapshot() {
     let dir = scratch("tmc_emit_ir_after");
     // A forwarder program: `scan` hops to the empty forwarder `hop`, which
     // `jump-threading` retargets away at -O1 — so `after:jump-threading` names
     // a snapshot that is actually captured (the pass fires). The snapshot must
-    // parse back as version-5 IR JSON.
+    // parse back as version-4 IR JSON.
     let src = "\
 alphabet ab { '_', 'a' }
 machine {
@@ -1081,7 +1081,7 @@ machine {
     assert!(ir_path.exists(), "the after:<pass> IR sidecar is written");
     let text = fs::read_to_string(&ir_path).unwrap();
     let program = IrProgram::from_json(&text).expect("the after:<pass> sidecar parses as IR JSON");
-    assert_eq!(program.version, 5, "IR version 5");
+    assert_eq!(program.version, 4, "IR version 4");
     assert!(program.worlds.iter().any(|w| w.name == "main"));
 }
 

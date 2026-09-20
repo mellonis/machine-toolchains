@@ -1237,7 +1237,7 @@ to the callee.
 
 ### The `.tmc` state-graph IR
 
-`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 5`. The
+`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 4`. The
 form follows the model — a Turing world is a set of states, each a
 priority-ordered list of classical match rows, so the document is a graph of
 states rather than a CFG of basic blocks. `tmt ir graph` renders one of its
@@ -1245,7 +1245,7 @@ worlds as a diagram (`docs/tmt/cli.md`).
 
 ```json
 {
-  "version": 5,
+  "version": 4,
   "worlds": [
     {
       "name": "main",
@@ -1326,7 +1326,7 @@ pre-version-4 document has neither field.
   routine outside the compilation unit is the one producer of a
   `param`-bearing entry and a label `dst` (`ir::resolve_binding`); every
   in-unit entry still lowers to the positional, index-only shape. As of
-  version 5 no compiler pass produces `return_exit` or a nonempty
+  version 4 no compiler pass produces `return_exit` or a nonempty
   `call_then.exits` — both stay reserved shape, filled by lowering with
   their empty value until a routine can declare `exits=`/`noreturn`.
 - `dispatch` is a codegen hint, `table` (the canonical form: a match table

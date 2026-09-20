@@ -63,8 +63,12 @@ use crate::footprint::FootprintTable;
 use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, SymLit};
 
 /// The TM IR encoding version. Bumps on any change to the serialized shape
-/// (field names, serde tags). Embedded in every [`IrProgram`] and pinned by a
-/// round-trip test, the `.pmc` `IR_VERSION` discipline.
+/// (field names, serde tags) ONCE A VERSION HAS SHIPPED — the `.pmc`
+/// `IR_VERSION` discipline: before a version's first release every addition
+/// folds into that same number instead of opening the next one, the same
+/// rule the `.tma` dialect version states explicitly
+/// (`docs/tmt/asm.md` (acceptance contract)). Embedded in every
+/// [`IrProgram`] and pinned by a round-trip test.
 ///
 /// Version 2 adds the two optimizer-shape fields: the [`IrTransition::TailCall`]
 /// terminal (the `tail_call` pass's output) and the [`IrState::dispatch`] hint
@@ -80,26 +84,26 @@ use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, S
 /// [`IrWorld::exits`] and [`IrWorld::returns`] (a routine's declared exit
 /// count and whether it can resume normally), the
 /// [`IrTransition::ReturnExit`] terminal, [`IrTransition::CallThen`]'s
-/// `exits` field, [`IrTapeBinding::param`] (a symbolic binding entry), and
+/// `exits` field, [`IrTapeBinding::param`] (a symbolic binding entry),
 /// [`IrMapPair::dst`]'s widening from a bare index to [`IrMapDst`] (a
-/// glyph-labelled pair against an out-of-unit callee). A call/bind into a
-/// routine outside this compilation unit is the first (and, at this
-/// version, the only) producer of a `param`-bearing entry and a `Label`
-/// dst (`ir::resolve_binding`); every in-unit entry still lowers to the
-/// positional, index-only shape, so a plain `-O0` document with no
-/// cross-unit bound call has no visible change but `glyphs` and the
-/// version digit.
-///
-/// Version 5 adds [`IrTapeBinding::map_written`] — the wire's own
-/// `TapeBinding.map_written` distinction (`docs/formats.md` (bound calls)),
-/// carried by neither v4 field: an OMITTED map (`pairs` empty,
-/// `map_written` false) is index identity and leaves the linker's
-/// `glyph-mismatch` guard live; a WRITTEN empty map (`with map { }`,
-/// `pairs` empty, `map_written` true) silences it on purpose. Applies to
-/// both a positional (in-unit) and a symbolic (out-of-unit) entry alike —
-/// the distinction predates `param` and was simply never expressible
-/// before this version.
-pub const TM_IR_VERSION: u32 = 5;
+/// glyph-labelled pair against an out-of-unit callee), and
+/// [`IrTapeBinding::map_written`] (the wire's own `TapeBinding.map_written`
+/// distinction, `docs/formats.md` (bound calls): an OMITTED map, `pairs`
+/// empty and `map_written` false, is index identity and leaves the
+/// linker's `glyph-mismatch` guard live; a WRITTEN empty map, `with map {
+/// }`, `pairs` empty and `map_written` true, silences it on purpose —
+/// carried by neither of the other two new fields, and applying to a
+/// positional (in-unit) entry exactly as it does to a symbolic
+/// (out-of-unit) one). Version 4 has not shipped in any release, so this
+/// whole vocabulary — including `map_written`, added after `param` and
+/// `IrMapDst` within the same unreleased number — joins it rather than
+/// opening a version 5. A call/bind into a routine outside this
+/// compilation unit is the first (and, at this version, the only) producer
+/// of a `param`-bearing entry and a `Label` dst (`ir::resolve_binding`);
+/// every in-unit entry still lowers to the positional, index-only shape,
+/// so a plain `-O0` document with no cross-unit bound call and no written
+/// empty map has no visible change but `glyphs` and the version digit.
+pub const TM_IR_VERSION: u32 = 4;
 
 /// A whole compiled module: its emitted worlds plus the index (into `worlds`)
 /// of the `machine` block — the program entry — or `None` for a library.
@@ -1526,25 +1530,27 @@ machine {
         let (ir, _) = lower_of(A1);
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
-        assert!(json.contains("\"version\": 5"), "{json}");
+        assert!(json.contains("\"version\": 4"), "{json}");
     }
 
-    /// The bare version literal names the acceptance contract, not a hint —
-    /// bumping it is what marks the vocabulary grown in this round as part of
-    /// v5. Mutation: leaving `TM_IR_VERSION` at 4.
+    /// The bare version literal names the acceptance contract, not a hint:
+    /// version 4 has not shipped in any release, so every field this arc
+    /// adds — `param`, the `Label` `dst`, and `map_written` — joins the
+    /// same number instead of opening a new one. Mutation: bumping
+    /// `TM_IR_VERSION` to 5.
     #[test]
-    fn the_version_literal_is_five() {
-        assert_eq!(TM_IR_VERSION, 5);
+    fn the_version_literal_is_four() {
+        assert_eq!(TM_IR_VERSION, 4);
     }
 
-    /// A document exercising every v4/v5 field — glyphs and an effective
+    /// A document exercising every v4 field — glyphs and an effective
     /// write set, a two-exit `CallThen` alongside a `ReturnExit`, a
     /// `noreturn` world, a named (WRITTEN) binding-call param, and a
     /// glyph-labelled map pair — round-trips unchanged. Mutation:
     /// `#[serde(skip_serializing)]` on `IrTapeBinding.param` (or on
     /// `map_written`) drops it from the wire form, so the compare goes red.
     #[test]
-    fn v5_documents_round_trip() {
+    fn v4_documents_round_trip() {
         let ir = IrProgram {
             version: TM_IR_VERSION,
             worlds: vec![
