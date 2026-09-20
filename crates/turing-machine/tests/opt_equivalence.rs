@@ -875,6 +875,32 @@ machine {
   state done { [*, *] -> halt; }
 }";
 
+/// The facade: `outer` declares the exits and hands them to `inner`,
+/// which decides. The forwarded continuations resume at one-row states
+/// `outer` mints, so this exercises those states through the whole
+/// matrix — including the renumbering and reachability walks that have
+/// to treat an exits entry as a real in-world edge.
+const EXIT_FACADE: &str = "\
+alphabet ab { '_', '0', '1' }
+routine inner(tape t: ab, state hit, state miss) {
+  entry state s {
+    ['_'] -> goto hit;
+    [*]   -> goto miss;
+  }
+}
+routine outer(tape t: ab, state won, state lost) {
+  entry state s { [*] -> call inner(t = t, hit = won, miss = lost) then back; }
+  state back { [*] -> return; }
+}
+machine {
+  tape d: ab;
+  tape out: ab;
+  entry state go { [*, *] -> call outer(t = d, won = w, lost = l) then done; }
+  state w    { [*, *] -> write [-, '0'] stop; }
+  state l    { [*, *] -> write [-, '1'] stop; }
+  state done { [*, *] -> halt; }
+}";
+
 #[test]
 fn inline_arity_reducing_projection_is_equivalent_across_the_matrix() {
     // Three cases across the full 2×3 matrix. The last two carry data on the
@@ -1203,13 +1229,21 @@ fn everything_matrix_is_green() {
             EXIT_CALL.to_string(),
             vec![&[(&[], 0), (&[], 0)], &[(&[2], 0), (&[], 0)]],
         ),
+        (
+            // The same two exits, reached through a facade that forwards
+            // them — the shape that mints resume states.
+            "exit_facade",
+            EXIT_FACADE.to_string(),
+            vec![&[(&[], 0), (&[], 0)], &[(&[2], 0), (&[], 0)]],
+        ),
     ];
     assert_eq!(
         roster.len(),
-        14,
+        15,
         "the single-source pass-exercise roster: 6 Appendix A + nested graft + \
-         7 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
-         dead-rows, inline ×2, the brk barrier, the exit-bearing call)"
+         8 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
+         dead-rows, inline ×2, the brk barrier, the exit-bearing call and \
+         the facade that forwards its exits)"
     );
     for (label, src, cases) in &roster {
         assert!(!src.is_empty(), "roster program `{label}` has a source");

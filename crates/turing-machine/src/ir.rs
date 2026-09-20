@@ -2951,10 +2951,37 @@ machine {
             mer.contains(&format!("exit #1\"| S{lost}")),
             "exit 1 reaches `lost`:\n{mer}"
         );
-        // A `then` that leaves through an exit renders as a terminal, the
-        // way `ret` does — pinned here because nothing else renders one.
-        let routine_graph = world(&ir, "inner").to_mermaid();
-        assert!(routine_graph.contains("ret #0"), "{routine_graph}");
+    }
+
+    /// A `then` that leaves the enclosing routine through one of its own
+    /// exits renders as that exit's terminal node, the way a `return`
+    /// continuation renders as `ret` — the call is an edge to `ret #1`,
+    /// not to the shared `ret`.
+    ///
+    /// Mutation: render such a `then` as a plain `ret`; the numbered node
+    /// disappears and the edge lands on the shared one.
+    #[test]
+    fn to_mermaid_renders_a_then_that_leaves_through_an_exit() {
+        let src = "\
+alphabet ab { '_', 'a' }
+routine leaf(tape t: ab) {
+  entry state s { [*] -> return; }
+}
+routine outer(tape t: ab, state first, state second) {
+  entry state s { [*] -> call leaf(t = t) then second; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}";
+        let (ir, _) = lower_of(src);
+        let mer = world(&ir, "outer").to_mermaid();
+        assert!(mer.contains("T_ret1((\"ret #1\"))"), "{mer}");
+        assert!(mer.contains("| T_ret1\n"), "{mer}");
+        assert!(
+            !mer.contains("| T_ret\n"),
+            "the shared `ret` node is not what a numbered exit uses:\n{mer}"
+        );
     }
 
     #[test]

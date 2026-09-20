@@ -1526,6 +1526,49 @@ fn the_object_arm_prints_state_parameters_positionally() {
     assert_eq!(run_interface(&header_path).stdout, out.stdout);
 }
 
+/// The object arm's positional exit names are freshened against the tape
+/// parameters printed beside them: a routine whose tape is literally
+/// named `exit0` would otherwise produce a signature naming one parameter
+/// twice, which the strict reader rejects as `duplicate-param` — a header
+/// printed at exit 0 that cannot be read back.
+///
+/// Mutation: print `state exit{k}` unconditionally; the re-parse below
+/// fails.
+#[test]
+fn the_object_arms_exit_names_never_collide_with_a_tape_parameter() {
+    const CLASH: &str = "\
+export alphabet bits { '_', '0', '1' }
+
+export routine pick(tape exit0: bits, state hit) {
+  entry state s { [*] -> goto hit; }
+}
+";
+    let dir = scratch("header_object_exit_clash");
+    let object = compile(
+        CLASH,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile CLASH: {e}"))
+    .object;
+    let obj_path = dir.join("pick.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+
+    let out = run_interface(&obj_path);
+    assert!(
+        out.stdout
+            .contains("export routine pick(tape exit0: bits writes {}, state exit0_1);"),
+        "{}",
+        out.stdout
+    );
+
+    let header_path = dir.join("pick.tmh");
+    std::fs::write(&header_path, &out.stdout).unwrap();
+    assert_eq!(run_interface(&header_path).stdout, out.stdout);
+}
+
 /// `TMC_LANG_VERSION` moved `0.1` → `0.2` in this task — the first task
 /// in the binding arc's phase 3a to change the `.tmc` grammar (the
 /// bodiless-signature alternative). Pre-1.0, `N` bumps on ANY grammar

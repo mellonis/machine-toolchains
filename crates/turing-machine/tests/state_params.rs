@@ -10,6 +10,7 @@
 //! observably different, which is what makes reversing either end alone a
 //! failing mutation rather than a no-op.
 
+use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::TapeSnapshot;
 use mtc_core::linker::{CallMech, LinkOptions};
 use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, WideTape};
@@ -90,10 +91,14 @@ fn run_program(
     )
     .unwrap_or_else(|e| panic!("the {mech} link failed: {e}"))
     .executable;
+    run_image(&exe, widths)
+}
 
+/// Run a linked image on blank tapes of the given per-tape alphabet widths.
+fn run_image(exe: &Executable, widths: &[u32]) -> (Outcome, Vec<TapeSnapshot>) {
     let mut registry = ArchRegistry::new();
     registry.register(Box::new(Tm1::new(exe.tape_count)));
-    let machine = Machine::from_executable(&exe, &registry).expect("loads");
+    let machine = Machine::from_executable(exe, &registry).expect("loads");
     let mut tapes: Vec<WideTape> = widths.iter().map(|&w| WideTape::new(w)).collect();
     let mut devices: Vec<&mut dyn Tape> = tapes.iter_mut().map(|t| t as &mut dyn Tape).collect();
     let result = machine
@@ -163,6 +168,97 @@ machine {{
 /// writes `'0'` (index 1) on the second tape; a seeded `'1'` takes exit 1
 /// and writes `'1'` (index 2).
 const SEEDS: [(&str, u8); 2] = [("-", 1), ("'1'", 2)];
+
+/// The facade: `outer` declares the two exits the machine binds, does no
+/// work of its own, and hands them straight to `inner` — the delegation
+/// shape a `graft` spells with `done = …` and a routine spells by passing
+/// its own `state` parameters on. The observable is the same as
+/// [`two_exits`]'s, so the same seeds decide it, but control now leaves
+/// `inner` through `outer`'s exit and then `outer` through the machine's
+/// state.
+fn facade(seed: &str) -> String {
+    format!(
+        "\
+alphabet ab {{ '_', '0', '1' }}
+
+routine inner(tape t: ab, state hit, state miss) {{
+  entry state s {{
+    ['_'] -> goto hit;
+    [*]   -> goto miss;
+  }}
+}}
+
+routine outer(tape t: ab, state won, state lost) {{
+  entry state s {{ [*] -> call inner(t = t, hit = won, miss = lost) then back; }}
+  state back {{ [*] -> return; }}
+}}
+
+machine {{
+  tape d: ab;
+  tape out: ab;
+  entry state go {{ [*, *] -> write [{seed}, -] call outer(t = d, won = w, lost = l) then done; }}
+  state w    {{ [*, *] -> write [-, '0'] stop; }}
+  state l    {{ [*, *] -> write [-, '1'] stop; }}
+  state done {{ [*, *] -> halt; }}
+}}
+"
+    )
+}
+
+/// Three exits, two of them TERMINATORS: a blank leaves through the
+/// machine's own state, `'0'` through a `stop` argument and `'1'` through
+/// a `halt` argument. The three seeds are told apart by the termination
+/// kind as well as the tape, which is what makes swapping two terminator
+/// kinds a failing mutation rather than an invisible one.
+fn terminator_arguments(seed: &str) -> String {
+    format!(
+        "\
+alphabet ab {{ '_', '0', '1' }}
+
+routine pick(tape t: ab, state blank, state zero, state one) {{
+  entry state s {{
+    ['_'] -> goto blank;
+    ['0'] -> goto zero;
+    [*]   -> goto one;
+  }}
+}}
+
+machine {{
+  tape d: ab;
+  tape out: ab;
+  entry state go {{ [*, *] -> write [{seed}, -] call pick(t = d, blank = w, zero = stop, one = halt) then done; }}
+  state w    {{ [*, *] -> write [-, '0'] stop; }}
+  state done {{ [*, *] -> halt; }}
+}}
+"
+    )
+}
+
+/// A `then` that names one of the enclosing routine's own `state`
+/// parameters: `outer` calls a leaf that RETURNS normally, and the
+/// continuation leaves `outer` through its own exit instead of resuming
+/// in `outer`. `then never` in the machine halts, so a continuation that
+/// wrongly printed `ret` would come back there and change the
+/// termination kind.
+const THEN_EXIT: &str = "\
+alphabet ab { '_', '0', '1' }
+
+routine leaf(tape t: ab) {
+  entry state s { [*] -> return; }
+}
+
+routine outer(tape t: ab, state done) {
+  entry state s { [*] -> call leaf(t = t) then done; }
+}
+
+machine {
+  tape d: ab;
+  tape out: ab;
+  entry state go { [*, *] -> call outer(t = d, done = fin) then never; }
+  state fin   { [*, *] -> write [-, '0'] stop; }
+  state never { [*, *] -> halt; }
+}
+";
 
 // ── lowering and emission ──────────────────────────────────────────────────
 
@@ -268,63 +364,185 @@ fn an_exit_bearing_object_disassembles_back_to_itself() {
     assert_eq!(again.to_bytes(), object.to_bytes(), "{text}");
 }
 
-/// A routine whose exit-bearing call reaches ITSELF through the callee's
-/// exits is the one shape the copy paths refuse: a per-site copy cannot
-/// close that loop, so the linker names it and advises the mechanism that
-/// can — frames, where the vector lives in the site's descriptor rather
-/// than in a splice. The refusal is a typed link error, not a miscompile,
-/// and the escape it advises is asserted here too.
+/// A RECURSIVE facade — `walk` forwards its own exits to itself — is the
+/// one shape the copy paths refuse: a per-site copy cannot close that
+/// loop. BOTH copy paths name it (hybrid delegates the shape to mono),
+/// and frames links it, because there the vector lives in the site's
+/// descriptor rather than in a splice. The distinctive wording is asserted
+/// rather than the advice, which every copy-path refusal carries.
 ///
-/// Mutation: dropping the exits vector at the recursive site; mono then
-/// links a program whose inner call resumes wherever the outer one did.
+/// The frames image is then RUN: the tape walks one cell of `'0'` before
+/// the blank, so the recursion goes one level deep and the exit has to
+/// thread back out through both frames.
+///
+/// Mutation: drop the exits vector at the recursive site; the copy paths
+/// stop refusing and link a program whose inner call resumes wherever the
+/// outer one did.
 #[test]
-fn a_recursive_exit_bearing_call_is_refused_by_the_copy_path() {
+fn a_recursive_facade_is_refused_by_the_copy_paths() {
     const RECURSIVE: &str = "\
 alphabet ab { '_', '0', '1' }
 
 routine walk(tape t: ab, state hit, state miss) {
   entry state s {
     ['_'] -> goto hit;
-    ['0'] -> move [>] call walk(t = t, hit = gotHit, miss = gotMiss) then done;
+    ['0'] -> move [>] call walk(t = t, hit = hit, miss = miss) then done;
     [*]   -> goto miss;
   }
-  state gotHit  { [*] -> goto hit; }
-  state gotMiss { [*] -> goto miss; }
-  state done    { [*] -> return; }
+  state done { [*] -> return; }
 }
 
 machine {
   tape d: ab;
-  entry state m { [*] -> call walk(t = d, hit = won, miss = lost) then fin; }
-  state won  { [*] -> write ['0'] stop; }
-  state lost { [*] -> write ['1'] stop; }
-  state fin  { [*] -> halt; }
+  tape out: ab;
+  entry state seed { [*, *] -> write ['0', -] move [>, .] goto back; }
+  state back { [*, *] -> move [<, .] call walk(t = d, hit = won, miss = lost) then fin; }
+  state won  { [*, *] -> write [-, '0'] stop; }
+  state lost { [*, *] -> write [-, '1'] stop; }
+  state fin  { [*, *] -> halt; }
 }
 ";
     let object = compile(RECURSIVE, CompileOptions::default())
         .unwrap_or_else(|e| panic!("compile: {e}"))
         .object;
-    let err = link(
-        std::slice::from_ref(&object),
-        &[],
-        LinkOptions {
-            call_mech: CallMech::Mono,
-            ..Default::default()
-        },
-    )
-    .expect_err("a copy per site cannot close a recursive exit loop")
-    .to_string();
-    assert!(err.contains("--call-mech=frames"), "{err}");
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let err = link(
+            std::slice::from_ref(&object),
+            &[],
+            LinkOptions {
+                call_mech: mech,
+                ..Default::default()
+            },
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{mech} must refuse a recursive facade"))
+        .to_string();
+        assert!(
+            err.contains("reaches `walk` again through its exits"),
+            "{mech}: {err}"
+        );
+    }
 
-    link(
-        &[object],
+    let exe = link(
+        std::slice::from_ref(&object),
         &[],
         LinkOptions {
             call_mech: CallMech::Frames,
             ..Default::default()
         },
     )
-    .expect("frames carries the vector in the descriptor and links");
+    .expect("frames carries the vector in the descriptor and links")
+    .executable;
+    let (outcome, snaps) = run_image(&exe, &[3, 3]);
+    assert_eq!(outcome, Outcome::Stopped, "the frames image runs");
+    assert_eq!(
+        cell_at(&snaps[1], 0),
+        1,
+        "the blank past the seeded cell leaves through exit 0, twice over"
+    );
+}
+
+// ── the three resume shapes ────────────────────────────────────────────────
+
+/// Forwarding a continuation: `outer` hands its own exits to `inner`, so
+/// control leaves `inner` through `outer`'s exit and `outer` through the
+/// machine's state. Run on both seeds, under all three mechanisms, at both
+/// opt levels.
+///
+/// The resume states this mints disturb no tape and move no head, which the
+/// absolute assertions below pin: the seeded cell survives and the head
+/// stays where the call left it.
+///
+/// Mutations: point the exits vector at the wrong resume state (the
+/// seeded run takes the other branch); give the minted state a write or a
+/// move (the seed or the head assertion goes red).
+#[test]
+fn a_forwarded_continuation_leaves_through_the_facades_exit() {
+    for (seed, expected) in SEEDS {
+        let seeded_cell = if expected == 1 { 0 } else { 2 };
+        for level in [OptLevel::O0, OptLevel::O1] {
+            for mech in MECHS {
+                let (outcome, snaps) = run_program(&facade(seed), level, mech, &[3, 3]);
+                assert_eq!(
+                    outcome,
+                    Outcome::Stopped,
+                    "seed {seed} under {mech} at {level:?} left through an exit"
+                );
+                assert_eq!(
+                    cell_at(&snaps[1], 0),
+                    expected,
+                    "seed {seed} under {mech} at {level:?} took the wrong exit"
+                );
+                assert_eq!(
+                    cell_at(&snaps[0], 0),
+                    seeded_cell,
+                    "the resume states write nothing ({seed}, {mech}, {level:?})"
+                );
+                assert_eq!(
+                    snaps[0].head, 0,
+                    "the resume states move no head ({seed}, {mech}, {level:?})"
+                );
+            }
+        }
+    }
+}
+
+/// A `state` argument may be a terminator, exactly as a `graft`'s exit
+/// may: `zero = stop` ends the run where it is, `one = halt` ends it
+/// abnormally, and the third exit resumes at a state as usual. Told apart
+/// by the termination KIND, so swapping the two terminator kinds is a
+/// failing mutation.
+#[test]
+fn a_terminator_state_argument_ends_the_run() {
+    // (seed, outcome, the `out` cell the run leaves behind)
+    let cases: [(&str, Outcome, u8); 3] = [
+        ("-", Outcome::Stopped, 1),
+        ("'0'", Outcome::Stopped, 0),
+        ("'1'", Outcome::Halted, 0),
+    ];
+    for (seed, want, out) in cases {
+        for level in [OptLevel::O0, OptLevel::O1] {
+            for mech in MECHS {
+                let (outcome, snaps) =
+                    run_program(&terminator_arguments(seed), level, mech, &[3, 3]);
+                assert_eq!(
+                    outcome, want,
+                    "seed {seed} under {mech} at {level:?} ended the wrong way"
+                );
+                assert_eq!(cell_at(&snaps[1], 0), out, "seed {seed} under {mech}");
+            }
+        }
+    }
+}
+
+/// A `then` naming one of the enclosing routine's `state` parameters is
+/// the instruction after the call — `retx #k` where a `return`
+/// continuation prints `ret` — so it needs no resume state at all.
+///
+/// Mutation: print `ret` there; control comes back to the machine's
+/// `then never`, and the run halts instead of stopping.
+#[test]
+fn a_then_that_names_a_state_parameter_returns_through_its_exit() {
+    let tma = assembly(THEN_EXIT, OptLevel::O0);
+    let call_then: Vec<&str> = tma
+        .lines()
+        .skip_while(|l| !l.contains("call    leaf"))
+        .take(2)
+        .map(|l| l.trim())
+        .collect();
+    assert_eq!(call_then, vec!["call    leaf [0]", "retx    #0"], "{tma}");
+
+    for level in [OptLevel::O0, OptLevel::O1] {
+        for mech in MECHS {
+            let (outcome, snaps) = run_program(THEN_EXIT, level, mech, &[3, 3]);
+            assert_eq!(
+                outcome,
+                Outcome::Stopped,
+                "under {mech} at {level:?} the continuation left through the exit"
+            );
+            assert_eq!(cell_at(&snaps[1], 0), 1, "under {mech} at {level:?}");
+        }
+    }
 }
 
 // ── the two optimizer guards ───────────────────────────────────────────────
@@ -397,8 +615,13 @@ machine {
 /// not attempted here, so `inline` refuses the callee outright — a stated
 /// conservatism, pinned so it stays a decision.
 ///
-/// Mutation: allow it (drop the `exits == 0` candidate guard); the call
-/// disappears from the `-O1` assembly.
+/// The eligibility rule lives in ONE place — the candidate set — so this
+/// pins that one guard.
+///
+/// Mutation: drop the `w.exits == 0` test from `inline`'s candidate
+/// filter; the callee becomes splice-eligible and the call disappears
+/// from the `-O1` assembly (in practice the splice hits the callee's own
+/// `retx` row first, which is the same failure one step earlier).
 #[test]
 fn an_exit_bearing_callee_is_not_inlined() {
     let tma = assembly(&two_exits("-"), OptLevel::O1);
@@ -458,14 +681,21 @@ machine {{
     )
 }
 
+/// The ceiling lives in ONE place — the explicit narrowing that publishes
+/// the count — so this pins that one guard.
+///
 /// Mutation: narrow the count with a bare `as u8`; the 256-parameter
-/// routine then compiles and publishes `exits=0` — silent corruption
-/// rather than a diagnostic.
+/// routine then publishes `exits=0` while its body leaves through exit 0,
+/// and the compile fails as `internal-error` (the world invariants catch
+/// it) rather than naming the ceiling — silent corruption turned into a
+/// compiler-bug report instead of a diagnostic.
 #[test]
 fn more_than_255_state_parameters_is_a_typed_error() {
     let err = compile(&many_state_params(256), CompileOptions::default())
         .expect_err("256 state parameters is one too many");
     assert_eq!(err.kind.code(), "too-many-state-params", "{err}");
+    // The signature the count came from, not some later use of it.
+    assert_eq!(err.span.start.line, 3, "{err}");
 }
 
 /// The near miss: exactly 255 is the widest signature the wire can carry,
