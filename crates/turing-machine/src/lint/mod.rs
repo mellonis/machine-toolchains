@@ -29,6 +29,7 @@
 //! batch CLI reports the fatal and moves on, so it is not a `tmt lint` defect.
 //! Not fixed here.
 
+mod docs_drift;
 pub(crate) mod patterns;
 pub mod rules;
 pub mod tma;
