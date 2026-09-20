@@ -46,9 +46,23 @@ impl Declarations {
 
     /// The embedded standard library, cloned in from its process-wide
     /// cache. The implicit default a compile believes unless `--nostdlib`.
+    ///
+    /// Reads [`crate::stdlib::header`] — the analysis of the committed
+    /// `std.tmh`, declarations only — rather than [`crate::stdlib::
+    /// resolved`] — the analysis of `std.tmc` itself, bodies and all.
+    /// This is the substantive change a `.tmh`/`--extern` needs: every
+    /// OTHER consumer of external declarations already reads a header
+    /// (`crate::header::read_extern`), so the embedded stdlib should not
+    /// be the one caller that instead sees bodies its own callers could
+    /// never see for any OTHER external module. The two analyses must
+    /// still agree on every exported routine's declared `writes`
+    /// contract, since that is all the footprint inference reads
+    /// (`stdlib_header.rs`'s `the_header_and_the_source_agree_on_every_
+    /// declared_contract` pins it); a divergence is `tmt interface`
+    /// dropping something, not a defect here.
     pub fn stdlib() -> Self {
         let mut decls = Self::none();
-        decls.push(Origin::Stdlib, crate::stdlib::resolved().clone());
+        decls.push(Origin::Stdlib, crate::stdlib::header().clone());
         decls
     }
 
