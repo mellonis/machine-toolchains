@@ -47,16 +47,36 @@
 //! table's iteration order.
 //!
 //! **Section order is canonicalized, not source-preserved, at two
-//! levels.** Within one namespace, every exported alphabet prints first,
-//! then every exported routine, then every exported graph — the three
-//! `Program` vectors are walked one after another rather than interleaved
-//! by source position. Within one graph's body, `state` blocks print
-//! first, then `graft` instances, then `bind` instances — the shape
-//! `Graph` already splits them into (`states`, `grafts`, `binds`), so
-//! printing in that fixed order needs no interleaved source-position
-//! bookkeeping. A signature's own parameter order IS preserved
-//! (`Signature::params`, tape and state parameters mixed as written),
-//! since nothing else records it.
+//! levels.** Within one namespace, its needed `use` lines print first (see
+//! below), then every exported alphabet, then every exported routine,
+//! then every exported graph — the three `Program` vectors are walked one
+//! after another rather than interleaved by source position. Within one
+//! graph's body, `state` blocks print first, then `graft` instances, then
+//! `bind` instances — the shape `Graph` already splits them into
+//! (`states`, `grafts`, `binds`), so printing in that fixed order needs
+//! no interleaved source-position bookkeeping. A signature's own
+//! parameter order IS preserved (`Signature::params`, tape and state
+//! parameters mixed as written), since nothing else records it.
+//!
+//! **A namespace prints the `use` lines its own printed content actually
+//! needs, on the SOURCE arm only** (docs/tmt/cli.md (interface)): an
+//! import from `Program::imports`, declared exactly at that namespace,
+//! reprints as `use path[ as alias];` iff its bound short name is
+//! referenced, unqualified, by something this render prints in that same
+//! scope — a tape signature's alphabet name, or (inside a printed
+//! `export graph` body) a bare `graft`/`bind` target or a bare `call`
+//! target in a rule's transition. An import whose bound name nothing
+//! printed there references is dropped, exactly like an import whose
+//! TARGET is never printed at all (a non-exported routine or graph, or an
+//! alphabet nothing exported reaches) — printing either would be text
+//! that cannot resolve when the header is read back through the strict
+//! reader. This is what makes std.tmc's volatile-twin namespaces
+//! (`binaryNumbersVolatile`, `binaryNumbersBareVolatile`), which import
+//! their representation alphabet from a SIBLING namespace via an explicit
+//! `use`, reprint as a header that reparses. The OBJECT arm prints no
+//! `use` line at all, on any routine: the wire's `Interface` carries no
+//! import record yet, so the object arm has nothing to read one back
+//! from.
 //!
 //! Grafts and binds print without their own doc lines: only `alphabet`,
 //! `routine`, and `graph` declarations carry one here, even though
@@ -120,7 +140,7 @@ use crate::compiler::{
 use crate::declarations::Declarations;
 use crate::footprint::{self, FootprintTable};
 use crate::parser::{
-    Bind, BindingArg, BindingValue, Doc, FoldExprKind, FoldExprNode, FoldOp, Graft, Graph,
+    Bind, BindingArg, BindingValue, Doc, FoldExprKind, FoldExprNode, FoldOp, Graft, Graph, Import,
     MapArrow, MoveDir, Pattern, PatternCellKind, Program, Routine, Rule, SigParam, SigParamKind,
     Signature, State, SymLit, SymMap, TermKind, Transition, WriteCellKind,
 };
@@ -200,7 +220,9 @@ pub(crate) fn read_extern(path: &Path, source: &str) -> Result<Resolved, Compile
 /// Render the exported declarations a compiled object still carries — the
 /// reduced arm: routine signatures and exported alphabets, no graphs, no
 /// maps, no doc lines (docs/formats.md (routine interfaces): the wire has
-/// no doc-line field at all).
+/// no doc-line field at all). No `use` lines either, on any routine: the
+/// wire's `Interface` records no imports yet, so this arm has nothing to
+/// read one back from.
 pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
     let interface = obj
         .interface
@@ -313,6 +335,27 @@ impl NsNode {
             .insert(rest, lines);
     }
 
+    /// Like [`insert`](Self::insert), but places its one `Item` BEFORE
+    /// everything already in that scope rather than after — for a scope's
+    /// `use` lines, which print ahead of its own declarations (RULING 25
+    /// — docs/tmt/cli.md (interface)). Lazily creates the scope exactly
+    /// as `insert` does, for the edge case of a namespace whose only
+    /// printed content turns out to be its `use` lines.
+    fn prepend(&mut self, ns: &[String], lines: Vec<String>) {
+        let Some((head, rest)) = ns.split_first() else {
+            self.order.insert(0, NsEntry::Item(lines));
+            return;
+        };
+        if !self.children.contains_key(head) {
+            self.children.insert(head.clone(), NsNode::default());
+            self.order.push(NsEntry::Child(head.clone()));
+        }
+        self.children
+            .get_mut(head)
+            .expect("just inserted")
+            .prepend(rest, lines);
+    }
+
     fn render(&self, depth: usize, out: &mut String) {
         let pad = "  ".repeat(depth);
         for entry in &self.order {
@@ -413,6 +456,31 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
         }
     }
 
+    // Every declaration this render will ITSELF print, by full qualified
+    // name — an exported alphabet, an alphabet merely referenced (see
+    // above), an exported routine, or an exported graph. This is the
+    // "printed" half of RULING 25's `use`-line criterion (docs/tmt/cli.md
+    // (interface)): a `use` whose target is not in this set could not
+    // possibly resolve when the header is read back, no matter how the
+    // scope that declared it prints, so it is never a candidate to keep.
+    let mut printed_full_names: HashSet<String> = HashSet::new();
+    for alphabet in &program.alphabets {
+        let full = full_name(&alphabet.ns, &alphabet.name);
+        if alphabet.exported || referenced_alphabets.contains(full.as_str()) {
+            printed_full_names.insert(full);
+        }
+    }
+    for routine in &program.routines {
+        if routine.exported {
+            printed_full_names.insert(full_name(&routine.ns, &routine.name));
+        }
+    }
+    for graph in &program.graphs {
+        if graph.exported {
+            printed_full_names.insert(full_name(&graph.ns, &graph.name));
+        }
+    }
+
     let mut root = NsNode::default();
     for alphabet in &program.alphabets {
         let full = full_name(&alphabet.ns, &alphabet.name);
@@ -449,9 +517,143 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
         root.insert(&graph.ns, graph_lines(graph, world, resolved, footprint));
     }
 
+    // `use` lines print before a scope's own declarations (see the module
+    // doc); this runs AFTER the three loops above so every scope they
+    // touch already exists in `root`, and prepending only ever reorders
+    // items WITHIN one scope, never which sibling namespace was created
+    // first. Distinct import scopes, in first-appearance-in-`Program::
+    // imports` order — that order is otherwise unobservable, since each
+    // scope's own OWN import order is what matters and stays source-order
+    // by construction (`needed_imports` filters `program.imports` in
+    // place, without reordering it).
+    let mut import_scopes: Vec<Vec<String>> = Vec::new();
+    for import in &program.imports {
+        if !import_scopes.contains(&import.ns) {
+            import_scopes.push(import.ns.clone());
+        }
+    }
+    for ns in &import_scopes {
+        let needed = needed_imports(
+            ns,
+            &program.imports,
+            &program.routines,
+            &program.graphs,
+            &printed_full_names,
+        );
+        if needed.is_empty() {
+            continue;
+        }
+        let lines: Vec<String> = needed.iter().map(|imp| use_line_text(imp)).collect();
+        root.prepend(ns, lines);
+    }
+
     let mut out = String::new();
     root.render(0, &mut out);
     out
+}
+
+/// `use path[ as alias];` — the canonical spelling for one printed import
+/// path (docs/tmt/cli.md (interface)).
+fn use_line_text(import: &Import) -> String {
+    let mut path = import.path.join("::");
+    if let Some(alias) = &import.alias {
+        path.push_str(" as ");
+        path.push_str(alias);
+    }
+    format!("use {path};")
+}
+
+/// The imports declared exactly at `ns` that this render both NEEDS and
+/// CAN reprint — two independent conditions, both required (RULING 25 —
+/// docs/tmt/cli.md (interface); "a `use` whose target is not printed is
+/// dropped — it could not resolve in the header"):
+///
+/// - referenced: the bound short name (`Import::binding`) is used,
+///   unqualified, by a PRINTED declaration in that same scope — a tape
+///   signature's alphabet name, or, inside a printed `export graph`
+///   body, a bare `graft`/`bind` target or a bare `call` target in a
+///   rule's transition. Only EXPORTED routines/graphs are scanned: those
+///   are the only ones this printer ever renders a signature or body
+///   for, so a reference from something the header drops (a
+///   non-exported world, or a routine's own dropped body) does not count.
+/// - printed: the import's TARGET (`Import::full_path`) is itself one of
+///   `printed_full_names` — an exported alphabet, an alphabet this same
+///   render prints because something exported references it, an
+///   exported routine, or an exported graph. A target that never prints
+///   (a private routine or graph reached only through the SAME import)
+///   would leave the `use` line pointing at a name the header never
+///   declares, so it is dropped too, even when referenced.
+///
+/// Source order preserved: `imports` is walked in its own (already
+/// source-ordered) sequence, filtered rather than resorted.
+fn needed_imports<'a>(
+    ns: &[String],
+    imports: &'a [Import],
+    routines: &[Routine],
+    graphs: &[Graph],
+    printed_full_names: &HashSet<String>,
+) -> Vec<&'a Import> {
+    let mut referenced: HashSet<&str> = HashSet::new();
+    for routine in routines {
+        if routine.exported && routine.ns.as_slice() == ns {
+            collect_sig_refs(&routine.sig, &mut referenced);
+        }
+    }
+    for graph in graphs {
+        if graph.exported && graph.ns.as_slice() == ns {
+            collect_sig_refs(&graph.sig, &mut referenced);
+            collect_graph_body_refs(graph, &mut referenced);
+        }
+    }
+    imports
+        .iter()
+        .filter(|imp| {
+            imp.ns.as_slice() == ns
+                && referenced.contains(imp.binding())
+                && printed_full_names.contains(&imp.full_path())
+        })
+        .collect()
+}
+
+/// Every tape parameter's alphabet name, exactly as WRITTEN in source
+/// (`SigParamKind::Tape::alphabet` — the same string `sig_param_text`
+/// prints), for one signature.
+fn collect_sig_refs<'p>(sig: &'p Signature, out: &mut HashSet<&'p str>) {
+    for param in &sig.params {
+        if let SigParamKind::Tape { alphabet, .. } = &param.kind {
+            out.insert(alphabet.as_str());
+        }
+    }
+}
+
+/// Every BARE (single-segment) reuse target a printed graph body spells
+/// unqualified — its top-level `graft`/`bind` instances, plus any `call`
+/// target inside a rule's transition. std.tmc's own exported graphs never
+/// exercise the `call` case (a graph carries no `call` in this library's
+/// design — see its own header comment — every cross-namespace call is a
+/// plain routine's), but the printer stays correct for one regardless: a
+/// bare `Transition::Call` target is exactly as printable, and exactly as
+/// import-dependent, as a bare `graft` target.
+fn collect_graph_body_refs<'p>(graph: &'p Graph, out: &mut HashSet<&'p str>) {
+    for graft in &graph.grafts {
+        if let [only] = graft.target.segments.as_slice() {
+            out.insert(only.as_str());
+        }
+    }
+    for bind in &graph.binds {
+        if let [only] = bind.target.segments.as_slice() {
+            out.insert(only.as_str());
+        }
+    }
+    for state in &graph.states {
+        for rule in &state.rules {
+            if let Transition::Call { target, .. } = &rule.transition
+                && let [only] = target.segments.as_slice()
+            {
+                out.insert(only.as_str());
+            }
+        }
+    }
 }
 
 fn alphabet_lines(name: &str, glyphs: &[String], exported: bool) -> Vec<String> {

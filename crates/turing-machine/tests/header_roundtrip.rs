@@ -448,6 +448,19 @@ fn write_set_suffix(line: &str) -> &str {
 /// — every other stdlib routine's alphabet is reachable unqualified
 /// (declared in its own namespace) and its object-arm name must match the
 /// source arm's exactly.
+///
+/// RULING 25 (docs/tmt/cli.md (interface)) widens the SOURCE arm's own
+/// divergence from the object arm: those same two namespaces now also
+/// print a `use` line for that same sibling-namespace alphabet, since the
+/// object arm still prints none at all (the wire carries no import
+/// record yet). `qualified_routines` never looks at `use` lines (it only
+/// tracks `namespace … {`, `}`, and `export routine …` lines), so this
+/// test's EXISTING routine-line comparison is unaffected either way; the
+/// bound below makes the new divergence explicit rather than merely
+/// unexamined, keeping the tolerance to EXACTLY those two namespaces and
+/// EXACTLY those two `use` lines — nothing wider. Mutation: a `use` line
+/// leaking into the object arm, or into any OTHER namespace on the source
+/// arm — either would move this assertion off its exact expected set.
 #[test]
 fn the_two_arms_agree_on_every_stdlib_routine() {
     let dir = scratch("header_two_arms_stdlib");
@@ -505,6 +518,28 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
             );
         }
     }
+
+    // RULING 25: bound the new `use`-line divergence to EXACTLY those two
+    // namespaces and EXACTLY those two lines, nothing wider.
+    assert!(
+        !object_out.stdout.contains("use "),
+        "the object arm printed a `use` line, which the wire cannot carry \
+         yet: {}",
+        object_out.stdout
+    );
+    let use_lines: Vec<&str> = source_out
+        .stdout
+        .lines()
+        .filter(|l| l.trim_start().starts_with("use "))
+        .collect();
+    assert_eq!(
+        use_lines,
+        vec![
+            "    use std::binaryNumbers::symbols;",
+            "    use std::binaryNumbersBare::symbols;",
+        ],
+        "unexpected `use` lines on the source arm: {use_lines:?}"
+    );
 }
 
 /// Mutation: ignoring `-o` and printing to stdout regardless — the
@@ -863,6 +898,138 @@ fn interface_output_reparses_as_a_header() {
     // reproduce it unchanged.
     let reparsed = run_interface(&header_path);
     assert_eq!(reparsed.stdout, header);
+}
+
+/// The real stdlib source, not a small fixture — the exact case that
+/// blocked Task 7's `std.tmh` generation before RULING 25 (docs/tmt/cli.md
+/// (interface)): `binaryNumbersVolatile` and `binaryNumbersBareVolatile`
+/// each import their representation alphabet from a SIBLING namespace via
+/// an explicit `use`, unqualified in every one of their routines' tape
+/// signatures. Mutation: dropping the `use`-line pass entirely — the
+/// reparse below fails `unresolved-alphabet` at
+/// `binaryNumbersVolatile::goToNumber`'s tape signature, exactly the
+/// error this task's own report recorded before the fix.
+#[test]
+fn the_real_stdlib_source_reparses_as_a_header() {
+    let dir = scratch("header_stdlib_reparses");
+    let src_path = dir.join("std.tmc");
+    std::fs::write(&src_path, stdlib::SOURCE).unwrap();
+    let header = run_interface(&src_path).stdout;
+
+    let header_path = dir.join("std.tmh");
+    std::fs::write(&header_path, &header).unwrap();
+
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, header,
+        "the stdlib's own header did not reparse to itself"
+    );
+}
+
+/// A namespace importing another's exported alphabet by `use`, named
+/// unqualified in a tape signature: the header must reprint that `use`
+/// line, or the alphabet name in the reprinted signature is unresolvable
+/// when the header is read back through the strict declarations-only
+/// reader. RULING 25 (docs/tmt/cli.md (interface)). Mutation: dropping
+/// the `use`-line pass — the reparse below fails `unresolved-alphabet`
+/// instead of reproducing the header, the same failure this task's report
+/// recorded against the real stdlib before the fix.
+#[test]
+fn a_header_prints_the_use_lines_its_declarations_need() {
+    const USE_ALPHABET_FIXTURE: &str = "\
+namespace producer {
+  export alphabet bits { '_', '0', '1' }
+}
+
+namespace consumer {
+  use producer::bits;
+
+  export routine touch(tape t: bits writes { '1' }) {
+    entry state s { [*] -> write ['1'] return; }
+  }
+}
+";
+    let dir = scratch("header_use_needed");
+    let src_path = dir.join("use_needed.tmc");
+    std::fs::write(&src_path, USE_ALPHABET_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    assert!(
+        source_out.stdout.contains("use producer::bits;"),
+        "the printer dropped the needed `use` line: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out
+            .stdout
+            .contains("export routine touch(tape t: bits writes { '1' });"),
+        "{}",
+        source_out.stdout
+    );
+
+    let header_path = dir.join("use_needed.tmh");
+    std::fs::write(&header_path, &source_out.stdout).unwrap();
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, source_out.stdout,
+        "the printed header did not reparse to itself"
+    );
+}
+
+/// The near miss: an import whose target is NEVER printed (a
+/// non-exported alphabet nothing exported references) must be dropped,
+/// not reprinted — `producer::secret` is private and nothing exported
+/// reaches it, so `producer` never appears in the header at all.
+/// Mutation: printing every import regardless of whether its target is
+/// printed — the header would then carry `use producer::secret;` naming
+/// a namespace that never appears anywhere else in the output. Caught
+/// here by CONTENT, not by a reparse failure: VERIFIED by hand (see the
+/// task report) that feeding that hand-mutated text back through
+/// `tmt interface` still exits 0 — resolving an unreferenced, `::`-
+/// absolute import path is `unused-import`, a lint finding, never fatal
+/// (docs/tmt/language.md (namespaces, visibility, and imports): "An
+/// import nothing references is a lint finding"). The positive
+/// assertion — the `use` line, and `producer` itself, are simply absent
+/// — is therefore the test.
+#[test]
+fn a_use_of_something_the_header_does_not_print_is_dropped() {
+    const UNUSED_IMPORT_FIXTURE: &str = "\
+namespace producer {
+  alphabet secret { '_', 'x' }
+}
+
+namespace consumer {
+  use producer::secret;
+
+  export alphabet bits { '_', '0', '1' }
+
+  export routine touch(tape t: bits writes { '1' }) {
+    entry state s { [*] -> write ['1'] return; }
+  }
+}
+";
+    let dir = scratch("header_use_dropped");
+    let src_path = dir.join("use_dropped.tmc");
+    std::fs::write(&src_path, UNUSED_IMPORT_FIXTURE).unwrap();
+    let out = run_interface(&src_path);
+
+    assert!(
+        !out.stdout.contains("use producer::secret"),
+        "an import whose target is never printed leaked into the header: {}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("producer"),
+        "`producer` has nothing exported or referenced, so it must not \
+         appear in the header at all: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("export routine touch(tape t: bits writes { '1' });"),
+        "{}",
+        out.stdout
+    );
 }
 
 /// A `0.2` bodiless routine signature (`;` in place of a `{ … }` body)

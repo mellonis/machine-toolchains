@@ -664,7 +664,10 @@ could not reproduce it. `volatile` is dropped from both arms
 for the same reason: the modifier is compile-time-only and leaves no
 trace in the generated assembly (docs/tmt/language.md (volatile tapes)),
 and it is never checked at a call site either, so it is not part of what
-a caller may rely on.
+a caller may rely on. The source arm also prints, ahead of each
+namespace's own declarations, the `use` lines its printed content
+actually needs to resolve; the object arm prints none, since the wire
+carries no import record yet.
 
 **A routine over a non-exported alphabet is legal, and both arms render
 it.** On the source arm, every alphabet an exported routine or graph
