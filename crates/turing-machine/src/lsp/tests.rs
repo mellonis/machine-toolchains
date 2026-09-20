@@ -1025,6 +1025,7 @@ fn item_boundaries_offer_the_keywords_of_the_enclosing_block() {
     let top = labels(&complete_between("", "\n"));
     assert!(top.contains(&"machine".to_string()), "{top:?}");
     assert!(top.contains(&"alphabet".to_string()), "{top:?}");
+    assert!(top.contains(&"map".to_string()), "{top:?}");
     assert!(!top.contains(&"state".to_string()), "{top:?}");
 
     let head = "\

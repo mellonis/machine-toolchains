@@ -909,9 +909,6 @@ fn close_unlisted(map: &mut SymMap, domain_card: usize) {
     }
 }
 
-/// Build one bound tape's [`TapeMap`] from its (optional) source symbol map,
-/// resolving `src` glyphs against the host alphabet and `dst` glyphs against
-/// the graph alphabet.
 /// The shared symbol-map legality contract (docs/formats.md (bound
 /// calls)): every pair's glyphs resolve in their own alphabet
 /// (`MapSymbolNotInAlphabet`), the blank stays pinned
@@ -922,9 +919,10 @@ fn close_unlisted(map: &mut SymMap, domain_card: usize) {
 /// `(src, dst)` pairs, which [`check_injective_completion`] reads.
 ///
 /// Shared by a graft binding's symbol map ([`build_tapemap`]) and a named
-/// map DECLARATION's own pairs (`crate::compiler::check_named_map_decl`,
-/// checked once at the declaration): the pair grammar and its legality
-/// are one contract, authored inline or under a name alike.
+/// map DECLARATION's own pairs (`check_named_map_decl`, checked once at
+/// the declaration): the pair grammar and its legality are one contract,
+/// authored inline or under a name alike.
+///
 /// A [`build_symbol_maps`] result: the built read map, the built write
 /// map, and the bidirectional `(src, dst)` pairs [`check_injective_completion`]
 /// reads — named so the call signature stays under clippy's complexity
@@ -987,7 +985,7 @@ fn build_symbol_maps(
 /// Equal-size alphabets must identity-complete to a bijection: the
 /// BIDIRECTIONAL read map, filled with identity, must be injective
 /// (`MapNotInjective`) — shared by [`build_tapemap`] and
-/// `crate::compiler::check_named_map_decl`.
+/// [`check_named_map_decl`].
 fn check_injective_completion(
     bidir: &[(u16, u16)],
     card: usize,
@@ -1012,6 +1010,9 @@ fn check_injective_completion(
     Ok(())
 }
 
+/// Build one bound tape's [`TapeMap`] from its (optional) source symbol
+/// map, resolving `src` glyphs against the host alphabet and `dst` glyphs
+/// against the graph alphabet.
 fn build_tapemap(
     map: Option<&SrcSymMap>,
     phys: usize,
@@ -1045,8 +1046,8 @@ fn build_tapemap(
     // the explicit srcs still in `pairs`, before the identity-pair retain
     // below, so an explicit `k->k` survives as identity while a truly absent
     // symbol traps. A NAMED map's own declaration checks the opposite way
-    // (`crate::compiler::check_named_map_decl` REQUIRES every non-blank
-    // source to be named on unequal cardinalities) — a graft is one splice,
+    // (`check_named_map_decl` REQUIRES every non-blank source to be named
+    // on unequal cardinalities) — a graft is one splice,
     // one visible use, so a silent hole here is not the same hazard a
     // reused declaration's silent gap would be.
     if host_card != graph_card {

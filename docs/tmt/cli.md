@@ -284,7 +284,7 @@ subsection.
 | `map-not-closed` | A named map declaration's two alphabets differ in size and it leaves a non-blank source symbol unmapped — unlike a graft's inline map (which silently holes an unnamed source), a declaration reused at many sites must name every one explicitly. |
 | `named-map-source-mismatch` | A `with map NAME` site's caller tape alphabet is not the named map's own declared source alphabet. |
 | `named-map-target-mismatch` | A `with map NAME` site's callee parameter alphabet is not the named map's own declared target alphabet. |
-| `undefined-map` | A `with map NAME` site, or a `use` import, names no map in scope — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (pass `--extern` or declare it locally). |
+| `undefined-map` | A `with map NAME` site names no map in scope — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (pass `--extern` or declare it locally). An unresolvable `use` import with no site naming it is a separate, non-fatal finding (`unused-import`), not this code. |
 | `fold-out-of-alphabet` | A write substitution folds to a value with no glyph in the tape's alphabet. |
 | `zero-modulus` | A `%` in a write-cell fold has a zero modulus. |
 | `negative-remainder` | A `%` fold produces a negative remainder — reachable only when subtraction takes the left operand negative. |

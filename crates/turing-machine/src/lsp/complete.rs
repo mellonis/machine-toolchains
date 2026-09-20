@@ -48,6 +48,7 @@ fn candidates(cursor: &Cursor, roster: Option<&Roster>, state: &DocState) -> Vec
                 "export",
                 "graph",
                 "machine",
+                "map",
                 "namespace",
                 "routine",
                 "use",

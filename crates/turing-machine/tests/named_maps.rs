@@ -17,8 +17,7 @@
 //! — it is CLOSED on unequal-cardinality alphabets: every non-blank source
 //! symbol must be named explicitly (`map-not-closed`). The first three
 //! reuse the exact codes a graft's own inline map already raises
-//! (`expand::build_tapemap`); only the fourth is new (step 1 of this
-//! task's brief, recorded in the task report).
+//! (`expand::build_tapemap`); only the fourth is new.
 //!
 //! **Two site checks** (`compiler::expand_named_maps_in_args`): the caller
 //! tape's alphabet must be the map's declared SOURCE
@@ -28,7 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use mtc_turing_machine::cli::{CliOutput, execute};
-use mtc_turing_machine::compiler::{CompileErrorKind, CompileOptions, compile};
+use mtc_turing_machine::compiler::{CompileErrorKind, CompileOptions, MapMiss, compile};
 
 /// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
 /// uniquely by process id + an atomic counter — copied verbatim from
@@ -58,8 +57,9 @@ fn args(list: &[&str]) -> Vec<String> {
 // The central claim: a name is a spelling, not a semantics.
 // ---------------------------------------------------------------------------
 
-/// The spec's own headline shape (task brief), concretely compilable: a
-/// `bind` and a direct `call` both binding through the same named map. Not
+/// The language reference's own example (docs/tmt/language.md (named
+/// maps)), concretely compilable: a `bind` and a direct `call` both
+/// binding through the same named map. Not
 /// injective — `'^'` and `'$'` both collapse onto `bits`'s blank — which is
 /// legal because `wide` (5) and `bits` (3) are UNEQUAL cardinalities, where
 /// injectivity is never required; it is the closed-on-unequal case (every
@@ -108,10 +108,7 @@ machine {{
 /// changes which physical symbol each callee row matches at codegen — the
 /// `.tma` text and the assembled object both diverge, since a bound call's
 /// pairs print (and assemble) in the order `IrTapeBinding::pairs` carries
-/// them. Verified by hand for this task: reversing that clone reds this
-/// test (`assert_eq!` on `.tma`), restored afterward — recorded in the
-/// task report, not re-asserted here (a hand-applied source mutation is not
-/// itself a fixture).
+/// them.
 #[test]
 fn a_named_map_declares_and_is_used_by_name() {
     let inline = compile(&headline_src(false), CompileOptions::default())
@@ -248,8 +245,9 @@ map bad: wide -> bits { '^' => '_', '$' => '_', '0' -> '0' }
 /// The near miss is the headline declaration itself: `HEADLINE_MAP_DECL`
 /// names `wide`'s all four non-blank symbols (`'^'`, `'$'`, `'0'`, `'1'`)
 /// even though two of them collapse onto the same target — closed, not
-/// injective, which unequal cardinalities never require (the brief's own
-/// warning: this shape is NOT the injectivity fixture).
+/// injective, which unequal cardinalities never require. This shape is
+/// the closed-on-unequal case, not the injectivity one — the two are
+/// isolated in separate fixtures above rather than conflated here.
 #[test]
 fn the_headline_map_names_every_non_blank_source_and_compiles() {
     compiles(&format!(
@@ -339,6 +337,79 @@ machine {
     );
 }
 
+/// A named map into an EXTERNAL callee (a routine reached only through a
+/// header, never defined in this unit) is refused the same way the
+/// inline form already is: a tape-binding argument into an external
+/// callee is unsupported regardless of whether its map is named or
+/// inline (`ir::resolve_binding`), and `compiler::expand_named_maps_in_args`
+/// returns early for an external target — so neither site check even
+/// runs before that more fundamental refusal.
+#[test]
+fn a_named_map_into_an_external_callee_is_refused() {
+    let dir = scratch("named_maps_external_callee");
+    const EXTERNAL_LIB_TMC: &str = "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine plusOne(tape num: bits writes { '0', '1' }) {
+    entry state s { [*] -> return; }
+  }
+}
+";
+    let lib_path = write(&dir, "extlib.tmc", EXTERNAL_LIB_TMC);
+    let lib_header = run_interface(&lib_path).stdout;
+    let header_path = write(&dir, "extlib.tmh", &lib_header);
+
+    let consumer = "\
+use mylib::bits;
+map m: bits -> bits { '0' -> '0', '1' -> '1' }
+
+machine {
+  tape data: bits;
+  entry state go { [*] -> call mylib::plusOne(num = data with map m) then stop; }
+}
+";
+    let consumer_path = write(&dir, "consumer.tmc", consumer);
+    let out_path = dir.join("consumer.tmo");
+    let argv = args(&[
+        "compile",
+        consumer_path.to_str().unwrap(),
+        "--extern",
+        header_path.to_str().unwrap(),
+        "-o",
+        out_path.to_str().unwrap(),
+    ]);
+    let err =
+        execute(&argv).expect_err("a tape-binding argument into an external callee is unsupported");
+    assert!(err.contains("external-binding-unsupported"), "{err}");
+}
+
+/// A map declaration's SOURCE and TARGET may themselves be qualified
+/// alphabet references, resolved through the identical path a tape's own
+/// alphabet reference takes (`compiler::resolve_tape_alphabet`, never a
+/// second one) — a site naming the map, with its own tapes ALSO qualified,
+/// compiles cleanly.
+#[test]
+fn a_qualified_alphabet_reference_as_source_and_target_compiles() {
+    compiles(
+        "\
+namespace n {
+  export alphabet wide { '_', '^', '$', '0', '1' }
+  export alphabet bits { '_', '0', '1' }
+}
+map crossQual: n::wide -> n::bits { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+
+routine plusOne(tape num: n::bits) {
+  entry state s { [*] -> return; }
+}
+
+machine {
+  tape data: n::wide;
+  entry state go { [*] -> call plusOne(num = data with map crossQual) then stop; }
+}
+",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Cross-unit: an exported map reaches the header, and an imported one is
 // usable at a site.
@@ -416,4 +487,70 @@ machine {
     argv.push(out_path.to_str().unwrap().to_string());
     let out = execute(&argv).unwrap_or_else(|e| panic!("compile consumer: {e}"));
     assert_eq!(out.code, 0, "{}", out.stderr);
+}
+
+// ---------------------------------------------------------------------------
+// A `with map NAME` reference that resolves nowhere — both readings.
+// ---------------------------------------------------------------------------
+
+/// Nothing anywhere declares `nosuch` — the plain "no such map" reading.
+#[test]
+fn a_bare_undefined_map_reference_is_refused() {
+    let src = "\
+alphabet a2 { '_', 'x' }
+alphabet b2 { '_', 'y' }
+routine plusOne(tape num: b2) {
+  entry state s { [*] -> return; }
+}
+machine {
+  tape data: a2;
+  entry state go { [*] -> call plusOne(num = data with map nosuch) then stop; }
+}
+";
+    assert!(
+        matches!(err(src), CompileErrorKind::UndefinedMap(MapMiss::NoSuchMap(n)) if n == "nosuch"),
+        "{:?}",
+        err(src)
+    );
+}
+
+/// A `use`-reached name whose unit's declarations were never given: the
+/// consumer's own `--extern` header exports `wide`/`bits` but no map
+/// named `nosuchmap`, so `mylib::nosuchmap` resolves structurally (through
+/// `use`) but has nothing behind it.
+#[test]
+fn a_use_reached_undefined_map_names_its_remedy() {
+    let dir = scratch("named_maps_undefined_map");
+    let lib_path = write(&dir, "lib.tmc", LIB_TMC);
+    let lib_header = run_interface(&lib_path).stdout;
+    let header_path = write(&dir, "lib.tmh", &lib_header);
+
+    let consumer = "\
+use mylib::wide, mylib::bits, mylib::nosuchmap;
+
+routine plusOne(tape num: bits) {
+  entry state s { [*] -> return; }
+}
+
+machine {
+  tape data: wide;
+  entry state go { [*] -> call plusOne(num = data with map nosuchmap) then stop; }
+}
+";
+    let consumer_path = write(&dir, "consumer.tmc", consumer);
+    let out_path = dir.join("consumer.tmo");
+    let argv = args(&[
+        "compile",
+        consumer_path.to_str().unwrap(),
+        "--extern",
+        header_path.to_str().unwrap(),
+        "-o",
+        out_path.to_str().unwrap(),
+    ]);
+    let err = execute(&argv).expect_err("the consumer must not compile");
+    assert!(err.contains("undefined-map"), "{err}");
+    assert!(
+        err.contains("mylib::nosuchmap") && err.contains("declarations were not given"),
+        "{err}"
+    );
 }

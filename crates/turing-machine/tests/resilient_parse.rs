@@ -46,6 +46,27 @@ fn a_broken_declaration_leaves_its_neighbours_parsed() {
     );
 }
 
+/// A broken first declaration does not take a following `map` declaration
+/// with it — proving `map` is in the recovery sync-word set
+/// (`Parser::skip_to_sync`), not just in the ordinary item dispatch: a
+/// sync set missing it would let the broken region swallow the whole rest
+/// of the file, and no `MAP_DECL` sibling would survive.
+#[test]
+fn a_broken_declaration_leaves_a_following_map_declaration_parsed() {
+    // The broken `alphabet` is followed DIRECTLY by the `map`, with no
+    // intervening valid declaration — a fixture with one in between would
+    // already close the recovery region on IT, never reaching `map`'s own
+    // sync-word branch at all.
+    let src = "alphabet { '_' }\nmap m: ab -> ab { '_' -> '_' }\n";
+    let (root, errors) = resilient(src);
+    assert_eq!(root.text(), src, "the tree lost source text");
+    assert_eq!(errors.len(), 1, "one recovery region, one error");
+    assert!(
+        root.children().any(|c| c.kind() == TmcKind::MapDecl.into()),
+        "the later map declaration still parses as a MAP_DECL"
+    );
+}
+
 /// INNER recovery: a broken world item does not take its machine with
 /// it — the MACHINE node survives at top level with the error region
 /// wrapped inside its world, and the sibling state is untouched.
