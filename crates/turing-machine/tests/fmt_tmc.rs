@@ -501,6 +501,85 @@ fn formatting_never_changes_a_token_with_contract_clauses() {
     );
 }
 
+/// A qualified alphabet reference (`ns::bits`) prints idempotently, drops
+/// no token, and canonicalizes to no interior whitespace around `::`, at
+/// BOTH grammar positions — a machine tape declaration and a signature
+/// tape parameter. Mutation: joining only the first segment (the
+/// `alphabet_token()`/single-token bug this task's own view-layer fix
+/// closed) — the second pass would then read a bare `ns` where the first
+/// read `ns::bits`, breaking idempotence, and the token signature would
+/// lose the `::` and the second segment entirely.
+#[test]
+fn a_qualified_alphabet_formats_idempotently_at_both_positions() {
+    let src = "namespace ns {\n  export alphabet bits { '_', '0', '1' }\n}\n\n\
+               routine r(tape t: ns :: bits writes { '0' }) {\n  \
+               entry state s { [*] -> write ['0'] return; }\n}\n\n\
+               machine {\n  tape d: ns::bits;\n  \
+               entry state s { [*] -> call r(t = d) then stop; }\n}\n";
+    let once = format(src).expect("formats");
+    let twice = format(&once).expect("formats a second time");
+    assert_eq!(once, twice, "fmt is not idempotent on a qualified alphabet");
+    assert!(
+        once.contains("tape t: ns::bits writes"),
+        "the signature-parameter form did not canonicalize to no interior \
+         whitespace: {once}"
+    );
+    assert!(
+        once.contains("tape d: ns::bits;"),
+        "the machine tape-declaration form did not canonicalize: {once}"
+    );
+    assert_eq!(
+        token_signature(src),
+        token_signature(&once),
+        "the formatted text does not lex to the same token stream for a \
+         qualified alphabet reference"
+    );
+}
+
+/// A comment written BETWEEN a qualified alphabet's `::` segments is
+/// never relocated — it prints between the same two tokens it was
+/// written between, exactly like every other position the never-move
+/// rule covers (docs/tmt/fmt.md (comments are never moved)), and
+/// formatting stays idempotent with it present. Pinned at both grammar
+/// positions: `render_tape`'s comment-bearing path (`slice_has_comment`
+/// falling back to `span_with_comments`) already operates on the raw
+/// token slice rather than assuming a single-token alphabet, so it needs
+/// no change for a qualified reference — this test is coverage for that
+/// fact, not a behavior change. Mutation: relocating the comment to the
+/// end of the reference (or dropping it) — either would move it off the
+/// exact slot pinned here, and idempotence would still hold trivially, so
+/// the position assertions (not just idempotence) are what catch it.
+#[test]
+fn a_comment_between_qualified_segments_stays_in_place() {
+    let tape_src = "namespace ns {\n  export alphabet bits { '_', '0', '1' }\n}\n\n\
+                    machine {\n  tape d: ns /* c1 */ :: bits;\n  \
+                    entry state s { [*] -> stop; }\n}\n";
+    let tape_out = format(tape_src).expect("formats");
+    assert!(
+        tape_out.contains("tape d: ns /* c1 */ ::bits;"),
+        "the comment moved off its slot between the `::` segments: {tape_out}"
+    );
+    let tape_twice = format(&tape_out).expect("formats a second time");
+    assert_eq!(
+        tape_out, tape_twice,
+        "not idempotent with an interior comment"
+    );
+
+    let sig_src = "namespace ns {\n  export alphabet bits { '_', '0', '1' }\n}\n\n\
+                   routine r(tape t: ns::/* c2 */bits writes { '0' }) {\n  \
+                   entry state s { [*] -> write ['0'] return; }\n}\n";
+    let sig_out = format(sig_src).expect("formats");
+    assert!(
+        sig_out.contains("tape t: ns:: /* c2 */ bits writes"),
+        "the comment moved off its slot between the `::` segments: {sig_out}"
+    );
+    let sig_twice = format(&sig_out).expect("formats a second time");
+    assert_eq!(
+        sig_out, sig_twice,
+        "not idempotent with an interior comment"
+    );
+}
+
 /// The empty clause `writes {}` (distinct from no clause at all — see
 /// `resolve_contract_clause` in the compiler) prints with no inner space,
 /// never the alphabet formatter's `{ }`.

@@ -117,9 +117,14 @@ machine {
 }
 ";
 
-/// Mutation: accepting `::` in only the machine tape-declaration position
-/// — this fixture alone goes red, since it exercises the SIGNATURE
-/// tape-parameter grammar exclusively (`Parser::sig_param`).
+/// Mutation: accepting `::` only in the machine tape-declaration position
+/// — `r`'s own signature parameter (`Parser::sig_param`) is what this
+/// fixture pins; its `machine` block ALSO writes a qualified tape
+/// declaration (needed to bind `t = d` at the `call`), so this fixture is
+/// not exclusive to the signature position the way
+/// `a_qualified_alphabet_names_a_tape` is exclusive to the machine one —
+/// it still goes red under the mutation, on the signature parameter
+/// specifically, one call frame further in.
 #[test]
 fn a_qualified_alphabet_names_a_signature_parameter() {
     let dir = scratch("qualified_sig_param");
@@ -344,4 +349,53 @@ fn a_matching_import_links() {
     );
     assert!(out.is_ok(), "{:?}", out.err());
     assert!(dir.join("out.tmx").exists());
+}
+
+// -- an end-to-end stdlib import, through `tmt build` ----------------------
+
+/// A user program that imports a STANDARD-LIBRARY alphabet by `use` (a
+/// tape declared over it) AND makes a plain `call` into a standard-library
+/// routine, built through `tmt build` — compile, THEN link against the
+/// embedded stdlib the way an ordinary program does, with no `--extern`
+/// and no `-L`/`-l` at all (the embedded stdlib is pushed into the
+/// compile-time declarations table by default, and auto-linked by
+/// reachability at link time — both already-existing behaviors this
+/// fixture is the first to exercise TOGETHER with a cross-unit alphabet
+/// reference). Must link clean: no `AlphabetDrift` (the embedded stdlib's
+/// declarations and its compiled object agree on `symbols`'s glyph order
+/// by construction, but nothing before this test proved that for a
+/// genuinely cross-unit-imported alphabet specifically) and no
+/// `glyph-mismatch` warning on the `call`. Mutation: `Interface::imports`
+/// recording the WRONG glyph order for `symbols` (the same class of bug
+/// the synthetic drift pair catches) would turn this build's exit code
+/// non-zero here too, against the real embedded stdlib rather than a
+/// hand-written fixture.
+#[test]
+fn a_stdlib_alphabet_imported_by_use_builds_and_links_clean() {
+    const STDLIB_IMPORT_CALLER: &str = "\
+use std::binaryNumbers::symbols;
+
+machine {
+  tape num: symbols;
+  entry state s { [*] -> call std::binaryNumbers::goToNumbersStart() then stop; }
+}
+";
+    let dir = scratch("stdlib_import_build");
+    let input = write(&dir, "caller.tmc", STDLIB_IMPORT_CALLER);
+    let out_path = dir.join("out.tmx");
+    let out = execute(&[
+        "build".to_string(),
+        input.to_str().unwrap().to_string(),
+        "-o".to_string(),
+        out_path.to_str().unwrap().to_string(),
+    ]);
+    assert!(out.is_ok(), "{:?}", out.err());
+    let out = out.unwrap();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("AlphabetDrift") && !out.stderr.contains("glyph-mismatch"),
+        "{}",
+        out.stderr
+    );
+    assert!(out_path.exists());
 }

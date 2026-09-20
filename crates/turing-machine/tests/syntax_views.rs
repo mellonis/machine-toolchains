@@ -636,6 +636,36 @@ fn contract_clauses_are_named_by_their_own_keyword() {
     assert_eq!(params[1].contract_clauses().count(), 0);
 }
 
+/// A qualified alphabet reference on a signature tape parameter is
+/// several IDENT tokens (`a::b::c`), not one — `alphabet_token()` answers
+/// only the first segment (documented as such), and `alphabet_segments`/
+/// `alphabet_text` are what a caller needing the WHOLE path reads.
+/// Mutation: `alphabet_text()` returning just the first segment (i.e. not
+/// walking past it) reads `"a"` instead of the joined `"a::b::c"`.
+#[test]
+fn a_qualified_sig_param_alphabet_is_every_segment_not_just_the_first() {
+    let root = tree(
+        "namespace a {\n  namespace b {\n    export alphabet c { '_' }\n  }\n}\n\
+         routine r(tape t: a::b::c) {\n  entry state s { [*] -> stop; }\n}\n",
+    );
+    let r = ReuseView::cast(first_of(&root, TmcKind::Reuse)).expect("reuse");
+    let params: Vec<_> = r.params().collect();
+    assert_eq!(params.len(), 1);
+
+    assert_eq!(
+        params[0].alphabet_token().map(|t| t.text().to_string()),
+        Some("a".to_string()),
+        "the single-token accessor answers only the first segment"
+    );
+    let segment_texts: Vec<String> = params[0]
+        .alphabet_segments()
+        .iter()
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(segment_texts, vec!["a", "b", "c"]);
+    assert_eq!(params[0].alphabet_text(), Some("a::b::c".to_string()));
+}
+
 /// Three bracket groups of identical shape in one rule; only the node's
 /// KIND tells them apart, and only a per-rule walk shows which rule has
 /// which. The second rule is the one that matters: it carries a move

@@ -726,11 +726,44 @@ impl SigParamView {
             .expect("SIG_PARAM always carries a name IDENT after its keyword")
     }
 
-    /// The alphabet a tape parameter is declared over — the IDENT after
-    /// `:`. `None` for a `state` parameter, which declares no alphabet.
+    /// The alphabet a tape parameter is declared over — the first IDENT
+    /// after `:`. For a qualified reference (`a::b::c`) this is only the
+    /// first segment — use [`Self::alphabet_segments`] for the whole
+    /// path. `None` for a `state` parameter, which declares no alphabet.
     pub fn alphabet_token(&self) -> Option<SyntaxToken> {
+        self.alphabet_segments().into_iter().next()
+    }
+
+    /// Every segment of the alphabet reference after `:`, in order — one
+    /// token for a bare name, several for a qualified reference
+    /// (`std::binaryNumbersBare::symbols`), the same shape
+    /// [`TapeView::alphabet_segments`] answers for a machine tape
+    /// declaration. Empty for a `state` parameter, which declares no
+    /// alphabet.
+    pub fn alphabet_segments(&self) -> Vec<SyntaxToken> {
         let idents = sig_param_idents(self.syntax());
-        idents.into_iter().nth(usize::from(self.volatile()) + 2)
+        idents
+            .into_iter()
+            .skip(usize::from(self.volatile()) + 2)
+            .collect()
+    }
+
+    /// [`Self::alphabet_segments`], joined `::` — `None` for a `state`
+    /// parameter, the [`TapeView::alphabet_text`] analog for a signature
+    /// tape parameter.
+    pub fn alphabet_text(&self) -> Option<String> {
+        let segments = self.alphabet_segments();
+        if segments.is_empty() {
+            None
+        } else {
+            Some(
+                segments
+                    .iter()
+                    .map(|t| t.text().to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            )
+        }
     }
 
     /// This parameter's own contract clauses, in the order written.
