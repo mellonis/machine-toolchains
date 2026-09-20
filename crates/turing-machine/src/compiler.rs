@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use mtc_core::diagnostics::{Diagnostic, Span};
-use mtc_core::formats::object::{ExportedAlphabet, ObjectFile};
+use mtc_core::formats::object::{ExportedAlphabet, ImportedAlphabet, ObjectFile};
 use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
@@ -141,8 +141,12 @@ pub enum CompileErrorKind {
     /// A world declares more than 16 tapes (a `machine` block's tape decls
     /// or a signature's tape params).
     TooManyTapes(usize),
-    /// A tape (or signature tape param) names an alphabet no scope resolves.
-    UnresolvedAlphabet(String),
+    /// A tape (or signature tape param) names an alphabet no scope
+    /// resolves. One code either way (docs/tmt/cli.md (error codes)); the
+    /// inner [`AlphabetMiss`] carries which of the two reasons it was —
+    /// the wording differs, the code does not, so a script matching on
+    /// `[unresolved-alphabet]` sees no change.
+    UnresolvedAlphabet(AlphabetMiss),
     /// Two tapes share one name in one world.
     DuplicateTape(String),
     /// Two states (or a state and a graft instance) share one name in one
@@ -300,6 +304,25 @@ pub enum CompileErrorKind {
     /// [`crate::ir::validate_world`]. Never a user error — the message
     /// carries the underlying diagnostic. The `.pmc` compiler's `Internal`.
     Internal(String),
+}
+
+/// The two reasons a tape's alphabet reference can go unresolved
+/// (`CompileErrorKind::UnresolvedAlphabet`) — one code, two remedies. A
+/// bare name that nothing in scope defines and nothing imports is a plain
+/// typo or a missing declaration; a name reached through a `use` import or
+/// an absolute qualified path (`Scopes::resolve` "resolves" either
+/// structurally, independent of whether anything backs it) but not found
+/// in ANY declarations module this compile was given is a unit whose
+/// declarations were never handed over — `--extern` or a local
+/// declaration is the fix, not a spelling correction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlphabetMiss {
+    /// Nothing in scope resolves the name and nothing declares it anywhere
+    /// reachable.
+    NoSuchAlphabet(String),
+    /// Reached through `use` or a qualified path, but no declarations
+    /// module given to this compile declares it.
+    DeclarationsNotGiven(String),
 }
 
 /// Binds each [`CompileErrorKind`] variant to its stable code exactly
@@ -547,8 +570,15 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::TooManyTapes(n) => {
                 write!(f, "{n} tapes — a world has at most 16")
             }
-            CompileErrorKind::UnresolvedAlphabet(n) => {
+            CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NoSuchAlphabet(n)) => {
                 write!(f, "unknown alphabet `{n}`")
+            }
+            CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::DeclarationsNotGiven(n)) => {
+                write!(
+                    f,
+                    "alphabet `{n}` is declared by `use` (or named by a qualified path), \
+                     but its declarations were not given — pass `--extern` or declare it locally"
+                )
             }
             CompileErrorKind::DuplicateTape(n) => {
                 write!(f, "duplicate tape `{n}` in this world")
@@ -1146,7 +1176,7 @@ fn resolve_program(
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
     let alphabets = resolve_all_alphabets(program, &scopes)?;
-    let resolved = resolve_module(program, &scopes, alphabets)?;
+    let resolved = resolve_module(program, &scopes, alphabets, externals)?;
     let mut ctx = WorldCtx {
         scopes: &scopes,
         imports_used: vec![false; program.imports.len()],
@@ -1863,7 +1893,8 @@ fn resolve_all_alphabets(
 fn resolve_module(
     program: &Program,
     scopes: &Scopes,
-    alphabets: HashMap<String, ResolvedAlphabet>,
+    mut alphabets: HashMap<String, ResolvedAlphabet>,
+    externals: &Declarations,
 ) -> Result<Resolved, CompileError> {
     let mut docs: HashMap<String, Doc> = HashMap::new();
     for a in &program.alphabets {
@@ -1895,7 +1926,8 @@ fn resolve_module(
             &r.grafts,
             &r.binds,
             scopes,
-            &alphabets,
+            &mut alphabets,
+            externals,
         )?);
     }
     for g in &program.graphs {
@@ -1910,13 +1942,14 @@ fn resolve_module(
             &g.grafts,
             &g.binds,
             scopes,
-            &alphabets,
+            &mut alphabets,
+            externals,
         )?);
     }
     let mut entry_world = None;
     if let Some(m) = &program.machine {
         entry_world = Some(worlds.len());
-        worlds.push(resolve_machine_world(m, scopes, &alphabets)?);
+        worlds.push(resolve_machine_world(m, scopes, &mut alphabets, externals)?);
     }
 
     Ok(Resolved {
@@ -1939,7 +1972,8 @@ fn resolve_world(
     grafts: &[Graft],
     binds: &[Bind],
     scopes: &Scopes,
-    alphabets: &HashMap<String, ResolvedAlphabet>,
+    alphabets: &mut HashMap<String, ResolvedAlphabet>,
+    externals: &Declarations,
 ) -> Result<ResolvedWorld, CompileError> {
     // Tapes: from the signature's tape params (routine/graph).
     let mut tapes: Vec<ResolvedTape> = Vec::new();
@@ -1954,7 +1988,7 @@ fn resolve_world(
                 ..
             } => {
                 let (full, card) =
-                    resolve_tape_alphabet(alphabet, p.name_span, ns, scopes, alphabets)?;
+                    resolve_tape_alphabet(alphabet, p.name_span, ns, scopes, alphabets, externals)?;
                 let glyphs = alphabets
                     .get(&full)
                     .map(|a| a.glyphs.as_slice())
@@ -2047,12 +2081,19 @@ fn resolve_world_calls(
 fn resolve_machine_world(
     m: &Machine,
     scopes: &Scopes,
-    alphabets: &HashMap<String, ResolvedAlphabet>,
+    alphabets: &mut HashMap<String, ResolvedAlphabet>,
+    externals: &Declarations,
 ) -> Result<ResolvedWorld, CompileError> {
     let mut tapes: Vec<ResolvedTape> = Vec::new();
     for t in &m.tapes {
-        let (full, card) =
-            resolve_tape_alphabet(&t.alphabet, t.alphabet_span, &[], scopes, alphabets)?;
+        let (full, card) = resolve_tape_alphabet(
+            &t.alphabet,
+            t.alphabet_span,
+            &[],
+            scopes,
+            alphabets,
+            externals,
+        )?;
         tapes.push(ResolvedTape {
             name: t.name.clone(),
             name_span: t.name_span,
@@ -2085,28 +2126,75 @@ fn resolve_machine_world(
 }
 
 /// Resolve a tape's alphabet reference to `(mangled name, cardinality)`. A
-/// tape alphabet must resolve to a LOCAL alphabet (its cardinality is needed
-/// for index resolution — external alphabets are unsupported in 0.1).
+/// bare or qualified name that resolves to a LOCAL alphabet answers from
+/// `alphabets` directly. A name `Scopes::resolve` reaches only through a
+/// `use` import binding or an absolute `::` path (never a local
+/// definition — that always carries `Some(DefKind::Alphabet)` when it IS
+/// one) is a genuine cross-unit reference: `find_external_alphabet` looks
+/// it up by its full mangled name in every declarations module this
+/// compile was given (`Declarations`, docs/tmt/language.md
+/// (declarations)), first match wins. A hit is inserted into `alphabets`
+/// under that same full name — the ONE table every downstream consumer
+/// (`ir::lower`, `expand`, `footprint`, `header`) indexes tape alphabets
+/// through, local or imported alike — so nothing past this function needs
+/// to know the difference. A miss splits into the two
+/// [`AlphabetMiss`] readings: `Scopes::resolve` returning `None` outright
+/// is nothing declaring the name anywhere ([`AlphabetMiss::NoSuchAlphabet`]);
+/// returning `Some` with no local kind is a real `use`/qualified
+/// reference whose unit's declarations were never given
+/// ([`AlphabetMiss::DeclarationsNotGiven`]).
 fn resolve_tape_alphabet(
     alphabet: &str,
     span: Span,
     ns: &[String],
     scopes: &Scopes,
-    alphabets: &HashMap<String, ResolvedAlphabet>,
+    alphabets: &mut HashMap<String, ResolvedAlphabet>,
+    externals: &Declarations,
 ) -> Result<(String, usize), CompileError> {
-    match scopes.resolve(alphabet, ns) {
-        Some(r) if r.kind == Some(DefKind::Alphabet) => {
+    if let Some(r) = scopes.resolve(alphabet, ns) {
+        if r.kind == Some(DefKind::Alphabet) {
             let card = alphabets
                 .get(&r.full)
                 .map(ResolvedAlphabet::cardinality)
                 .expect("a locally-defined alphabet was resolved");
-            Ok((r.full, card))
+            return Ok((r.full, card));
         }
-        _ => Err(CompileError {
-            span,
-            kind: CompileErrorKind::UnresolvedAlphabet(alphabet.to_string()),
-        }),
+        if r.kind.is_none() {
+            if let Some(glyphs) = find_external_alphabet(&externals.modules(), &r.full) {
+                let card = glyphs.len();
+                alphabets
+                    .entry(r.full.clone())
+                    .or_insert_with(|| ResolvedAlphabet {
+                        name: r.full.clone(),
+                        name_span: span,
+                        glyphs: glyphs.to_vec(),
+                    });
+                return Ok((r.full, card));
+            }
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::DeclarationsNotGiven(
+                    r.full,
+                )),
+            });
+        }
     }
+    Err(CompileError {
+        span,
+        kind: CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NoSuchAlphabet(
+            alphabet.to_string(),
+        )),
+    })
+}
+
+/// First-match lookup of a mangled alphabet name among external
+/// declarations modules, in table order — the alphabet analog of
+/// `footprint::find_external`'s routine/graph lookup, over
+/// `Resolved::alphabets` instead of `Resolved::worlds`.
+fn find_external_alphabet<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a [String]> {
+    externals
+        .iter()
+        .find_map(|module| module.alphabets.get(name).map(|a| a.glyphs.as_slice()))
 }
 
 /// Resolve one `writes`/`preserves` clause into a symbol-index set in its
@@ -2485,6 +2573,33 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
                 ExportedAlphabet { name: full, glyphs }
             })
             .collect();
+        // Every alphabet this unit pulled in from ANOTHER unit's
+        // declarations: `resolve_tape_alphabet`'s external branch is the
+        // ONLY site that ever inserts into `Resolved::alphabets` besides
+        // this program's own declarations, so the complement of
+        // `program.alphabets`' full names in that map is exactly the
+        // import set — sound only as long as that stays the map's one
+        // other writer. Sorted by name for a deterministic wire order:
+        // unlike an exported alphabet's, an import's order has no source
+        // position to inherit (docs/formats.md (routine interfaces)).
+        let local_names: HashSet<String> = analysis
+            .program
+            .alphabets
+            .iter()
+            .map(|a| full_name(&a.ns, &a.name))
+            .collect();
+        let mut imports: Vec<ImportedAlphabet> = analysis
+            .resolved
+            .alphabets
+            .iter()
+            .filter(|(name, _)| !local_names.contains(name.as_str()))
+            .map(|(name, a)| ImportedAlphabet {
+                name: name.clone(),
+                glyphs: a.glyphs.clone(),
+            })
+            .collect();
+        imports.sort_by(|a, b| a.name.cmp(&b.name));
+        interface.imports = imports;
     }
 
     let mut diagnostics = analysis.diagnostics;
@@ -3250,7 +3365,7 @@ mod tests {
             },
             CompileErrorKind::DuplicateBinding("x".into()),
             CompileErrorKind::TooManyTapes(17),
-            CompileErrorKind::UnresolvedAlphabet("x".into()),
+            CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NoSuchAlphabet("x".into())),
             CompileErrorKind::DuplicateTape("x".into()),
             CompileErrorKind::DuplicateState("x".into()),
             CompileErrorKind::DuplicateParam("x".into()),

@@ -74,9 +74,14 @@
 //! (`binaryNumbersVolatile`, `binaryNumbersBareVolatile`), which import
 //! their representation alphabet from a SIBLING namespace via an explicit
 //! `use`, reprint as a header that reparses. The OBJECT arm prints no
-//! `use` line at all, on any routine: the wire's `Interface` carries no
-//! import record yet, so the object arm has nothing to read one back
-//! from.
+//! `use` line at all, on any routine: `Interface::imports` (docs/formats.md
+//! (routine interfaces)) records only a GENUINELY cross-unit reference — a
+//! name a `use` or a qualified path reaches that this unit's own
+//! declarations do not define, resolved against an external declarations
+//! module at compile time. A same-unit sibling-namespace `use`, the shape
+//! std.tmc's volatile twins use, resolves against this unit's OWN
+//! declarations and never touches it, so it carries nothing the object arm
+//! could read a `use` line back from for that shape either.
 //!
 //! Grafts and binds print without their own doc lines: only `alphabet`,
 //! `routine`, and `graph` declarations carry one here, even though
@@ -95,28 +100,35 @@
 //! private alphabet) still prints nothing, exactly as before.
 //!
 //! **The object arm has no alphabet NAME to read per tape** — the wire's
-//! `RoutineInterface` carries a tape's glyph list, never an identifier
-//! for it (`Interface::imports` would carry cross-unit alphabet names,
-//! but nothing populates it yet). The reconstruction is matching a
-//! tape's glyph list, by content, against exported alphabets the routine
-//! could spell UNQUALIFIED in source — its own namespace, or any
-//! ENCLOSING namespace (an unqualified name resolves outward through
-//! enclosing scopes); the first match (in wire order) wins, and two such
-//! exported alphabets sharing one glyph list are genuinely
-//! indistinguishable from the object alone — the printer accepts that
-//! ambiguity rather than erroring on it. A content match in a SIBLING or
-//! otherwise unrelated namespace — reachable only through an explicit
-//! `use` alias, like std.tmc's volatile twins importing their
-//! representation alphabet from a sibling namespace — is deliberately not
-//! used: the wire records no `use` edge (`Interface::imports` is
-//! unpopulated), so nothing here could tell that content match apart from
-//! a coincidental one. A tape whose alphabet no reachable export matches
-//! — whether none matches at all, or only an unrelated one does — gets a
-//! SYNTHESIZED, deterministic plain-`alphabet` declaration instead of an
-//! error: `<routine>__<param>` (the routine's own mangled name with `::`
-//! replaced by `_`, joined to the parameter name), declared at the top
-//! level, before the namespace block that uses it. The object arm never
-//! fails to render a routine for want of an alphabet name.
+//! `RoutineInterface` carries a tape's glyph list, never an identifier for
+//! it. The reconstruction is matching a tape's glyph list, by content,
+//! against exported alphabets the routine could spell UNQUALIFIED in
+//! source — its own namespace, or any ENCLOSING namespace (an unqualified
+//! name resolves outward through enclosing scopes); the first match (in
+//! wire order) wins, and two such exported alphabets sharing one glyph
+//! list are genuinely indistinguishable from the object alone — the
+//! printer accepts that ambiguity rather than erroring on it. A content
+//! match in a SIBLING or otherwise unrelated namespace — reachable only
+//! through an explicit `use` alias, like std.tmc's volatile twins
+//! importing their representation alphabet from a SIBLING namespace — is
+//! deliberately not used, and `Interface::imports` (docs/formats.md
+//! (routine interfaces)) does not help here EITHER: that record carries
+//! only a GENUINELY cross-unit import (a name resolved at compile time
+//! against another unit's declarations table), and a same-unit
+//! sibling-namespace `use` never becomes one — it resolves locally, so no
+//! entry for it ever reaches the wire (verified: the compiled embedded
+//! stdlib, whose volatile twins are exactly this shape, carries zero
+//! `Interface::imports` records). A genuinely cross-unit import DOES carry
+//! a name and glyphs on the wire, but nothing here reads it yet — the
+//! shipped corpus has no fixture that would exercise it, since std.tmc's
+//! own cross-namespace `use`s are all same-unit. A tape whose alphabet no
+//! reachable export matches — whether none matches at all, or only an
+//! unrelated one does — gets a SYNTHESIZED, deterministic plain-`alphabet`
+//! declaration instead of an error: `<routine>__<param>` (the routine's
+//! own mangled name with `::` replaced by `_`, joined to the parameter
+//! name), declared at the top level, before the namespace block that uses
+//! it. The object arm never fails to render a routine for want of an
+//! alphabet name.
 //!
 //! **The object arm skips the entry world.** A `machine` block always
 //! compiles to the literal symbol name `main` (a program cannot also

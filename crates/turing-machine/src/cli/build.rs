@@ -4,9 +4,13 @@
 //! lazily via reachability, with `--nostdlib` to opt out — the PM-1 `link`
 //! wiring. `compile` has its own, narrower `--nostdlib`/`--extern`
 //! (docs/tmt/cli.md (compile)): the declarations base the footprint/contract
-//! check believes ([`read_externals`]) — resolving a call target itself, or
-//! an alphabet reached through `use`, is unaffected until cross-unit name
-//! resolution lands.
+//! check believes ([`read_externals`]), and the same base a tape's
+//! alphabet reference resolves against when it names one through `use` or
+//! a qualified path and nothing local defines it
+//! (docs/tmt/language.md (declarations)). Resolving a `call`/`graft`/
+//! `bind` TARGET itself stays a link-time question independent of this
+//! table: the callee's footprint is believed through it, but the target
+//! need not be defined anywhere this compile can see to compile clean.
 
 use std::fmt::Write as _;
 use std::fs;

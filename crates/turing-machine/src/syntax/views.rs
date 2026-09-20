@@ -520,8 +520,22 @@ impl TapeView {
     }
 
     /// The alphabet name this tape is declared over: the first IDENT
-    /// after `:`.
+    /// after `:`. For a qualified reference (`a::b::c`) this is only the
+    /// first segment — use [`Self::alphabet_segments`] for the whole path.
     pub fn alphabet_token(&self) -> SyntaxToken {
+        self.alphabet_segments()
+            .into_iter()
+            .next()
+            .expect("TAPE always carries an alphabet IDENT after its `:`")
+    }
+
+    /// Every segment of the alphabet reference after `:`, in order — one
+    /// token for a bare name, several for a qualified reference
+    /// (`std::binaryNumbersBare::symbols`), which prints back joined by
+    /// `::` with no interior whitespace, the same canonicalization
+    /// `QualName::joined` gives a `call`/`graft`/`bind` target
+    /// (docs/tmt/language.md (qualified names)).
+    pub fn alphabet_segments(&self) -> Vec<SyntaxToken> {
         self.syntax()
             .children_with_tokens()
             .skip_while(|e| e.kind() != TmcKind::Colon.into())
@@ -529,8 +543,19 @@ impl TapeView {
                 SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
                 _ => None,
             })
-            .next()
-            .expect("TAPE always carries an alphabet IDENT after its `:`")
+            .collect()
+    }
+
+    /// [`Self::alphabet_segments`], joined `::` — the text both
+    /// [`super::extract::extract_tape`] and the `.tmc` fmt printer's
+    /// `render_tape` read, so a qualified reference is canonicalized
+    /// identically wherever it prints.
+    pub fn alphabet_text(&self) -> String {
+        self.alphabet_segments()
+            .iter()
+            .map(|t| t.text().to_string())
+            .collect::<Vec<_>>()
+            .join("::")
     }
 }
 

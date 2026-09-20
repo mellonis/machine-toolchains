@@ -688,13 +688,27 @@ pub(crate) fn extract_alphabet(
 /// the rule holds uniformly instead of by exception.
 fn extract_tape(view: &TapeView, index: &TextLineIndex) -> TapeDecl {
     let name = view.name_token();
-    let alphabet = view.alphabet_token();
+    // A qualified reference (`std::binaryNumbersBare::symbols`) is several
+    // IDENT tokens; the span covers first segment start to last segment
+    // end, mirroring `Parser::qual_name`'s own span (docs/tmt/language.md
+    // (qualified names)).
+    let segments = view.alphabet_segments();
+    let first = segments
+        .first()
+        .expect("TAPE always carries an alphabet IDENT after its `:`");
+    let last = segments
+        .last()
+        .expect("TAPE always carries an alphabet IDENT after its `:`");
+    let alphabet_span = index.span(TextRange::new(
+        first.text_range().start,
+        last.text_range().end,
+    ));
     let header = header_token(view.syntax());
     TapeDecl {
         name: name.text().to_string(),
         name_span: index.span(name.text_range()),
-        alphabet: alphabet.text().to_string(),
-        alphabet_span: index.span(alphabet.text_range()),
+        alphabet: view.alphabet_text(),
+        alphabet_span,
         volatile: view.volatile(),
         line: index.line_col(header.text_range().start).0,
         span: index.span(TextRange::new(

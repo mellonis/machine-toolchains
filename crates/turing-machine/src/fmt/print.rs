@@ -2581,7 +2581,7 @@ fn render_tape(view: &TapeView, unit: &Unit, name_width: usize, indent: usize) -
         if view.volatile() { "volatile " } else { "" },
         name,
         " ".repeat(name_width.saturating_sub(name.chars().count())),
-        view.alphabet_token().text()
+        view.alphabet_text()
     );
     Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
 }

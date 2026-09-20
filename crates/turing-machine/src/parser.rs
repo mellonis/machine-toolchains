@@ -1550,7 +1550,11 @@ impl Parser<'_> {
             self.bump();
             let (name, name_span) = self.name("a tape parameter name")?;
             self.expect(&TokenKind::Colon, "`:` after the tape parameter name")?;
-            let (alphabet, alphabet_span) = self.name("an alphabet name")?;
+            // A qualified reference is accepted here too — the same
+            // grammar `parse_tape` takes for a machine tape declaration
+            // (docs/tmt/language.md (qualified names)).
+            let q = self.qual_name("an alphabet name")?;
+            let (alphabet, alphabet_span) = (q.joined(), q.span);
             // `writes { … }`, then `preserves { … }`, both optional — the
             // fixed order is a grammar rule, not an fmt convention, because
             // fmt is token-preserving and cannot reorder an author's
@@ -1841,7 +1845,11 @@ impl Parser<'_> {
         self.bump(); // `tape`
         self.name("a tape name")?;
         self.expect(&TokenKind::Colon, "`:` after the tape name")?;
-        self.name("an alphabet name")?;
+        // A qualified reference (`IDENT (:: IDENT)*`) is accepted here the
+        // same way `Self::qual_name` already accepts one for a `call`/
+        // `graft`/`bind` target — the asymmetry closes
+        // (docs/tmt/language.md (qualified names)).
+        self.qual_name("an alphabet name")?;
         self.expect(&TokenKind::Semi, "`;`")?;
         Ok(())
     }

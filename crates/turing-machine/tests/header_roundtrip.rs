@@ -440,10 +440,16 @@ fn write_set_suffix(line: &str) -> &str {
 /// `binaryNumbersBareVolatile`) import their representation alphabet from
 /// a SIBLING namespace via an explicit `use std::binaryNumbers::symbols;`
 /// (or its bare twin) — reachable unqualified in source, but with no
-/// trace on the wire (`Interface::imports` is unpopulated), so the object
-/// arm cannot reconstruct it and synthesizes a
-/// `std_<owning-namespace>_<routine>__num` name instead
-/// (docs/tmt/cli.md (interface)). That is a deliberate, asserted
+/// trace on the wire, so the object arm cannot reconstruct it and
+/// synthesizes a `std_<owning-namespace>_<routine>__num` name instead
+/// (docs/tmt/cli.md (interface)). `Interface::imports` (docs/formats.md
+/// (routine interfaces)) does not close this gap: it records only a
+/// GENUINELY cross-unit reference, resolved at compile time against
+/// another unit's declarations table, and this `use` names a SIBLING
+/// namespace of the SAME unit (std.tmc itself) — it resolves against
+/// std.tmc's own declarations, never reaching `Declarations`, so no entry
+/// for it lands on the wire (verified: the compiled object below carries
+/// zero `Interface::imports` records). That is a deliberate, asserted
 /// divergence on the alphabet-name half for exactly those two namespaces
 /// — every other stdlib routine's alphabet is reachable unqualified
 /// (declared in its own namespace) and its object-arm name must match the
@@ -452,16 +458,16 @@ fn write_set_suffix(line: &str) -> &str {
 /// The `use`-line rule (docs/tmt/cli.md (interface)) widens the SOURCE
 /// arm's own divergence from the object arm: those same two namespaces
 /// now also print a `use` line for that same sibling-namespace alphabet,
-/// since the object arm still prints none at all (the wire carries no
-/// import record yet). `qualified_routines` never looks at `use` lines
-/// (it only tracks `namespace … {`, `}`, and `export routine …` lines),
-/// so this test's EXISTING routine-line comparison is unaffected either
-/// way; the bound below makes the new divergence explicit rather than
-/// merely unexamined, keeping the tolerance to EXACTLY those two
-/// namespaces and EXACTLY those two `use` lines — nothing wider.
-/// Mutation: a `use` line leaking into the object arm, or into any OTHER
-/// namespace on the source arm — either would move this assertion off
-/// its exact expected set.
+/// since the object arm still prints none at all (nothing on the wire
+/// names that `use` edge — see above). `qualified_routines` never looks
+/// at `use` lines (it only tracks `namespace … {`, `}`, and
+/// `export routine …` lines), so this test's EXISTING routine-line
+/// comparison is unaffected either way; the bound below makes the new
+/// divergence explicit rather than merely unexamined, keeping the
+/// tolerance to EXACTLY those two namespaces and EXACTLY those two `use`
+/// lines — nothing wider. Mutation: a `use` line leaking into the object
+/// arm, or into any OTHER namespace on the source arm — either would move
+/// this assertion off its exact expected set.
 #[test]
 fn the_two_arms_agree_on_every_stdlib_routine() {
     let dir = scratch("header_two_arms_stdlib");

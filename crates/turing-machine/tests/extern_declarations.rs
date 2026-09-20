@@ -4,29 +4,28 @@
 //! are crate-private (`declarations.rs`, `compiler::Resolved`), so —
 //! exactly as `tests/header_roundtrip.rs` does for the equally
 //! crate-private `header` printer — every assertion here goes through
-//! `mtc_turing_machine::cli::execute`, observing the one thing outside
-//! the crate that currently consults the table: the footprint/contract
-//! check (`compiler::check_contracts` -> `footprint::find_external`). A
-//! callee found in the table is believed at its DECLARED effective write
-//! set; a callee found nowhere is opaque and assumed to write the whole
-//! alphabet (docs/tmt/language.md (contract clauses)) — so a caller with
-//! a narrow `writes {}` contract on a call into a declared-but-external
-//! routine compiles cleanly iff that routine's declarations reached the
-//! table.
+//! `mtc_turing_machine::cli::execute`, observing the two things outside
+//! the crate that consult the table: the footprint/contract check
+//! (`compiler::check_contracts` -> `footprint::find_external`), which
+//! every fixture below exercises, and cross-unit alphabet resolution
+//! (`compiler::resolve_tape_alphabet` -> `find_external_alphabet`), which
+//! `tests/cross_unit.rs` exercises instead — a `use lib::bits;` plus a
+//! `tape d: bits;` reaching `bits`'s declarations only when `--extern`
+//! gave them. A callee found in the table is believed at its DECLARED
+//! effective write set; a callee found nowhere is opaque and assumed to
+//! write the whole alphabet (docs/tmt/language.md (contract clauses)) —
+//! so a caller with a narrow `writes {}` contract on a call into a
+//! declared-but-external routine compiles cleanly iff that routine's
+//! declarations reached the table.
 //!
-//! None of these fixtures reuse the brief's own headline shape
-//! (`use mylib::bits;` plus a cross-unit alphabet import): resolving THAT
-//! shape to a successful compile is cross-unit name/alphabet resolution
-//! against `Declarations`, not yet wired (a later task's work) — the
-//! same source fails on `unresolved-alphabet` on `bits` whether or not
-//! `--extern` is given, so it cannot observe anything about this task.
-//! Every fixture below instead declares its alphabet LOCALLY and calls
-//! the external routine TRANSPARENTLY (an empty-arg qualified `call`,
-//! binding by tape index — the one external-call shape that already
-//! works today, independent of `Declarations`, exactly as
-//! `crates/turing-machine/src/footprint.rs`'s own `STD_CALLER` fixture
-//! demonstrates), so a compile's success or failure turns only on
-//! whether the callee's declarations reached the table.
+//! Every fixture below declares its alphabet LOCALLY and calls the
+//! external routine TRANSPARENTLY (an empty-arg qualified `call`, binding
+//! by tape index — the one external-call shape that already worked before
+//! cross-unit alphabet resolution landed, independent of `Declarations`,
+//! exactly as `crates/turing-machine/src/footprint.rs`'s own `STD_CALLER`
+//! fixture demonstrates), so a compile's success or failure here turns
+//! only on whether the CALLEE's declarations reached the table — not on
+//! the alphabet resolution `cross_unit.rs` covers on its own.
 
 use std::path::{Path, PathBuf};
 

@@ -252,7 +252,7 @@ graft-map family in the graft section of the same page.
 | `duplicate-name` | Two entities (alphabet, routine, graph, or namespace) share one name in one scope. |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
 | `too-many-tapes` | A world declares more than 16 tapes. |
-| `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves. |
+| `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (pass `--extern` or declare it locally). |
 | `duplicate-tape` | Two tapes share one name in one world. |
 | `duplicate-state` | Two states (or a state and a graft instance) share one name in one world. |
 | `duplicate-param` | Two signature parameters share one name. |
