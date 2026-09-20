@@ -240,17 +240,18 @@ pub enum CompileErrorKind {
     /// ungrafted graph is never expanded — the same unreachable-graph
     /// posture the resolver takes).
     GraftCallUnsupported(String),
-    /// A graft binding's symbol map references a glyph that is not in the tape
-    /// it maps (the host tape for the `src`, the graph tape for the `dst`).
+    /// A symbol map (a graft binding's, or a named map declaration's own
+    /// pairs) references a glyph that is not in the alphabet it maps (the
+    /// source side for `src`, the target side for `dst`).
     MapSymbolNotInAlphabet(String),
-    /// A graft binding maps the blank off itself — `'_'->X` (blank must read
+    /// A symbol map maps the blank off itself — `'_'->X` (blank must read
     /// as blank) or a two-way `Y->'_'` (its write-back would un-pin blank; a
     /// read-only `Y=>'_'` collapse is the legal spelling).
     MapBlankPin,
-    /// A graft binding maps one symbol to two different images in one
+    /// A symbol map maps one symbol to two different images in one
     /// direction — a read collision, or a two-way write-back collision.
     MapConflict { symbol: String },
-    /// A graft binding on equal-size alphabets is not injective: identity
+    /// A symbol map on equal-size alphabets is not injective: identity
     /// completion collides (two symbols would read as one). `symbol` is the
     /// collision image.
     MapNotInjective { symbol: String },
@@ -258,6 +259,30 @@ pub enum CompileErrorKind {
     /// glyph-for-glyph equal — an omitted map means identity, which requires
     /// matching alphabets.
     IdentityGlyphMismatch,
+    /// A named map declaration (`map NAME: SRC -> DST { … }`) leaves a
+    /// non-blank SOURCE symbol unmapped, on unequal-cardinality alphabets —
+    /// the one declaration check with no inline-form analog (`name` is the
+    /// unmapped glyph; docs/tmt/language.md (named maps)).
+    MapNotClosed(String),
+    /// A `with map NAME` site's caller tape alphabet is not the named map's
+    /// own declared SOURCE alphabet.
+    NamedMapSourceMismatch {
+        map: String,
+        expected: String,
+        found: String,
+    },
+    /// A `with map NAME` site's callee parameter alphabet is not the named
+    /// map's own declared TARGET alphabet.
+    NamedMapTargetMismatch {
+        map: String,
+        expected: String,
+        found: String,
+    },
+    /// A `with map NAME` site names no map in scope — the named-map analog
+    /// of [`AlphabetMiss`], split the same way: a name nothing declares
+    /// anywhere, or a name reached through `use`/a qualified path whose
+    /// unit's declarations were not given.
+    UndefinedMap(MapMiss),
     /// A write substitution folds to a value with no glyph in the tape's
     /// alphabet (an out-of-alphabet fold result). `name` is the message.
     FoldOutOfAlphabet(String),
@@ -320,6 +345,18 @@ pub enum AlphabetMiss {
     /// Nothing in scope resolves the name and nothing declares it anywhere
     /// reachable.
     NoSuchAlphabet(String),
+    /// Reached through `use` or a qualified path, but no declarations
+    /// module given to this compile declares it.
+    DeclarationsNotGiven(String),
+}
+
+/// [`AlphabetMiss`]'s named-map analog (`CompileErrorKind::UndefinedMap`) —
+/// same two readings, same split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapMiss {
+    /// Nothing in scope resolves the name and nothing declares it anywhere
+    /// reachable.
+    NoSuchMap(String),
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
@@ -409,6 +446,10 @@ impl CompileErrorKind {
         CompileErrorKind::MapConflict { .. } => "map-conflict",
         CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
         CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
+        CompileErrorKind::MapNotClosed(_) => "map-not-closed",
+        CompileErrorKind::NamedMapSourceMismatch { .. } => "named-map-source-mismatch",
+        CompileErrorKind::NamedMapTargetMismatch { .. } => "named-map-target-mismatch",
+        CompileErrorKind::UndefinedMap(_) => "undefined-map",
         CompileErrorKind::FoldOutOfAlphabet(_) => "fold-out-of-alphabet",
         CompileErrorKind::FoldZeroModulus => "zero-modulus",
         CompileErrorKind::FoldNegativeRemainder { .. } => "negative-remainder",
@@ -701,25 +742,64 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::MapBlankPin => {
                 write!(
                     f,
-                    "a graft map may not move the blank off itself — blank reads and writes as blank (a `Y=>'_'` read-only collapse is allowed)"
+                    "a symbol map may not move the blank off itself — blank reads and writes as blank (a `Y=>'_'` read-only collapse is allowed)"
                 )
             }
             CompileErrorKind::MapConflict { symbol } => {
                 write!(
                     f,
-                    "graft map sends symbol `{symbol}` to two different images"
+                    "this symbol map sends symbol `{symbol}` to two different images"
                 )
             }
             CompileErrorKind::MapNotInjective { symbol } => {
                 write!(
                     f,
-                    "graft map on an equal-size alphabet is not injective — identity completion collides on `{symbol}`"
+                    "this symbol map, on an equal-size alphabet, is not injective — identity completion collides on `{symbol}`"
                 )
             }
             CompileErrorKind::IdentityGlyphMismatch => {
                 write!(
                     f,
                     "an omitted graft map means identity, which requires the two tapes to have glyph-for-glyph equal alphabets"
+                )
+            }
+            CompileErrorKind::MapNotClosed(g) => {
+                write!(
+                    f,
+                    "this map's two alphabets differ in size, so it must name every \
+                     non-blank source symbol explicitly — `{g}` is unmapped"
+                )
+            }
+            CompileErrorKind::NamedMapSourceMismatch {
+                map,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "map `{map}` is declared over source alphabet `{expected}`, but this \
+                     site's caller tape is over `{found}`"
+                )
+            }
+            CompileErrorKind::NamedMapTargetMismatch {
+                map,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "map `{map}` is declared over target alphabet `{expected}`, but this \
+                     site's callee parameter is over `{found}`"
+                )
+            }
+            CompileErrorKind::UndefinedMap(MapMiss::NoSuchMap(n)) => {
+                write!(f, "unknown map `{n}`")
+            }
+            CompileErrorKind::UndefinedMap(MapMiss::DeclarationsNotGiven(n)) => {
+                write!(
+                    f,
+                    "map `{n}` is declared by `use` (or named by a qualified path), \
+                     but its declarations were not given — pass `--extern` or declare it locally"
                 )
             }
             CompileErrorKind::FoldOutOfAlphabet(m) => {
@@ -792,6 +872,27 @@ impl ResolvedAlphabet {
     pub fn cardinality(&self) -> usize {
         self.glyphs.len()
     }
+}
+
+/// A resolved named map declaration (docs/tmt/language.md (named maps)):
+/// its two alphabets, already resolved to their mangled names (keys into
+/// `Resolved.alphabets`, local or cross-unit alike — the same resolution a
+/// tape's alphabet reference goes through, `resolve_tape_alphabet`), and
+/// its own pairs, checked ONCE here (`crate::expand::check_named_map_decl`)
+/// and cloned into every site that names it (`expand_named_maps`) — a name
+/// is a spelling, not a semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedMapDecl {
+    /// Mangled name; a key into `Resolved.maps`.
+    pub name: String,
+    pub name_span: Span,
+    pub exported: bool,
+    /// Mangled source alphabet name.
+    pub src: String,
+    /// Mangled target alphabet name.
+    pub dst: String,
+    pub pairs: Vec<crate::parser::MapPair>,
+    pub span: Span,
 }
 
 /// Resolve one alphabet's elements into its glyph vector, or fail with the
@@ -931,6 +1032,9 @@ fn push_glyph(
 pub(crate) struct Resolved {
     /// Resolved alphabets, keyed by mangled name → glyph vector.
     pub alphabets: HashMap<String, ResolvedAlphabet>,
+    /// Resolved named map declarations, keyed by mangled name — the four
+    /// declaration checks already passed by the time a `Resolved` exists.
+    pub maps: HashMap<String, ResolvedMapDecl>,
     /// Every world in source order: routines, graphs, then the machine
     /// (a program's entry) last if present.
     pub worlds: Vec<ResolvedWorld>,
@@ -1176,7 +1280,7 @@ fn resolve_program(
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
     let alphabets = resolve_all_alphabets(program, &scopes)?;
-    let resolved = resolve_module(program, &scopes, alphabets, externals)?;
+    let mut resolved = resolve_module(program, &scopes, alphabets, externals)?;
     let mut ctx = WorldCtx {
         scopes: &scopes,
         imports_used: vec![false; program.imports.len()],
@@ -1184,6 +1288,16 @@ fn resolve_program(
         diagnostics: Vec::new(),
     };
     ctx.check_worlds(program, &resolved, mode)?;
+    // Every `with map NAME` site expands to its declaration's pairs here,
+    // once every world's tape signature is known (a callee may be defined
+    // later in source, or in another unit entirely) and after the
+    // structural arg checks above have confirmed every site names a real
+    // tape parameter — so a named-map site error is never reported ahead
+    // of a more fundamental unknown-arg/wrong-kind one. `check_contracts`
+    // below reads the expanded pairs through the footprint inference
+    // (`crate::footprint` walks `BindingValue::Named::map::pairs`), so this
+    // must run first.
+    expand_named_maps(&mut resolved, &scopes, externals)?;
     check_contracts(&resolved, externals)?;
     let WorldCtx {
         imports_used,
@@ -1192,6 +1306,228 @@ fn resolve_program(
     } = ctx;
     unused_import_warnings(program, &imports_used, &mut diagnostics);
     Ok((resolved, diagnostics))
+}
+
+/// The declaring namespace a resolved world's own MANGLED name implies:
+/// the mangled name minus its last `::` segment, or the empty path for the
+/// machine (`"main"`) — the same rule `WorldCtx::world_ns` documents,
+/// duplicated here as four lines rather than threaded through as a
+/// borrowed `&WorldCtx`, since [`expand_named_maps`] runs before any
+/// `WorldCtx` exists for this compile (the field lives on a mutable
+/// diagnostics context, not on `Resolved`).
+fn world_ns_of(mangled: &str) -> Vec<String> {
+    if mangled == "main" {
+        return Vec::new();
+    }
+    let mut parts: Vec<&str> = mangled.split("::").collect();
+    parts.pop();
+    parts.into_iter().map(String::from).collect()
+}
+
+/// Resolve a `with map NAME` reference to its declaration, the same
+/// local/cross-unit split [`resolve_tape_alphabet`] gives an alphabet
+/// reference: a name `Scopes::resolve` kinds locally as [`DefKind::Map`]
+/// answers from `maps` directly; one reached only through `use` or an
+/// absolute path (`kind: None`) is looked up among `externals`' modules;
+/// neither is [`CompileErrorKind::UndefinedMap`], split the same two ways
+/// [`AlphabetMiss`] is.
+fn resolve_map_ref(
+    name: &str,
+    span: Span,
+    ns: &[String],
+    scopes: &Scopes,
+    maps: &HashMap<String, ResolvedMapDecl>,
+    ext_modules: &[&Resolved],
+) -> Result<ResolvedMapDecl, CompileError> {
+    if let Some(r) = scopes.resolve(name, ns) {
+        if r.kind == Some(DefKind::Map) {
+            return Ok(maps
+                .get(&r.full)
+                .expect("a locally-defined map was resolved")
+                .clone());
+        }
+        if r.kind.is_none() {
+            if let Some(decl) = find_external_map(ext_modules, &r.full) {
+                return Ok(decl.clone());
+            }
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::UndefinedMap(MapMiss::DeclarationsNotGiven(r.full)),
+            });
+        }
+    }
+    Err(CompileError {
+        span,
+        kind: CompileErrorKind::UndefinedMap(MapMiss::NoSuchMap(name.to_string())),
+    })
+}
+
+/// One binding-arg list's named-map sites, expanded in place: a `with map
+/// NAME` (`map.named`, `Some`) is resolved, checked against the two site
+/// rules (docs/tmt/language.md (named maps): the caller tape's alphabet is
+/// the map's declared SOURCE, the callee parameter's alphabet its declared
+/// TARGET), and its `pairs` filled in from the declaration's own — after
+/// which it reads exactly like the inline `with map { … }` form to every
+/// consumer downstream (footprint inference, the lint layer, IR lowering).
+/// `callee_name` not found in `callee_tapes` (an external callee, or a
+/// bind-call carrying no args of its own) is silently skipped: an external
+/// callee's binding args are refused elsewhere
+/// (`CompileErrorKind::ExternalBindingUnsupported`, `ir::resolve_binding`)
+/// regardless of whether the map they carry is named or inline.
+#[allow(clippy::too_many_arguments)]
+fn expand_named_maps_in_args(
+    args: &mut [BindingArg],
+    callee_name: &str,
+    external: bool,
+    host_tapes: &HashMap<String, String>,
+    callee_tapes: &HashMap<String, Vec<(String, String)>>,
+    maps: &HashMap<String, ResolvedMapDecl>,
+    ext_modules: &[&Resolved],
+    scopes: &Scopes,
+    ns: &[String],
+) -> Result<(), CompileError> {
+    if external {
+        return Ok(());
+    }
+    let Some(callee_sig) = callee_tapes.get(callee_name) else {
+        return Ok(());
+    };
+    for arg in args.iter_mut() {
+        let BindingValue::Named { target, map, .. } = &mut arg.value else {
+            continue;
+        };
+        let Some(m) = map else { continue };
+        let Some((name, name_span)) = m.named.clone() else {
+            continue; // the inline form — nothing to expand
+        };
+        let decl = resolve_map_ref(&name, name_span, ns, scopes, maps, ext_modules)?;
+        // Site check 1: the caller tape's alphabet is the map's SOURCE. A
+        // target this compile could not resolve to a host tape is a
+        // different check's job (`UnresolvedTapeTarget`, already run by
+        // `WorldCtx::check_worlds` before this pass) — silently skip
+        // rather than double-report.
+        if let Some(host_alpha) = host_tapes.get(target.as_str())
+            && *host_alpha != decl.src
+        {
+            return Err(CompileError {
+                span: name_span,
+                kind: CompileErrorKind::NamedMapSourceMismatch {
+                    map: decl.name.clone(),
+                    expected: decl.src.clone(),
+                    found: host_alpha.clone(),
+                },
+            });
+        }
+        // Site check 2: the callee parameter's alphabet is the map's
+        // TARGET.
+        if let Some((_, callee_alpha)) = callee_sig.iter().find(|(n, _)| n == &arg.name)
+            && *callee_alpha != decl.dst
+        {
+            return Err(CompileError {
+                span: name_span,
+                kind: CompileErrorKind::NamedMapTargetMismatch {
+                    map: decl.name.clone(),
+                    expected: decl.dst.clone(),
+                    found: callee_alpha.clone(),
+                },
+            });
+        }
+        m.pairs = decl.pairs.clone();
+    }
+    Ok(())
+}
+
+/// Expand every `with map NAME` site across the whole resolved module —
+/// grafts, binds, and direct calls alike, the same three binding-carrying
+/// constructs [`crate::lint::rules::dead_map_pair`] walks. Runs AFTER
+/// [`resolve_module`] builds every world (a callee may be defined later in
+/// source, or reached only by name at all, e.g. a graft's own target), so
+/// `callee_tapes` is a snapshot taken up front rather than read live off
+/// `resolved.worlds` while this walks it mutably.
+fn expand_named_maps(
+    resolved: &mut Resolved,
+    scopes: &Scopes,
+    externals: &Declarations,
+) -> Result<(), CompileError> {
+    let callee_tapes: HashMap<String, Vec<(String, String)>> = resolved
+        .worlds
+        .iter()
+        .map(|w| {
+            (
+                w.name.clone(),
+                w.tapes
+                    .iter()
+                    .map(|t| (t.name.clone(), t.alphabet.clone()))
+                    .collect(),
+            )
+        })
+        .collect();
+    // Owned rather than borrowed from `resolved.maps`: the loop below
+    // borrows `resolved.worlds` mutably, and a clone up front is far
+    // simpler than proving the two borrows disjoint through every helper
+    // call.
+    let maps = resolved.maps.clone();
+    let ext_modules = externals.modules();
+
+    for world in &mut resolved.worlds {
+        let host_tapes: HashMap<String, String> = world
+            .tapes
+            .iter()
+            .map(|t| (t.name.clone(), t.alphabet.clone()))
+            .collect();
+        let ns = world_ns_of(&world.name);
+        for graft in &mut world.grafts {
+            expand_named_maps_in_args(
+                &mut graft.args,
+                &graft.target,
+                false,
+                &host_tapes,
+                &callee_tapes,
+                &maps,
+                &ext_modules,
+                scopes,
+                &ns,
+            )?;
+        }
+        for bind in &mut world.binds {
+            let target = bind.target.clone();
+            let external = bind.external;
+            expand_named_maps_in_args(
+                &mut bind.args,
+                &target,
+                external,
+                &host_tapes,
+                &callee_tapes,
+                &maps,
+                &ext_modules,
+                scopes,
+                &ns,
+            )?;
+        }
+        for call in &mut world.calls {
+            if let ResolvedCallTarget::Routine {
+                name,
+                external,
+                args,
+            } = &mut call.target
+            {
+                let name = name.clone();
+                let external = *external;
+                expand_named_maps_in_args(
+                    args,
+                    &name,
+                    external,
+                    &host_tapes,
+                    &callee_tapes,
+                    &maps,
+                    &ext_modules,
+                    scopes,
+                    &ns,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// [`ReadMode::DeclarationsOnly`]'s own shape rule, checked once per
@@ -1607,6 +1943,7 @@ fn has_body(program: &Program, world: &ResolvedWorld) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DefKind {
     Alphabet,
+    Map,
     Routine,
     Graph,
 }
@@ -1615,6 +1952,7 @@ impl DefKind {
     fn noun(self) -> &'static str {
         match self {
             DefKind::Alphabet => "an alphabet",
+            DefKind::Map => "a named map",
             DefKind::Routine => "a routine",
             DefKind::Graph => "a graph",
         }
@@ -1668,6 +2006,14 @@ impl Scopes {
                 name: &a.name,
                 kind: DefKind::Alphabet,
                 name_span: a.name_span,
+            });
+        }
+        for m in &program.maps {
+            ents.push(Ent {
+                ns: &m.ns,
+                name: &m.name,
+                kind: DefKind::Map,
+                name_span: m.name_span,
             });
         }
         for r in &program.routines {
@@ -1902,6 +2248,7 @@ fn resolve_module(
             docs.insert(full_name(&a.ns, &a.name), d.clone());
         }
     }
+    let maps = resolve_all_maps(program, scopes, &mut alphabets, externals, &mut docs)?;
     for r in &program.routines {
         if let Some(d) = &r.doc {
             docs.insert(full_name(&r.ns, &r.name), d.clone());
@@ -1954,10 +2301,54 @@ fn resolve_module(
 
     Ok(Resolved {
         alphabets,
+        maps,
         worlds,
         entry_world,
         docs,
     })
+}
+
+/// Resolve every named map declaration's two alphabets (through
+/// [`resolve_tape_alphabet`] — the same local/cross-unit resolution a
+/// tape's alphabet reference goes through, never a second path) and run
+/// its four declaration checks once
+/// (`crate::expand::check_named_map_decl`). Called from [`resolve_module`]
+/// before any world resolves, mirroring how alphabet docs are collected
+/// early: a named map is a top-level declaration like an alphabet, not
+/// tied to any one world.
+fn resolve_all_maps(
+    program: &Program,
+    scopes: &Scopes,
+    alphabets: &mut HashMap<String, ResolvedAlphabet>,
+    externals: &Declarations,
+    docs: &mut HashMap<String, Doc>,
+) -> Result<HashMap<String, ResolvedMapDecl>, CompileError> {
+    let mut maps: HashMap<String, ResolvedMapDecl> = HashMap::new();
+    for m in &program.maps {
+        if let Some(d) = &m.doc {
+            docs.insert(full_name(&m.ns, &m.name), d.clone());
+        }
+        let (src_full, _) =
+            resolve_tape_alphabet(&m.src, m.src_span, &m.ns, scopes, alphabets, externals)?;
+        let (dst_full, _) =
+            resolve_tape_alphabet(&m.dst, m.dst_span, &m.ns, scopes, alphabets, externals)?;
+        let src_glyphs = alphabets[&src_full].glyphs.clone();
+        let dst_glyphs = alphabets[&dst_full].glyphs.clone();
+        crate::expand::check_named_map_decl(&m.pairs, &src_glyphs, &dst_glyphs, m.span)?;
+        maps.insert(
+            full_name(&m.ns, &m.name),
+            ResolvedMapDecl {
+                name: full_name(&m.ns, &m.name),
+                name_span: m.name_span,
+                exported: m.exported,
+                src: src_full,
+                dst: dst_full,
+                pairs: m.pairs.clone(),
+                span: m.span,
+            },
+        );
+    }
+    Ok(maps)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2195,6 +2586,13 @@ fn find_external_alphabet<'a>(externals: &[&'a Resolved], name: &str) -> Option<
     externals
         .iter()
         .find_map(|module| module.alphabets.get(name).map(|a| a.glyphs.as_slice()))
+}
+
+/// First-match lookup of a mangled MAP name among external declarations
+/// modules, in table order — [`find_external_alphabet`]'s named-map twin,
+/// over `Resolved::maps`.
+fn find_external_map<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a ResolvedMapDecl> {
+    externals.iter().find_map(|module| module.maps.get(name))
 }
 
 /// Resolve one `writes`/`preserves` clause into a symbol-index set in its
@@ -3410,6 +3808,18 @@ mod tests {
             CompileErrorKind::MapConflict { symbol: "x".into() },
             CompileErrorKind::MapNotInjective { symbol: "x".into() },
             CompileErrorKind::IdentityGlyphMismatch,
+            CompileErrorKind::MapNotClosed("x".into()),
+            CompileErrorKind::NamedMapSourceMismatch {
+                map: "m".into(),
+                expected: "a".into(),
+                found: "b".into(),
+            },
+            CompileErrorKind::NamedMapTargetMismatch {
+                map: "m".into(),
+                expected: "a".into(),
+                found: "b".into(),
+            },
+            CompileErrorKind::UndefinedMap(MapMiss::NoSuchMap("x".into())),
             CompileErrorKind::FoldOutOfAlphabet("x".into()),
             CompileErrorKind::FoldZeroModulus,
             CompileErrorKind::FoldNegativeRemainder { hint_modulus: None },

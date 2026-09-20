@@ -587,6 +587,15 @@ fn tree_symbols(items: impl Iterator<Item = TopView>, index: &TextLineIndex) -> 
                 selection_span: index.span(a.name_token().text_range()),
                 children: Vec::new(),
             }),
+            // A named map is a declaration like an alphabet — no body
+            // worth a separate symbol tier, so the same leaf shape.
+            TopView::MapDecl(m) => Some(SymbolNode {
+                name: m.name_token().text().to_string(),
+                kind: SymbolNodeKind::Function,
+                span: index.span(symbol_extent(m.syntax())),
+                selection_span: index.span(m.name_token().text_range()),
+                children: Vec::new(),
+            }),
             TopView::Namespace(ns) => Some(namespace_symbol(&ns, index)),
             TopView::Reuse(r) => Some(reuse_symbol(&r, index)),
             TopView::Machine(m) => Some(machine_symbol(&m, index)),

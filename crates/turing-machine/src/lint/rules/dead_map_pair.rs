@@ -455,6 +455,58 @@ machine {
         );
     }
 
+    /// The `GRAFT_SRC` shape, named instead of inline: the graft's own
+    /// `with map { … }` becomes a declared `map collapse: … { … }`
+    /// referenced by `with map collapse`. This rule reads
+    /// `ctx.resolved`'s already-EXPANDED binding args
+    /// (`compiler::expand_named_maps` fills a named reference's `pairs`
+    /// in place before lint ever runs), so a named site's dead pair is
+    /// exactly as visible as an inline one's — no code in this file
+    /// changes for it.
+    const NAMED_MAP_SRC: &str = "\
+alphabet host5 { '_', '^', '$', '0', '1' }
+alphabet bare3 { '_', '0', '1' }
+map collapse: host5 -> bare3 { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+
+graph zeroing(tape v: bare3, state done) {
+  entry state s {
+    ['1'] -> write ['0'] move [>] goto s;
+    [*] -> done;
+  }
+}
+
+machine {
+  tape t: host5;
+  entry graft zeroing(v = t with map collapse, done = fin) as z;
+  state fin { [*] -> stop; }
+}
+";
+
+    /// Mutation: leaving the rule reading inline maps only (matching
+    /// solely a `SymMap` with `named: None`) — this site names its map,
+    /// so that mutation would silently drop it and the finding would
+    /// vanish.
+    #[test]
+    fn dead_map_pair_fires_on_a_named_map() {
+        let f = findings(NAMED_MAP_SRC);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].message,
+            "the write-back half of `'1' -> '1'` never fires: `zeroing` never writes '1'"
+        );
+    }
+
+    /// The near miss: both digits are written, so neither write-back half
+    /// is dead.
+    #[test]
+    fn and_not_when_the_named_maps_pair_is_live() {
+        let src = NAMED_MAP_SRC.replace(
+            "    [*] -> done;",
+            "    ['0'] -> write ['1'] move [>] goto s;\n    [*] -> done;",
+        );
+        assert!(messages(&src).is_empty(), "{:?}", messages(&src));
+    }
+
     #[test]
     fn the_stdlib_has_no_dead_map_pairs() {
         // The corpus checkpoint. The one map in `std.tmc` collapses its

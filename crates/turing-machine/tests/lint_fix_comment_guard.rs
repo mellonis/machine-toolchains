@@ -11,12 +11,14 @@
 //! trigger a fix at all — a fixture that never produced a fix would pass the
 //! withhold assertion vacuously.
 //!
-//! Roster: nine rules emit a `Fix`. Seven are pinned here; the other two are
+//! Roster: ten rules emit a `Fix`. Eight are pinned here; the other two are
 //! accounted for rather than skipped. `contract-clause-overlap` — the rule
 //! the guard was hoisted out of — keeps its withhold test in its own unit
 //! tests. `dead-map-pair` is exempt BY MECHANISM: its one edit replaces the
 //! pair's `->` arrow token with `=>`, and a span covering a single token can
 //! never contain a comment, so the guard has nothing to withhold there.
+//! `unused-map` (whole-declaration delete, same shape as `unused-alphabet`)
+//! is pinned here alongside its siblings.
 //!
 //! Comment placement is free: every span is a node range read off the
 //! green tree (`lint/rules/spans.rs`), so a comment anywhere inside a
@@ -195,6 +197,23 @@ machine {
 ",
         ") as seek;",
         "unused-graft-instance",
+    );
+}
+
+#[test]
+fn unused_map_withholds_the_fix_when_the_declaration_holds_a_comment() {
+    assert_guard_pair(
+        "\
+alphabet wide { '_', '^', '$', '0', '1' }
+alphabet bits { '_', '0', '1' }
+map wideToBits: wide -> bits { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+machine {
+  tape t: wide;
+  entry state s { [*] -> stop; }
+}
+",
+        "'1' -> '1' }",
+        "unused-map",
     );
 }
 

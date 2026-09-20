@@ -186,16 +186,18 @@ use mtc_core::diagnostics::Span;
 use crate::lexer::{Comment, CommentKind, LexMode, Token, TokenKind, lex_with};
 use crate::parser::{
     AlphabetElem, BindingArg, BindingValue, Continuation, ContractClause, Import, MapArrow,
-    MoveCell, MoveDir, PatternCell, PatternCellKind, Rule, SigParam, SigParamKind, SymLit, SymMap,
-    TermKind, Transition, WriteCell, WriteCellKind, parse_green_from_tokens, reparse_sig_param,
+    MapPair, MoveCell, MoveDir, PatternCell, PatternCellKind, Rule, SigParam, SigParamKind, SymLit,
+    SymMap, TermKind, Transition, WriteCell, WriteCellKind, parse_green_from_tokens,
+    reparse_sig_param,
 };
 use crate::syntax::extract::{
     comment_from, extract_alphabet, extract_bind, extract_doc_items, extract_graft, extract_import,
-    extract_rule, sig_tokens,
+    extract_map_decl, extract_rule, sig_tokens,
 };
 use crate::syntax::{
-    AlphabetView, BindView, DocRunView, GraftView, MachineView, NamespaceView, ReuseKind,
-    ReuseView, RootView, RuleView, StateView, TapeView, TmcKind, TopView, UseView, WorldView,
+    AlphabetView, BindView, DocRunView, GraftView, MachineView, MapDeclView, NamespaceView,
+    ReuseKind, ReuseView, RootView, RuleView, StateView, TapeView, TmcKind, TopView, UseView,
+    WorldView,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -1199,10 +1201,43 @@ fn binding_arg_text(arg: &BindingArg, col: usize, map_interior: &Interior<'_>) -
 fn binding_value_text(value: &BindingValue, col: usize, map_interior: &Interior<'_>) -> String {
     match value {
         BindingValue::Named { target, map, .. } => match map {
-            Some(map) => {
-                let map_col = col + target.chars().count() + 1; // "TARGET "
-                format!("{target} {}", sym_map_text(map, map_col, map_interior))
-            }
+            Some(map) => match &map.named {
+                // `with map NAME` — a named reference carries no pairs of
+                // its own to print (`SymMap::named`'s own doc): resolution
+                // expands it into `pairs` for the compiler, but the
+                // printer reproduces the SOURCE, so it prints the name
+                // verbatim. A comment written between `map` and the name
+                // (captured in `map_interior`'s one slot, since there is
+                // no delimited body to key further slots off) still
+                // prints in place, mirroring `render_use`'s own slot-0
+                // handling.
+                Some((name, _)) => {
+                    let mut out = format!("{target} with map");
+                    let slot0_trailing = interior_trailing(&map_interior.slots[0]);
+                    let slot0_lines = interior_lines(&map_interior.slots[0], col + INDENT_UNIT);
+                    if !slot0_trailing.is_empty() {
+                        out.push_str(&slot0_trailing);
+                        out.push('\n');
+                    } else if slot0_lines.is_empty() {
+                        out.push(' ');
+                    }
+                    if !slot0_lines.is_empty() {
+                        if slot0_trailing.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&slot0_lines);
+                        out.push_str(&" ".repeat(col));
+                    } else if !slot0_trailing.is_empty() {
+                        out.push_str(&" ".repeat(col));
+                    }
+                    out.push_str(name);
+                    out
+                }
+                None => {
+                    let map_col = col + target.chars().count() + 1; // "TARGET "
+                    format!("{target} {}", sym_map_text(map, map_col, map_interior))
+                }
+            },
             None => target.clone(),
         },
         BindingValue::Terminator { kind, .. } => term_text(*kind).to_string(),
@@ -1215,17 +1250,7 @@ fn binding_value_text(value: &BindingValue, col: usize, map_interior: &Interior<
 /// (module doc, "Argument lists and the width threshold";
 /// docs/tmt/fmt.md (comments inside a list)).
 fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
-    let pairs: Vec<String> = map
-        .pairs
-        .iter()
-        .map(|pair| {
-            let arrow = match pair.arrow {
-                MapArrow::Bidirectional => "->",
-                MapArrow::ReadOnly => "=>",
-            };
-            format!("{} {arrow} {}", sym_text(&pair.src), sym_text(&pair.dst))
-        })
-        .collect();
+    let pairs: Vec<String> = map.pairs.iter().map(map_pair_clean_text).collect();
     if interior.is_empty() {
         return format!("with map {{ {} }}", pairs.join(", "));
     }
@@ -1256,6 +1281,18 @@ fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
     out.push_str(&" ".repeat(col));
     out.push('}');
     out
+}
+
+/// One comment-free `src -> dst` / `src => dst` pair — shared by
+/// [`sym_map_text`] (an inline `with map { … }`) and [`render_map_decl`]
+/// (a named map's own declared body): the two lists share the exact same
+/// pair grammar.
+fn map_pair_clean_text(pair: &MapPair) -> String {
+    let arrow = match pair.arrow {
+        MapArrow::Bidirectional => "->",
+        MapArrow::ReadOnly => "=>",
+    };
+    format!("{} {arrow} {}", sym_text(&pair.src), sym_text(&pair.dst))
 }
 
 /// The pair count of a binding argument's map, or 0 when it carries none —
@@ -1986,6 +2023,7 @@ fn render_top_item(unit: &Unit, indent: usize, source: &str, index: &TextLineInd
         {
             TopView::Use(v) => render_use(&v, unit, indent, index),
             TopView::Alphabet(v) => render_alphabet(&v, unit, indent, source, index),
+            TopView::MapDecl(v) => render_map_decl(&v, unit, indent, source, index),
             TopView::Namespace(v) => render_namespace(&v, unit, indent, source, index),
             TopView::Reuse(v) => render_reuse(&v, unit, indent, source, index),
             TopView::Machine(v) => render_machine(&v, unit, indent, source, index),
@@ -2228,6 +2266,106 @@ fn render_alphabet(
             }
             // The NEXT slot's same-line comments belong to THIS entry's line
             // — see the indexing rule above.
+            code.push_str(&interior_trailing(&interior.slots[i + 1]));
+            code.push('\n');
+        }
+        code.push_str(&interior_lines(
+            &interior.slots[entries.len()],
+            indent + INDENT_UNIT,
+        ));
+        code.push_str(&pad);
+        code.push('}');
+    }
+    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+}
+
+/// `export? map NAME: SRC -> DST { pairs }` — the same shape
+/// [`render_alphabet`] prints (a header through the last significant
+/// header token, then a comma-separated `{ … }` body), with the header
+/// running through `->` (not `{`) since the map's own DST reference sits
+/// between the two.
+fn render_map_decl(
+    view: &MapDeclView,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let m = extract_map_decl(view, &[], source, index);
+    let open_trailing = trivia::open_trailing(view.syntax(), index);
+    let pad = " ".repeat(indent);
+    let mut code = doc_run_text(
+        &doc_items(view.doc_run(), source, index),
+        indent,
+        trivia::blank_before_decl(view.syntax()),
+    );
+    // A header (through the `{`, DST's own reference included) carrying
+    // comments prints them in place (docs/tmt/fmt.md (comments are never
+    // moved)); the extracted fast path below is byte-identical to what a
+    // comment-free header always printed.
+    let head = head_through_open(view.syntax(), TmcKind::LBrace, &pad).unwrap_or_else(|| {
+        format!(
+            "{pad}{}map {}: {} -> {} {{",
+            if m.exported { "export " } else { "" },
+            m.name,
+            m.src,
+            m.dst
+        )
+    });
+    let (entries, body_interior) = {
+        let all: Vec<SyntaxElement> = view.syntax().children_with_tokens().collect();
+        let close_idx = all
+            .iter()
+            .rposition(|e| e.kind() == TmcKind::RBrace.into())
+            .unwrap_or(all.len());
+        let open_idx = all
+            .iter()
+            .position(|e| e.kind() == TmcKind::LBrace.into())
+            .unwrap_or(close_idx);
+        let mut body_from = (open_idx + 1).min(close_idx);
+        let mut open_claimed = 0usize;
+        while open_claimed < open_trailing.len() && body_from < close_idx {
+            if let SyntaxElement::Token(t) = &all[body_from]
+                && is_comment_kind(t.kind())
+            {
+                open_claimed += 1;
+            }
+            body_from += 1;
+        }
+        let entry_cont = " ".repeat(indent + INDENT_UNIT);
+        split_flat_entries(
+            &all[body_from..close_idx],
+            &|i| map_pair_clean_text(&m.pairs[i]),
+            &entry_cont,
+        )
+    };
+    let interior = bucket(&body_interior, entries.len());
+    let one_line = format!("{head} {} }}", entries.join(", "));
+    let fits = |s: &str| {
+        s.split('\n')
+            .next_back()
+            .is_some_and(|l| l.chars().count() <= LINE_WIDTH)
+    };
+    if open_trailing.is_empty() && interior.is_empty() && fits(&one_line) {
+        code.push_str(&one_line);
+    } else if open_trailing.is_empty() && !interior.forces_break && fits(&one_line) {
+        code.push_str(&format!(
+            "{head} {} }}",
+            join_cells_with_interior(&entries, &interior)
+        ));
+    } else {
+        code.push_str(&head);
+        code.push_str(&open_trailing_text(&open_trailing));
+        code.push_str(&interior_trailing(&interior.slots[0]));
+        code.push('\n');
+        let entry_pad = " ".repeat(indent + INDENT_UNIT);
+        for (i, entry) in entries.iter().enumerate() {
+            code.push_str(&interior_lines(&interior.slots[i], indent + INDENT_UNIT));
+            code.push_str(&entry_pad);
+            code.push_str(entry);
+            if i + 1 < entries.len() {
+                code.push(',');
+            }
             code.push_str(&interior_trailing(&interior.slots[i + 1]));
             code.push('\n');
         }
@@ -4304,6 +4442,98 @@ mod tests {
         assert_eq!(once, src, "the header comment stays in the header");
         let twice = format(&once).expect("the green printer formats");
         assert_eq!(once, twice, "and pass 1 is a fixed point");
+    }
+
+    /// A named map declaration — the same one-line canonical shape as an
+    /// alphabet — round-trips and is idempotent.
+    #[test]
+    fn a_named_map_declaration_round_trips() {
+        pins(
+            "map wideToBits: wide -> bits { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }\n",
+            "map wideToBits: wide -> bits { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }\n",
+        );
+        pins(
+            "export map wideToBits: wide -> bits { '0' -> '0' }\n",
+            "export map wideToBits: wide -> bits { '0' -> '0' }\n",
+        );
+    }
+
+    /// The header comment mirrors `the_alphabet_header_comment_is_a_fixed_point`:
+    /// a comment between `map` and the name prints in place, and pass 1 is
+    /// already a fixed point under the never-move rule.
+    #[test]
+    fn the_map_header_comment_is_a_fixed_point() {
+        let src = "map /* m */ wideToBits: wide -> bits { '0' -> '0' }\n";
+        let once = format(src).expect("the green printer formats");
+        assert_eq!(once, src, "the header comment stays in the header");
+        let twice = format(&once).expect("the green printer formats");
+        assert_eq!(once, twice, "and pass 1 is a fixed point");
+    }
+
+    /// A `with map NAME` site — the named form of a binding argument's
+    /// map — prints its name verbatim, never as an (empty) inline body.
+    #[test]
+    fn a_named_map_reference_at_a_site_prints_verbatim() {
+        let src = "\
+alphabet wide { '_', 'a' }
+alphabet bits { '_', 'b' }
+map wideToBits: wide -> bits { 'a' -> 'b' }
+routine plusOne(tape num: bits) {
+  entry state s {
+    [*] -> return;
+  }
+}
+machine {
+  tape data: wide;
+  bind plusOne(num = data with map wideToBits) as inc;
+  entry state go {
+    [*] -> stop;
+  }
+}
+";
+        let once = format(src).expect("the green printer formats");
+        assert_eq!(once, src, "the named reference reprints byte for byte");
+        let twice = format(&once).expect("the green printer formats");
+        assert_eq!(once, twice);
+    }
+
+    /// A comment between `with map` and the named reference is neither
+    /// dropped nor moved (docs/tmt/fmt.md (comments are never moved)) —
+    /// never a panic, and never a silently empty `with map {  }`.
+    #[test]
+    fn a_comment_before_a_named_map_reference_never_panics_and_is_not_dropped() {
+        let src = "\
+alphabet wide { '_', 'a' }
+alphabet bits { '_', 'b' }
+map wideToBits: wide -> bits { 'a' -> 'b' }
+routine plusOne(tape num: bits) {
+  entry state s {
+    [*] -> return;
+  }
+}
+machine {
+  tape data: wide;
+  bind plusOne(num = data with map /* keep */ wideToBits) as inc;
+  entry state go {
+    [*] -> stop;
+  }
+}
+";
+        let out = format(src).expect("the green printer formats");
+        assert!(out.contains("/* keep */"), "{out}");
+        assert!(out.contains("wideToBits"), "{out}");
+    }
+
+    /// A long pair list wraps onto its own lines, over the width the
+    /// alphabet body's own wrap threshold uses, and stays idempotent.
+    #[test]
+    fn a_wide_map_declaration_wraps_and_is_idempotent() {
+        let src = "map longNamedCrossRepresentationMap: veryLongSourceAlphabetName -> \
+                    veryLongTargetAlphabetName { '^' => '_', '$' => '_', '0' -> '0', \
+                    '1' -> '1', '2' -> '2', '3' -> '3' }\n";
+        let once = format(src).expect("the green printer formats");
+        let twice = format(&once).expect("the green printer formats");
+        assert_eq!(once, twice, "wrapped output must itself be a fixed point");
     }
 
     /// The grid's widths are measured with the interior the row renderer

@@ -45,6 +45,7 @@ pub const TMC_LANG_VERSION: &str = "0.2";
 pub struct Program {
     pub imports: Vec<Import>,
     pub alphabets: Vec<Alphabet>,
+    pub maps: Vec<MapDecl>,
     pub routines: Vec<Routine>,
     pub graphs: Vec<Graph>,
     /// The single `machine` block; `None` in a library file. Parsing rejects a
@@ -134,6 +135,35 @@ pub struct Alphabet {
 pub enum AlphabetElem {
     Single(SymLit),
     Range { lo: SymLit, hi: SymLit, span: Span },
+}
+
+/// An `export? map NAME: SRC -> DST { pairs }` declaration — a reusable,
+/// named symbol map (docs/tmt/language.md (named maps)). `src`/`dst` are the
+/// two alphabets' names, bare or qualified (`Parser::qual_name`, the same
+/// grammar a tape's alphabet reference takes) — resolved against scope +
+/// externals exactly like a tape's alphabet reference, never a second path.
+/// `pairs` is checked ONCE here, at the declaration (the four checks:
+/// symbols in their alphabet, blank pinned, injective on equal
+/// cardinalities, closed on unequal); a site naming this map by `with map
+/// NAME` expands to these same pairs before IR — a name is a spelling, not
+/// a semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub line: u32,
+    pub col: u32,
+    pub exported: bool,
+    pub ns: Vec<String>,
+    pub src: String,
+    pub src_span: Span,
+    pub dst: String,
+    pub dst_span: Span,
+    pub pairs: Vec<MapPair>,
+    /// The whole declaration: header start (`export` when written, else
+    /// `map`) → the body's closing `}`.
+    pub span: Span,
+    pub doc: Option<Doc>,
 }
 
 /// A `routine`/`graph` signature: parameters in declaration order (= vector
@@ -520,12 +550,25 @@ pub enum TermKind {
     Halt,
 }
 
-/// A `with map { pairs }` per-tape symbol map.
+/// A `with map { pairs }` per-tape symbol map — written inline, or as
+/// `with map NAME` naming a declared map (`named`, `Some`). The named form
+/// carries no `pairs` of its own at parse time (`named.is_some()` implies
+/// `pairs` starts empty); `compiler::expand_named_maps` fills `pairs` in
+/// from the declaration's own, once resolution knows every world's tape
+/// signature, and checks that the caller tape's alphabet is the map's
+/// declared source and the callee parameter's alphabet its declared target.
+/// Every consumer past that point (IR lowering, footprint inference, the
+/// lint layer) reads `pairs` the same way regardless of provenance — a name
+/// is a spelling, not a semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymMap {
     pub pairs: Vec<MapPair>,
-    /// `map` keyword start → `}` end.
+    /// `map` keyword start → `}` end (inline form), or `map` keyword start
+    /// → the named reference's own end (named form).
     pub span: Span,
+    /// `Some((name, name_span))` for `with map NAME`; `None` for the
+    /// inline `with map { … }` form.
+    pub named: Option<(String, Span)>,
 }
 
 /// One map pair `src -> dst` (bidirectional) or `src => dst` (read-only).
@@ -1158,7 +1201,7 @@ impl Parser<'_> {
     fn next_is_top_doc_accepting(&self) -> bool {
         matches!(&self.peek().kind, TokenKind::Ident(w)
             if matches!(w.as_str(),
-                "export" | "alphabet" | "routine" | "graph" | "machine" | "namespace"))
+                "export" | "alphabet" | "map" | "routine" | "graph" | "machine" | "namespace"))
     }
 
     /// One namespace level's item loop — the recovery seam
@@ -1236,7 +1279,14 @@ impl Parser<'_> {
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => true,
                 TokenKind::Ident(w) => matches!(
                     w.as_str(),
-                    "use" | "alphabet" | "routine" | "graph" | "machine" | "namespace" | "export"
+                    "use"
+                        | "alphabet"
+                        | "map"
+                        | "routine"
+                        | "graph"
+                        | "machine"
+                        | "namespace"
+                        | "export"
                 ),
                 _ => false,
             };
@@ -1317,6 +1367,11 @@ impl Parser<'_> {
                         self.parse_alphabet()?;
                         self.g_finish(); // Alphabet
                     }
+                    "map" => {
+                        self.g_start_at(cp, TmcKind::MapDecl);
+                        self.parse_map_decl()?;
+                        self.g_finish(); // MapDecl
+                    }
                     "routine" => {
                         self.g_start_at(cp, TmcKind::Reuse);
                         self.parse_reuse(ReuseCarrier::Routine)?;
@@ -1359,6 +1414,11 @@ impl Parser<'_> {
                                 self.parse_alphabet()?;
                                 self.g_finish(); // Alphabet — `export` included
                             }
+                            TokenKind::Ident(w2) if w2 == "map" => {
+                                self.g_start_at(cp, TmcKind::MapDecl);
+                                self.parse_map_decl()?;
+                                self.g_finish(); // MapDecl — `export` included
+                            }
                             TokenKind::Ident(w2) if w2 == "routine" => {
                                 self.g_start_at(cp, TmcKind::Reuse);
                                 self.parse_reuse(ReuseCarrier::Routine)?;
@@ -1372,7 +1432,7 @@ impl Parser<'_> {
                             _ => {
                                 return Err(Self::expected(
                                     &t2,
-                                    "`alphabet`, `routine`, or `graph` after `export`",
+                                    "`alphabet`, `map`, `routine`, or `graph` after `export`",
                                 ));
                             }
                         }
@@ -2514,16 +2574,45 @@ impl Parser<'_> {
         })
     }
 
-    /// `map { pairs }` after a consumed `with` — the production
-    /// [`reparse_sym_map`] re-runs over a SYM_MAP node's own tokens.
+    /// `map { pairs }` or `map NAME` after a consumed `with` — the
+    /// production [`reparse_sym_map`] re-runs over a SYM_MAP node's own
+    /// tokens. The named form accepts a bare or qualified reference
+    /// (`Parser::qual_name`, the same grammar a tape's alphabet reference
+    /// takes) to a declared `map` (docs/tmt/language.md (named maps));
+    /// resolution fills its `pairs` in from the declaration.
     fn sym_map(&mut self) -> Result<SymMap, CompileError> {
         // Opens at `map`, not at the `with` the caller already consumed:
-        // `SymMap::span` runs `map` → `}`, and keeping the node's extent
-        // equal to that span is what lets extraction copy it rather than
-        // recompute it.
+        // `SymMap::span` runs `map` → its end, and keeping the node's
+        // extent equal to that span is what lets extraction copy it rather
+        // than recompute it.
         self.g_flush_start(TmcKind::SymMap);
         let map_tok = self.expect_kw_tok("map", "`map` after `with`")?;
-        self.expect(&TokenKind::LBrace, "`{` to open the map")?;
+        if matches!(self.peek().kind, TokenKind::LBrace) {
+            let (pairs, body_span) = self.map_pairs_body()?;
+            self.g_finish(); // SymMap
+            Ok(SymMap {
+                pairs,
+                span: join(map_tok.span(), body_span),
+                named: None,
+            })
+        } else {
+            let q = self.qual_name("a named map")?;
+            self.g_finish(); // SymMap
+            let name_span = q.span;
+            Ok(SymMap {
+                pairs: Vec::new(),
+                span: join(map_tok.span(), name_span),
+                named: Some((q.joined(), name_span)),
+            })
+        }
+    }
+
+    /// A `{ pairs }` map body, positioned at `{` — shared by
+    /// [`Self::sym_map`]'s inline form and [`Self::parse_map_decl`]'s
+    /// declaration body, so the comma/`}` separator rule has one owner.
+    /// Returns the pairs and the body's own span (`{` start → `}` end).
+    fn map_pairs_body(&mut self) -> Result<(Vec<MapPair>, Span), CompileError> {
+        let lb = self.expect(&TokenKind::LBrace, "`{` to open the map")?;
         let mut pairs: Vec<MapPair> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             loop {
@@ -2536,11 +2625,22 @@ impl Parser<'_> {
             }
         }
         let rb = self.expect(&TokenKind::RBrace, "`}` to close the map")?;
-        self.g_finish(); // SymMap
-        Ok(SymMap {
-            pairs,
-            span: join(map_tok.span(), rb.span()),
-        })
+        Ok((pairs, join(lb.span(), rb.span())))
+    }
+
+    /// `export? map NAME: SRC -> DST { pairs }` — a top-level declaration
+    /// (docs/tmt/language.md (named maps)). `SRC`/`DST` accept a bare or
+    /// qualified alphabet reference, the same grammar a tape parameter's
+    /// alphabet takes.
+    fn parse_map_decl(&mut self) -> Result<(), CompileError> {
+        self.bump(); // `map`
+        self.name("a map name")?;
+        self.expect(&TokenKind::Colon, "`:` after the map name")?;
+        self.qual_name("a source alphabet name")?;
+        self.expect(&TokenKind::Arrow, "`->` between the map's two alphabets")?;
+        self.qual_name("a target alphabet name")?;
+        self.map_pairs_body()?;
+        Ok(())
     }
 
     fn expect_kw_tok(
@@ -2685,6 +2785,25 @@ pub(crate) fn reparse_alphabet_elems(tokens: &[Token]) -> Vec<AlphabetElem> {
     p.bump(); // `{`
     p.alphabet_elems()
         .expect("reparse_alphabet_elems: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a MAP_DECL node's own pair list:
+/// re-parses it through [`Parser::map_pairs_body`], the same production
+/// `parse_map_decl` itself runs for its body. Takes the WHOLE
+/// declaration's token run and walks to just past its first `{`, mirroring
+/// [`reparse_alphabet_elems`]: the run is `DocLine|AttentionLine* export?
+/// map NAME : SRC -> DST { … }`, and neither the doc prefix nor the header
+/// (name, `:`, a possibly-qualified SRC, `->`, a possibly-qualified DST)
+/// can carry an `LBrace`, so the first one in the run is always the body's
+/// opener.
+pub(crate) fn reparse_map_pairs(tokens: &[Token]) -> Vec<MapPair> {
+    let mut p = bare_parser(tokens);
+    while !matches!(p.peek().kind, TokenKind::LBrace | TokenKind::Eof) {
+        p.bump();
+    }
+    p.map_pairs_body()
+        .expect("reparse_map_pairs: extraction only ever runs on an already-parsed tree")
+        .0
 }
 
 /// Retokenization reuse shim for a RULE's own pattern: re-parses it

@@ -310,6 +310,21 @@ The fix deletes the whole declaration, including any leading doc/attention
 run — an orphaned `?`/`!` run is a parse error, so the doc goes with the
 alphabet it documents.
 
+### unused-map
+
+A named `map` declaration (`docs/tmt/language.md` (named maps)) nothing
+names with `with map NAME`. Export-independent, the same reasoning as
+`unused-alphabet`: a `with map NAME` site is the only way a map is ever
+reached, so an exported-but-unused declaration is as dead as a private
+one.
+
+```
+b.tmc:3:5: lint: map `dead` is never used by any binding
+```
+
+The fix deletes the whole declaration, including any leading doc/attention
+run, mirroring `unused-alphabet`'s own fix.
+
 ### unused-tape
 
 A machine `tape` no rule ever reads, writes, or moves, and no reuse ever
@@ -480,6 +495,14 @@ caller glyph as the callee glyph, and write a callee write of that glyph
 back as the caller glyph (`docs/formats.md (bound calls)`). When the second
 half never fires, the pair means exactly what a one-way `src => dst`
 spelling means, minus the ceremony.
+
+A `with map NAME` site names its pairs exactly as a `with map { … }` one
+does — a named map's pairs are checked once at the declaration
+(`docs/tmt/language.md` (named maps)) and expanded to a site's binding
+before this rule (or any other) ever sees it — so a named site's dead pair
+is exactly as visible as an inline one's, findings anchored on the pair's
+own written position in the DECLARATION rather than on the site that names
+it.
 
 **Write-half only.** The rule decides the write direction and nothing else.
 Whether a caller glyph the pair names ever reaches the callee at all depends

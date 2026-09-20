@@ -221,7 +221,9 @@ compile` itself, and the per-file fatal lines of `tmt lint` and
 `tmt fmt`. Codes are permanent identifiers: they never change meaning.
 Feature-context detail stays with its feature — the fold family's
 verbatim messages live in `docs/tmt/language.md (substitution)`, the
-graft-map family in the graft section of the same page.
+symbol-map family (graft, call/bind, and a named map's own declaration
+checks) in `docs/tmt/language.md (symbol maps)` and its "Named maps"
+subsection.
 
 | Code | Meaning |
 |---|---|
@@ -274,11 +276,15 @@ graft-map family in the graft section of the same page.
 | `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `preserves`). |
 | `graft-cycle` | A graph definition graft-depends on itself, directly or through a cycle of definitions. |
 | `graft-call-unsupported` | A grafted graph's body contains a `call` — splicing a calling graph into the host is not supported. |
-| `map-symbol-not-in-alphabet` | A graft binding's symbol map references a glyph that is not in the tape it maps. |
-| `map-blank-pin` | A graft binding maps the blank off itself — blank must read as blank, and a write-back must not un-pin it. |
-| `map-conflict` | A graft binding maps one symbol to two different images in one direction. |
-| `map-not-injective` | A graft binding on equal-size alphabets is not injective — identity completion collides. |
+| `map-symbol-not-in-alphabet` | A symbol map (a graft binding's, or a named map declaration's own pairs) references a glyph that is not in the alphabet it maps. |
+| `map-blank-pin` | A symbol map maps the blank off itself — blank must read as blank, and a write-back must not un-pin it. |
+| `map-conflict` | A symbol map maps one symbol to two different images in one direction. |
+| `map-not-injective` | A symbol map on equal-size alphabets is not injective — identity completion collides. |
 | `identity-glyph-mismatch` | An omitted symbol map on tapes whose alphabets are not glyph-for-glyph equal — an omitted map means identity. |
+| `map-not-closed` | A named map declaration's two alphabets differ in size and it leaves a non-blank source symbol unmapped — unlike a graft's inline map (which silently holes an unnamed source), a declaration reused at many sites must name every one explicitly. |
+| `named-map-source-mismatch` | A `with map NAME` site's caller tape alphabet is not the named map's own declared source alphabet. |
+| `named-map-target-mismatch` | A `with map NAME` site's callee parameter alphabet is not the named map's own declared target alphabet. |
+| `undefined-map` | A `with map NAME` site, or a `use` import, names no map in scope — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (pass `--extern` or declare it locally). |
 | `fold-out-of-alphabet` | A write substitution folds to a value with no glyph in the tape's alphabet. |
 | `zero-modulus` | A `%` in a write-cell fold has a zero modulus. |
 | `negative-remainder` | A `%` fold produces a negative remainder — reachable only when subtraction takes the left operand negative. |

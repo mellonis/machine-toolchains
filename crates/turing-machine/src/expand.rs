@@ -912,6 +912,106 @@ fn close_unlisted(map: &mut SymMap, domain_card: usize) {
 /// Build one bound tape's [`TapeMap`] from its (optional) source symbol map,
 /// resolving `src` glyphs against the host alphabet and `dst` glyphs against
 /// the graph alphabet.
+/// The shared symbol-map legality contract (docs/formats.md (bound
+/// calls)): every pair's glyphs resolve in their own alphabet
+/// (`MapSymbolNotInAlphabet`), the blank stays pinned
+/// (`MapBlankPin`), and a repeated source with a different image in one
+/// direction conflicts (`MapConflict`). Returns the built read/write maps
+/// (identity-seeded, not yet closed or bijection-checked — the two
+/// callers below diverge exactly there) plus the bidirectional
+/// `(src, dst)` pairs, which [`check_injective_completion`] reads.
+///
+/// Shared by a graft binding's symbol map ([`build_tapemap`]) and a named
+/// map DECLARATION's own pairs (`crate::compiler::check_named_map_decl`,
+/// checked once at the declaration): the pair grammar and its legality
+/// are one contract, authored inline or under a name alike.
+/// A [`build_symbol_maps`] result: the built read map, the built write
+/// map, and the bidirectional `(src, dst)` pairs [`check_injective_completion`]
+/// reads — named so the call signature stays under clippy's complexity
+/// threshold.
+type SymbolMapsResult = Result<(SymMap, SymMap, Vec<(u16, u16)>), CompileError>;
+
+fn build_symbol_maps(
+    pairs: &[crate::parser::MapPair],
+    src_glyphs: &[String],
+    dst_glyphs: &[String],
+) -> SymbolMapsResult {
+    let src_idx: HashMap<&str, u16> = src_glyphs
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i as u16))
+        .collect();
+    let dst_idx: HashMap<&str, u16> = dst_glyphs
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i as u16))
+        .collect();
+
+    let mut rmap = SymMap::identity();
+    let mut wmap = SymMap::identity();
+    let mut bidir: Vec<(u16, u16)> = Vec::new();
+    for pair in pairs {
+        let src_g = glyph_label(&pair.src);
+        let dst_g = glyph_label(&pair.dst);
+        let src = *src_idx.get(src_g.as_str()).ok_or(CompileError {
+            span: pair.src.span(),
+            kind: CompileErrorKind::MapSymbolNotInAlphabet(src_g.clone()),
+        })?;
+        let dst = *dst_idx.get(dst_g.as_str()).ok_or(CompileError {
+            span: pair.dst.span(),
+            kind: CompileErrorKind::MapSymbolNotInAlphabet(dst_g.clone()),
+        })?;
+        // Blank reads as blank.
+        if src == 0 && dst != 0 {
+            return Err(CompileError {
+                span: pair.span,
+                kind: CompileErrorKind::MapBlankPin,
+            });
+        }
+        insert_map_pair(&mut rmap, src, dst, &src_g, pair.span)?;
+        if pair.arrow == MapArrow::Bidirectional {
+            // A two-way fold onto blank would write blank back as non-blank.
+            if dst == 0 && src != 0 {
+                return Err(CompileError {
+                    span: pair.span,
+                    kind: CompileErrorKind::MapBlankPin,
+                });
+            }
+            insert_map_pair(&mut wmap, dst, src, &dst_g, pair.span)?;
+            bidir.push((src, dst));
+        }
+    }
+    Ok((rmap, wmap, bidir))
+}
+
+/// Equal-size alphabets must identity-complete to a bijection: the
+/// BIDIRECTIONAL read map, filled with identity, must be injective
+/// (`MapNotInjective`) — shared by [`build_tapemap`] and
+/// `crate::compiler::check_named_map_decl`.
+fn check_injective_completion(
+    bidir: &[(u16, u16)],
+    card: usize,
+    dst_glyphs: &[String],
+    span: Span,
+) -> Result<(), CompileError> {
+    let bmap: HashMap<u16, u16> = bidir.iter().copied().collect();
+    let mut seen: HashSet<u16> = HashSet::new();
+    for s in 0..card as u16 {
+        let v = bmap.get(&s).copied().unwrap_or(s);
+        if !seen.insert(v) {
+            let g = dst_glyphs
+                .get(usize::from(v))
+                .cloned()
+                .unwrap_or_else(|| v.to_string());
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::MapNotInjective { symbol: g },
+            });
+        }
+    }
+    Ok(())
+}
+
 fn build_tapemap(
     map: Option<&SrcSymMap>,
     phys: usize,
@@ -938,57 +1038,17 @@ fn build_tapemap(
         });
     };
 
-    let host_idx: HashMap<&str, u16> = host_glyphs
-        .iter()
-        .enumerate()
-        .map(|(i, g)| (g.as_str(), i as u16))
-        .collect();
-    let graph_idx: HashMap<&str, u16> = graph_glyphs
-        .iter()
-        .enumerate()
-        .map(|(i, g)| (g.as_str(), i as u16))
-        .collect();
-
-    let mut rmap = SymMap::identity();
-    let mut wmap = SymMap::identity();
-    let mut bidir: Vec<(u16, u16)> = Vec::new();
-    for pair in &m.pairs {
-        let src_g = glyph_label(&pair.src);
-        let dst_g = glyph_label(&pair.dst);
-        let src = *host_idx.get(src_g.as_str()).ok_or(CompileError {
-            span: pair.src.span(),
-            kind: CompileErrorKind::MapSymbolNotInAlphabet(src_g.clone()),
-        })?;
-        let dst = *graph_idx.get(dst_g.as_str()).ok_or(CompileError {
-            span: pair.dst.span(),
-            kind: CompileErrorKind::MapSymbolNotInAlphabet(dst_g.clone()),
-        })?;
-        // Blank reads as blank.
-        if src == 0 && dst != 0 {
-            return Err(CompileError {
-                span: pair.span,
-                kind: CompileErrorKind::MapBlankPin,
-            });
-        }
-        insert_map_pair(&mut rmap, src, dst, &src_g, pair.span)?;
-        if pair.arrow == MapArrow::Bidirectional {
-            // A two-way fold onto blank would write blank back as non-blank.
-            if dst == 0 && src != 0 {
-                return Err(CompileError {
-                    span: pair.span,
-                    kind: CompileErrorKind::MapBlankPin,
-                });
-            }
-            insert_map_pair(&mut wmap, dst, src, &dst_g, pair.span)?;
-            bidir.push((src, dst));
-        }
-    }
+    let (mut rmap, mut wmap, bidir) = build_symbol_maps(&m.pairs, host_glyphs, graph_glyphs)?;
     // Closed-on-unequal (docs/formats.md (bound calls)): identity completion
     // exists only for equal-size alphabets. Across differently-sized tapes
     // every non-blank source the map does not name is a hole — computed from
     // the explicit srcs still in `pairs`, before the identity-pair retain
     // below, so an explicit `k->k` survives as identity while a truly absent
-    // symbol traps.
+    // symbol traps. A NAMED map's own declaration checks the opposite way
+    // (`crate::compiler::check_named_map_decl` REQUIRES every non-blank
+    // source to be named on unequal cardinalities) — a graft is one splice,
+    // one visible use, so a silent hole here is not the same hazard a
+    // reused declaration's silent gap would be.
     if host_card != graph_card {
         close_unlisted(&mut rmap, host_card);
         close_unlisted(&mut wmap, graph_card);
@@ -997,24 +1057,8 @@ fn build_tapemap(
     rmap.pairs.retain(|s, d| s != d);
     wmap.pairs.retain(|s, d| s != d);
 
-    // Equal-size alphabets must identity-complete to a bijection: the
-    // BIDIRECTIONAL read map, filled with identity, must be injective.
     if host_card == graph_card {
-        let bmap: HashMap<u16, u16> = bidir.into_iter().collect();
-        let mut seen: HashSet<u16> = HashSet::new();
-        for s in 0..host_card as u16 {
-            let v = bmap.get(&s).copied().unwrap_or(s);
-            if !seen.insert(v) {
-                let g = graph_glyphs
-                    .get(usize::from(v))
-                    .cloned()
-                    .unwrap_or_else(|| v.to_string());
-                return Err(CompileError {
-                    span,
-                    kind: CompileErrorKind::MapNotInjective { symbol: g },
-                });
-            }
-        }
+        check_injective_completion(&bidir, host_card, graph_glyphs, span)?;
     }
     Ok(TapeMap {
         phys,
@@ -1023,6 +1067,44 @@ fn build_tapemap(
         rmap,
         wmap,
     })
+}
+
+/// The four checks a named map DECLARATION carries once, at the
+/// declaration (docs/tmt/language.md (named maps)): every pair's `src` is
+/// in SRC and `dst` is in DST, the blank stays pinned, the map is
+/// injective on equal cardinalities (both shared with a graft binding's
+/// own map, [`build_tapemap`], through [`build_symbol_maps`] and
+/// [`check_injective_completion`]), and — the one check unique to a named
+/// declaration — CLOSED on unequal cardinalities: every non-blank SOURCE
+/// symbol must be explicitly named. A graft's own inline map silently
+/// holes an unnamed source across unequal cardinalities
+/// (`build_tapemap`'s `close_unlisted`) because a graft is one splice, one
+/// visible use; a NAME is checked once and reused at every site that
+/// names it, so an unnamed source there would be a silent runtime trap
+/// wherever the declaration is next used — this declaration is therefore
+/// required to be exhaustive over its non-blank source alphabet instead.
+pub(crate) fn check_named_map_decl(
+    pairs: &[crate::parser::MapPair],
+    src_glyphs: &[String],
+    dst_glyphs: &[String],
+    span: Span,
+) -> Result<(), CompileError> {
+    let (_rmap, _wmap, bidir) = build_symbol_maps(pairs, src_glyphs, dst_glyphs)?;
+    if src_glyphs.len() == dst_glyphs.len() {
+        check_injective_completion(&bidir, src_glyphs.len(), dst_glyphs, span)?;
+    } else {
+        let named: HashSet<String> = pairs.iter().map(|p| glyph_label(&p.src)).collect();
+        // Index 0 is the blank, by convention — never required.
+        for g in src_glyphs.iter().skip(1) {
+            if !named.contains(g) {
+                return Err(CompileError {
+                    span,
+                    kind: CompileErrorKind::MapNotClosed(g.clone()),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build a graft's [`Composite`] (per graph tape) plus its continuation

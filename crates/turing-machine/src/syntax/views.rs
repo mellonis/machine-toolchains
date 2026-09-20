@@ -41,6 +41,7 @@ ast_node!(pub struct MoveVecView: TmcKind::MoveVec.into());
 ast_node!(pub struct TransitionView: TmcKind::Transition.into());
 ast_node!(pub struct BindingArgView: TmcKind::BindingArg.into());
 ast_node!(pub struct SymMapView: TmcKind::SymMap.into());
+ast_node!(pub struct MapDeclView: TmcKind::MapDecl.into());
 
 /// One item that can appear at file level: `use`, `alphabet`,
 /// `machine`, `namespace`, and `reuse` (both `routine` and `graph` —
@@ -61,6 +62,7 @@ ast_node!(pub struct SymMapView: TmcKind::SymMap.into());
 pub enum TopView {
     Use(UseView),
     Alphabet(AlphabetView),
+    MapDecl(MapDeclView),
     Reuse(ReuseView),
     Machine(MachineView),
     Namespace(NamespaceView),
@@ -73,6 +75,7 @@ impl TopView {
         UseView::cast(node.clone())
             .map(TopView::Use)
             .or_else(|| AlphabetView::cast(node.clone()).map(TopView::Alphabet))
+            .or_else(|| MapDeclView::cast(node.clone()).map(TopView::MapDecl))
             .or_else(|| ReuseView::cast(node.clone()).map(TopView::Reuse))
             .or_else(|| MachineView::cast(node.clone()).map(TopView::Machine))
             .or_else(|| NamespaceView::cast(node).map(TopView::Namespace))
@@ -86,6 +89,7 @@ impl TopView {
         match self {
             TopView::Use(v) => v.syntax(),
             TopView::Alphabet(v) => v.syntax(),
+            TopView::MapDecl(v) => v.syntax(),
             TopView::Reuse(v) => v.syntax(),
             TopView::Machine(v) => v.syntax(),
             TopView::Namespace(v) => v.syntax(),
@@ -102,6 +106,7 @@ impl TopView {
         match self {
             TopView::Use(_) => TmcKind::Use,
             TopView::Alphabet(_) => TmcKind::Alphabet,
+            TopView::MapDecl(_) => TmcKind::MapDecl,
             TopView::Reuse(_) => TmcKind::Reuse,
             TopView::Machine(_) => TmcKind::Machine,
             TopView::Namespace(_) => TmcKind::Namespace,
@@ -313,6 +318,93 @@ impl AlphabetView {
     /// The doc run this declaration retro-wraps, when one was written —
     /// the alphabet's own first child node (docs/core.md (syntax
     /// trees)).
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
+    }
+}
+
+/// `MAP_DECL`'s own header IDENTs, in document order — direct child IDENT
+/// tokens up to (not including) the `:` before the source alphabet: an
+/// optional `export`, then the `map` keyword, then the name
+/// (`parse_map_decl` in `crates/turing-machine/src/parser.rs`). Shared by
+/// `name_token` and `exported`, mirroring `alphabet_header_idents`.
+fn map_decl_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    node.children_with_tokens()
+        .take_while(|e| e.kind() != TmcKind::Colon.into())
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
+impl MapDeclView {
+    /// The map's name: the LAST header IDENT before `:`, mirroring
+    /// `AlphabetView::name_token`.
+    pub fn name_token(&self) -> SyntaxToken {
+        map_decl_header_idents(self.syntax())
+            .into_iter()
+            .next_back()
+            .expect("MAP_DECL always carries a name IDENT before its `:`")
+    }
+
+    /// Whether `export` was written — the first header IDENT's text,
+    /// mirroring `AlphabetView::exported`.
+    pub fn exported(&self) -> bool {
+        map_decl_header_idents(self.syntax())
+            .first()
+            .is_some_and(|t| t.text() == "export")
+    }
+
+    /// Every segment of the SOURCE alphabet reference — the IDENTs between
+    /// `:` and `->`, one for a bare name, several for a qualified one,
+    /// mirroring `TapeView::alphabet_segments`.
+    pub fn src_segments(&self) -> Vec<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .skip_while(|e| e.kind() != TmcKind::Colon.into())
+            .take_while(|e| e.kind() != TmcKind::Arrow.into())
+            .filter_map(|e| match e {
+                SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// [`Self::src_segments`], joined `::` — mirroring
+    /// `TapeView::alphabet_text`.
+    pub fn src_text(&self) -> String {
+        self.src_segments()
+            .iter()
+            .map(|t| t.text().to_string())
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+
+    /// Every segment of the TARGET alphabet reference — the IDENTs between
+    /// `->` and the body's `{`.
+    pub fn dst_segments(&self) -> Vec<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .skip_while(|e| e.kind() != TmcKind::Arrow.into())
+            .take_while(|e| e.kind() != TmcKind::LBrace.into())
+            .filter_map(|e| match e {
+                SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// [`Self::dst_segments`], joined `::`.
+    pub fn dst_text(&self) -> String {
+        self.dst_segments()
+            .iter()
+            .map(|t| t.text().to_string())
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+
+    /// The doc run this declaration retro-wraps, when one was written.
     pub fn doc_run(&self) -> Option<DocRunView> {
         child(self.syntax())
     }

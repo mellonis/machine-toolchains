@@ -61,15 +61,15 @@ use mtc_core::syntax::{
 
 use super::kinds::TmcKind;
 use super::views::{
-    AlphabetView, BindView, DocRunView, GraftView, MachineView, ReuseKind, ReuseView, RootView,
-    RuleView, StateView, TapeView, TopView, UsePathView, WorldView,
+    AlphabetView, BindView, DocRunView, GraftView, MachineView, MapDeclView, ReuseKind, ReuseView,
+    RootView, RuleView, StateView, TapeView, TopView, UsePathView, WorldView,
 };
 use crate::lexer::{Comment, CommentKind, GLYPH_ESCAPES, Token, TokenKind, normalize_doc_payload};
 use crate::parser::{
-    Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, Program, Routine, Rule, Signature,
-    State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems, reparse_binding_arg,
-    reparse_doc_items, reparse_move_vec, reparse_pattern, reparse_qual_name, reparse_sig_param,
-    reparse_transition, reparse_write_vec,
+    Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, MapDecl, Program, Routine, Rule,
+    Signature, State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems,
+    reparse_binding_arg, reparse_doc_items, reparse_map_pairs, reparse_move_vec, reparse_pattern,
+    reparse_qual_name, reparse_sig_param, reparse_transition, reparse_write_vec,
 };
 use crate::parser::{DocRunItem, DocRunKind};
 
@@ -678,6 +678,64 @@ pub(crate) fn extract_alphabet(
     }
 }
 
+/// One `export? map NAME: SRC -> DST { pairs }` — mirrors
+/// [`extract_alphabet`]'s own shape: `line` is the NAME's line, `col` the
+/// HEADER's column, `src`/`dst` the two alphabet references' own spans
+/// (first segment start → last segment end, mirroring [`extract_tape`]'s
+/// qualified-alphabet span).
+pub(crate) fn extract_map_decl(
+    view: &MapDeclView,
+    ns: &[String],
+    source: &str,
+    index: &TextLineIndex,
+) -> MapDecl {
+    let name = view.name_token();
+    let header = header_token(view.syntax());
+    let src_segments = view.src_segments();
+    let src_first = src_segments
+        .first()
+        .expect("MAP_DECL always carries a source alphabet IDENT after `:`");
+    let src_last = src_segments
+        .last()
+        .expect("MAP_DECL always carries a source alphabet IDENT after `:`");
+    let src_span = index.span(TextRange::new(
+        src_first.text_range().start,
+        src_last.text_range().end,
+    ));
+    let dst_segments = view.dst_segments();
+    let dst_first = dst_segments
+        .first()
+        .expect("MAP_DECL always carries a target alphabet IDENT after `->`");
+    let dst_last = dst_segments
+        .last()
+        .expect("MAP_DECL always carries a target alphabet IDENT after `->`");
+    let dst_span = index.span(TextRange::new(
+        dst_first.text_range().start,
+        dst_last.text_range().end,
+    ));
+    MapDecl {
+        name: name.text().to_string(),
+        name_span: index.span(name.text_range()),
+        line: index.line_col(name.text_range().start).0,
+        col: index.line_col(header.text_range().start).1,
+        exported: view.exported(),
+        ns: ns.to_vec(),
+        src: view.src_text(),
+        src_span,
+        dst: view.dst_text(),
+        dst_span,
+        pairs: reparse_map_pairs(&sig_tokens(view.syntax(), index)),
+        // Header start (not the node's own start, which is the bound doc
+        // run when one was written — `header_token`'s own doc) → the
+        // node's end, mirroring `extract_tape`'s `span`.
+        span: index.span(TextRange::new(
+            header.text_range().start,
+            view.syntax().text_range().end,
+        )),
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
 /// One `volatile? tape NAME: ALPHABET;` — the one declaration here
 /// whose node start IS its header, since `tape` accepts no doc run:
 /// `Parser::next_is_world_doc_accepting` excludes it, so a run written
@@ -1052,6 +1110,7 @@ fn extract_items(
             TopView::Alphabet(a) => program
                 .alphabets
                 .push(extract_alphabet(&a, ns, source, index)),
+            TopView::MapDecl(m) => program.maps.push(extract_map_decl(&m, ns, source, index)),
             TopView::Namespace(nsv) => {
                 let mut child = ns.to_vec();
                 child.push(nsv.name());
@@ -1105,6 +1164,7 @@ pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
     let mut program = Program {
         imports: Vec::new(),
         alphabets: Vec::new(),
+        maps: Vec::new(),
         routines: Vec::new(),
         graphs: Vec::new(),
         machine: None,
@@ -1482,6 +1542,7 @@ mod tests {
                         span: Span::new(5, 28, 5, 36),
                     }],
                     span: Span::new(5, 22, 5, 38),
+                    named: None,
                 }),
             },
             span: Span::new(5, 11, 5, 38),
@@ -1549,6 +1610,7 @@ mod tests {
                 },
             ],
             span: Span::new(5, 22, 5, 48),
+            named: None,
         };
 
         let root =

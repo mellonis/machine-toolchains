@@ -750,6 +750,46 @@ An explicitly written identity pair is not a hole: `'0' -> '0'` keeps `0`
 mapped even under the closed rule, which is why the example above lists
 the digits rather than relying on their indices lining up.
 
+### Named maps
+
+A map used at several sites can be declared once and referenced by name,
+alongside the inline form, which stays legal everywhere it always was:
+
+```
+map wideToBits: wide -> bits { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+
+bind plusOne(num = data with map wideToBits) as inc;
+[*] -> call invert(num = data with map wideToBits) then t;
+```
+
+`export map` alongside `export alphabet` makes a declaration importable
+(`use lib::wideToBits;`), and it travels through a `.tmh` header the same
+way an exported alphabet does. A named map **expands to its declared
+pairs** before anything past name resolution sees it — the linker never
+receives a name, and a site written `with map NAME` compiles to exactly
+the binding the same site would carry written `with map { … }` inline: a
+name is a spelling, not a semantics.
+
+The declaration is checked **once**, at the `map` statement itself, over
+its own two named alphabets (SOURCE, then DST): every pair's glyphs
+resolve in their own alphabet, the blank stays pinned, and — on
+equal-cardinality alphabets — the map is injective, exactly the graft-time
+checks above. On UNEQUAL cardinalities the declaration additionally
+requires every non-blank source symbol to be named explicitly: unlike a
+graft's own inline map (one splice, one visible use, so an unnamed source
+quietly becomes a hole), a named declaration is meant to be reused at
+every site that names it, so a gap left implicit there would be a silent
+runtime trap wherever it is next used. `wideToBits` above satisfies this:
+`wide`'s four non-blank symbols (`^`, `$`, `0`, `1`) are all named, even
+though two of them collapse onto the same target glyph — closed, not
+injective, which unequal cardinalities never require.
+
+At each SITE only two further facts are checked: the caller tape's
+alphabet must be the map's own declared SOURCE, and the callee
+parameter's alphabet must be its own declared TARGET — a named map
+resolved once at its declaration cannot silently drift onto a
+differently-alphabeted pair of tapes at a use site.
+
 ## Range expansion and substitution
 
 Ranges and bindings are source-level notation. The compiler expands each

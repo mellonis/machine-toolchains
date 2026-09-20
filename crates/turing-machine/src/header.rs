@@ -1,12 +1,13 @@
 //! The `tmt interface` printer (docs/tmt/language.md (headers)): one
 //! canonical rendering of a unit's EXPORTED declarations, reachable from
 //! two inputs — a `.tmc` source (the complete arm: exported alphabets,
-//! exported maps in a later round (none exist in the language yet, and a
-//! header is a valid, total rendering without them), `export routine`
+//! exported maps (docs/tmt/language.md (named maps)), `export routine`
 //! signatures with their contracts and `?` doc lines, and `export graph`
 //! bodies in full) or a compiled `.tmo` object (the reduced arm:
-//! signatures, contracts, and exported alphabets only — an object carries
-//! no graph body, no map, and no doc line to print).
+//! signatures, contracts, and exported alphabets only — a named map has
+//! no assembly spelling of its own, the same reason an exported alphabet
+//! DOES print here (its glyphs ride the wire) while a graph body and a
+//! doc line do not — an object carries no map information to print).
 //!
 //! **The printer never emits `volatile` either**, for the identical
 //! reason: the language reference states outright that the modifier is
@@ -152,8 +153,8 @@ use crate::declarations::Declarations;
 use crate::footprint::{self, FootprintTable};
 use crate::parser::{
     Bind, BindingArg, BindingValue, Doc, FoldExprKind, FoldExprNode, FoldOp, Graft, Graph, Import,
-    MapArrow, MoveDir, Pattern, PatternCellKind, Program, Routine, Rule, SigParam, SigParamKind,
-    Signature, State, SymLit, SymMap, TermKind, Transition, WriteCellKind,
+    MapArrow, MapDecl, MapPair, MoveDir, Pattern, PatternCellKind, Program, Routine, Rule,
+    SigParam, SigParamKind, Signature, State, SymLit, SymMap, TermKind, Transition, WriteCellKind,
 };
 
 /// Render every exported declaration of a `.tmc` source as a header — the
@@ -609,6 +610,16 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
             }
         }
     }
+    // An exported map's own two alphabets, the same "referenced, printed
+    // even if not itself exported" rule.
+    for map in &program.maps {
+        if map.exported {
+            let full = full_name(&map.ns, &map.name);
+            let decl = &resolved.maps[full.as_str()];
+            referenced_alphabets.insert(decl.src.as_str());
+            referenced_alphabets.insert(decl.dst.as_str());
+        }
+    }
 
     // Every declaration this render will ITSELF print, by full qualified
     // name — an exported alphabet, an alphabet merely referenced (see
@@ -625,6 +636,11 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
         let full = full_name(&alphabet.ns, &alphabet.name);
         if alphabet.exported || referenced_alphabets.contains(full.as_str()) {
             printed_full_names.insert(full);
+        }
+    }
+    for map in &program.maps {
+        if map.exported {
+            printed_full_names.insert(full_name(&map.ns, &map.name));
         }
     }
     for routine in &program.routines {
@@ -653,6 +669,21 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
             &alphabet.ns,
             alphabet_lines(&alphabet.name, glyphs, alphabet.exported),
         );
+    }
+    // Named maps: EXPORTED only (docs/tmt/language.md (named maps)) — a
+    // map used only privately inside a printed graph body is a narrower
+    // gap this render does not yet close (`docs/tmt/language.md`'s own
+    // alphabet precedent prints a referenced-but-unexported alphabet too;
+    // a named map does not get that treatment here), so a graph that
+    // names a non-exported map in a binding still prints `with map NAME`
+    // (`binding_value_text`) but the header will not carry NAME's own
+    // declaration — a header consumer would need it exported (or
+    // declared locally in its own unit) to graft that graph back.
+    for map in &program.maps {
+        if !map.exported {
+            continue;
+        }
+        root.insert(&map.ns, map_lines(map));
     }
     for routine in &program.routines {
         if !routine.exported {
@@ -699,6 +730,7 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
         .alphabets
         .iter()
         .map(|a| full_name(&a.ns, &a.name))
+        .chain(program.maps.iter().map(|m| full_name(&m.ns, &m.name)))
         .chain(program.routines.iter().map(|r| full_name(&r.ns, &r.name)))
         .chain(program.graphs.iter().map(|g| full_name(&g.ns, &g.name)))
         .collect();
@@ -706,6 +738,7 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
         let needed = needed_imports(
             ns,
             &program.imports,
+            &program.maps,
             &program.routines,
             &program.graphs,
             &printed_full_names,
@@ -771,12 +804,23 @@ fn use_line_text(import: &Import) -> String {
 fn needed_imports<'a>(
     ns: &[String],
     imports: &'a [Import],
+    maps: &'a [MapDecl],
     routines: &[Routine],
     graphs: &[Graph],
     printed_full_names: &HashSet<String>,
     local_names: &HashSet<String>,
 ) -> Vec<&'a Import> {
     let mut referenced: HashSet<&str> = HashSet::new();
+    for map in maps {
+        if map.exported && map.ns.as_slice() == ns {
+            if !map.src.contains("::") {
+                referenced.insert(map.src.as_str());
+            }
+            if !map.dst.contains("::") {
+                referenced.insert(map.dst.as_str());
+            }
+        }
+    }
     for routine in routines {
         if routine.exported && routine.ns.as_slice() == ns {
             collect_sig_refs(&routine.sig, &mut referenced);
@@ -823,19 +867,39 @@ fn collect_graph_body_refs<'p>(graph: &'p Graph, out: &mut HashSet<&'p str>) {
         if let [only] = graft.target.segments.as_slice() {
             out.insert(only.as_str());
         }
+        collect_binding_map_refs(&graft.args, out);
     }
     for bind in &graph.binds {
         if let [only] = bind.target.segments.as_slice() {
             out.insert(only.as_str());
         }
+        collect_binding_map_refs(&bind.args, out);
     }
     for state in &graph.states {
         for rule in &state.rules {
-            if let Transition::Call { target, .. } = &rule.transition
-                && let [only] = target.segments.as_slice()
-            {
-                out.insert(only.as_str());
+            if let Transition::Call { target, args, .. } = &rule.transition {
+                if let [only] = target.segments.as_slice() {
+                    out.insert(only.as_str());
+                }
+                collect_binding_map_refs(args, out);
             }
+        }
+    }
+}
+
+/// A binding-arg list's own `with map NAME` references, BARE
+/// (unqualified) ones only — the same "single segment" rule
+/// `collect_graph_body_refs` applies to a graft/bind/call target, over a
+/// named map's joined reference text rather than a [`crate::parser::
+/// QualName`]'s segments (`SymMap::named` stores the joined string; a
+/// qualified one self-resolves and needs no `use` line).
+fn collect_binding_map_refs<'p>(args: &'p [BindingArg], out: &mut HashSet<&'p str>) {
+    for arg in args {
+        if let BindingValue::Named { map: Some(m), .. } = &arg.value
+            && let Some((name, _)) = &m.named
+            && !name.contains("::")
+        {
+            out.insert(name.as_str());
         }
     }
 }
@@ -1135,8 +1199,18 @@ fn binding_args_text(args: &[BindingArg]) -> String {
 
 fn binding_value_text(value: &BindingValue) -> String {
     match value {
+        // A named reference (`SymMap::named`, `Some`) prints its own name
+        // verbatim: this renderer reads the RAW, pre-resolution `Program`
+        // (the module doc's determinism rule — never `Resolved`'s
+        // world-order-dependent data for this), so a named map's `pairs`
+        // are still empty here (`compiler::expand_named_maps` fills them
+        // in later, for the compile pipeline, never for `Program` itself)
+        // — printing them would be `with map {  }`, silently wrong.
         BindingValue::Named { target, map, .. } => match map {
-            Some(m) => format!("{target} with map {{ {} }}", map_pairs_text(m)),
+            Some(m) => match &m.named {
+                Some((name, _)) => format!("{target} with map {name}"),
+                None => format!("{target} with map {{ {} }}", map_pairs_text(m)),
+            },
             None => target.clone(),
         },
         BindingValue::Terminator { kind, .. } => match kind {
@@ -1148,7 +1222,14 @@ fn binding_value_text(value: &BindingValue) -> String {
 }
 
 fn map_pairs_text(map: &SymMap) -> String {
-    map.pairs
+    map_pair_list_text(&map.pairs)
+}
+
+/// One comma-`, `-joined pair list — shared by an inline `with map { … }`
+/// ([`map_pairs_text`]) and a named map's own declared body
+/// ([`map_lines`]).
+fn map_pair_list_text(pairs: &[MapPair]) -> String {
+    pairs
         .iter()
         .map(|pair| {
             let arrow = match pair.arrow {
@@ -1163,6 +1244,25 @@ fn map_pairs_text(map: &SymMap) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// One `export map NAME: SRC -> DST { pairs }` — mirrors
+/// [`alphabet_lines`]'s shape (a doc run, then the one-line declaration;
+/// this renderer never wraps a body across lines, matching every other
+/// declaration here). Only ever called for an EXPORTED map (see the
+/// caller in [`render_source`]).
+fn map_lines(map: &MapDecl) -> Vec<String> {
+    let mut lines = doc_lines(map.doc.as_ref());
+    let pairs = if map.pairs.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{ {} }}", map_pair_list_text(&map.pairs))
+    };
+    lines.push(format!(
+        "export map {}: {} -> {} {pairs}",
+        map.name, map.src, map.dst
+    ));
+    lines
 }
 
 fn graft_text(graft: &Graft) -> String {

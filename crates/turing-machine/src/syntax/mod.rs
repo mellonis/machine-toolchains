@@ -146,7 +146,7 @@ pub use kinds::{TmcKind, kind_name};
 pub use layout::{SigLayout, layout};
 pub use views::{
     AlphabetView, AttrView, BindView, BindingArgView, ContractClauseView, DocRunView, GraftView,
-    MachineView, MoveVecView, NamespaceView, ReuseKind, ReuseView, RootView, RuleView,
+    MachineView, MapDeclView, MoveVecView, NamespaceView, ReuseKind, ReuseView, RootView, RuleView,
     SigParamKind, SigParamView, StateView, SymMapView, TapeView, TopView, TransitionView,
     UsePathView, UseView, WorldView, WriteVecView,
 };

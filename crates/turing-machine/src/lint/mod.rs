@@ -144,6 +144,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("unused-graft-instance", rules::unused_graft_instance::check),
     ("unused-graft-name", rules::unused_graft_name::check),
     ("unused-alphabet", rules::unused_alphabet::check),
+    ("unused-map", rules::unused_map::check),
     ("unused-tape", rules::unused_tape::check),
     ("unused-exit", rules::unused_exit::check),
     ("deprecated-call", rules::deprecated_call::check),

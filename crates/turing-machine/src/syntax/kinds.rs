@@ -123,6 +123,14 @@ pub enum TmcKind {
     /// tokens skipped to the next sync point (`parse_green_resilient`).
     /// Nothing reads inside one — extraction and views skip it whole.
     Error = 54,
+    /// `export? map NAME: SRC -> DST { pairs }` — a top-level declaration,
+    /// appended after `Error` so no existing discriminant moves. Its own
+    /// extent follows the same keyword-decided-extent rule `ALPHABET`
+    /// follows: the node opens at `export` (when written) or `map`,
+    /// closes at the body's `}`, and a pair's tokens sit directly under
+    /// it unbracketed — the same "no dedicated node for a comma-separated
+    /// element" choice `ALPHABET`'s own elements make.
+    MapDecl = 55,
 }
 
 impl From<TmcKind> for SyntaxKind {
@@ -197,6 +205,7 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
         k if k == TmcKind::BindingArg.into() => "BINDING_ARG",
         k if k == TmcKind::SymMap.into() => "SYM_MAP",
         k if k == TmcKind::Error.into() => "ERROR",
+        k if k == TmcKind::MapDecl.into() => "MAP_DECL",
         _ => "?",
     }
 }
@@ -396,7 +405,7 @@ mod tests {
     /// by the same argument.
     #[test]
     fn kind_name_never_falls_through_for_an_occupied_discriminant() {
-        for raw in (0u16..=30).chain(32u16..=54) {
+        for raw in (0u16..=30).chain(32u16..=55) {
             let name = kind_name(SyntaxKind(raw));
             assert!(!name.is_empty(), "kind {raw} has no name");
             assert_ne!(name, "?", "kind {raw} has no `kind_name` arm");
