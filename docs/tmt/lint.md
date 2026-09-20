@@ -651,6 +651,28 @@ the fix is missing:
 h.tmc:3:54: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
 ```
 
+### unreachable-continuation
+
+A `then` written on a `call`/`bind` site whose callee is KNOWN to be
+`noreturn` — the continuation can never run, since the callee never hands
+control back (docs/tmt/language.md (reuse)). "Known" means the callee's
+own `noreturn` clause is visible to this unit: an in-unit routine's own
+declaration, or an out-of-unit one's entry in the declarations this
+compile was given (`--extern`, the embedded standard library). A callee
+this unit cannot see at all is left alone even when it happens to be
+`noreturn` in reality — the linker never checks a `then` either way, so
+nothing here can tell "unreachable" from "merely unproven", and `then`
+stays mandatory at such a site regardless.
+
+```
+k.tmc:5:34: lint: this `then` is unreachable — `forever` is `noreturn`
+```
+
+The fix drops the whole ` then …` clause, `MachineApplicable`: the
+program's observable behavior is unchanged, since the callee was never
+going to resume there anyway. Withheld by the shared comment guard
+(quickfix availability, above) when a comment sits inside the clause.
+
 ### state-may-trap (opt-in)
 
 A state whose rules leave some input unmatched and that has no

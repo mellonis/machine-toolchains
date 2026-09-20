@@ -134,17 +134,21 @@ pub(crate) enum Transition2 {
     /// `goto` a concrete same-world state.
     Goto(String),
     /// A routine call surviving to IR (a binding-call operand). `args` are the
-    /// source-form binding args the IR lowers to a bound-call record.
+    /// source-form binding args the IR lowers to a bound-call record. `then`
+    /// is `None` only when the author omitted it — legal exactly when
+    /// `target` is a callee KNOWN to be `noreturn`, a check `ir::lower_rule`
+    /// makes (docs/tmt/language.md (reuse)).
     Call {
         target: String,
         external: bool,
         args: Vec<BindingArg>,
-        then: Continuation,
+        then: Option<Continuation>,
     },
     /// A call on a world-local bind name (the bind carries the binding).
+    /// `then` is the SITE's own resume point — see [`Self::Call`]'s doc.
     BindCall {
         name: String,
-        then: Continuation,
+        then: Option<Continuation>,
     },
     Return,
     Stop,
@@ -1550,11 +1554,11 @@ fn resolve_aliases(states: &mut [ExpandedState], alias: &HashMap<String, String>
             match &mut r.transition {
                 Transition2::Goto(n) => *n = resolve_alias(n, alias),
                 Transition2::Call { then, .. } | Transition2::BindCall { then, .. } => {
-                    if let Continuation::State { name, span } = then {
-                        *then = Continuation::State {
+                    if let Some(Continuation::State { name, span }) = then {
+                        *then = Some(Continuation::State {
                             name: resolve_alias(name, alias),
                             span: *span,
-                        };
+                        });
                     }
                 }
                 _ => {}

@@ -896,7 +896,7 @@ mod tests {
             target: target.into(),
             binding,
             exits: Vec::new(),
-            then: IrThen::Return,
+            then: Some(IrThen::Return),
         }
     }
 

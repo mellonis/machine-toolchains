@@ -450,7 +450,7 @@ fn reference_in_world(
                         };
                         return Some((hit, target.span));
                     }
-                    if let Continuation::State { name, span } = then {
+                    if let Some(Continuation::State { name, span }) = then {
                         let at = name_span(*span, name);
                         if span_touches(at, pos) {
                             return Some((world_local(world, name), at));

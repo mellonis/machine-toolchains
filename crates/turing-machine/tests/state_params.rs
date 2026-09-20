@@ -11,6 +11,7 @@
 //! failing mutation rather than a no-op.
 
 use mtc_core::formats::executable::Executable;
+use mtc_core::formats::object::{ObjectFile, SymbolDef};
 use mtc_core::formats::tapeblock::TapeSnapshot;
 use mtc_core::linker::{CallMech, LinkOptions};
 use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, WideTape};
@@ -996,3 +997,346 @@ machine {
   state done { [*, *] -> halt; }
 }
 ";
+
+// ── `noreturn`: inferred, declarable, exported ──────────────────────────────
+
+/// The [`RoutineInterface`](mtc_core::formats::object::RoutineInterface)
+/// for the routine/machine named `name`, found by its symbol's blob index —
+/// mirrors `interface_emission.rs::routine_interface`, kept local rather
+/// than shared: each integration test file in this crate defines its own
+/// local helpers instead of depending on a shared test-support module.
+fn returns_bit(object: &ObjectFile, name: &str) -> bool {
+    let symbol = object
+        .symbols
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no symbol named `{name}` in {:?}", object.symbols));
+    let blob = match symbol.def {
+        SymbolDef::Defined { blob } | SymbolDef::Local { blob } => blob,
+        SymbolDef::External => panic!("`{name}` is external, not defined in this object"),
+    };
+    object
+        .interface
+        .as_ref()
+        .unwrap_or_else(|| panic!("object carries no interface section"))
+        .routines[blob as usize]
+        .returns
+}
+
+/// `forever`'s only `return` sits in `dead` — a state nothing in the body
+/// ever `goto`s or resumes at, so it survives to `-O0` codegen but is
+/// deleted by `-O1`'s `dce` pass. Built with EXACTLY this shape because a
+/// fact computed AFTER the optimizer would see the `return` at `-O0`
+/// (`dce` never runs) and not at `-O1` (already deleted) — the one shape
+/// that makes "compute it post-optimizer" and "compute it pre-optimizer"
+/// disagree.
+const DEAD_RETURN_NORETURN: &str = "\
+alphabet ab { '_', 'a' }
+
+export routine forever(tape t: ab) {
+  entry state s { [*] -> goto s; }
+  state dead { [*] -> return; }
+}
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}
+";
+
+/// The inferred fact never depends on `-O`: `forever`'s dead `return` is
+/// counted conservatively either way, so both levels agree — here, both
+/// say "can return" (`returns == true`), since a dead state still counts.
+///
+/// Mutation: compute `IrWorld::returns` from `ir::lower_world` AFTER
+/// `optimizer::optimize` runs instead of before (feed the ALREADY-lowered,
+/// then separately optimized-per-level IR into `body_can_return`'s
+/// equivalent post-hoc): at `-O0` `dce` never runs, so `dead` and its
+/// `return` survive and the fact still reads `true`; at `-O1` `dce` has
+/// already deleted `dead` by the time the fact is read, so it flips to
+/// `false` — verified by hand: reordering `ir.rs`'s `returns` field to be
+/// filled from a post-optimize scan reds this test at `-O1` while `-O0`
+/// stays green, the exact asymmetry this assertion exists to catch.
+#[test]
+fn noreturn_is_inferred_from_the_body_independently_of_opt_level() {
+    let o0 = compile(
+        DEAD_RETURN_NORETURN,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile -O0: {e}"))
+    .object;
+    let o1 = compile(
+        DEAD_RETURN_NORETURN,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile -O1: {e}"))
+    .object;
+    assert_eq!(
+        returns_bit(&o0, "forever"),
+        returns_bit(&o1, "forever"),
+        "the `returns` bit must not depend on the optimization level"
+    );
+    // Both must additionally read `true`: the dead `return` counts.
+    assert!(
+        returns_bit(&o0, "forever"),
+        "the dead `return` still counts at -O0"
+    );
+    assert!(
+        returns_bit(&o1, "forever"),
+        "the dead `return` still counts at -O1"
+    );
+}
+
+/// A routine declared `noreturn` whose body carries a live `return` is
+/// refused — the declared-and-wrong shape.
+#[test]
+fn a_declared_noreturn_that_returns_is_refused() {
+    let src = "\
+alphabet ab { '_', 'a' }
+
+routine liar(tape t: ab) noreturn {
+  entry state s { [*] -> return; }
+}
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}
+";
+    let err = compile(src, CompileOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("[noreturn-violated]"), "{err}");
+}
+
+/// The same body without the `return` — the near miss: a truthful
+/// `noreturn` declaration compiles clean.
+#[test]
+fn a_truthful_one_compiles() {
+    let src = "\
+alphabet ab { '_', 'a' }
+
+routine honest(tape t: ab) noreturn {
+  entry state s { [*] -> goto s; }
+}
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}
+";
+    compile(src, CompileOptions::default()).unwrap_or_else(|e| panic!("compile: {e}"));
+}
+
+/// The compiled object's interface carries the inferred fact as its
+/// `returns` bit — `false` for a genuinely `noreturn` routine.
+#[test]
+fn the_interface_carries_the_returns_bit() {
+    let src = "\
+alphabet ab { '_', 'a' }
+
+export routine forever(tape t: ab) noreturn {
+  entry state s { [*] -> goto s; }
+}
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}
+";
+    let object = compile(src, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile: {e}"))
+        .object;
+    assert!(
+        !returns_bit(&object, "forever"),
+        "a `noreturn` routine's interface must carry `returns: false`"
+    );
+}
+
+/// `tmt interface` prints `noreturn` on BOTH arms, from the same fact
+/// reached two different ways: the source arm infers it from the body, the
+/// object arm reads the wire's `returns` bit codegen wrote from that same
+/// inference — so the two arms agree by construction.
+#[test]
+fn tmt_interface_prints_noreturn() {
+    let dir = scratch("interface_noreturn");
+    // `ab` is EXPORTED so the object arm's alphabet-matching rule (1)
+    // reaches it by its own short name too, exactly like the source
+    // arm — otherwise the object arm synthesizes a private name
+    // (`resolve_object_alphabet`'s rule (4)) and the two arms'
+    // signature LINES would legitimately differ in the alphabet name
+    // alone, which is not what this test is checking.
+    const SRC: &str = "\
+export alphabet ab { '_', 'a' }
+
+export routine forever(tape t: ab) noreturn {
+  entry state s { [*] -> goto s; }
+}
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}
+";
+    let src_path = write_file(&dir, "src.tmc", SRC);
+
+    let source_arm = execute(&args(&["interface", src_path.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface: {e}"));
+    assert_eq!(source_arm.code, 0, "{}", source_arm.stderr);
+    assert!(
+        source_arm
+            .stdout
+            .contains("export routine forever(tape t: ab writes {}) noreturn;"),
+        "source arm: {}",
+        source_arm.stdout
+    );
+
+    let obj_path = dir.join("src.tmo");
+    let compiled = execute(&args(&[
+        "compile",
+        src_path.to_str().unwrap(),
+        "-o",
+        obj_path.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile: {e}"));
+    assert_eq!(compiled.code, 0, "{}", compiled.stderr);
+
+    let object_arm = execute(&args(&["interface", obj_path.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface: {e}"));
+    assert_eq!(object_arm.code, 0, "{}", object_arm.stderr);
+    assert!(
+        object_arm
+            .stdout
+            .contains("export routine forever(tape t: ab writes {}) noreturn;"),
+        "object arm: {}",
+        object_arm.stdout
+    );
+}
+
+/// A bodiless (`.tmh`) declarations-only reading of a `noreturn` routine
+/// round-trips: there is no body to infer from, so the declared clause is
+/// the only source of truth, and it must reprint unchanged.
+#[test]
+fn a_bodiless_noreturn_declaration_round_trips() {
+    let dir = scratch("interface_noreturn_header");
+    let header_path = write_file(
+        &dir,
+        "src.tmh",
+        "\
+alphabet ab { '_', 'a' }
+
+export routine forever(tape t: ab writes {}) noreturn;
+",
+    );
+    let out = execute(&args(&["interface", header_path.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout
+            .contains("export routine forever(tape t: ab writes {}) noreturn;"),
+        "{}",
+        out.stdout
+    );
+}
+
+// ── `then` optional against a known `noreturn` callee, end to end ──────────
+
+/// `pick` never carries a `return`, only its two `state` parameters as
+/// exits, so it is inferred `noreturn` — the call site's own `then` may
+/// therefore be omitted, putting the call in TAIL position
+/// (docs/tmt/language.md (reuse)). Seeded so the exit that fires is
+/// unambiguous: `go` writes `'1'` before calling, so `pick`'s dispatch
+/// takes `hit`, not the blank-reading `miss`.
+const NORETURN_TAIL: &str = "\
+alphabet ab { '_', '0', '1' }
+
+routine pick(tape t: ab, state hit, state miss) noreturn {
+  entry state s {
+    ['1'] -> hit;
+    [*]   -> miss;
+  }
+}
+
+machine {
+  tape d: ab;
+  entry state go { [*] -> write ['1'] call pick(t = d, hit = won, miss = lost); }
+  state won  { [*] -> write ['0'] stop; }
+  state lost { [*] -> write ['1'] stop; }
+}
+";
+
+/// Codegen prints NOTHING after a tail-position call: no `ret`, `retx`,
+/// `stp`, `hlt`, or `jmp` — the very next line is a fresh state label, not
+/// a resume instruction belonging to this call.
+///
+/// Mutation: falling back to some default `Then` (e.g. always synthesizing
+/// `stp`) when `IrTransition::CallThen.then` is `None`; the line right
+/// after `call` would then be `stp` instead of `won:`.
+#[test]
+fn an_exit_bearing_tail_call_prints_no_resume_instruction() {
+    let tma = assembly(NORETURN_TAIL, OptLevel::O0);
+    let after_call: &str = tma
+        .lines()
+        .skip_while(|l| !l.trim_start().starts_with("call    pick"))
+        .nth(1)
+        .map(|l| l.trim())
+        .unwrap_or_else(|| panic!("no line after the call:\n{tma}"));
+    assert_eq!(
+        after_call, "won:",
+        "an instruction follows the tail call:\n{tma}"
+    );
+}
+
+/// The tail-position `noreturn` shape, executed end to end: an exit-bearing
+/// call whose `then` is omitted because its callee is inferred `noreturn`
+/// links and runs correctly under all three call mechanisms, at both
+/// optimization levels — the `.tmc`-level counterpart to the hand-written
+/// `.tma` fixture `link_matrix.rs::TAIL_POSITION_NORETURN` proves at the
+/// object level. None of the three mechanisms refuses it.
+///
+/// Mutation: refuse a `then`-omitted call unconditionally in
+/// `ir::lower_rule` (never checking `known_noreturn`); this fixture stops
+/// compiling at all, at either level.
+#[test]
+fn a_noreturn_exits_only_callee_may_omit_then_and_still_links_and_runs() {
+    for level in [OptLevel::O0, OptLevel::O1] {
+        for mech in MECHS {
+            let (outcome, snaps) = run_program(NORETURN_TAIL, level, mech, &[3]);
+            assert_eq!(
+                outcome,
+                Outcome::Stopped,
+                "under {mech} at {level:?} the tail-position call did not run to a stop"
+            );
+            assert_eq!(
+                cell_at(&snaps[0], 0),
+                1,
+                "under {mech} at {level:?}: exit `hit` should have fired, leaving '0' \
+                 (index 1) behind"
+            );
+        }
+    }
+}
+
+/// A `then` omitted against a callee that is NOT known to be `noreturn` —
+/// here, one this unit cannot see at all (no declarations for `outside`) —
+/// stays a compile error, never silently accepted. `then` also stays
+/// mandatory against a callee that CAN return; `an_exit_bearing_site_is_
+/// never_tail_called`'s own fixture and every other `then …` call in this
+/// file already exercise that half continuously.
+#[test]
+fn an_omitted_then_against_an_unknown_callee_is_refused() {
+    let src = "\
+alphabet ab { '_', 'a' }
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> call outside(t = t); }
+}
+";
+    let err = compile(src, CompileOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("[then-required]"), "{err}");
+}

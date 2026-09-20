@@ -96,6 +96,31 @@ every call site jumps into, and `return` hands control back to whichever
 site called it. `return` is legal only inside a routine; writing it in a
 `graph` or `machine` body is a compile error.
 
+Whether a routine can return at all is a fact of its body: any `return`
+transition, any `then return` on a call it makes, or `return` handed to a
+callee as a `state` argument (that callee's own exit then returns from
+THIS routine) all count, counted conservatively over the WHOLE body —
+dead states included — so the fact never depends on the optimization
+level. A routine with none of those is `noreturn`, and its signature may
+say so explicitly:
+
+```
+routine loop(tape t: ab) noreturn {
+  entry state s { [*] -> goto s; }
+}
+```
+
+The clause is an optional ASSERTION: the compiler checks it against the
+inferred fact and refuses a mismatch, but the inferred fact — carried on
+every compiled object and printed by `tmt interface` either way — never
+depends on whether the author wrote it. `then` becomes OPTIONAL at a
+`call`/`bind` site whose callee is KNOWN to be `noreturn` (its
+declarations are visible to this unit, in-unit or through `--extern`/the
+standard library); against an unknown callee, or one that can return,
+`then` stays mandatory, since the linker never checks it either way. A
+`then` written anyway against a known `noreturn` callee is the
+`unreachable-continuation` lint finding (`docs/tmt/lint.md`).
+
 A `graph` is a reusable *pattern* of behaviour rather than a callable
 body. It has no return: it names its exits as `state` parameters, and
 each graft site says which of its own states each exit leads to. A graph
@@ -539,6 +564,14 @@ at run time and in when continuations are decided.
 
 ```
 entry state s { [*] -> call plusOne(num = data) then done; }
+```
+
+`then` may be omitted when the callee is KNOWN (its declarations are
+visible to this unit) to be `noreturn` ("Worlds", above) — the call is
+then in tail position, and nothing after it ever runs:
+
+```
+entry state s { [*] -> call loop(t = data); }
 ```
 
 The argument list binds the callee's tape parameters to the caller's
@@ -992,14 +1025,14 @@ A deprecated entity's callers are a lint finding
 
 ## Reserved keywords
 
-Twenty-seven words are fully reserved and may not be used as any name — a
+Twenty-eight words are fully reserved and may not be used as any name — a
 tape, state, world, namespace, alias, binding, or graft-instance name:
 
 ```
 alphabet  machine  tape    state   entry   routine  graph   namespace
 export    use      graft   bind    as      map      with    write
 move      goto     call    then    return  stop     halt    debugger
-volatile  writes   preserves
+volatile  writes   preserves       noreturn
 ```
 
 Reservation is enforced wherever a name is expected: `tape state: ab;` is

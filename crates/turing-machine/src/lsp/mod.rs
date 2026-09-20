@@ -42,6 +42,7 @@ use mtc_core::syntax::{AstNode, GreenNode, SyntaxElement, SyntaxNode, TextLineIn
 
 use crate::compiler::{CompileError, Resolved, analyze_staged};
 use crate::config;
+use crate::declarations::Declarations;
 use crate::lexer::Token;
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 use crate::parser::{Doc, Program};
@@ -801,6 +802,9 @@ impl LanguageService for TmcLanguageService {
         ) {
             (Some(resolved), Some(program), Some(raw_tokens), Some(green)) => {
                 let root = SyntaxNode::new_root(Rc::clone(green));
+                // `analyze_staged`'s own fixed default — the identical
+                // choice `lint()` makes for the batch CLI.
+                let externals = Declarations::stdlib();
                 let ctx = LintContext {
                     resolved,
                     diagnostics: &staged.diagnostics,
@@ -808,6 +812,7 @@ impl LanguageService for TmcLanguageService {
                     root: &root,
                     index: &line_index,
                     comment_tokens: raw_tokens,
+                    externals: &externals,
                 };
                 Some(run_rules(&ctx, &effective_allow, &effective_warn))
             }

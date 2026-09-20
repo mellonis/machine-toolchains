@@ -60,7 +60,7 @@ pub(crate) fn body_referenced_names(world: &ResolvedWorld) -> HashSet<&str> {
                 }
                 Transition::Call { args, then, .. } => {
                     collect_arg_targets(args, &mut names);
-                    if let Continuation::State { name, .. } = then {
+                    if let Some(Continuation::State { name, .. }) = then {
                         names.insert(name.as_str());
                     }
                 }

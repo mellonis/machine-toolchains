@@ -23,7 +23,7 @@ use mtc_core::syntax::{AstNode, SyntaxElement, SyntaxNode, SyntaxToken};
 
 use crate::lint::LintContext;
 use crate::parser::MapPair;
-use crate::syntax::{GraftView, RuleView, TmcKind};
+use crate::syntax::{GraftView, RuleView, TmcKind, TransitionView};
 
 /// The innermost node castable to `V` on the path from `root` down to
 /// the node containing byte `offset` — the range query every helper is
@@ -131,6 +131,32 @@ pub(crate) fn marker_span(ctx: &LintContext, rule_span: Span) -> Option<Span> {
     })
 }
 
+/// The span to delete to remove a call's ` then CONTINUATION` clause —
+/// from the end of its binding list's `)` through the end of the
+/// TRANSITION itself, since the continuation is always a `call`
+/// transition's own last token: `call r(…) then d;` becomes `call r(…);`.
+/// Anchored on the call's own span. `None` when the transition carries no
+/// `then` token at all (already omitted — nothing for a caller to find
+/// here in the first place, since `unreachable-continuation` only ever
+/// fires on a call that DOES write one).
+pub(crate) fn then_clause_span(ctx: &LintContext, call_span: Span) -> Option<Span> {
+    let transition = innermost::<TransitionView>(ctx.root, ctx.index.offset(call_span.start))?;
+    let then_kw = transition
+        .syntax()
+        .children_with_tokens()
+        .find_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() && t.text() == "then" => {
+                Some(t)
+            }
+            _ => None,
+        })?;
+    let before = prev_significant_token(&then_kw)?;
+    Some(Span {
+        start: ctx.index.span(before.text_range()).end,
+        end: ctx.index.span(transition.syntax().text_range()).end,
+    })
+}
+
 /// The `->` token inside one map pair — the span a demotion edit
 /// replaces. Nothing but the arrow can sit between the pair's two
 /// literals, so the search is by range containment between them.
@@ -162,6 +188,7 @@ mod tests {
         let a: Analysis = analyze(src).unwrap();
         let root = SyntaxNode::new_root(std::rc::Rc::clone(&a.green));
         let index = TextLineIndex::new(src);
+        let externals = crate::declarations::Declarations::stdlib();
         let ctx = LintContext {
             resolved: &a.resolved,
             diagnostics: &a.diagnostics,
@@ -169,6 +196,7 @@ mod tests {
             root: &root,
             index: &index,
             comment_tokens: &a.tokens,
+            externals: &externals,
         };
         f(&ctx)
     }

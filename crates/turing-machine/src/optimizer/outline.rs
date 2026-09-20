@@ -224,13 +224,19 @@ fn compute_inbound(w: &IrWorld) -> HashMap<u32, Vec<u32>> {
                 IrTransition::Goto { state } => inbound.entry(*state).or_default().push(st.id),
                 IrTransition::CallThen { exits, then, .. } => {
                     match then {
-                        IrThen::Goto { state } => inbound.entry(*state).or_default().push(st.id),
+                        Some(IrThen::Goto { state }) => {
+                            inbound.entry(*state).or_default().push(st.id)
+                        }
                         // The other resume points are instructions after
-                        // the call, naming no state of this world.
-                        IrThen::Return
-                        | IrThen::ReturnExit { .. }
-                        | IrThen::Stop
-                        | IrThen::Halt => {}
+                        // the call, naming no state of this world; `None`
+                        // (a tail-position call) names none either.
+                        Some(
+                            IrThen::Return
+                            | IrThen::ReturnExit { .. }
+                            | IrThen::Stop
+                            | IrThen::Halt,
+                        )
+                        | None => {}
                     }
                     for e in exits {
                         inbound.entry(*e).or_default().push(st.id);
@@ -506,7 +512,7 @@ fn trampoline(w: &mut IrWorld, root: u32, routine_name: &str, junction: u32) {
             target: routine_name.to_string(),
             binding: vec![],
             exits: Vec::new(),
-            then: IrThen::Goto { state: junction },
+            then: Some(IrThen::Goto { state: junction }),
         },
         synthesized: false,
         direct: false,
@@ -598,7 +604,7 @@ mod tests {
                     Some(IrTransition::CallThen { target, binding, then, .. })
                         if target == "main.outline0"
                             && binding.is_empty()
-                            && *then == IrThen::Goto { state: mid_id }
+                            && *then == Some(IrThen::Goto { state: mid_id })
                 )
             })
             .collect();

@@ -282,19 +282,30 @@ fn widen_rule(r: &mut IrRule, n: usize) {
 /// `goto`s shift by `base`; a `return` becomes the call's `then` continuation
 /// (its `goto` target is already a caller-space id); terminals and traps pass
 /// through. Candidates are leaves, so no nested call is ever reached.
-fn remap_transition(t: &IrTransition, base: u32, then: IrThen) -> IrTransition {
+///
+/// `then: None` is a tail-position site — legal only against a callee KNOWN
+/// to be `noreturn`, which by that very fact has NO `return` transition
+/// anywhere in its body, dead or live (`ir::body_can_return`). A candidate
+/// spliced from such a callee therefore never reaches the `Return` arm
+/// below at all, which is why `None` there is `unreachable!` rather than a
+/// third rewrite to define.
+fn remap_transition(t: &IrTransition, base: u32, then: Option<IrThen>) -> IrTransition {
     match t {
         IrTransition::Goto { state } => IrTransition::Goto {
             state: base + state,
         },
         IrTransition::Return => match then {
-            IrThen::Goto { state } => IrTransition::Goto { state },
-            IrThen::Return => IrTransition::Return,
+            Some(IrThen::Goto { state }) => IrTransition::Goto { state },
+            Some(IrThen::Return) => IrTransition::Return,
             // The site resumed by leaving the CALLER through one of its own
             // exits, so a copied `return` does exactly that instead.
-            IrThen::ReturnExit { exit } => IrTransition::ReturnExit { exit },
-            IrThen::Stop => IrTransition::Stop,
-            IrThen::Halt => IrTransition::Halt,
+            Some(IrThen::ReturnExit { exit }) => IrTransition::ReturnExit { exit },
+            Some(IrThen::Stop) => IrTransition::Stop,
+            Some(IrThen::Halt) => IrTransition::Halt,
+            None => unreachable!(
+                "a `return` inside a spliced callee implies the callee CAN return, so its \
+                 call site was never a tail-position (`then: None`) one to begin with"
+            ),
         },
         IrTransition::Stop => IrTransition::Stop,
         IrTransition::Halt => IrTransition::Halt,
@@ -490,7 +501,7 @@ machine {
                             target: "r".into(),
                             binding: vec![],
                             exits: Vec::new(),
-                            then: IrThen::Goto { state: 1 },
+                            then: Some(IrThen::Goto { state: 1 }),
                         },
                         synthesized: false,
                         direct: false,
@@ -611,7 +622,7 @@ machine {
                             target: "r".into(),
                             binding: vec![],
                             exits: Vec::new(),
-                            then: IrThen::Goto { state: 1 },
+                            then: Some(IrThen::Goto { state: 1 }),
                         },
                         synthesized: false,
                         direct: false,
@@ -799,7 +810,7 @@ machine {
                         target: "main".into(),
                         binding: vec![],
                         exits: Vec::new(),
-                        then: IrThen::Return,
+                        then: Some(IrThen::Return),
                     },
                     synthesized: false,
                     direct: false,
@@ -858,7 +869,7 @@ machine {
                             target: "r".into(),
                             binding: vec![],
                             exits: Vec::new(),
-                            then: IrThen::Goto { state: 1 },
+                            then: Some(IrThen::Goto { state: 1 }),
                         },
                         synthesized: false,
                         direct: false,

@@ -190,10 +190,35 @@ fn render_from_source(source: &str, mode: ReadMode) -> Result<String, CompileErr
     let externals = Declarations::stdlib();
     let analysis = compiler::analyze_with_mode(source, &externals, mode)?;
     let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
+    // A routine's `noreturn` fact: INFERRED from its body for a BODIED
+    // routine (`ReadMode::Program`, the ONLY mode where `has_body` is ever
+    // true), through the identical `ir::body_can_return` the compiler
+    // itself runs over a freshly-expanded module — never re-derived by a
+    // second walk. `ReadMode::DeclarationsOnly` gives every routine an
+    // EMPTY body (a header has none to infer from), so `expand::expand`
+    // is skipped there entirely and `routine_lines` falls back to echoing
+    // the DECLARED clause instead (`Routine::noreturn`) — the only source
+    // of truth a bodiless signature has.
+    let returns: HashMap<String, bool> = if analysis.program.routines.iter().any(|r| r.has_body) {
+        let expanded = crate::expand::expand(&analysis.resolved)?;
+        expanded
+            .worlds
+            .iter()
+            .map(|w| {
+                (
+                    w.name.clone(),
+                    crate::ir::body_can_return(w, &analysis.resolved),
+                )
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
     Ok(render_source(
         &analysis.program,
         &analysis.resolved,
         &footprint,
+        &returns,
     ))
 }
 
@@ -328,7 +353,15 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
             for k in 0..routine.exits {
                 params.push(format!("state {}", fresh_param_name(&mut taken, k)));
             }
-            let lines = vec![format!("export routine {local}({});", params.join(", "))];
+            // `noreturn` reads straight off the wire's `returns` bit — the
+            // one fact a bodiless header has no body to infer, so this arm
+            // echoes it exactly as `routine.exits`/`writes` already do
+            // (docs/formats.md (routine interfaces)).
+            let noreturn = if routine.returns { "" } else { " noreturn" };
+            let lines = vec![format!(
+                "export routine {local}({}){noreturn};",
+                params.join(", ")
+            )];
             root.insert(&ns, lines);
         }
     }
@@ -597,7 +630,12 @@ fn doc_lines(doc: Option<&Doc>) -> Vec<String> {
 // Source arm
 // ---------------------------------------------------------------------------
 
-fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTable) -> String {
+fn render_source(
+    program: &Program,
+    resolved: &Resolved,
+    footprint: &FootprintTable,
+    returns: &HashMap<String, bool>,
+) -> String {
     let worlds: HashMap<&str, &ResolvedWorld> = resolved
         .worlds
         .iter()
@@ -725,9 +763,17 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
         }
         let full = full_name(&routine.ns, &routine.name);
         let world = worlds[full.as_str()];
+        // Inferred for a bodied routine (`returns` was built from one),
+        // echoed from the declared clause otherwise (`render_from_source`'s
+        // own doc).
+        let noreturn = if routine.has_body {
+            !returns.get(&full).copied().unwrap_or(true)
+        } else {
+            routine.noreturn.is_some()
+        };
         root.insert(
             &routine.ns,
-            routine_lines(routine, world, resolved, footprint),
+            routine_lines(routine, world, resolved, footprint, noreturn),
         );
     }
     for graph in &program.graphs {
@@ -996,10 +1042,12 @@ fn routine_lines(
     world: &ResolvedWorld,
     resolved: &Resolved,
     footprint: &FootprintTable,
+    noreturn: bool,
 ) -> Vec<String> {
     let mut lines = doc_lines(routine.doc.as_ref());
     let sig = signature_text(&routine.sig, world, resolved, footprint);
-    lines.push(format!("export routine {}({});", routine.name, sig));
+    let suffix = if noreturn { " noreturn" } else { "" };
+    lines.push(format!("export routine {}({}){suffix};", routine.name, sig));
     lines
 }
 
@@ -1250,14 +1298,21 @@ fn fold_op_symbol(op: FoldOp) -> &'static str {
 fn transition_text(transition: &Transition) -> Option<String> {
     Some(match transition {
         Transition::Goto { name, .. } => format!("goto {name}"),
+        // A graph body — the only place this printer renders a full rule —
+        // never contains a `call` at all (`0.1` rejects a graft whose graph
+        // body holds one), so `then` is always written when this arm does
+        // fire; the `None` fallback exists only to keep the match total.
         Transition::Call {
             target, args, then, ..
-        } => format!(
-            "call {}({}) then {}",
-            target.joined(),
-            binding_args_text(args),
-            continuation_text(then)
-        ),
+        } => match then {
+            Some(then) => format!(
+                "call {}({}) then {}",
+                target.joined(),
+                binding_args_text(args),
+                continuation_text(then)
+            ),
+            None => format!("call {}({})", target.joined(), binding_args_text(args)),
+        },
         Transition::Return { .. } => "return".to_string(),
         Transition::Stop { .. } => "stop".to_string(),
         Transition::Halt { .. } => "halt".to_string(),

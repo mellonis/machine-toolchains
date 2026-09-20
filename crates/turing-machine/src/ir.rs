@@ -336,7 +336,17 @@ pub enum IrTransition {
         /// (`resolve_exits`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exits: Vec<u32>,
-        then: IrThen,
+        /// `None` only for a call in TAIL POSITION — the source omitted
+        /// `then` against a callee KNOWN to be `noreturn`
+        /// (`compiler::CompileErrorKind::ThenRequired` refuses every other
+        /// omission), so codegen emits no instruction after the `call` at
+        /// all: control never comes back to resume one
+        /// (docs/tmt/language.md (reuse)). The wire's absent-key default is
+        /// `None` for the identical "absence reads as itself" reason
+        /// `writes`/`enters`/`leaves` already fold to their empty forms —
+        /// a v3 document, which never omitted `then`, always carried one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        then: Option<IrThen>,
     },
     Return,
     /// A return through one of the callee's declared exits (`retx #k`) —
@@ -503,28 +513,38 @@ impl IrWorld {
                                 st.id
                             );
                         }
-                        match then {
-                            IrThen::Goto { state } => {
-                                let _ = writeln!(edges, "    S{} -->|\"{call}\"| S{state}", st.id);
-                            }
-                            IrThen::Return => {
-                                declare(&mut out, "T_ret", "ret", &mut terms);
-                                let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_ret", st.id);
-                            }
-                            IrThen::ReturnExit { exit } => {
-                                if ret_exit_terms.insert(*exit) {
-                                    let _ = writeln!(out, "    T_ret{exit}((\"ret #{exit}\"))");
+                        // `then: None` is the omitted-`then` (tail-position)
+                        // shape — control never comes back to this call at
+                        // all, so there is no edge left to draw for it
+                        // beyond the exits already rendered above.
+                        if let Some(then) = then {
+                            match then {
+                                IrThen::Goto { state } => {
+                                    let _ =
+                                        writeln!(edges, "    S{} -->|\"{call}\"| S{state}", st.id);
                                 }
-                                let _ =
-                                    writeln!(edges, "    S{} -->|\"{call}\"| T_ret{exit}", st.id);
-                            }
-                            IrThen::Stop => {
-                                declare(&mut out, "T_stp", "stp", &mut terms);
-                                let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_stp", st.id);
-                            }
-                            IrThen::Halt => {
-                                declare(&mut out, "T_hlt", "hlt", &mut terms);
-                                let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_hlt", st.id);
+                                IrThen::Return => {
+                                    declare(&mut out, "T_ret", "ret", &mut terms);
+                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_ret", st.id);
+                                }
+                                IrThen::ReturnExit { exit } => {
+                                    if ret_exit_terms.insert(*exit) {
+                                        let _ = writeln!(out, "    T_ret{exit}((\"ret #{exit}\"))");
+                                    }
+                                    let _ = writeln!(
+                                        edges,
+                                        "    S{} -->|\"{call}\"| T_ret{exit}",
+                                        st.id
+                                    );
+                                }
+                                IrThen::Stop => {
+                                    declare(&mut out, "T_stp", "stp", &mut terms);
+                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_stp", st.id);
+                                }
+                                IrThen::Halt => {
+                                    declare(&mut out, "T_hlt", "hlt", &mut terms);
+                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_hlt", st.id);
+                                }
                             }
                         }
                     }
@@ -672,6 +692,21 @@ pub(crate) fn lower(
     // one record per blob, not one only where a contract happens to exist.
     let footprint = crate::footprint::infer_resolved_with(resolved, &externals.modules());
 
+    // Whether each emitted world's body can return, computed ONCE over the
+    // EXPANDED module — before the optimizer ever runs (`optimize` is a
+    // later, separate stage `compile()` calls after `lower` returns) and
+    // over EVERY state, dead ones included — so the fact can never depend
+    // on `-O` (`body_can_return`'s own doc). Read twice per world: once to
+    // fill `IrWorld::returns`, once (for a call/bind site that omits
+    // `then`) to decide whether the CALLEE is a KNOWN `noreturn` — an
+    // in-unit callee's own entry here, since its declarations ARE this
+    // unit's to know.
+    let can_return: HashMap<&str, bool> = expanded
+        .worlds
+        .iter()
+        .map(|w| (w.name.as_str(), body_can_return(w, resolved)))
+        .collect();
+
     let mut worlds = Vec::with_capacity(expanded.worlds.len());
     for ew in &expanded.worlds {
         let rw = by_name.get(ew.name.as_str()).copied();
@@ -682,6 +717,7 @@ pub(crate) fn lower(
             resolved,
             externals,
             &footprint,
+            &can_return,
             &mut warnings,
         )?);
     }
@@ -699,6 +735,100 @@ pub(crate) fn lower(
     Ok((program, warnings))
 }
 
+/// Whether `ew`'s body has ANY way to return normally to a caller: a
+/// direct `return`, a `then return` on a call/bind, or `return` handed to
+/// a callee as a `state` argument (the callee's exit then returns from
+/// THIS routine, docs/tmt/language.md (routines)). Scanned
+/// UNCONDITIONALLY over every state and rule of `ew` — dead ones
+/// included — which is what makes the fact independent of `-O`: called
+/// from `lower`, strictly before `optimize` ever runs (and, for a bodied
+/// routine, from `header::render_source`'s source arm, over an identical
+/// fresh `expand::expand` — the two calls agree by construction, since
+/// both read the same function on the same expanded module), over the
+/// EXPANDED module (post graft-splice) rather than the source `Resolved`
+/// one, so a graft's own exit bound to `return` — which splicing already
+/// turns into a literal `Transition2::Return` wherever the graph forwards
+/// through it, dead states included — is counted for free, with no second
+/// graft-walk duplicating `expand.rs`'s own substitution.
+///
+/// `resolved` supplies a `Transition2::BindCall`'s own fixed argument
+/// list: a bind-call site carries no `args` of its own (the bind's
+/// declaration does), so its exits are read from there instead.
+pub(crate) fn body_can_return(ew: &ExpandedWorld, resolved: &Resolved) -> bool {
+    for state in &ew.states {
+        for rule in &state.rules {
+            match &rule.transition {
+                Transition2::Return => return true,
+                Transition2::Call { then, args, .. } => {
+                    if matches!(then, Some(Continuation::Return { .. })) || args_return(args) {
+                        return true;
+                    }
+                }
+                Transition2::BindCall { name, then } => {
+                    if matches!(then, Some(Continuation::Return { .. })) {
+                        return true;
+                    }
+                    if let Some(rw) = resolved.worlds.iter().find(|w| w.name == ew.name)
+                        && let Some(bind) = rw.binds.iter().find(|b| b.name == *name)
+                        && args_return(&bind.args)
+                    {
+                        return true;
+                    }
+                }
+                Transition2::Goto(_)
+                | Transition2::Stop
+                | Transition2::Halt
+                | Transition2::TrapRead
+                | Transition2::TrapWrite => {}
+            }
+        }
+    }
+    false
+}
+
+/// Whether `args` hands a `state` argument the terminator `return` — the
+/// one shape a `BindingValue::Terminator` takes for that arm
+/// (`BindingValue::Named` is always a tape target or a state's own name,
+/// never a terminator).
+fn args_return(args: &[BindingArg]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            &a.value,
+            BindingValue::Terminator {
+                kind: TermKind::Return,
+                ..
+            }
+        )
+    })
+}
+
+/// Whether call target `target` is KNOWN — its declarations are in this
+/// unit's table — to be `noreturn`: `Some(true)`/`Some(false)` when known,
+/// `None` when not (an external call with no declarations for it).
+///
+/// An IN-UNIT callee's fact is the INFERRED one, already computed once in
+/// `lower` (`can_return`) over the same expanded module — never re-derived
+/// here. An OUT-OF-UNIT callee has no body this unit can read, so its fact
+/// is its DECLARED `noreturn` clause alone, exactly as the object arm's
+/// printer reads a bodiless header (docs/tmt/language.md (routines)); the
+/// header-versus-object question — whether a lying header is later caught
+/// — is a different, later check (docs/formats.md (routine interfaces)).
+fn known_noreturn(
+    target: &str,
+    external: bool,
+    can_return: &HashMap<&str, bool>,
+    externals: &Declarations,
+) -> Option<bool> {
+    if external {
+        externals
+            .routine(target)
+            .map(|rw| rw.declared_noreturn.is_some())
+    } else {
+        can_return.get(target).map(|&returns| !returns)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn lower_world(
     ew: &ExpandedWorld,
     rw: Option<&ResolvedWorld>,
@@ -706,6 +836,7 @@ fn lower_world(
     resolved: &Resolved,
     externals: &Declarations,
     footprint: &FootprintTable,
+    can_return: &HashMap<&str, bool>,
     warnings: &mut Vec<Diagnostic>,
 ) -> Result<IrWorld, CompileError> {
     let arity = ew.tapes.len();
@@ -726,6 +857,27 @@ fn lower_world(
         .get(entry_name)
         .expect("the entry names one of the world's states");
 
+    // A routine declared `noreturn` whose body CAN return is refused here —
+    // the ONE place both facts are in hand: the DECLARED clause (`rw`, a
+    // source-level fact) and the INFERRED one (`can_return`, computed once
+    // in `lower` over this same expanded module before the optimizer runs).
+    // Never checked for a `machine`/`graph` — `rw.declared_noreturn` is
+    // `None` for both by construction (`compiler::resolve_world`), so the
+    // condition below can only ever fire for a routine.
+    let world_can_return = can_return
+        .get(ew.name.as_str())
+        .copied()
+        .expect("`can_return` was built from the same `expanded.worlds` this world came from");
+    if let Some(rw) = rw
+        && let Some(span) = rw.declared_noreturn
+        && world_can_return
+    {
+        return Err(CompileError {
+            span,
+            kind: CompileErrorKind::NoreturnViolated(ew.name.clone()),
+        });
+    }
+
     let mut states = Vec::with_capacity(ew.states.len());
     let mut forwarders = Forwarders::new(ew);
     for (i, s) in ew.states.iter().enumerate() {
@@ -738,6 +890,7 @@ fn lower_world(
                 expanded,
                 resolved,
                 externals,
+                can_return,
                 &mut forwarders,
             )?);
         }
@@ -817,9 +970,16 @@ fn lower_world(
         // place that check lives — so it is read here, never re-derived
         // from the list.
         exits: rw.map(|w| w.exits).unwrap_or(0),
-        // Whether a routine can also resume normally is inferred from its
-        // body elsewhere; lowering publishes the permissive reading.
-        returns: true,
+        // The inferred fact, computed once in `lower` over the EXPANDED
+        // module before the optimizer runs — opt-independent by
+        // construction (`body_can_return`'s own doc). A `machine` publishes
+        // `true` unconditionally: nothing ever calls `main`, so its own
+        // "returns" bit describes no caller's `then` and the field is
+        // simply unread for it (`header.rs`'s object-arm printer skips the
+        // entry world outright) — `body_can_return` would say `false` for
+        // every ordinary program (a machine only ever stops/halts, never
+        // returns), which is meaningless noise on this world, not a fact.
+        returns: ew.kind != WorldKind::Routine || world_can_return,
     };
 
     unreachable_state_warnings(&world, ew, warnings);
@@ -834,6 +994,7 @@ fn lower_rule(
     expanded: &Expanded,
     resolved: &Resolved,
     externals: &Declarations,
+    can_return: &HashMap<&str, bool>,
     forwarders: &mut Forwarders,
 ) -> Result<IrRule, CompileError> {
     let pattern: Vec<IrCell> = r
@@ -894,16 +1055,39 @@ fn lower_rule(
     // A `then` is the instruction AFTER the call, not a label, so an exit of
     // the enclosing routine needs no state of its own there: it prints
     // `retx #k` exactly where a `return` continuation prints `ret`.
-    let then_of = |cont: &Continuation| -> Result<IrThen, CompileError> {
-        Ok(match cont {
-            Continuation::State { name, .. } => match resolve_state(name)? {
-                StateTarget::State(state) => IrThen::Goto { state },
-                StateTarget::Exit(exit) => IrThen::ReturnExit { exit },
-            },
-            Continuation::Return { .. } => IrThen::Return,
-            Continuation::Stop { .. } => IrThen::Stop,
-            Continuation::Halt { .. } => IrThen::Halt,
-        })
+    //
+    // `cont: None` is the omitted-`then` shape — legal ONLY against a
+    // callee KNOWN (in-unit, or declared to this unit) to be `noreturn`;
+    // every other omission is `CompileErrorKind::ThenRequired` here, the
+    // one place both facts (the callee's known-ness and its return fact)
+    // are in hand. Verified true lowers to `None` too: codegen then emits
+    // no instruction after the `call` at all (docs/tmt/language.md
+    // (reuse)).
+    let then_of = |cont: &Option<Continuation>,
+                   target: &str,
+                   external: bool|
+     -> Result<Option<IrThen>, CompileError> {
+        match cont {
+            Some(cont) => Ok(Some(match cont {
+                Continuation::State { name, .. } => match resolve_state(name)? {
+                    StateTarget::State(state) => IrThen::Goto { state },
+                    StateTarget::Exit(exit) => IrThen::ReturnExit { exit },
+                },
+                Continuation::Return { .. } => IrThen::Return,
+                Continuation::Stop { .. } => IrThen::Stop,
+                Continuation::Halt { .. } => IrThen::Halt,
+            })),
+            None => {
+                if known_noreturn(target, external, can_return, externals) == Some(true) {
+                    Ok(None)
+                } else {
+                    Err(CompileError {
+                        span: r.span,
+                        kind: CompileErrorKind::ThenRequired(target.to_string()),
+                    })
+                }
+            }
+        }
     };
 
     let (transition, synthesized) = match &r.transition {
@@ -941,7 +1125,7 @@ fn lower_rule(
                     target: target.clone(),
                     binding,
                     exits,
-                    then: then_of(then)?,
+                    then: then_of(then, target, *external)?,
                 },
                 false,
             )
@@ -988,7 +1172,7 @@ fn lower_rule(
                     target: bind.target.clone(),
                     binding,
                     exits,
-                    then: then_of(then)?,
+                    then: then_of(then, &bind.target, bind.external)?,
                 },
                 false,
             )
@@ -1555,12 +1739,17 @@ fn unreachable_state_warnings(world: &IrWorld, ew: &ExpandedWorld, warnings: &mu
                 IrTransition::Goto { state } => work.push(*state),
                 IrTransition::CallThen { exits, then, .. } => {
                     match then {
-                        IrThen::Goto { state } => work.push(*state),
-                        // The other resumes are instructions, not states.
-                        IrThen::Return
-                        | IrThen::ReturnExit { .. }
-                        | IrThen::Stop
-                        | IrThen::Halt => {}
+                        Some(IrThen::Goto { state }) => work.push(*state),
+                        // The other resumes are instructions, not states;
+                        // `None` (an omitted, tail-position `then`) leaves
+                        // the world for good, like a terminator.
+                        Some(
+                            IrThen::Return
+                            | IrThen::ReturnExit { .. }
+                            | IrThen::Stop
+                            | IrThen::Halt,
+                        )
+                        | None => {}
                     }
                     // Every exit of the callee resumes at one of this
                     // world's states — an edge as real as the `then`, and
@@ -1755,11 +1944,11 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                     ..
                 } => {
                     match then {
-                        IrThen::Goto { state } => in_state(*state)?,
+                        Some(IrThen::Goto { state }) => in_state(*state)?,
                         // `retx #k` at the resume point leaves through an
                         // exit of THIS world, so the number is bounded the
                         // same way the terminal form is.
-                        IrThen::ReturnExit { exit } => {
+                        Some(IrThen::ReturnExit { exit }) => {
                             if *exit >= w.exits as u32 {
                                 return Err(format!(
                                     "{}: state {} resumes through exit {} (the world declares {})",
@@ -1767,7 +1956,9 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                                 ));
                             }
                         }
-                        IrThen::Return | IrThen::Stop | IrThen::Halt => {}
+                        // `None` is a call in tail position — no resume
+                        // instruction to bounds-check at all.
+                        Some(IrThen::Return | IrThen::Stop | IrThen::Halt) | None => {}
                     }
                     // An exits entry is an in-world resume point, so it is
                     // bounds-checked exactly as a `then` target is.
@@ -1997,7 +2188,7 @@ machine {
                                     // A two-exit call: the exits= operand
                                     // names the resume states.
                                     exits: vec![1, 2],
-                                    then: IrThen::Goto { state: 1 },
+                                    then: Some(IrThen::Goto { state: 1 }),
                                 },
                                 synthesized: false,
                                 direct: false,
@@ -2189,7 +2380,7 @@ machine {
                                         map_written: true,
                                     }],
                                     exits: Vec::new(),
-                                    then: IrThen::Goto { state: 0 },
+                                    then: Some(IrThen::Goto { state: 0 }),
                                 },
                                 synthesized: false,
                                 direct: false,
@@ -2499,7 +2690,7 @@ machine {
         assert_eq!(call.0, "mylib::plusOne");
         // done is a state in main; the then resumes there.
         let done = state(m, "done");
-        assert_eq!(call.2, IrThen::Goto { state: done.id });
+        assert_eq!(call.2, Some(IrThen::Goto { state: done.id }));
         // binding[0] binds callee tape 0 (num) to host tape 1 (data, wide).
         // wide = _,a,b,0,1 → '0'=3,'1'=4 ; bits = _,0,1 → '0'=1,'1'=2.
         assert_eq!(call.1.len(), 1);
@@ -2757,7 +2948,7 @@ machine {
         };
         // `second` is the SECOND `state` parameter, so exit 1 — and no
         // state was minted for it (the world keeps its one source state).
-        assert_eq!(*then, IrThen::ReturnExit { exit: 1 });
+        assert_eq!(*then, Some(IrThen::ReturnExit { exit: 1 }));
         assert_eq!(r.states.len(), 1, "a `then` needs no resume state");
     }
 

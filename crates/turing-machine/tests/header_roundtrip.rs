@@ -1480,8 +1480,9 @@ fn the_source_arm_prints_state_parameters_by_name() {
 
     let out = run_interface(&path);
     assert!(
-        out.stdout
-            .contains("export routine pick(tape n: bits writes {}, state hit, state miss);"),
+        out.stdout.contains(
+            "export routine pick(tape n: bits writes {}, state hit, state miss) noreturn;"
+        ),
         "{}",
         out.stdout
     );
@@ -1515,8 +1516,9 @@ fn the_object_arm_prints_state_parameters_positionally() {
 
     let out = run_interface(&obj_path);
     assert!(
-        out.stdout
-            .contains("export routine pick(tape n: bits writes {}, state exit0, state exit1);"),
+        out.stdout.contains(
+            "export routine pick(tape n: bits writes {}, state exit0, state exit1) noreturn;"
+        ),
         "{}",
         out.stdout
     );
@@ -1559,7 +1561,7 @@ export routine pick(tape exit0: bits, state hit) {
     let out = run_interface(&obj_path);
     assert!(
         out.stdout
-            .contains("export routine pick(tape exit0: bits writes {}, state exit0_1);"),
+            .contains("export routine pick(tape exit0: bits writes {}, state exit0_1) noreturn;"),
         "{}",
         out.stdout
     );

@@ -317,6 +317,19 @@ pub enum CompileErrorKind {
     /// carries no parameter names, so without the callee's own signature
     /// there is no order to write it in. `name` is the callee.
     StateArgsNeedDeclarations(String),
+    /// A routine's signature declares `noreturn`, but its body carries a
+    /// way to return — a `return` transition, a `then return`, or `return`
+    /// handed to a callee as a `state` argument, counted CONSERVATIVELY
+    /// over the whole body (dead states included) so the fact never
+    /// depends on `-O` (docs/tmt/language.md (routines)). `name` is the
+    /// routine.
+    NoreturnViolated(String),
+    /// A `call`/bind site omitted `then`, but its callee is not KNOWN
+    /// (its declarations are in this unit's table) to be `noreturn` — an
+    /// unknown callee, or a known one that CAN return, both keep `then`
+    /// mandatory, since the linker never checks it either way
+    /// (docs/tmt/language.md (reuse)). `name` is the callee.
+    ThenRequired(String),
 
     // -- codegen / assemble orchestration ----------------------------------
     /// A compiler-internal invariant broke: the codegen-produced `.tma`
@@ -453,6 +466,8 @@ impl CompileErrorKind {
         CompileErrorKind::RowWidth { .. } => "row-width",
         CompileErrorKind::TooManyStateParams(_) => "too-many-state-params",
         CompileErrorKind::StateArgsNeedDeclarations(_) => "state-args-need-declarations",
+        CompileErrorKind::NoreturnViolated(_) => "noreturn-violated",
+        CompileErrorKind::ThenRequired(_) => "then-required",
         CompileErrorKind::Internal(_) => "internal-error",
     }
 }
@@ -836,6 +851,18 @@ impl std::fmt::Display for CompileErrorKind {
                     "this call hands `state` arguments to `{name}`, whose declarations are not given — an exits vector is positional, so the callee's own parameter order is needed: give them with `tmt compile --extern <file>.tmh`, or declare the callee in this unit. If the argument meant a tape instead, it names none of this world's"
                 )
             }
+            CompileErrorKind::NoreturnViolated(name) => {
+                write!(
+                    f,
+                    "`{name}` is declared `noreturn`, but its body has a way to return"
+                )
+            }
+            CompileErrorKind::ThenRequired(name) => {
+                write!(
+                    f,
+                    "this call into `{name}` omits `then`, but `{name}` is not known to be `noreturn` — `then` stays mandatory unless the callee's declarations are in this unit and mark it `noreturn`"
+                )
+            }
             CompileErrorKind::Internal(m) => write!(f, "internal compiler error: {m}"),
         }
     }
@@ -1063,6 +1090,14 @@ pub(crate) struct ResolvedWorld {
     /// Every consumer reads this field rather than narrowing the list
     /// again, which is what keeps the ceiling a single check.
     pub exits: u8,
+    /// Whether a `noreturn` clause was written on this ROUTINE's signature
+    /// (always `None` for a `machine`/`graph`, which never carry one) — the
+    /// clause's own span, for a mismatch diagnostic. An author's ASSERTION,
+    /// checked against the body's own inferred fact (`ir::lower_world`) for
+    /// a bodied routine; the only source of truth for a BODILESS one (a
+    /// header carries no body to infer from — docs/tmt/language.md
+    /// (routines)).
+    pub declared_noreturn: Option<Span>,
     /// States, rules in SOURCE form.
     pub states: Vec<State>,
     /// Graft instances declared in this world.
@@ -1136,12 +1171,14 @@ pub(crate) struct ResolvedBind {
     pub span: Span,
 }
 
-/// A resolved `call` transition inside a rule.
+/// A resolved `call` transition inside a rule. `then` is `None` only when
+/// the author omitted it — legal exactly against a callee KNOWN to be
+/// `noreturn` (docs/tmt/language.md (reuse)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedCall {
     pub span: Span,
     pub target: ResolvedCallTarget,
-    pub then: Continuation,
+    pub then: Option<Continuation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2298,6 +2335,7 @@ fn resolve_module(
             r.exported,
             &r.ns,
             &r.sig,
+            r.noreturn,
             &r.states,
             &r.grafts,
             &r.binds,
@@ -2314,6 +2352,9 @@ fn resolve_module(
             g.exported,
             &g.ns,
             &g.sig,
+            // A `graph` never carries a `noreturn` clause — the grammar
+            // admits the word only after a ROUTINE's own signature.
+            None,
             &g.states,
             &g.grafts,
             &g.binds,
@@ -2388,6 +2429,7 @@ fn resolve_world(
     exported: bool,
     ns: &[String],
     sig: &crate::parser::Signature,
+    declared_noreturn: Option<Span>,
     states: &[State],
     grafts: &[Graft],
     binds: &[Bind],
@@ -2462,6 +2504,7 @@ fn resolve_world(
         tapes,
         state_params,
         exits,
+        declared_noreturn,
         states: states.to_vec(),
         grafts,
         binds,
@@ -2559,6 +2602,8 @@ fn resolve_machine_world(
         // A `machine` block has no signature, so it declares no exits.
         state_params: Vec::new(),
         exits: 0,
+        // A `machine` block has no `noreturn` grammar slot at all.
+        declared_noreturn: None,
         states: m.states.to_vec(),
         grafts,
         binds,
@@ -3360,9 +3405,16 @@ impl WorldCtx<'_> {
                     // An omitted transition is a self-goto — the current state
                     // is always a valid target, so there is nothing to check.
                     Transition::Stay { .. } => {}
-                    Transition::Call { then, .. } => {
+                    // `then: None` (an omitted continuation) has nothing to
+                    // check here — whether the omission itself is legal
+                    // (a KNOWN `noreturn` callee) is `ir::lower_rule`'s own
+                    // check, made once the callee's return fact is known.
+                    Transition::Call {
+                        then: Some(then), ..
+                    } => {
                         self.check_continuation(then, &states, &binds, &ns, is_routine)?;
                     }
+                    Transition::Call { then: None, .. } => {}
                 }
             }
         }
@@ -3891,6 +3943,8 @@ mod tests {
             },
             CompileErrorKind::TooManyStateParams(256),
             CompileErrorKind::StateArgsNeedDeclarations("x".into()),
+            CompileErrorKind::NoreturnViolated("x".into()),
+            CompileErrorKind::ThenRequired("x".into()),
             CompileErrorKind::Internal("x".into()),
         ];
         let witnessed: Vec<&str> = all.iter().map(|k| k.code()).collect();

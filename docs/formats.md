@@ -1337,6 +1337,11 @@ pre-version-4 document has neither field.
   `synthesized`.
 - Per-world, `exits` (a `.routine`'s declared exit count) and `returns`
   (`false` only for a `noreturn` routine) round out the same reserved
-  vocabulary — every world today lowers with `exits: 0` and `returns: true`
-  (or omits them, since both default and skip when at that value), since no
-  `.routine` declares either clause yet.
+  vocabulary. `returns` carries the INFERRED fact — whether the source body
+  has any way to return, counted conservatively over the whole body (dead
+  states included) so it is independent of `-O` — never the author's own
+  optional `noreturn` assertion, which the compiler checks against that
+  inferred fact and refuses on a mismatch (docs/tmt/language.md
+  (routines)). A world without any way to return omits the field
+  (`returns: true` is the fill/deserialization default, since a v3 document
+  never omitted it).

@@ -293,6 +293,8 @@ subsection.
 | `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
 | `too-many-state-params` | A signature declares more than 255 `state` parameters — the published exit count is one byte wide. |
 | `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (pass `--extern`, or declare it locally). |
+| `noreturn-violated` | A routine's signature declares `noreturn`, but its body has a way to return — a `return` transition, a `then return`, or `return` handed to a callee as a `state` argument, counted conservatively over the whole body. |
+| `then-required` | A `call`/bind site omits `then`, but its callee is not known (declared to this unit) to be `noreturn` — `then` stays mandatory against an unknown callee or one that can return, since the linker never checks it either way. |
 | `internal-error` | The compiler broke its own invariant — generated assembly failed to assemble, or a compiler-built IR world failed validation. A compiler bug, not a source error; please report it. |
 
 ## `tmt asm`
@@ -712,6 +714,16 @@ compiles to the symbol name `main`, but it is never a callee — nothing
 binds against it or reads its own interface entry — so it publishes no
 write set and prints no declaration on the object arm; the source arm
 never renders it either, since a `machine` block has no `export` keyword.
+
+**Both arms print `noreturn` from the same fact, reached two different
+ways.** A BODIED routine's `noreturn` is INFERRED from its body — whether
+`return` is reachable anywhere in it, dead states included — the identical
+inference the compiler itself runs before optimizing, never the author's
+own optional assertion (docs/tmt/language.md (routines)). The object arm
+reads the wire's `returns` bit, which carries that same inferred fact. A
+BODILESS routine (declarations-only reading, below) has no body to infer
+from, so its `noreturn` is whatever its own signature declares, echoed
+back verbatim — the round-trip this whole page promises.
 
 **A `.tmh` extension selects declarations-only reading of a text INPUT**
 (docs/tmt/language.md (headers)): the identical `.tmc` grammar, read in a

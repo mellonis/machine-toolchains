@@ -81,12 +81,17 @@ fn retarget(w: &mut IrWorld, from: u32, to: u32) {
                 IrTransition::Goto { state } => fix(state),
                 IrTransition::CallThen { exits, then, .. } => {
                     match then {
-                        IrThen::Goto { state } => fix(state),
-                        // The other resume points name no state to retarget.
-                        IrThen::Return
-                        | IrThen::ReturnExit { .. }
-                        | IrThen::Stop
-                        | IrThen::Halt => {}
+                        Some(IrThen::Goto { state }) => fix(state),
+                        // The other resume points name no state to
+                        // retarget; `None` (a tail-position call) names
+                        // none either.
+                        Some(
+                            IrThen::Return
+                            | IrThen::ReturnExit { .. }
+                            | IrThen::Stop
+                            | IrThen::Halt,
+                        )
+                        | None => {}
                     }
                     // Exits name states, so a merge has to move them onto
                     // the keeper too. Two states differing ONLY in their

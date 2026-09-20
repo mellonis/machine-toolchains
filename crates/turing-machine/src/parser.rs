@@ -228,6 +228,15 @@ pub struct Routine {
     /// always empty, the same shape an explicit empty `{ }` body would also
     /// produce — this flag is what tells the two apart.
     pub has_body: bool,
+    /// The `noreturn` clause's own span, written directly after the
+    /// signature's closing `)` — `None` when the author left the fact
+    /// unwritten. A ROUTINE-only clause: a `graph` never returns to begin
+    /// with (docs/tmt/language.md (worlds)), so the grammar admits the
+    /// word after a routine's signature only. The clause is an optional
+    /// ASSERTION the compiler checks against the body's own inferred fact
+    /// (docs/tmt/language.md (routines)); it is never itself the source of
+    /// truth for a bodied routine.
+    pub noreturn: Option<Span>,
     pub states: Vec<State>,
     pub grafts: Vec<Graft>,
     pub binds: Vec<Bind>,
@@ -484,11 +493,17 @@ pub enum Transition {
         explicit: bool,
         span: Span,
     },
-    /// `call TARGET(binding) then CONTINUATION`.
+    /// `call TARGET(binding)[ then CONTINUATION]`. `then` is `None` only
+    /// when the author omitted it — legal ONLY against a callee KNOWN
+    /// (its declarations are in the table) to be `noreturn`, a program-level
+    /// check (`compiler::CompileErrorKind::ThenRequired`), never a grammar
+    /// rule: the grammar cannot know a callee's return fact, so it accepts
+    /// the omission everywhere and the check narrows it
+    /// (docs/tmt/language.md (reuse)).
     Call {
         target: QualName,
         args: Vec<BindingArg>,
-        then: Continuation,
+        then: Option<Continuation>,
         span: Span,
     },
     Return {
@@ -1535,6 +1550,14 @@ impl Parser<'_> {
         };
         self.name(what)?;
         self.signature()?;
+        // `noreturn` — ROUTINE only: a `graph` never returns to begin with
+        // (docs/tmt/language.md (worlds)), so the grammar admits the word
+        // only after a routine's own signature. Written directly, no
+        // dedicated node — the same "REUSE's own bare tokens" shape the
+        // signature's own punctuation takes (`ReuseView::signature`'s doc).
+        if carrier == ReuseCarrier::Routine && self.at_kw("noreturn") {
+            self.bump();
+        }
         // `0.2`'s one grammar alternative (docs/tmt/language.md
         // (headers)): a bare `;` in place of the `{ … }` body, yielding a
         // REUSE with no WORLD child — a declarations-only reading of the
@@ -2376,14 +2399,24 @@ impl Parser<'_> {
             TokenKind::Ident(w) if w == "call" => {
                 self.bump();
                 let target = self.qual_name("a call target")?;
-                let args = self.binding_args()?;
-                self.expect_kw("then", "`then` after the call target")?;
-                let then = self.continuation()?;
-                let end = match &then {
-                    Continuation::State { span, .. }
-                    | Continuation::Return { span }
-                    | Continuation::Stop { span }
-                    | Continuation::Halt { span } => *span,
+                let (args, close_span) = self.binding_args()?;
+                // `then` is grammar-OPTIONAL: whether an omission is legal
+                // (only against a callee KNOWN to be `noreturn`) is a
+                // program-level check the grammar cannot make, so it is
+                // accepted here unconditionally (docs/tmt/language.md
+                // (reuse)).
+                let (then, end) = if self.at_kw("then") {
+                    self.bump();
+                    let cont = self.continuation()?;
+                    let span = match &cont {
+                        Continuation::State { span, .. }
+                        | Continuation::Return { span }
+                        | Continuation::Stop { span }
+                        | Continuation::Halt { span } => *span,
+                    };
+                    (Some(cont), span)
+                } else {
+                    (None, close_span)
                 };
                 Ok(Transition::Call {
                     target,
@@ -2478,7 +2511,10 @@ impl Parser<'_> {
     /// the walk: a `call`'s list becomes [`Transition::Call`]'s `args`,
     /// which [`reparse_transition`] must reproduce faithfully. A
     /// `graft`/`bind`'s list is dropped by its caller.
-    fn binding_args(&mut self) -> Result<Vec<BindingArg>, CompileError> {
+    /// Returns the parsed args plus the closing `)`'s own span — the
+    /// fallback end of a `call` whose `then` is omitted (`Self::transition`),
+    /// since nothing after the binding names an end in that shape.
+    fn binding_args(&mut self) -> Result<(Vec<BindingArg>, Span), CompileError> {
         self.expect(&TokenKind::LParen, "`(` to open the binding")?;
         let mut args: Vec<BindingArg> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RParen) {
@@ -2497,8 +2533,8 @@ impl Parser<'_> {
                 }
             }
         }
-        self.expect(&TokenKind::RParen, "`)` to close the binding")?;
-        Ok(args)
+        let close = self.expect(&TokenKind::RParen, "`)` to close the binding")?;
+        Ok((args, close.span()))
     }
 
     /// Parses one `name = value` binding argument — the unit

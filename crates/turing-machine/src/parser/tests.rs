@@ -277,7 +277,7 @@ fn a5_routine_call_across_alphabets_parses() {
     let map = map.as_ref().expect("the binding carries a map");
     assert_eq!(map.pairs.len(), 2);
     assert!(matches!(map.pairs[0].arrow, MapArrow::Bidirectional));
-    assert!(matches!(then, Continuation::State { name, .. } if name == "done"));
+    assert!(matches!(then, Some(Continuation::State { name, .. }) if name == "done"));
     assert!(m.states.iter().any(|s| s.name == "done"));
 }
 
@@ -365,16 +365,31 @@ fn empty_rule_body_still_errors() {
 }
 
 #[test]
-fn call_without_then_still_errors() {
-    // `then` stays mandatory on a `call`, action present or not.
-    let msg = parse_src("machine { entry state s { [*] -> call f(); } }")
-        .unwrap_err()
-        .to_string();
-    assert!(msg.contains("then"), "message: {msg}");
-    let msg = parse_src("machine { entry state s { [*] -> move [>] call f(); } }")
-        .unwrap_err()
-        .to_string();
-    assert!(msg.contains("then"), "message: {msg}");
+fn call_without_then_parses_leaving_it_none() {
+    // `then` is grammar-OPTIONAL — whether an omission is legal (only
+    // against a callee KNOWN to be `noreturn`) is a program-level check
+    // (`compiler::CompileErrorKind::ThenRequired`, pinned in
+    // `state_params.rs`), never a parse error: the grammar cannot see a
+    // callee's return fact. Mutation: requiring `then` again at parse time
+    // makes both of these fail to parse.
+    let p = parse_src("machine { entry state s { [*] -> call f(); } }")
+        .expect("an omitted `then` parses");
+    match &machine(&p).states[0].rules[0].transition {
+        Transition::Call {
+            target, args, then, ..
+        } => {
+            assert_eq!(target.segments, vec!["f".to_string()]);
+            assert!(args.is_empty());
+            assert_eq!(*then, None);
+        }
+        other => panic!("expected a Call transition, got {other:?}"),
+    }
+    let p = parse_src("machine { entry state s { [*] -> move [>] call f(); } }")
+        .expect("an omitted `then` parses with an action present");
+    assert!(matches!(
+        machine(&p).states[0].rules[0].transition,
+        Transition::Call { then: None, .. }
+    ));
 }
 
 #[test]
@@ -805,7 +820,7 @@ machine {
         panic!("expected a call transition");
     };
     assert!(args.is_empty());
-    assert!(matches!(then, Continuation::Halt { .. }));
+    assert!(matches!(then, Some(Continuation::Halt { .. })));
 }
 
 #[test]
@@ -822,10 +837,11 @@ fn every_continuation_shape_parses() {
             panic!("expected a call");
         };
         let got = match then {
-            Continuation::State { .. } => "state",
-            Continuation::Return { .. } => "return",
-            Continuation::Stop { .. } => "stop",
-            Continuation::Halt { .. } => "halt",
+            Some(Continuation::State { .. }) => "state",
+            Some(Continuation::Return { .. }) => "return",
+            Some(Continuation::Stop { .. }) => "stop",
+            Some(Continuation::Halt { .. }) => "halt",
+            None => "none",
         };
         assert_eq!(got, check, "{cont}");
     }

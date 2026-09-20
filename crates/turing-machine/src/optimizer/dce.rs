@@ -34,13 +34,18 @@ pub fn run(w: &mut IrWorld) -> u32 {
                 IrTransition::Goto { state } => work.push(*state),
                 IrTransition::CallThen { exits, then, .. } => {
                     match then {
-                        IrThen::Goto { state } => work.push(*state),
+                        Some(IrThen::Goto { state }) => work.push(*state),
                         // The other resume points leave the world (an
-                        // instruction after the call), like the terminators.
-                        IrThen::Return
-                        | IrThen::ReturnExit { .. }
-                        | IrThen::Stop
-                        | IrThen::Halt => {}
+                        // instruction after the call), like the terminators;
+                        // `None` (a tail-position call) leaves it too — no
+                        // instruction follows the call at all.
+                        Some(
+                            IrThen::Return
+                            | IrThen::ReturnExit { .. }
+                            | IrThen::Stop
+                            | IrThen::Halt,
+                        )
+                        | None => {}
                     }
                     // An exit handler is reached ONLY through the site's
                     // exits vector, so the walk that decides what lives

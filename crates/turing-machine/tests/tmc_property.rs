@@ -2196,10 +2196,14 @@ fn stamp_rule(rule: &mtc_turing_machine::parser::Rule, seen: &mut BTreeSet<&'sta
             stamp_qual(target, seen);
             stamp_args(args, seen);
             match then {
-                Continuation::State { .. } => seen.insert("continuation.state"),
-                Continuation::Return { .. } => seen.insert("continuation.return"),
-                Continuation::Stop { .. } => seen.insert("continuation.stop"),
-                Continuation::Halt { .. } => seen.insert("continuation.halt"),
+                Some(Continuation::State { .. }) => seen.insert("continuation.state"),
+                Some(Continuation::Return { .. }) => seen.insert("continuation.return"),
+                Some(Continuation::Stop { .. }) => seen.insert("continuation.stop"),
+                Some(Continuation::Halt { .. }) => seen.insert("continuation.halt"),
+                // The generator never omits `then` (below), so this arm is
+                // unreached today — kept total rather than panicking, since
+                // a view answers what the tree holds.
+                None => false,
             };
         }
         Transition::Return { .. } => {

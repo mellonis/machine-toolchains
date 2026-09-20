@@ -1973,8 +1973,15 @@ fn transition_text(
             let entries = binding_entries(args, entry_col, map_pairs);
             let head = format!("call {}", target.joined());
             // The `;` the caller appends is reserved by rendering it into the
-            // tail used for the fit measurement.
-            let tail = format!(" then {};", continuation_text(then));
+            // tail used for the fit measurement. `then: None` (an omitted
+            // continuation, legal only against a known `noreturn` callee)
+            // prints no ` then …` suffix at all — the canonical position for
+            // its absence, exactly as an omitted rule-level transition
+            // prints nothing (below).
+            let tail = match then {
+                Some(cont) => format!(" then {};", continuation_text(cont)),
+                None => ";".to_string(),
+            };
             let rendered = paren_list(
                 col,
                 &head,

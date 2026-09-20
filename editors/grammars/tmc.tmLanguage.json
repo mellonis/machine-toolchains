@@ -51,7 +51,7 @@
     },
     "keywordsModifier": {
       "name": "keyword.control.tmc",
-      "match": "\\b(export|entry|volatile)\\b"
+      "match": "\\b(export|entry|volatile|noreturn)\\b"
     },
     "keywordsImport": {
       "name": "keyword.control.tmc",

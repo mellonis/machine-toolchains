@@ -1008,6 +1008,12 @@ struct ReuseParts {
     /// extract to four empty `WorldParts` vectors, so `has_body` cannot
     /// be derived from their contents.
     has_body: bool,
+    /// The `noreturn` clause's own span, `None` when absent. Read
+    /// unconditionally here even for a `graph` view — harmless, since
+    /// `ReuseView::noreturn_token` never fires there — and dropped by
+    /// [`extract_items`] when stamping a [`Graph`], which carries no such
+    /// field.
+    noreturn: Option<Span>,
     states: Vec<State>,
     grafts: Vec<Graft>,
     binds: Vec<Bind>,
@@ -1036,6 +1042,7 @@ fn extract_reuse(view: &ReuseView, source: &str, index: &TextLineIndex) -> Reuse
         .last()
         .expect("REUSE's signature run always closes on its own `)`");
     let has_body = view.world().is_some();
+    let noreturn = view.noreturn_token().map(|t| index.span(t.text_range()));
     let parts = extract_world(view.world(), source, index);
     ReuseParts {
         name: name.text().to_string(),
@@ -1054,6 +1061,7 @@ fn extract_reuse(view: &ReuseView, source: &str, index: &TextLineIndex) -> Reuse
             )),
         },
         has_body,
+        noreturn,
         states: parts.states,
         grafts: parts.grafts,
         binds: parts.binds,
@@ -1128,6 +1136,7 @@ fn extract_items(
                         ns: ns.to_vec(),
                         sig: parts.sig,
                         has_body: parts.has_body,
+                        noreturn: parts.noreturn,
                         states: parts.states,
                         grafts: parts.grafts,
                         binds: parts.binds,
@@ -1477,9 +1486,9 @@ mod tests {
                     },
                     span: Span::new(8, 23, 8, 28),
                 }],
-                then: crate::parser::Continuation::Halt {
+                then: Some(crate::parser::Continuation::Halt {
                     span: Span::new(8, 35, 8, 39),
-                },
+                }),
                 span: Span::new(8, 14, 8, 39),
             },
         ];

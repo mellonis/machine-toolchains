@@ -97,13 +97,17 @@ fn renumber_dense(w: &mut IrWorld) {
                 IrTransition::Goto { state } => *state = remap[state],
                 IrTransition::CallThen { exits, then, .. } => {
                     match then {
-                        IrThen::Goto { state } => *state = remap[state],
+                        Some(IrThen::Goto { state }) => *state = remap[state],
                         // The other resume points are instructions after the
-                        // call, not state ids — nothing to remap.
-                        IrThen::Return
-                        | IrThen::ReturnExit { .. }
-                        | IrThen::Stop
-                        | IrThen::Halt => {}
+                        // call, not state ids — nothing to remap; `None` (a
+                        // tail-position call) has no resume point at all.
+                        Some(
+                            IrThen::Return
+                            | IrThen::ReturnExit { .. }
+                            | IrThen::Stop
+                            | IrThen::Halt,
+                        )
+                        | None => {}
                     }
                     // An exits entry is an in-world state id like any
                     // other: a renumbering that skipped it would leave the

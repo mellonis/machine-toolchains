@@ -40,6 +40,7 @@ use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::syntax::{SyntaxNode, TextLineIndex};
 
 use crate::compiler::{self, CompileError, Resolved};
+use crate::declarations::Declarations;
 use crate::lexer::Token;
 use crate::parser::Program;
 
@@ -129,6 +130,15 @@ pub(crate) struct LintContext<'a> {
     /// not "optimize" it to a comment-free lex on the grounds that its
     /// current parser would tolerate one.
     pub comment_tokens: &'a [Token],
+    /// The declaration modules `resolved` was itself resolved against —
+    /// `Declarations::stdlib()`, `lint()`'s own fixed default (batch lint
+    /// takes no `--extern`). Read by `unreachable-continuation` to decide
+    /// whether an EXTERNAL call's callee is KNOWN to be `noreturn`: an
+    /// in-unit callee's own `resolved` entry answers that directly, but an
+    /// out-of-unit one has no body here to infer from, only whatever
+    /// declarations this table happens to carry (docs/tmt/language.md
+    /// (declarations)).
+    pub externals: &'a Declarations,
 }
 
 /// A lint rule: reads the analysis context, pushes any findings.
@@ -166,6 +176,10 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     (
         "contract-clause-overlap",
         rules::contract_clause_overlap::check,
+    ),
+    (
+        "unreachable-continuation",
+        rules::unreachable_continuation::check,
     ),
 ];
 
@@ -267,6 +281,12 @@ pub(crate) fn alphabet_glyphs<'a>(resolved: &'a Resolved, mangled: &str) -> Opti
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
     validate_allow(&options.allow)?;
     validate_allow(&options.warn)?;
+    // `compiler::analyze` resolves against `Declarations::stdlib()`, its
+    // own fixed default (batch lint takes no `--extern`) — reconstructed
+    // here rather than threaded out of `analyze`, since `Analysis` does
+    // not retain the `Declarations` it resolved with (the identical choice
+    // `header::render_from_source` makes for `tmt interface`).
+    let externals = Declarations::stdlib();
     let analysis = compiler::analyze(source)?;
     // `analyze` lexes WithComments (the green parse needs the trivia); that
     // one stream is the guard's comment channel, and the tree it parsed
@@ -281,6 +301,7 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
         root: &root,
         index: &index,
         comment_tokens: &analysis.tokens,
+        externals: &externals,
     };
     let diagnostics = run_rules(&ctx, &options.allow, &options.warn);
     Ok(LintReport { diagnostics })

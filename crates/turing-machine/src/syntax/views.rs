@@ -512,21 +512,62 @@ impl ReuseView {
     /// REUSE's own tokens, which is why the run still starts and ends
     /// with them.
     ///
-    /// Stops at `Semi` as well as `World`: a bodiless (`0.2`) REUSE has
-    /// no WORLD child to stop the walk, so its own trailing `;` sits
-    /// directly among REUSE's remaining children — without this second
-    /// stop condition the run would swallow it too.
+    /// Stops right at the matching `RParen`, never past it: a routine's
+    /// own `noreturn` clause (`Self::noreturn_token`) can sit directly
+    /// among REUSE's remaining children too, between the `)` and
+    /// `World`/`Semi`, and belongs to that accessor, not to the signature
+    /// run. The `World`/`Semi` guard stays as a defensive second stop for
+    /// a tree the error-resilient parser recovered without ever closing
+    /// the paren — a view answers what the tree holds rather than
+    /// assuming the shape it usually has.
     pub fn signature(&self) -> Vec<SyntaxToken> {
+        let mut out = Vec::new();
+        let mut started = false;
+        for e in self.syntax().children_with_tokens() {
+            if !started {
+                if e.kind() == TmcKind::LParen.into() {
+                    started = true;
+                } else {
+                    continue;
+                }
+            }
+            if e.kind() == TmcKind::World.into() || e.kind() == TmcKind::Semi.into() {
+                break;
+            }
+            match &e {
+                SyntaxElement::Token(t) => out.push(t.clone()),
+                SyntaxElement::Node(n) => out.extend(n.descendant_tokens()),
+            }
+            if e.kind() == TmcKind::RParen.into() {
+                break;
+            }
+        }
+        out.retain(|t| !is_trivia(t));
+        out
+    }
+
+    /// The `noreturn` clause's own token, when a ROUTINE's signature
+    /// carries one — written directly after the signature's closing `)`,
+    /// before `World`/`Semi` (the same span `signature()` stops at). No
+    /// dedicated node wraps it, mirroring the signature's own bare
+    /// tokens (`Self::signature`'s doc): `parse_reuse` only ever bumps
+    /// the word for a `routine` carrier, so this never fires for a
+    /// `graph` — a `graph` never returns to begin with
+    /// (docs/tmt/language.md (worlds)).
+    pub fn noreturn_token(&self) -> Option<SyntaxToken> {
         self.syntax()
             .children_with_tokens()
-            .skip_while(|e| e.kind() != TmcKind::LParen.into())
+            .skip_while(|e| e.kind() != TmcKind::RParen.into())
+            .skip(1) // past the signature's own `)`
             .take_while(|e| e.kind() != TmcKind::World.into() && e.kind() != TmcKind::Semi.into())
-            .flat_map(|e| match e {
-                SyntaxElement::Token(t) => vec![t],
-                SyntaxElement::Node(n) => n.descendant_tokens().collect(),
+            .find_map(|e| match e {
+                SyntaxElement::Token(t)
+                    if t.kind() == TmcKind::Ident.into() && t.text() == "noreturn" =>
+                {
+                    Some(t)
+                }
+                _ => None,
             })
-            .filter(|t| !is_trivia(t))
-            .collect()
     }
 
     /// This reuse's signature parameters, in declaration order — which

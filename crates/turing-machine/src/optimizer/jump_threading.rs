@@ -78,7 +78,7 @@ pub fn run(w: &mut IrWorld) -> u32 {
                     }
                     IrTransition::CallThen { exits, then, .. } => {
                         match then {
-                            IrThen::Goto { state } => {
+                            Some(IrThen::Goto { state }) => {
                                 let new = resolve(*state);
                                 if new != *state {
                                     *state = new;
@@ -86,11 +86,15 @@ pub fn run(w: &mut IrWorld) -> u32 {
                                 }
                             }
                             // The other resume points are instructions, not
-                            // in-world targets to thread.
-                            IrThen::Return
-                            | IrThen::ReturnExit { .. }
-                            | IrThen::Stop
-                            | IrThen::Halt => {}
+                            // in-world targets to thread; `None` (a
+                            // tail-position call) has no resume point at all.
+                            Some(
+                                IrThen::Return
+                                | IrThen::ReturnExit { .. }
+                                | IrThen::Stop
+                                | IrThen::Halt,
+                            )
+                            | None => {}
                         }
                         // An exits entry is an inbound reference like the
                         // `then`, and threads the same way: resuming at a

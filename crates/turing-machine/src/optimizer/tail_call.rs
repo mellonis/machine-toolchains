@@ -50,10 +50,14 @@ pub fn run(w: &mut IrWorld) -> u32 {
             // through exit `k` of the SITE's exit vector, and a tail jump
             // carries no site — the callee would index the original
             // caller's vector instead.
+            // `then: None` (a tail-position call into a KNOWN `noreturn`
+            // callee) never matches here: `TailCall` assumes the callee's
+            // OWN `ret` eventually pops the frame this rewrite skips
+            // pushing, which a callee that never returns can never do.
             let is_tail = matches!(
                 &r.transition,
                 IrTransition::CallThen { binding, exits, then, .. }
-                    if binding.is_empty() && exits.is_empty() && matches!(then, IrThen::Return)
+                    if binding.is_empty() && exits.is_empty() && matches!(then, Some(IrThen::Return))
             );
             if is_tail {
                 let IrTransition::CallThen { target, .. } = &r.transition else {

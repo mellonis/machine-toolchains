@@ -100,10 +100,12 @@ enum Term {
     /// exit labels stay a list rather than text folded into `operand`: the
     /// label printer needs the names, since a state reached only through an
     /// exits operand has no other reference to print its label for.
+    /// `then: None` is TAIL POSITION — the callee is known `noreturn`, so no
+    /// instruction follows the `call` at all (docs/tmt/language.md (reuse)).
     Call {
         operand: String,
         exits: Vec<String>,
-        then: Then,
+        then: Option<Then>,
     },
     Ret,
     /// `retx #k` — leave through exit `k` of the call site's exit vector.
@@ -649,13 +651,16 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
             } else {
                 format!("{} {}", target, render_binding(binding))
             };
-            let then = match then {
+            // `None` is a call in TAIL POSITION — the source omitted `then`
+            // against a callee known to be `noreturn`, so no instruction
+            // follows the `call` at all (`Term::Call`'s own doc).
+            let then = then.as_ref().map(|t| match t {
                 IrThen::Goto { state } => Then::Goto(state_label(w, *state)),
                 IrThen::Return => Then::Ret,
                 IrThen::ReturnExit { exit } => Then::RetExit(*exit),
                 IrThen::Stop => Then::Stop,
                 IrThen::Halt => Then::Halt,
-            };
+            });
             Term::Call {
                 operand,
                 // In exit order — the callee's `retx #k` indexes this list.
@@ -872,13 +877,19 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
     } else {
         String::new()
     };
+    // `noreturn` prints only for a world whose inferred fact says it never
+    // returns — `IrWorld::returns` is unconditionally `true` for a
+    // `machine` (its own doc), so this can only ever fire for a routine
+    // (docs/formats.md (routine interfaces)).
+    let noreturn = if w.returns { "" } else { ", noreturn" };
     e.push(
         format!(
-            ".routine {}, tapes={}, alpha=({}){}",
+            ".routine {}, tapes={}, alpha=({}){}{}",
             w.name,
             w.arity,
             alpha.join(", "),
-            exits
+            exits,
+            noreturn
         ),
         0,
     );
@@ -912,7 +923,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
         let goto_target = match &b.term {
             Term::Goto(t) => Some(t.as_str()),
             Term::Call {
-                then: Then::Goto(t),
+                then: Some(Then::Goto(t)),
                 ..
             } => Some(t.as_str()),
             _ => None,
@@ -967,12 +978,17 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                     format!("{operand} exits=({})", exits.join(", "))
                 };
                 e.push(grid(None, "call", &operand), b.term_line);
+                // `None` is TAIL POSITION: the call is the block's own last
+                // instruction, nothing prints after it (`Term::Call`'s doc).
                 match then {
-                    Then::Goto(t) => emit_goto(e, t),
-                    Then::Ret => e.push(grid(None, "ret", ""), b.term_line),
-                    Then::RetExit(k) => e.push(grid(None, "retx", &format!("#{k}")), b.term_line),
-                    Then::Stop => e.push(grid(None, "stp", ""), b.term_line),
-                    Then::Halt => e.push(grid(None, "hlt", ""), b.term_line),
+                    Some(Then::Goto(t)) => emit_goto(e, t),
+                    Some(Then::Ret) => e.push(grid(None, "ret", ""), b.term_line),
+                    Some(Then::RetExit(k)) => {
+                        e.push(grid(None, "retx", &format!("#{k}")), b.term_line)
+                    }
+                    Some(Then::Stop) => e.push(grid(None, "stp", ""), b.term_line),
+                    Some(Then::Halt) => e.push(grid(None, "hlt", ""), b.term_line),
+                    None => {}
                 }
             }
             Term::Ret => e.push(grid(None, "ret", ""), b.term_line),
