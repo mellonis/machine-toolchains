@@ -2,8 +2,11 @@
 //! with `.tmc`/`.tma`/`.tmo`/`.tmx` extensions. `link` auto-links the
 //! embedded standard library (`std::binaryNumbers` / `std::binaryNumbersBare`)
 //! lazily via reachability, with `--nostdlib` to opt out — the PM-1 `link`
-//! wiring. `compile` needs no such flag: the stdlib is a link-time input, not
-//! a compile-time one.
+//! wiring. `compile` has its own, narrower `--nostdlib`/`--extern`
+//! (docs/tmt/cli.md (compile)): the declarations base the footprint/contract
+//! check believes ([`read_externals`]) — resolving a call target itself, or
+//! an alphabet reached through `use`, is unaffected until cross-unit name
+//! resolution lands.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -12,7 +15,9 @@ use std::path::{Path, PathBuf};
 use mtc_core::formats::object::ObjectFile;
 use mtc_core::linker::{CallMech, LinkOptions, LinkReport};
 
-use crate::compiler::{CompileOptions, CompileReport, compile as compile_source};
+use crate::compiler::{
+    CompileOptions, CompileReport, Declarations, Origin, compile as compile_source,
+};
 use crate::optimizer::OptLevel;
 
 use super::{Args, CliOutput};
@@ -33,9 +38,44 @@ FLAGS:
                       pass; default final)
   --fno-<pass>       disable one optimizer pass (repeatable)
   --foutline         enable the default-off `outline` optimizer pass
+  --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
+                     repeatable, in command-line order)
+  --nostdlib         do not read the embedded standard library's declarations
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
 ";
+
+/// `--extern` files in command-line order, then the embedded standard
+/// library last unless `nostdlib` (docs/tmt/cli.md (compile)) — the exact
+/// push order [`crate::footprint::find_external`]'s first-match lookup
+/// relies on, so a user's own `--extern std.tmh` shadows the built-in
+/// `std` when both are given. Each file's own declarations-only read is
+/// [`crate::header::read_extern`] (STRICT on a `.tmh`, LENIENT on
+/// anything else); a file that fails to read or parse is reported by ITS
+/// OWN path, never the primary compile's input.
+fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declarations, String> {
+    let mut externals = Declarations::none();
+    for raw in paths {
+        let path = Path::new(raw);
+        let source =
+            fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let resolved = crate::header::read_extern(path, &source).map_err(|e| {
+            format!(
+                "{}:{}:{}: error: {} [{}]",
+                path.display(),
+                e.span.start.line,
+                e.span.start.col,
+                e.kind,
+                e.kind.code()
+            )
+        })?;
+        externals.push(Origin::Extern(path.to_path_buf()), resolved);
+    }
+    if !nostdlib {
+        externals.push(Origin::Stdlib, crate::stdlib::resolved().clone());
+    }
+    Ok(externals)
+}
 
 pub(super) fn render_warnings(stderr: &mut String, input: &Path, report: &CompileReport) {
     for d in &report.diagnostics {
@@ -173,6 +213,13 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     let emit_ir = take_emit_ir(&mut args)?;
     take_disabled_passes(&mut args, &mut options.disabled_passes);
     options.capture_ir = matches!(emit_ir, Some(Some(_)));
+    // `--extern`/`--nostdlib` pick the declarations base the footprint/
+    // contract check believes (docs/tmt/cli.md (compile)) — read BEFORE
+    // the primary input so a broken `--extern` file's error surfaces
+    // first, naming ITS OWN path (`read_externals`), never the input's.
+    let extern_paths = args.values("--extern")?;
+    let nostdlib = args.flag("--nostdlib");
+    options.externals = read_externals(&extern_paths, nostdlib)?;
     let explicit_out = args.value("-o")?;
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {

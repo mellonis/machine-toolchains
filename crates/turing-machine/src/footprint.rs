@@ -615,6 +615,15 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
 
 /// An external callee found in one of the external modules by its full
 /// path: the module (for its alphabets) and the world.
+///
+/// **FIRST-MATCH over `externals`, in the exact order `Declarations::modules()`
+/// returns it** — `--extern` files in command-line order, then the embedded
+/// standard library last (docs/tmt/cli.md (compile)): a user's own `--extern
+/// std.tmh` shadows the built-in `std` when both are given, mirroring the
+/// linker's own first-wins rule for a name declared in more than one
+/// object (`crates/core/src/linker/resolve.rs`) — a compiler that resolved
+/// a name differently from the linker would diagnose a program the linker
+/// then builds differently.
 fn find_external<'a>(
     externals: &[&'a Resolved],
     path: &str,

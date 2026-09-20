@@ -73,6 +73,9 @@ FLAGS:
                       pass; default final)
   --fno-<pass>       disable one optimizer pass (repeatable)
   --foutline         enable the default-off `outline` optimizer pass
+  --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
+                     repeatable, in command-line order)
+  --nostdlib         do not read the embedded standard library's declarations
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
 ```
@@ -174,6 +177,38 @@ repeating it is an unknown-flag error.
 `docs/tmt/optimizer.md (passes)` works every pass through a before/after
 graph example built with this flag, and `tmt ir graph` renders the
 documents it writes.
+
+### `--extern` and `--nostdlib`
+
+`--extern FILE` reads one other unit's declarations for the footprint/
+contract check (`docs/tmt/language.md (contract clauses)`): a callee found
+in one of these — or in the embedded standard library, believed by default
+— contributes its DECLARED effective write set; a callee found nowhere
+contributes the whole alphabet. `FILE`'s extension decides how it is read,
+never a second front end: a `.tmh` is read STRICTLY, the same shape `tmt
+interface` enforces on a header (a routine body or a `machine` block is an
+error); anything else — a `.tmc` — is read LENIENTLY as a full program,
+where any body and any `machine` block are simply unused. The flag is
+repeatable, and order is meaningful: modules are consulted in command-line
+order, with the embedded standard library consulted last — so a `--extern
+std.tmh` of the user's own shadows the built-in `std` when both are
+present. This mirrors the linker's own first-wins rule for a name declared
+in more than one object.
+
+`--nostdlib` drops the embedded standard library from that lookup —
+`std::…` names then behave like any other external, contributing the
+whole alphabet unless an explicit `--extern` supplies their declarations
+too (a user may disable the built-in library and supply their own under
+the same `std` name).
+
+Naming a name is a separate step from believing its contract: `--extern`
+supplies what the footprint check believes about a callee's write set. It
+does not, by itself, resolve a call target or an alphabet reached through
+`use` — an unresolved `use`-imported name fails exactly as it does without
+`--extern`.
+
+A `--extern` file that fails to read or parse is a compile error naming
+that file's own path, never the primary input's.
 
 ### Compile errors
 
@@ -463,7 +498,12 @@ a build is either fully argv-driven or fully manifest-driven.
   `--nostdlib`, and `--entry` outright rather than silently ignoring
   them — five flags, one more than the compile-side/link-side split
   alone would suggest, because a target's entry symbol is as much a
-  manifest-declared fact as its output path or its libraries.
+  manifest-declared fact as its output path or its libraries. In argv
+  mode, `--nostdlib` reaches the compile step too, not only the link
+  step: the declarations base the footprint/contract check believes
+  (`tmt compile`'s own `--nostdlib`, above) drops the embedded standard
+  library as well — argv mode has no `--extern` of its own, so this is
+  its one opt-out.
 - **Common to both modes** (`--allow`, `--no-relax`, `--call-mech`,
   `--keep-objects`, `-v`). `--call-mech` is the one link-side flag
   manifest mode does *not* reject: it is accepted there as a

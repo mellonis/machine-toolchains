@@ -109,6 +109,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::path::Path;
 
 use mtc_core::formats::object::{ExportedAlphabet, ObjectFile, RoutineInterface, SymbolDef};
 
@@ -159,6 +160,41 @@ fn render_from_source(source: &str, mode: ReadMode) -> Result<String, CompileErr
         &analysis.resolved,
         &footprint,
     ))
+}
+
+/// Read one `--extern FILE`'s declarations for `tmt compile`
+/// (docs/tmt/cli.md (compile)) — not a render, [`Resolved`] itself, the
+/// same shape [`Declarations`] pushes for the embedded stdlib. A `.tmh`
+/// extension (case-insensitive, matching `cli/interface.rs`'s identical
+/// rule for a `.tmh` on `tmt interface`) selects STRICT reading —
+/// [`ReadMode::DeclarationsOnly`], which rejects a routine body or a
+/// `machine` block outright — and anything else (a `.tmc`) is read
+/// LENIENTLY as [`ReadMode::Program`]: bodies and a `machine` block are
+/// accepted and simply unused, since [`Resolved`] retains no body content
+/// for [`Declarations`] to keep either way. Text has no container magic to
+/// tell a header from a full source by, so — exactly as in
+/// `cli/interface.rs` — the extension is the one place it IS the signal,
+/// never a second front end.
+///
+/// Resolved against the embedded standard library as its OWN external
+/// context, unconditionally — the same choice [`render_from_source`]
+/// makes for `tmt interface`, independent of whatever `--nostdlib`/
+/// `--extern` set the PRIMARY compile this file feeds was itself given
+/// (this function has no visibility into that set, and reading one
+/// `--extern` file's own declarations against another is cross-unit name
+/// resolution, not this task's — docs/tmt/cli.md (compile)).
+pub(crate) fn read_extern(path: &Path, source: &str) -> Result<Resolved, CompileError> {
+    let mode = if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("tmh"))
+    {
+        ReadMode::DeclarationsOnly
+    } else {
+        ReadMode::Program
+    };
+    let analysis = compiler::analyze_with_mode(source, &Declarations::stdlib(), mode)?;
+    Ok(analysis.resolved)
 }
 
 /// Render the exported declarations a compiled object still carries — the

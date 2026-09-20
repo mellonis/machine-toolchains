@@ -268,6 +268,16 @@ fn compile_spec() -> CommandSpec {
                 "--foutline",
                 "enable the default-off `outline` pass (-O1 only)",
             ),
+            FlagSpec::value(
+                "--extern",
+                "read a .tmh/.tmc's declarations (repeatable, in order)",
+                ValueHint::File(ext(&["tmh", "tmc"])),
+            )
+            .repeatable(),
+            FlagSpec::boolean(
+                "--nostdlib",
+                "do not read the embedded standard library's declarations",
+            ),
             FlagSpec::boolean("-Werror", "treat warnings as errors"),
             FlagSpec::boolean("-v", "render the compile report (passes, rounds)"),
             FlagSpec::value("-o", "output path", ValueHint::File(any_file())),

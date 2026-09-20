@@ -711,10 +711,19 @@ fn run_block_tape_path<'a>(
 
 /// Compile options for argv mode: exactly `tmt compile`'s preset/flag
 /// logic (cli/build.rs::compile), minus -S/--emit-ir/--stamped-asm which
-/// stay compile-only inspection artifacts.
+/// stay compile-only inspection artifacts. `tmt build` has no `--extern`
+/// of its own; `--nostdlib` is the one link-scoped flag it ALSO applies
+/// here, to the compile-time declarations base (docs/tmt/cli.md (build))
+/// — the same flag now means "don't link it in" and "don't believe its
+/// declared contracts," which is the reading a user who passed it almost
+/// certainly wants either way.
 fn argv_compile_options(flags: &Flags) -> CompileOptions {
     let mut options = CompileOptions {
-        externals: Declarations::stdlib(),
+        externals: if flags.nostdlib {
+            Declarations::none()
+        } else {
+            Declarations::stdlib()
+        },
         debug_info: flags.debug_preset || flags.debug_info,
         strip_debugger: flags.release_preset || flags.strip_debugger,
         opt_level: if flags.release_preset {
