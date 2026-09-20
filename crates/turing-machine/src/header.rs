@@ -4,10 +4,12 @@
 //! exported maps (docs/tmt/language.md (named maps)), `export routine`
 //! signatures with their contracts and `?` doc lines, and `export graph`
 //! bodies in full) or a compiled `.tmo` object (the reduced arm:
-//! signatures, contracts, and exported alphabets only — a named map has
-//! no assembly spelling of its own, the same reason an exported alphabet
-//! DOES print here (its glyphs ride the wire) while a graph body and a
-//! doc line do not — an object carries no map information to print).
+//! signatures, contracts, and exported alphabets only — no graph body, no
+//! map, no doc line). The two fields diverge for opposite reasons: an
+//! exported alphabet's glyphs ride the wire (`Interface::alphabets`), so
+//! the object arm CAN reprint them and does; a named map has no assembly
+//! spelling of its own at all, so the object arm has nothing to read one
+//! back from and prints none.
 //!
 //! **The printer never emits `volatile` either**, for the identical
 //! reason: the language reference states outright that the modifier is
@@ -147,7 +149,8 @@ use mtc_core::formats::object::{ExportedAlphabet, Interface, ObjectFile, SymbolD
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
-    self, CompileError, ReadMode, Resolved, ResolvedWorld, full_name, published_writes,
+    self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, full_name,
+    published_writes,
 };
 use crate::declarations::Declarations;
 use crate::footprint::{self, FootprintTable};
@@ -587,6 +590,23 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
         .map(|w| (w.name.as_str(), w))
         .collect();
 
+    // Every named map an EXPORTED graph body's binding args reach — the
+    // only place a `with map NAME` reference can print at all, since a
+    // routine's own body never prints (only its signature does). Reads
+    // `resolved`'s own copies: `compiler::expand_named_maps` already
+    // rewrote a resolved site's `SymMap::named` to the DECLARATION'S OWN
+    // mangled name, so this is a direct membership test, never a second
+    // resolution of the written text (`Program`'s own copies, which the
+    // printer elsewhere reads for the WRITTEN spelling, are untouched by
+    // that rewrite).
+    let mut referenced_maps: HashSet<&str> = HashSet::new();
+    for graph in &program.graphs {
+        if graph.exported {
+            let full = full_name(&graph.ns, &graph.name);
+            resolved_map_refs(worlds[full.as_str()], &mut referenced_maps);
+        }
+    }
+
     // Every alphabet an EXPORTED routine or graph's tape parameter draws
     // from, by its mangled name — printed even when the alphabet itself is
     // not exported (a plain `alphabet`, not `export alphabet`; see the
@@ -610,11 +630,12 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
             }
         }
     }
-    // An exported map's own two alphabets, the same "referenced, printed
-    // even if not itself exported" rule.
+    // Every map this render will itself print (exported, or referenced
+    // from a printed graph body) contributes its own two alphabets, the
+    // same "referenced, printed even if not itself exported" rule.
     for map in &program.maps {
-        if map.exported {
-            let full = full_name(&map.ns, &map.name);
+        let full = full_name(&map.ns, &map.name);
+        if map.exported || referenced_maps.contains(full.as_str()) {
             let decl = &resolved.maps[full.as_str()];
             referenced_alphabets.insert(decl.src.as_str());
             referenced_alphabets.insert(decl.dst.as_str());
@@ -639,8 +660,9 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
         }
     }
     for map in &program.maps {
-        if map.exported {
-            printed_full_names.insert(full_name(&map.ns, &map.name));
+        let full = full_name(&map.ns, &map.name);
+        if map.exported || referenced_maps.contains(full.as_str()) {
+            printed_full_names.insert(full);
         }
     }
     for routine in &program.routines {
@@ -670,20 +692,18 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
             alphabet_lines(&alphabet.name, glyphs, alphabet.exported),
         );
     }
-    // Named maps: EXPORTED only (docs/tmt/language.md (named maps)) — a
-    // map used only privately inside a printed graph body is a narrower
-    // gap this render does not yet close (`docs/tmt/language.md`'s own
-    // alphabet precedent prints a referenced-but-unexported alphabet too;
-    // a named map does not get that treatment here), so a graph that
-    // names a non-exported map in a binding still prints `with map NAME`
-    // (`binding_value_text`) but the header will not carry NAME's own
-    // declaration — a header consumer would need it exported (or
-    // declared locally in its own unit) to graft that graph back.
+    // Named maps: exported, or referenced from a printed graph body — the
+    // same rule an alphabet gets. A map an exported graph names but this
+    // unit does not itself declare (an imported one) has no declaration
+    // to print here; its own `use` line covers it instead
+    // (`needed_imports`, below).
     for map in &program.maps {
-        if !map.exported {
+        let full = full_name(&map.ns, &map.name);
+        let referenced = referenced_maps.contains(full.as_str());
+        if !map.exported && !referenced {
             continue;
         }
-        root.insert(&map.ns, map_lines(map));
+        root.insert(&map.ns, map_lines(map, map.exported));
     }
     for routine in &program.routines {
         if !routine.exported {
@@ -900,6 +920,38 @@ fn collect_binding_map_refs<'p>(args: &'p [BindingArg], out: &mut HashSet<&'p st
             && !name.contains("::")
         {
             out.insert(name.as_str());
+        }
+    }
+}
+
+/// Every named-map reference one RESOLVED world's own grafts, binds, and
+/// direct calls reach, by MANGLED name — `resolved`'s own copies, whose
+/// `SymMap::named` `compiler::expand_named_maps` already rewrote from the
+/// written text to the declaration's own mangled identity, so this reads
+/// that identity directly rather than re-resolving anything. Decides
+/// whether a printed graph body's `with map NAME` needs its own
+/// declaration printed alongside it (`render_source`), independently of
+/// [`collect_binding_map_refs`], which reads the UNRESOLVED written text
+/// off `Program` for the separate `use`-line decision.
+fn resolved_map_refs<'a>(world: &'a ResolvedWorld, out: &mut HashSet<&'a str>) {
+    fn note<'a>(args: &'a [BindingArg], out: &mut HashSet<&'a str>) {
+        for arg in args {
+            if let BindingValue::Named { map: Some(m), .. } = &arg.value
+                && let Some((name, _)) = &m.named
+            {
+                out.insert(name.as_str());
+            }
+        }
+    }
+    for graft in &world.grafts {
+        note(&graft.args, out);
+    }
+    for bind in &world.binds {
+        note(&bind.args, out);
+    }
+    for call in &world.calls {
+        if let ResolvedCallTarget::Routine { args, .. } = &call.target {
+            note(args, out);
         }
     }
 }
@@ -1246,12 +1298,15 @@ fn map_pair_list_text(pairs: &[MapPair]) -> String {
         .join(", ")
 }
 
-/// One `export map NAME: SRC -> DST { pairs }` — mirrors
-/// [`alphabet_lines`]'s shape (a doc run, then the one-line declaration;
-/// this renderer never wraps a body across lines, matching every other
-/// declaration here). Only ever called for an EXPORTED map (see the
-/// caller in [`render_source`]).
-fn map_lines(map: &MapDecl) -> Vec<String> {
+/// One `export? map NAME: SRC -> DST { pairs }` — mirrors
+/// [`alphabet_lines`]'s shape exactly, `exported` included: a map
+/// referenced from a printed graph body but not itself exported prints
+/// unqualified (`map NAME: …`), the same "referenced, printed even if not
+/// itself exported" rule an alphabet gets (see the caller in
+/// [`render_source`]). This renderer never wraps a body across lines,
+/// matching every other declaration here.
+fn map_lines(map: &MapDecl, exported: bool) -> Vec<String> {
+    let keyword = if exported { "export map" } else { "map" };
     let mut lines = doc_lines(map.doc.as_ref());
     let pairs = if map.pairs.is_empty() {
         "{}".to_string()
@@ -1259,7 +1314,7 @@ fn map_lines(map: &MapDecl) -> Vec<String> {
         format!("{{ {} }}", map_pair_list_text(&map.pairs))
     };
     lines.push(format!(
-        "export map {}: {} -> {} {pairs}",
+        "{keyword} {}: {} -> {} {pairs}",
         map.name, map.src, map.dst
     ));
     lines

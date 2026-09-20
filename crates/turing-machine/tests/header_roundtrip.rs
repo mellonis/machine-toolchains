@@ -1120,6 +1120,122 @@ export routine touch(tape t: symbols writes {}) {
     );
 }
 
+/// A NON-exported map named inside an EXPORTED graph body's binding
+/// still needs its own declaration in the header, or the printed
+/// `with map NAME` reference cannot resolve when the header is read
+/// back — the same "referenced, printed even if not itself exported"
+/// rule an alphabet already gets. Mutation: dropping the
+/// referenced-map path (printing only EXPORTED maps) — the header would
+/// then carry `with map collapse` inside `outer`'s printed body with no
+/// `collapse` declaration anywhere in it, and the reparse below would
+/// fail `unknown map \`collapse\` [undefined-map]`.
+#[test]
+fn a_locally_referenced_map_prints_unexported_and_the_header_reparses() {
+    const PRIVATE_MAP_FIXTURE: &str = "\
+export alphabet host5 { '_', '^', '$', '0', '1' }
+export alphabet bare3 { '_', '0', '1' }
+map collapse: host5 -> bare3 { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+
+export graph inner(tape v: bare3, state done) {
+  entry state s { [*] -> done; }
+}
+
+export graph outer(tape t: host5, state done) {
+  entry graft inner(v = t with map collapse, done = done) as z;
+}
+";
+    let dir = scratch("header_private_map_referenced");
+    let src_path = dir.join("privmap.tmc");
+    std::fs::write(&src_path, PRIVATE_MAP_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    assert!(
+        source_out.stdout.contains(
+            "map collapse: host5 -> bare3 { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }"
+        ),
+        "the private but referenced map's own declaration is missing: {}",
+        source_out.stdout
+    );
+    assert!(
+        !source_out.stdout.contains("export map collapse"),
+        "a non-exported map must not print `export`: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out.stdout.contains("with map collapse"),
+        "{}",
+        source_out.stdout
+    );
+
+    let header_path = dir.join("privmap.tmh");
+    std::fs::write(&header_path, &source_out.stdout).unwrap();
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, source_out.stdout,
+        "the printed header did not reparse to itself"
+    );
+}
+
+/// A map imported from a sibling namespace (`use producer::collapse;`)
+/// and named inside an EXPORTED graph body needs its `use` line kept —
+/// the same rule an imported alphabet already gets
+/// (`a_header_keeps_the_use_of_an_alphabet_from_another_unit`). The
+/// import's TARGET (`producer::collapse`) is itself printed (it is
+/// exported), so this also exercises the "printed-or-external" half of
+/// the `use`-line rule on a map for the first time.
+#[test]
+fn an_imported_map_referenced_in_a_graph_body_keeps_its_use_line() {
+    const IMPORTED_MAP_FIXTURE: &str = "\
+namespace producer {
+  export alphabet host5 { '_', '^', '$', '0', '1' }
+  export alphabet bare3 { '_', '0', '1' }
+  export map collapse: host5 -> bare3 { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+}
+
+namespace consumer {
+  use producer::host5, producer::bare3, producer::collapse;
+
+  export graph inner(tape v: bare3, state done) {
+    entry state s { [*] -> done; }
+  }
+
+  export graph outer(tape t: host5, state done) {
+    entry graft inner(v = t with map collapse, done = done) as z;
+  }
+}
+";
+    let dir = scratch("header_imported_map_referenced");
+    let src_path = dir.join("impmap.tmc");
+    std::fs::write(&src_path, IMPORTED_MAP_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    assert!(
+        source_out.stdout.contains("use producer::collapse;"),
+        "the printer dropped the needed `use` line for the imported map: {}",
+        source_out.stdout
+    );
+    // `producer::collapse` is itself exported IN THIS SAME UNIT, so its own
+    // declaration prints too (under `producer`) — the "printed" half of the
+    // printed-or-external rule, not the "external" half; a genuinely
+    // cross-unit import is `a_header_keeps_the_use_of_an_alphabet_from_
+    // another_unit`'s own shape, already covered for alphabets.
+    assert!(
+        source_out
+            .stdout
+            .contains("export map collapse: host5 -> bare3"),
+        "{}",
+        source_out.stdout
+    );
+
+    let header_path = dir.join("impmap.tmh");
+    std::fs::write(&header_path, &source_out.stdout).unwrap();
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, source_out.stdout,
+        "the printed header did not reparse to itself"
+    );
+}
+
 /// The near miss: an import whose target is NEVER printed (a
 /// non-exported alphabet nothing exported references) must be dropped,
 /// not reprinted — `producer::secret` is private and nothing exported
