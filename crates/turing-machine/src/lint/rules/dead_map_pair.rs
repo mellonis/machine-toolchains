@@ -41,6 +41,20 @@
 //! acceptance — unequal cardinalities, or a pair whose two glyphs sit at the
 //! same index — and the finding still reports without one otherwise.
 
+//! A NAMED map's pairs are the DECLARATION's own — every site that names
+//! it (docs/tmt/language.md (named maps)) shares the identical `MapPair`
+//! values, span included (`compiler::expand_named_maps` clones them
+//! verbatim). A pair is therefore judged, and reported, once per
+//! DECLARATION rather than once per site: a pair is dead only if it is
+//! dead at EVERY site that names the map, because the declaration — and
+//! whatever fix demotes its arrow — is shared, not per-site; a live
+//! write-back at even one site means the pair genuinely still does
+//! something somewhere. An inline map's pair is used at exactly one site
+//! by construction, so the same rule applied uniformly degrades to the
+//! old per-site behaviour there, unchanged. A named map with no site at
+//! all is `unused-map`'s business, never this rule's — nothing here fires
+//! without at least one site to judge against.
+
 use std::collections::HashMap;
 
 use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
@@ -50,7 +64,7 @@ use crate::footprint::{self, FootprintTable};
 use crate::lint::LintContext;
 use crate::lint::patterns::glyph_label;
 use crate::lint::rules::spans::arrow_span;
-use crate::parser::{BindingArg, BindingValue, MapArrow};
+use crate::parser::{BindingArg, BindingValue, MapArrow, MapPair};
 
 /// The position of `glyph` in a glyph vector.
 fn index_of(glyphs: &[String], glyph: &str) -> Option<u32> {
@@ -82,14 +96,41 @@ fn demotion_preserves_acceptance(
     index_of(host_glyphs, src) == Some(dst_index)
 }
 
-/// Flag every dead write-back half in one binding site's args.
-fn check_binding(
+/// One pair's aggregated verdict, keyed by the pair's own textual position
+/// (`pair.span`, as four raw coordinates — `Span` carries no `Hash`, and
+/// this rule owns no license to add one to a `crates/core` type). Folded
+/// across however many sites name it: one for an inline map's pair (by
+/// construction), one-or-more for a named map's, since every such site
+/// shares the identical `MapPair` (module doc).
+struct PairVerdict {
+    /// The pair itself — identical across every site folded in (module
+    /// doc), kept whole (rather than just its `src`/`dst`/`span`) so
+    /// [`arrow_span`] can locate the arrow token from the real node.
+    pair: MapPair,
+    /// `true` only while every site folded in so far judged the write-back
+    /// half dead.
+    dead_everywhere: bool,
+    /// `true` only while demoting stays safe at every site folded in so
+    /// far — the fix, when offered, is one edit at the shared declaration,
+    /// so it must be safe for every site the declaration reaches.
+    fix_safe_everywhere: bool,
+    /// Every callee name a site folded a dead verdict from, in first-seen
+    /// order — cited in the message when there is exactly one (matching
+    /// the pre-existing, pinned single-site wording byte for byte);
+    /// summarized when a named map's sites span more than one callee.
+    callees: Vec<String>,
+}
+
+/// Fold one binding site's own dead-write-back verdicts into `verdicts`,
+/// keyed by each bidirectional pair's own span. Judging is unchanged from
+/// before this rule folded across sites; only the accumulation is new.
+fn judge_binding(
     ctx: &LintContext,
     footprints: &FootprintTable,
     host: &ResolvedWorld,
     callee: &ResolvedWorld,
     args: &[BindingArg],
-    out: &mut Vec<Diagnostic>,
+    verdicts: &mut HashMap<(u32, u32, u32, u32), PairVerdict>,
 ) {
     // A callee the inference did not table (it walks every resolved world, so
     // this is a shape that should not arise) decides nothing.
@@ -138,35 +179,45 @@ fn check_binding(
                 continue;
             }
             let dst = glyph_label(&pair.dst);
+            let key = (
+                pair.span.start.line,
+                pair.span.start.col,
+                pair.span.end.line,
+                pair.span.end.col,
+            );
             // A `dst` outside the callee's alphabet cannot be looked up, and
-            // is a fatal of its own further down the pipeline.
+            // is a fatal of its own further down the pipeline. Unjudgeable
+            // at THIS site — over-approximate by folding in NOT dead, the
+            // same fail-safe-to-silence posture the module doc states, so a
+            // named map spanning an unresolvable site never reports a false
+            // dead-everywhere.
             let Some(dst_index) = index_of(callee_glyphs, &dst) else {
+                verdicts
+                    .entry(key)
+                    .and_modify(|v| v.dead_everywhere = false)
+                    .or_insert_with(|| PairVerdict {
+                        pair: pair.clone(),
+                        dead_everywhere: false,
+                        fix_safe_everywhere: false,
+                        callees: Vec::new(),
+                    });
                 continue;
             };
-            if written.contains(dst_index) {
-                continue;
-            }
             let src = glyph_label(&pair.src);
-            let fix = demotion_preserves_acceptance(host_glyphs, callee_glyphs, &src, dst_index)
-                .then(|| arrow_span(ctx, pair))
-                .flatten()
-                .map(|span| Fix {
-                    description: format!("demote to a one-way pair (`'{src}' => '{dst}'`)"),
-                    applicability: Applicability::MachineApplicable,
-                    edits: vec![Edit {
-                        span,
-                        replacement: "=>".to_string(),
-                    }],
-                });
-            out.push(Diagnostic {
-                code: "dead-map-pair",
-                span: pair.span,
-                message: format!(
-                    "the write-back half of `'{src}' -> '{dst}'` never fires: `{}` never writes '{dst}'",
-                    callee.name
-                ),
-                fix,
+            let dead_here = !written.contains(dst_index);
+            let fix_safe_here =
+                demotion_preserves_acceptance(host_glyphs, callee_glyphs, &src, dst_index);
+            let entry = verdicts.entry(key).or_insert_with(|| PairVerdict {
+                pair: pair.clone(),
+                dead_everywhere: true,
+                fix_safe_everywhere: true,
+                callees: Vec::new(),
             });
+            entry.dead_everywhere &= dead_here;
+            entry.fix_safe_everywhere &= fix_safe_here;
+            if dead_here {
+                entry.callees.push(callee.name.clone());
+            }
         }
     }
 }
@@ -185,6 +236,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
         .collect();
     let callee = |name: &str| by_name.get(name).copied();
 
+    let mut verdicts: HashMap<(u32, u32, u32, u32), PairVerdict> = HashMap::new();
     for host in &ctx.resolved.worlds {
         for call in &host.calls {
             // A call on a bind name carries no args of its own — the binding
@@ -197,22 +249,72 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             } = &call.target
                 && let Some(c) = callee(name)
             {
-                check_binding(ctx, &footprints, host, c, args, out);
+                judge_binding(ctx, &footprints, host, c, args, &mut verdicts);
             }
         }
         // A graft's target is always a locally defined graph.
         for graft in &host.grafts {
             if let Some(c) = callee(&graft.target) {
-                check_binding(ctx, &footprints, host, c, &graft.args, out);
+                judge_binding(ctx, &footprints, host, c, &graft.args, &mut verdicts);
             }
         }
         for bind in &host.binds {
             if !bind.external
                 && let Some(c) = callee(&bind.target)
             {
-                check_binding(ctx, &footprints, host, c, &bind.args, out);
+                judge_binding(ctx, &footprints, host, c, &bind.args, &mut verdicts);
             }
         }
+    }
+
+    // One finding per pair, iff it stayed dead across every site that
+    // folded into it (module doc) — an inline map's pair has exactly one
+    // site, so this reduces to the pre-existing per-site behaviour there.
+    for verdict in verdicts.into_values() {
+        if !verdict.dead_everywhere {
+            continue;
+        }
+        let PairVerdict {
+            pair,
+            fix_safe_everywhere,
+            mut callees,
+            ..
+        } = verdict;
+        let src = glyph_label(&pair.src);
+        let dst = glyph_label(&pair.dst);
+        callees.dedup();
+        let subject = match callees.as_slice() {
+            [one] => format!("`{one}` never writes '{dst}'"),
+            many => {
+                let mut sorted = many.to_vec();
+                sorted.sort();
+                format!(
+                    "none of {} ever writes '{dst}'",
+                    sorted
+                        .iter()
+                        .map(|c| format!("`{c}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        };
+        let fix = fix_safe_everywhere
+            .then(|| arrow_span(ctx, &pair))
+            .flatten()
+            .map(|arrow_span| Fix {
+                description: format!("demote to a one-way pair (`'{src}' => '{dst}'`)"),
+                applicability: Applicability::MachineApplicable,
+                edits: vec![Edit {
+                    span: arrow_span,
+                    replacement: "=>".to_string(),
+                }],
+            });
+        out.push(Diagnostic {
+            code: "dead-map-pair",
+            span: pair.span,
+            message: format!("the write-back half of `'{src}' -> '{dst}'` never fires: {subject}"),
+            fix,
+        });
     }
 }
 
@@ -461,8 +563,7 @@ machine {
     /// `ctx.resolved`'s already-EXPANDED binding args
     /// (`compiler::expand_named_maps` fills a named reference's `pairs`
     /// in place before lint ever runs), so a named site's dead pair is
-    /// exactly as visible as an inline one's — no code in this file
-    /// changes for it.
+    /// exactly as visible as an inline one's.
     const NAMED_MAP_SRC: &str = "\
 alphabet host5 { '_', '^', '$', '0', '1' }
 alphabet bare3 { '_', '0', '1' }
@@ -505,6 +606,88 @@ machine {
             "    ['0'] -> write ['1'] move [>] goto s;\n    [*] -> done;",
         );
         assert!(messages(&src).is_empty(), "{:?}", messages(&src));
+    }
+
+    /// The same named map, used at TWO sites whose callees disagree on
+    /// whether they write `'1'`: `zeroOut` never writes it (dead there),
+    /// `bothOut` writes both digits (live there). The declaration is
+    /// shared, so the pair reports only when EVERY site agrees it is
+    /// dead — one live site keeps it silent everywhere.
+    ///
+    /// Mutation: reporting a named map's pair as soon as it is dead at
+    /// ANY one site, rather than requiring every site to agree — that
+    /// mutation reds this test (the live `bothOut` site would no longer
+    /// suppress the finding the dead `zeroOut` site would otherwise
+    /// raise).
+    #[test]
+    fn a_named_maps_pair_dead_at_one_site_but_live_at_another_is_not_reported() {
+        let src = "\
+alphabet host5 { '_', '^', '$', '0', '1' }
+alphabet bare3 { '_', '0', '1' }
+map collapse: host5 -> bare3 { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+
+routine zeroOut(tape v: bare3) {
+  entry state s {
+    ['1'] -> write ['0'] move [>] goto s;
+    [*] -> return;
+  }
+}
+
+routine bothOut(tape v: bare3) {
+  entry state s {
+    ['1'] -> write ['0'] move [>] goto s;
+    ['0'] -> write ['1'] move [>] goto s;
+    [*] -> return;
+  }
+}
+
+machine {
+  tape t: host5;
+  bind zeroOut(v = t with map collapse) as z1;
+  bind bothOut(v = t with map collapse) as z2;
+  entry state go { [*] -> call z1() then two; }
+  state two { [*] -> call z2() then stop; }
+}
+";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+        compile(src, CompileOptions::default()).expect("the fixture compiles");
+    }
+
+    /// The same named map used at TWO sites whose callees BOTH never
+    /// write `'1'`: the pair is dead everywhere it is used, and reports
+    /// exactly ONCE — not once per site.
+    ///
+    /// Mutation: reporting per site instead of once per declaration (the
+    /// pre-fix behaviour) — that mutation produces two identical findings
+    /// at the identical span; this test's `assert_eq!(f.len(), 1, …)`
+    /// reds under it.
+    #[test]
+    fn a_named_maps_pair_dead_at_every_site_reports_exactly_once() {
+        let src = "\
+alphabet host5 { '_', '^', '$', '0', '1' }
+alphabet bare3 { '_', '0', '1' }
+map collapse: host5 -> bare3 { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+
+routine zeroOut(tape v: bare3) {
+  entry state s {
+    ['1'] -> write ['0'] move [>] goto s;
+    [*] -> return;
+  }
+}
+
+machine {
+  tape t: host5;
+  bind zeroOut(v = t with map collapse) as z1;
+  entry state go { [*] -> call zeroOut(v = t with map collapse) then two; }
+  state two { [*] -> call z1() then stop; }
+}
+";
+        let f = findings(src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].message,
+            "the write-back half of `'1' -> '1'` never fires: `zeroOut` never writes '1'"
+        );
     }
 
     #[test]

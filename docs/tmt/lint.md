@@ -502,7 +502,15 @@ does — a named map's pairs are checked once at the declaration
 before this rule (or any other) ever sees it — so a named site's dead pair
 is exactly as visible as an inline one's, findings anchored on the pair's
 own written position in the DECLARATION rather than on the site that names
-it.
+it. Because a named map's pairs are shared, a pair is flagged only when it
+is dead at EVERY site that names the map — a pair live at even one site
+still does something somewhere, so it is not dead — and reports exactly
+ONCE per declaration, never once per site. An inline map's pair is used
+at exactly one site by construction, so this is the same rule applied
+uniformly, not a special case: the message names the one callee that
+never writes the glyph when every site shares one, or summarizes across
+every callee involved when a named map's sites disagree on which routine
+or graph they call.
 
 **Write-half only.** The rule decides the write direction and nothing else.
 Whether a caller glyph the pair names ever reaches the callee at all depends

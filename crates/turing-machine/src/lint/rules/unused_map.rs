@@ -5,15 +5,15 @@
 //! binding-arg site (`docs/tmt/language.md` (named maps)) naming it. New on
 //! the lint channel, detected source-level over `Resolved`.
 //!
-//! Usage is decided over `ctx.resolved`'s already-expanded binding args:
-//! `compiler::expand_named_maps` clears nothing about a site's provenance
-//! (`SymMap::named` survives expansion, `pairs` alongside it), so every
-//! `with map NAME` — a graft's, a bind's, or a direct call's own — is still
-//! visible here as a bare or qualified reference. Only the LAST segment (a
-//! qualified reference's own local name, or a bare one) can ever name a
-//! declaration THIS unit owns, so the declaration's own short name — never
-//! its full mangled path — is what a use is matched against; the mangled
-//! `ResolvedMapDecl::name`'s own last `::` segment is exactly that.
+//! Usage is decided by RESOLVED identity, matching `unused-alphabet`'s own
+//! rule: `compiler::expand_named_maps` rewrites a resolved site's own
+//! `SymMap::named` text to the declaration's mangled `ResolvedMapDecl::name`
+//! (a `Resolved`-only rewrite — the two SOURCE printers read `Program`,
+//! untouched by it, and keep printing what the author wrote), so a site's
+//! `named` here IS the mangled name it resolved to, never the raw written
+//! spelling. Matching on that avoids the trap a bare SHORT-name compare
+//! would fall into: two different namespaces may each declare a `map m`,
+//! and a use of one must never silence the other.
 //!
 //! The fix deletes the whole declaration, including any leading doc/
 //! attention run — an orphaned `?`/`!` run is a parse error, so the doc
@@ -29,25 +29,19 @@ use crate::lint::rules::spans::decl_span;
 use crate::parser::BindingValue;
 use crate::syntax::MapDeclView;
 
-/// The bare local name a mangled declaration name (`ns::…::NAME`) ends in.
-fn short_name(mangled: &str) -> &str {
-    mangled.rsplit("::").next().unwrap_or(mangled)
-}
-
-/// This binding value's own named-map reference, SHORT-named, if any.
+/// This binding value's own named-map reference, by its RESOLVED mangled
+/// name (`compiler::expand_named_maps` already rewrote it), if any.
 fn named_map_ref(value: &BindingValue) -> Option<&str> {
     let BindingValue::Named { map: Some(m), .. } = value else {
         return None;
     };
     let (name, _) = m.named.as_ref()?;
-    Some(short_name(name))
+    Some(name.as_str())
 }
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
-    // Every SHORT name a `with map NAME` site names, across every graft,
-    // bind, and call in the module — the resolved module's own args, which
-    // still carry `SymMap::named` after expansion (`compiler::
-    // expand_named_maps` fills `pairs` in place, never clears provenance).
+    // Every mangled name a `with map NAME` site resolved to, across every
+    // graft, bind, and call in the module.
     let mut used: HashSet<&str> = HashSet::new();
     for world in &ctx.resolved.worlds {
         for graft in &world.grafts {
@@ -64,7 +58,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     }
 
     for (name, map) in &ctx.resolved.maps {
-        if !used.contains(short_name(name)) {
+        if !used.contains(name.as_str()) {
             let fix = decl_span::<MapDeclView>(ctx, map.name_span).map(|span| Fix {
                 description: format!("delete the unused map `{name}`"),
                 applicability: Applicability::MaybeIncorrect,
@@ -133,6 +127,63 @@ machine {
     #[test]
     fn and_not_on_a_used_one() {
         assert!(findings(SRC).is_empty(), "{:?}", findings(SRC));
+    }
+
+    /// Two namespaces each declare a map with the SAME short name (`m`);
+    /// only `used::m` is ever named at a site. Mutation: matching by short
+    /// name (`rsplit("::")`) instead of the resolved mangled name — that
+    /// would see ANY `with map m` as covering BOTH declarations, so
+    /// `dead::m` would never be reported.
+    #[test]
+    fn a_namespaced_declaration_is_reported_even_when_a_same_short_named_one_elsewhere_is_used() {
+        let src = "\
+alphabet a2 { '_', 'x' }
+alphabet b2 { '_', 'y' }
+namespace used {
+  map m: a2 -> b2 { 'x' -> 'y' }
+}
+namespace dead {
+  map m: a2 -> b2 { 'x' -> 'y' }
+}
+routine plusOne(tape num: b2) {
+  entry state s { [*] -> return; }
+}
+machine {
+  tape data: a2;
+  entry state go { [*] -> call plusOne(num = data with map used::m) then stop; }
+}
+";
+        let f = findings(src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("dead::m"), "{f:?}");
+        assert!(!f[0].contains("used::m"), "{f:?}");
+    }
+
+    /// A `use`-imported bare name still counts as a use of the declaration
+    /// it resolves to, not of anything else sharing its short name.
+    #[test]
+    fn a_use_imported_name_counts_for_the_right_declaration() {
+        let src = "\
+alphabet a2 { '_', 'x' }
+alphabet b2 { '_', 'y' }
+namespace used {
+  export map m: a2 -> b2 { 'x' -> 'y' }
+}
+namespace dead {
+  map m: a2 -> b2 { 'x' -> 'y' }
+}
+use used::m;
+routine plusOne(tape num: b2) {
+  entry state s { [*] -> return; }
+}
+machine {
+  tape data: a2;
+  entry state go { [*] -> call plusOne(num = data with map m) then stop; }
+}
+";
+        let f = findings(src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("dead::m"), "{f:?}");
     }
 
     // The comment-guard withhold test lives alongside its siblings in

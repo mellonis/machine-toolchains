@@ -1433,6 +1433,18 @@ fn expand_named_maps_in_args(
             });
         }
         m.pairs = decl.pairs.clone();
+        // Rewrite the WRITTEN reference to the declaration's own mangled
+        // name — safe here (and only here): `Resolved` holds cloned args,
+        // entirely independent of `Program`'s own copies, so this can
+        // never reach the two SOURCE printers (`fmt/print.rs`,
+        // `header.rs::binding_value_text`), which read `Program` and must
+        // keep printing what the author wrote. Giving `Resolved`'s own
+        // copy the RESOLVED identity — rather than leaving consumers to
+        // guess from the written (possibly bare, possibly short-name-
+        // colliding) text — is what lets `unused-map` and the header's
+        // own referenced-map collection match by identity instead of by
+        // spelling.
+        m.named = Some((decl.name.clone(), name_span));
     }
     Ok(())
 }
