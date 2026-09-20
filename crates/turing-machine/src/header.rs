@@ -59,29 +59,39 @@
 //! parameters mixed as written), since nothing else records it.
 //!
 //! **A namespace prints the `use` lines its own printed content actually
-//! needs, on the SOURCE arm only** (docs/tmt/cli.md (interface)): an
-//! import from `Program::imports`, declared exactly at that namespace,
-//! reprints as `use path[ as alias];` iff its bound short name is
-//! referenced, unqualified, by something this render prints in that same
-//! scope — a tape signature's alphabet name, or (inside a printed
-//! `export graph` body) a bare `graft`/`bind` target or a bare `call`
-//! target in a rule's transition. An import whose bound name nothing
-//! printed there references is dropped, exactly like an import whose
-//! TARGET is never printed at all (a non-exported routine or graph, or an
-//! alphabet nothing exported reaches) — printing either would be text
-//! that cannot resolve when the header is read back through the strict
-//! reader. This is what makes std.tmc's volatile-twin namespaces
-//! (`binaryNumbersVolatile`, `binaryNumbersBareVolatile`), which import
-//! their representation alphabet from a SIBLING namespace via an explicit
-//! `use`, reprint as a header that reparses. The OBJECT arm prints no
-//! `use` line at all, on any routine: `Interface::imports` (docs/formats.md
-//! (routine interfaces)) records only a GENUINELY cross-unit reference — a
-//! name a `use` or a qualified path reaches that this unit's own
-//! declarations do not define, resolved against an external declarations
-//! module at compile time. A same-unit sibling-namespace `use`, the shape
-//! std.tmc's volatile twins use, resolves against this unit's OWN
-//! declarations and never touches it, so it carries nothing the object arm
-//! could read a `use` line back from for that shape either.
+//! needs, on BOTH arms** (docs/tmt/cli.md (interface)), though the two
+//! arms reach that decision from different data.
+//!
+//! On the SOURCE arm: an import from `Program::imports`, declared exactly
+//! at that namespace, reprints as `use path[ as alias];` iff its bound
+//! short name is referenced, unqualified, by something this render
+//! prints in that same scope — a tape signature's alphabet name, or
+//! (inside a printed `export graph` body) a bare `graft`/`bind` target or
+//! a bare `call` target in a rule's transition — AND EITHER the header
+//! prints the import's target itself (a non-exported routine or graph,
+//! or an alphabet nothing exported reaches, drops the `use` alongside
+//! it — printing either would be text that cannot resolve when the
+//! header is read back) OR the target lives in ANOTHER unit: reached
+//! through the compile's declarations table rather than through this
+//! unit's own declarations (`needed_imports`'s own doc has the exact
+//! rule), which a program that compiled at all could only have done by
+//! resolving the name externally. This is what makes std.tmc's
+//! volatile-twin namespaces (`binaryNumbersVolatile`,
+//! `binaryNumbersBareVolatile`), which import their representation
+//! alphabet from a SIBLING namespace of the SAME unit, reprint as a
+//! header that reparses (the target IS printed here, from the
+//! "printed" branch), and is what lets a genuinely cross-unit `use` (a
+//! user program's `use std::binaryNumbers::symbols;` against the
+//! embedded stdlib, say) reprint too (the "external" branch — nothing in
+//! THIS unit ever prints `symbols`, but the reader's own declarations
+//! table, stdlib or `--extern`, resolves it independently).
+//!
+//! On the OBJECT arm: [`resolve_object_alphabet`] decides a tape's
+//! alphabet identifier by a four-rule match (its own doc has the details)
+//! and prints a `use <qualified name>;` line in the routine's own
+//! namespace exactly when that match crosses into another namespace of
+//! the same object or into an imported-alphabet record — never for a
+//! same-namespace or enclosing-scope match, which needs no `use` at all.
 //!
 //! Grafts and binds print without their own doc lines: only `alphabet`,
 //! `routine`, and `graph` declarations carry one here, even though
@@ -100,34 +110,23 @@
 //! private alphabet) still prints nothing, exactly as before.
 //!
 //! **The object arm has no alphabet NAME to read per tape** — the wire's
-//! `RoutineInterface` carries a tape's glyph list, never an identifier for
-//! it. The reconstruction is matching a tape's glyph list, by content,
-//! against exported alphabets the routine could spell UNQUALIFIED in
-//! source — its own namespace, or any ENCLOSING namespace (an unqualified
-//! name resolves outward through enclosing scopes); the first match (in
-//! wire order) wins, and two such exported alphabets sharing one glyph
-//! list are genuinely indistinguishable from the object alone — the
-//! printer accepts that ambiguity rather than erroring on it. A content
-//! match in a SIBLING or otherwise unrelated namespace — reachable only
-//! through an explicit `use` alias, like std.tmc's volatile twins
-//! importing their representation alphabet from a SIBLING namespace — is
-//! deliberately not used, and `Interface::imports` (docs/formats.md
-//! (routine interfaces)) does not help here EITHER: that record carries
-//! only a GENUINELY cross-unit import (a name resolved at compile time
-//! against another unit's declarations table), and a same-unit
-//! sibling-namespace `use` never becomes one — it resolves locally, so no
-//! entry for it ever reaches the wire (verified: the compiled embedded
-//! stdlib, whose volatile twins are exactly this shape, carries zero
-//! `Interface::imports` records). A genuinely cross-unit import DOES carry
-//! a name and glyphs on the wire, but nothing here reads it yet — the
-//! shipped corpus has no fixture that would exercise it, since std.tmc's
-//! own cross-namespace `use`s are all same-unit. A tape whose alphabet no
-//! reachable export matches — whether none matches at all, or only an
-//! unrelated one does — gets a SYNTHESIZED, deterministic plain-`alphabet`
+//! `RoutineInterface` carries a tape's glyph list, never an identifier
+//! for it, so [`resolve_object_alphabet`] reconstructs one by CONTENT
+//! match, trying four sources in order: an exported alphabet reachable
+//! unqualified from the routine's own namespace (its own, or any
+//! ENCLOSING one); failing that, an exported alphabet in ANY OTHER
+//! namespace of the same object, named via a `use` line; failing that, an
+//! alphabet this object IMPORTED from another unit (`Interface::imports`,
+//! docs/formats.md (routine interfaces)), likewise via a `use` line; and
+//! failing all three, a SYNTHESIZED, deterministic plain-`alphabet`
 //! declaration instead of an error: `<routine>__<param>` (the routine's
 //! own mangled name with `::` replaced by `_`, joined to the parameter
 //! name), declared at the top level, before the namespace block that uses
-//! it. The object arm never fails to render a routine for want of an
+//! it. Two exported alphabets (or two imports) sharing one glyph list are
+//! genuinely indistinguishable from the object alone — the printer
+//! accepts that ambiguity rather than erroring on it, taking the first
+//! match in wire order, same as before this rule had four tiers instead
+//! of one. The object arm never fails to render a routine for want of an
 //! alphabet name.
 //!
 //! **The object arm skips the entry world.** A `machine` block always
@@ -143,7 +142,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use mtc_core::formats::object::{ExportedAlphabet, ObjectFile, RoutineInterface, SymbolDef};
+use mtc_core::formats::object::{ExportedAlphabet, Interface, ObjectFile, SymbolDef};
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
@@ -232,9 +231,12 @@ pub(crate) fn read_extern(path: &Path, source: &str) -> Result<Resolved, Compile
 /// Render the exported declarations a compiled object still carries — the
 /// reduced arm: routine signatures and exported alphabets, no graphs, no
 /// maps, no doc lines (docs/formats.md (routine interfaces): the wire has
-/// no doc-line field at all). No `use` lines either, on any routine: the
-/// wire's `Interface` records no imports yet, so this arm has nothing to
-/// read one back from.
+/// no doc-line field at all). A routine's tape parameter names its
+/// alphabet through [`resolve_object_alphabet`]'s four-rule matching
+/// order, printing a `use` line ahead of a namespace's own declarations
+/// (matching the source arm's placement — see the module doc) whenever
+/// that order resolves a tape through another namespace of this same
+/// object or through an imported-alphabet record.
 pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
     let interface = obj
         .interface
@@ -246,6 +248,14 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
         let (ns, local) = split_ns(&alphabet.name);
         root.insert(&ns, alphabet_lines(local, &alphabet.glyphs, true));
     }
+
+    // Per-namespace short-name claims (rule (1)'s own reachable names,
+    // seeded lazily, plus every `use` this render decides to print) and
+    // the `use` lines themselves, in first-claimed order —
+    // `resolve_object_alphabet`'s own doc has the full collision rule.
+    let mut claimed: HashMap<Vec<String>, HashMap<String, String>> = HashMap::new();
+    let mut use_lines: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+
     for symbol in &obj.symbols {
         // The entry world is skipped on the object arm: a `machine` block
         // always compiles to the literal symbol name `main`, and unlike an
@@ -271,43 +281,175 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
                 format!("`{}`: no interface record for its own blob", symbol.name)
             })?;
             let (ns, local) = split_ns(&symbol.name);
-            // A tape's glyph list is matched only against exported
-            // alphabets the routine could spell UNQUALIFIED in source: its
-            // own namespace, or any ENCLOSING namespace (an unqualified
-            // name resolves outward through enclosing scopes —
-            // docs/tmt/language.md (namespaces)), never a SIBLING or
-            // otherwise unrelated namespace reached only through an
-            // explicit `use` alias. A `use`-imported alphabet (like
-            // std.tmc's volatile twins importing their representation
-            // alphabet from a sibling namespace) is exactly the case this
-            // excludes: the wire has no record of that `use` edge
-            // (`Interface::imports` is unpopulated — see the module doc),
-            // so nothing here could tell that content match apart from a
-            // coincidental one, and it synthesizes instead.
-            let reachable_alphabets: Vec<&ExportedAlphabet> = interface
-                .alphabets
+            let mut params = Vec::with_capacity(routine.params.len());
+            for ((param_name, glyphs), writes) in routine
+                .params
                 .iter()
-                .filter(|a| ns.starts_with(&split_ns(&a.name).0))
-                .collect();
-            // A tape whose glyph list matches no exported alphabet in its
-            // OWN namespace gets a synthesized one, declared at the top
-            // level — BEFORE this routine's own namespace block prints,
-            // since insertion order is print order and the routine itself
-            // is inserted next.
-            for (param_name, glyphs) in routine.params.iter().zip(&routine.glyphs) {
-                if !reachable_alphabets.iter().any(|a| &a.glyphs == glyphs) {
-                    let synth = synthesized_alphabet_name(&symbol.name, param_name);
-                    root.insert(&[], alphabet_lines(&synth, glyphs, false));
-                }
+                .zip(&routine.glyphs)
+                .zip(&routine.writes)
+            {
+                let alphabet_name = match resolve_object_alphabet(
+                    interface,
+                    &ns,
+                    &symbol.name,
+                    param_name,
+                    glyphs,
+                    &mut claimed,
+                    &mut use_lines,
+                ) {
+                    Ok(name) => name,
+                    Err(synth) => {
+                        // A tape whose alphabet no rule (1)/(2)/(3) match
+                        // claims gets a synthesized one, declared at the
+                        // top level — BEFORE this routine's own namespace
+                        // block prints, since insertion order is print
+                        // order and the routine itself is inserted next.
+                        root.insert(&[], alphabet_lines(&synth, glyphs, false));
+                        synth
+                    }
+                };
+                params.push(tape_param_text(param_name, &alphabet_name, writes));
             }
-            let lines = object_routine_lines(&symbol.name, local, routine, &reachable_alphabets);
+            let lines = vec![format!("export routine {local}({});", params.join(", "))];
             root.insert(&ns, lines);
         }
+    }
+
+    // `use` lines print ahead of a namespace's own declarations, exactly
+    // like the source arm's own `NsNode::prepend` pass — every namespace
+    // referenced here already exists in `root` by construction (a `use`
+    // is only ever recorded alongside the routine that needed it, which
+    // this loop has already inserted).
+    for (ns, lines) in use_lines {
+        root.prepend(&ns, lines);
     }
 
     let mut out = String::new();
     root.render(0, &mut out);
     Ok(out)
+}
+
+/// One tape's alphabet identifier on the object arm — the first rule that
+/// matches, in order (docs/tmt/cli.md (interface)):
+///
+/// 1. An exported alphabet reachable UNQUALIFIED from the routine's own
+///    namespace (its own, or any ENCLOSING one — an unqualified name
+///    resolves outward through enclosing scopes,
+///    docs/tmt/language.md (namespaces)) — printed by short name, no
+///    `use` needed, exactly as before this rule had siblings.
+/// 2. An exported alphabet in ANY OTHER namespace of this same object — a
+///    `use <qualified name>;` line in the routine's own namespace (the
+///    same placement and spelling the source arm's `use_line_text` gives
+///    one), printed by short name. This is what makes std.tmc's
+///    volatile-twin namespaces (`binaryNumbersVolatile`,
+///    `binaryNumbersBareVolatile`), which import their representation
+///    alphabet from a SIBLING namespace, match the source arm exactly.
+/// 3. An alphabet this object IMPORTED from ANOTHER unit
+///    (`Interface::imports`, docs/formats.md (routine interfaces)) —
+///    likewise a `use <qualified name>;` line and the short name; no
+///    local `alphabet` declaration exists for it here, the same way the
+///    source arm's cross-unit `use` prints no local declaration either —
+///    the header trusts the reader's OWN declarations table to resolve
+///    it.
+/// 4. Otherwise the SYNTHESIZED, deterministic private name
+///    (`synthesized_alphabet_name`) — never an error, since a routine
+///    over a private alphabet is legal.
+///
+/// Within (1)/(2)/(3), the first CONTENT match (by glyph list) wins, in
+/// wire order — two exported alphabets (or two imports) sharing one
+/// glyph list are genuinely indistinguishable from the object alone, and
+/// this printer accepts that ambiguity rather than erroring on it, same
+/// as before this rule had siblings.
+///
+/// A short-name COLLISION inside the routine's own namespace — a (2) or
+/// (3) candidate whose short name is already claimed by a DIFFERENT full
+/// path in that same namespace, whether claimed by an earlier (2)/(3)
+/// `use` or already occupied by a (1) reachable declaration — is refused
+/// rather than printed: `Err`, so the caller falls back to (4) for
+/// whichever candidate lost the race, instead of emitting a `use` that
+/// would shadow or be shadowed. `Ok` is returned both for a fresh claim
+/// and for a REPEAT of the identical `(ns, full path)` pair (two tapes in
+/// one namespace importing the same alphabet resolve to the same short
+/// name without a duplicate `use` line).
+fn resolve_object_alphabet(
+    interface: &Interface,
+    ns: &[String],
+    routine_full_name: &str,
+    param_name: &str,
+    glyphs: &[String],
+    claimed: &mut HashMap<Vec<String>, HashMap<String, String>>,
+    use_lines: &mut Vec<(Vec<String>, Vec<String>)>,
+) -> Result<String, String> {
+    if !claimed.contains_key(ns) {
+        let mut seed: HashMap<String, String> = HashMap::new();
+        for a in reachable_alphabets(&interface.alphabets, ns) {
+            seed.insert(short_name(&a.name).to_string(), a.name.clone());
+        }
+        claimed.insert(ns.to_vec(), seed);
+    }
+
+    if let Some(a) = reachable_alphabets(&interface.alphabets, ns)
+        .into_iter()
+        .find(|a| a.glyphs == glyphs)
+    {
+        return Ok(short_name(&a.name).to_string());
+    }
+
+    let other_alphabets: Vec<&ExportedAlphabet> = interface
+        .alphabets
+        .iter()
+        .filter(|a| !ns.starts_with(&split_ns(&a.name).0))
+        .collect();
+    if let Some(a) = other_alphabets.into_iter().find(|a| a.glyphs == glyphs)
+        && let Some(name) = try_claim_use(ns, &a.name, claimed, use_lines)
+    {
+        return Ok(name);
+    }
+
+    if let Some(imp) = interface.imports.iter().find(|imp| imp.glyphs == glyphs)
+        && let Some(name) = try_claim_use(ns, &imp.name, claimed, use_lines)
+    {
+        return Ok(name);
+    }
+
+    Err(synthesized_alphabet_name(routine_full_name, param_name))
+}
+
+/// Every alphabet reachable UNQUALIFIED from a routine printed at `ns` —
+/// rule (1) of [`resolve_object_alphabet`].
+fn reachable_alphabets<'a>(
+    alphabets: &'a [ExportedAlphabet],
+    ns: &[String],
+) -> Vec<&'a ExportedAlphabet> {
+    alphabets
+        .iter()
+        .filter(|a| ns.starts_with(&split_ns(&a.name).0))
+        .collect()
+}
+
+/// Bind `full`'s short name inside `ns`, or refuse on a collision —
+/// [`resolve_object_alphabet`]'s own doc has the full rule. `None` means
+/// `ns` already binds that short name to a DIFFERENT full path.
+fn try_claim_use(
+    ns: &[String],
+    full: &str,
+    claimed: &mut HashMap<Vec<String>, HashMap<String, String>>,
+    use_lines: &mut Vec<(Vec<String>, Vec<String>)>,
+) -> Option<String> {
+    let short = short_name(full).to_string();
+    let scope = claimed.entry(ns.to_vec()).or_default();
+    match scope.get(&short) {
+        Some(existing) if existing == full => Some(short),
+        Some(_) => None,
+        None => {
+            scope.insert(short.clone(), full.to_string());
+            match use_lines.iter_mut().find(|(n, _)| n == ns) {
+                Some((_, lines)) => lines.push(format!("use {full};")),
+                None => use_lines.push((ns.to_vec(), vec![format!("use {full};")])),
+            }
+            Some(short)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -473,10 +615,11 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
     // above), an exported routine, or an exported graph. This is the
     // "printed" half of the `use`-line rule (docs/tmt/cli.md
     // (interface)): a `use` line is printed only when this scope's
-    // printed content references its name AND the header prints its
-    // target — a `use` whose target is not in this set could not
-    // possibly resolve when the header is read back, no matter how the
-    // scope that declared it prints, so it is never a candidate to keep.
+    // printed content references its name AND EITHER the header prints
+    // its target OR the target lives in another unit (`needed_imports`'s
+    // own doc carries that second half) — a SAME-unit target that is
+    // neither printed here nor reached externally could not possibly
+    // resolve when the header is read back, so it stays dropped.
     let mut printed_full_names: HashSet<String> = HashSet::new();
     for alphabet in &program.alphabets {
         let full = full_name(&alphabet.ns, &alphabet.name);
@@ -546,6 +689,19 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
             import_scopes.push(import.ns.clone());
         }
     }
+    // Every name THIS unit declares itself, mangled — alphabets, routines
+    // and graphs alike. An import whose target is not in this set, in a
+    // program that compiled at all, resolved through the declarations
+    // table rather than through this unit's own declarations: it lives in
+    // ANOTHER unit (docs/tmt/cli.md (interface)), which is the second half
+    // of the `use`-line rule below.
+    let local_names: HashSet<String> = program
+        .alphabets
+        .iter()
+        .map(|a| full_name(&a.ns, &a.name))
+        .chain(program.routines.iter().map(|r| full_name(&r.ns, &r.name)))
+        .chain(program.graphs.iter().map(|g| full_name(&g.ns, &g.name)))
+        .collect();
     for ns in &import_scopes {
         let needed = needed_imports(
             ns,
@@ -553,6 +709,7 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
             &program.routines,
             &program.graphs,
             &printed_full_names,
+            &local_names,
         );
         if needed.is_empty() {
             continue;
@@ -580,9 +737,12 @@ fn use_line_text(import: &Import) -> String {
 /// The imports declared exactly at `ns` that this render both NEEDS and
 /// CAN reprint — two independent conditions, both required
 /// (docs/tmt/cli.md (interface)): a `use` line is printed only when this
-/// scope's printed content references its name and the header prints
-/// its target; a `use` whose target is not printed is dropped — it could
-/// not resolve in the header.
+/// scope's printed content references its name AND EITHER the header
+/// prints its target OR the target lives in ANOTHER unit — reached
+/// through the declarations table, never through this unit's own
+/// declarations (`local_names`), which is exactly how a genuinely
+/// cross-unit alphabet reference (`use std::binaryNumbers::symbols;`
+/// against the embedded stdlib, say) resolves.
 ///
 /// - referenced: the bound short name (`Import::binding`) is used,
 ///   unqualified, by a PRINTED declaration in that same scope — a tape
@@ -592,13 +752,19 @@ fn use_line_text(import: &Import) -> String {
 ///   are the only ones this printer ever renders a signature or body
 ///   for, so a reference from something the header drops (a
 ///   non-exported world, or a routine's own dropped body) does not count.
-/// - printed: the import's TARGET (`Import::full_path`) is itself one of
-///   `printed_full_names` — an exported alphabet, an alphabet this same
-///   render prints because something exported references it, an
-///   exported routine, or an exported graph. A target that never prints
-///   (a private routine or graph reached only through the SAME import)
-///   would leave the `use` line pointing at a name the header never
-///   declares, so it is dropped too, even when referenced.
+/// - printed-or-external: the import's TARGET (`Import::full_path`) is
+///   either one of `printed_full_names` — an exported alphabet, an
+///   alphabet this same render prints because something exported
+///   references it, an exported routine, or an exported graph — or
+///   absent from `local_names` altogether. A program that compiled at
+///   all and references a name neither declared locally nor printed here
+///   must have resolved that name through the declarations table (this
+///   unit has no other way to make it resolve), so the `use` line is the
+///   only way the printed reference could ever reparse — it is kept
+///   rather than dropped. A SAME-unit target that is neither printed nor
+///   locally declared cannot occur (it would not have compiled), so this
+///   is not a loophole for the "private target, same import" case the
+///   printed-here rule alone already drops.
 ///
 /// Source order preserved: `imports` is walked in its own (already
 /// source-ordered) sequence, filtered rather than resorted.
@@ -608,6 +774,7 @@ fn needed_imports<'a>(
     routines: &[Routine],
     graphs: &[Graph],
     printed_full_names: &HashSet<String>,
+    local_names: &HashSet<String>,
 ) -> Vec<&'a Import> {
     let mut referenced: HashSet<&str> = HashSet::new();
     for routine in routines {
@@ -626,7 +793,8 @@ fn needed_imports<'a>(
         .filter(|imp| {
             imp.ns.as_slice() == ns
                 && referenced.contains(imp.binding())
-                && printed_full_names.contains(&imp.full_path())
+                && (printed_full_names.contains(&imp.full_path())
+                    || !local_names.contains(&imp.full_path()))
         })
         .collect()
 }
@@ -796,8 +964,8 @@ fn sig_param_text(
 
 /// One tape parameter's rendered text — `tape NAME: ALPHABET writes { … }`
 /// — the ONE renderer both the source arm (`sig_param_text`) and the object
-/// arm (`object_routine_lines`) call, so the two can never drift apart on
-/// how a parameter is formatted, only on what write set they pass in (which
+/// arm (`from_object`) call, so the two can never drift apart on how a
+/// parameter is formatted, only on what write set they pass in (which
 /// `compiler::published_writes` also unifies — see the module doc).
 fn tape_param_text(name: &str, alphabet: &str, writes: &[String]) -> String {
     format!("tape {name}: {alphabet} writes {}", braced_list(writes))
@@ -1032,52 +1200,15 @@ fn indented(lines: Vec<String>) -> Vec<String> {
 // Object arm
 // ---------------------------------------------------------------------------
 
-fn object_routine_lines(
-    routine_full_name: &str,
-    local_name: &str,
-    routine: &RoutineInterface,
-    alphabets: &[&ExportedAlphabet],
-) -> Vec<String> {
-    let mut params = Vec::with_capacity(routine.params.len());
-    for ((param_name, glyphs), writes) in routine
-        .params
-        .iter()
-        .zip(&routine.glyphs)
-        .zip(&routine.writes)
-    {
-        // A tape's alphabet has no name on the wire (docs/formats.md
-        // (routine interfaces) records only its glyphs); resolving it back
-        // to the identifier a `.tmc` header must spell means matching this
-        // tape's full glyph list, by content, against an alphabet in the
-        // routine's OWN namespace that this same object exports (`alphabets`
-        // is already filtered to that namespace by the caller — a
-        // cross-namespace content match is not usable without a qualified
-        // alphabet reference, which the language does not have yet). A tape
-        // whose alphabet no same-namespace export matches gets the SAME
-        // synthesized name `from_object` already declared for it at the top
-        // level (see the module doc and `synthesized_alphabet_name`) — never
-        // an error, since a routine over a private alphabet is legal.
-        let alphabet_name = alphabets
-            .iter()
-            .find(|a| &a.glyphs == glyphs)
-            .map(|a| short_name(&a.name).to_string())
-            .unwrap_or_else(|| synthesized_alphabet_name(routine_full_name, param_name));
-        params.push(tape_param_text(param_name, &alphabet_name, writes));
-    }
-    vec![format!(
-        "export routine {local_name}({});",
-        params.join(", ")
-    )]
-}
-
-/// A deterministic stand-in name for a tape's alphabet when the object
-/// exports nothing with matching glyph content: the routine's own mangled
+/// A deterministic stand-in name for a tape's alphabet when nothing this
+/// object exports or imports has matching glyph content
+/// ([`resolve_object_alphabet`]'s rule (4)): the routine's own mangled
 /// name with `::` replaced by `_`, joined to the parameter name by `__`
 /// (docs/tmt/cli.md (interface)). Two different routines can never
 /// collide on this scheme — their mangled names differ — and reusing it
-/// consistently between the declaration `from_object` emits and the
-/// reference `object_routine_lines` prints is what keeps the two in sync
-/// without passing the synthesized name across the two call sites
+/// consistently between the declaration `from_object` inserts and the
+/// reference `resolve_object_alphabet` returns is what keeps the two in
+/// sync without passing the synthesized name across the two sites
 /// directly.
 fn synthesized_alphabet_name(routine_full_name: &str, param_name: &str) -> String {
     format!("{}__{param_name}", routine_full_name.replace("::", "_"))

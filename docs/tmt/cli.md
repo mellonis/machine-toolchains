@@ -664,30 +664,42 @@ could not reproduce it. `volatile` is dropped from both arms
 for the same reason: the modifier is compile-time-only and leaves no
 trace in the generated assembly (docs/tmt/language.md (volatile tapes)),
 and it is never checked at a call site either, so it is not part of what
-a caller may rely on. The source arm also prints, ahead of each
-namespace's own declarations, the `use` lines its printed content
-actually needs to resolve; the object arm prints none, since the wire
-carries no import record yet.
+a caller may rely on. **Both arms print, ahead of each namespace's own
+declarations, the `use` lines that namespace's printed content needs** —
+though the two decide "needs" from different data. The source arm keeps
+a `use` when its bound name is referenced AND EITHER the header prints
+the import's target itself OR the target lives in ANOTHER unit, reached
+through the compile's declarations table rather than through this unit's
+own declarations (a program that compiled at all could only have
+resolved such a name that way). The object arm reaches the equivalent
+case through its own tape-alphabet matching order, described next.
 
 **A routine over a non-exported alphabet is legal, and both arms render
 it.** On the source arm, every alphabet an exported routine or graph
 references prints — as `export alphabet` when it is itself exported, as
 a plain `alphabet` (no `export`) when it is only referenced. On the
-object arm, a tape's glyph list is matched by content against exported
-alphabets the routine could spell UNQUALIFIED in source — its own
-namespace, or any enclosing one — only; a content match reachable only
-through an explicit `use` alias into a sibling namespace is not used,
-since the object carries no record of that alias to spell it with; a
-list matching no reachable export gets a synthesized, deterministic `alphabet`
-declaration instead — `<routine>__<param>`, the routine's own mangled
-name with `::` replaced by `_`, joined to the parameter name — declared
-at the top level, before the namespace block that uses it. The object arm
-never fails to render a routine for want of an alphabet name. This is
-also why the two-arm identity above is a property of routines over
-EXPORTED alphabets (every tape in the standard library draws from one):
-a routine over a private alphabet still renders on both arms, but the
-object arm's synthesized name is not expected to match the source arm's
-own local spelling.
+object arm, a tape's glyph list is matched by content, trying four
+sources in order: (1) an exported alphabet reachable UNQUALIFIED from the
+routine's own namespace (its own, or any enclosing one) — printed by
+short name, no `use` needed; (2) an exported alphabet in any OTHER
+namespace of the same object — a `use <qualified name>;` line in the
+routine's own namespace, printed by short name; (3) an alphabet the
+object IMPORTED from another unit — likewise a `use` line and the short
+name, with no local `alphabet` declaration for it; (4) otherwise a
+synthesized, deterministic `alphabet` declaration — `<routine>__<param>`,
+the routine's own mangled name with `::` replaced by `_`, joined to the
+parameter name — declared at the top level, before the namespace block
+that uses it. Within (1)/(2)/(3) the first content match wins, in wire
+order; a short-name collision inside one namespace — two matched
+alphabets that would both want the same short name there — falls back to
+(4) for whichever one loses the race, rather than printing an ambiguous
+`use`. The object arm never fails to render a routine for want of an
+alphabet name. This is also why the two-arm identity is a property of
+routines over EXPORTED (or importable) alphabets — every tape in the
+standard library draws from one, so (1) or (2) always matches there: a
+routine over a genuinely PRIVATE, non-exported, non-imported alphabet
+still renders on both arms, but the object arm's synthesized name is not
+expected to match the source arm's own local spelling.
 
 **The object arm skips the entry world.** A `machine` block always
 compiles to the symbol name `main`, but it is never a callee — nothing

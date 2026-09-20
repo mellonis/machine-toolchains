@@ -413,16 +413,6 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// The write-set suffix of a rendered signature line — from the `writes`
-/// keyword to the end — with the alphabet-name half elided. Used to check
-/// write-set agreement independently of which alphabet identifier a line
-/// spells, since the two can legitimately diverge (see
-/// `the_two_arms_agree_on_every_stdlib_routine`) while the write set
-/// itself never may.
-fn write_set_suffix(line: &str) -> &str {
-    line.find("writes").map(|i| &line[i..]).unwrap_or(line)
-}
-
 /// Mutation: printing `preserves` from the source arm — `invertNumber`
 /// (`std::binaryNumbersBare::invertNumber` and its volatile twin, each
 /// declaring `preserves { '_' }` with no `writes` clause) diverges,
@@ -434,40 +424,24 @@ fn write_set_suffix(line: &str) -> &str {
 /// this test fail on exactly the two `invertNumber` entries, restored
 /// afterward (see the task report).
 ///
-/// The ALPHABET-NAME half of the line is compared separately from the
-/// WRITE-SET half, and only the write-set half is required to agree for
-/// EVERY routine. The two volatile namespaces (`binaryNumbersVolatile`,
-/// `binaryNumbersBareVolatile`) import their representation alphabet from
-/// a SIBLING namespace via an explicit `use std::binaryNumbers::symbols;`
-/// (or its bare twin) — reachable unqualified in source, but with no
-/// trace on the wire, so the object arm cannot reconstruct it and
-/// synthesizes a `std_<owning-namespace>_<routine>__num` name instead
-/// (docs/tmt/cli.md (interface)). `Interface::imports` (docs/formats.md
-/// (routine interfaces)) does not close this gap: it records only a
-/// GENUINELY cross-unit reference, resolved at compile time against
-/// another unit's declarations table, and this `use` names a SIBLING
-/// namespace of the SAME unit (std.tmc itself) — it resolves against
-/// std.tmc's own declarations, never reaching `Declarations`, so no entry
-/// for it lands on the wire (verified: the compiled object below carries
-/// zero `Interface::imports` records). That is a deliberate, asserted
-/// divergence on the alphabet-name half for exactly those two namespaces
-/// — every other stdlib routine's alphabet is reachable unqualified
-/// (declared in its own namespace) and its object-arm name must match the
-/// source arm's exactly.
-///
-/// The `use`-line rule (docs/tmt/cli.md (interface)) widens the SOURCE
-/// arm's own divergence from the object arm: those same two namespaces
-/// now also print a `use` line for that same sibling-namespace alphabet,
-/// since the object arm still prints none at all (nothing on the wire
-/// names that `use` edge — see above). `qualified_routines` never looks
-/// at `use` lines (it only tracks `namespace … {`, `}`, and
-/// `export routine …` lines), so this test's EXISTING routine-line
-/// comparison is unaffected either way; the bound below makes the new
-/// divergence explicit rather than merely unexamined, keeping the
-/// tolerance to EXACTLY those two namespaces and EXACTLY those two `use`
-/// lines — nothing wider. Mutation: a `use` line leaking into the object
-/// arm, or into any OTHER namespace on the source arm — either would move
-/// this assertion off its exact expected set.
+/// EVERY stdlib routine line agrees byte-for-byte between the two arms —
+/// no tolerance, not even for the two volatile namespaces
+/// (`binaryNumbersVolatile`, `binaryNumbersBareVolatile`), which import
+/// their representation alphabet from a SIBLING namespace via an explicit
+/// `use std::binaryNumbers::symbols;` (or its bare twin). Rule (2) of
+/// `resolve_object_alphabet` (docs/tmt/cli.md (interface)) is exactly
+/// what closes this: `binaryNumbers::symbols` is EXPORTED, so a tape
+/// whose glyph list matches it, in a SIBLING namespace of `binaryNumbers`
+/// itself, now resolves through the same "another namespace of this same
+/// object" tier the source arm's own `use`-printing rule reaches through
+/// its "target lives in another unit" clause — the two arms are deciding
+/// the SAME question (is this alphabet reachable unqualified, or does it
+/// need a `use` line?) from different data, and now answer it the same
+/// way. Mutation: reverting `resolve_object_alphabet`'s rule (2) to a
+/// same-or-enclosing-namespace-only match (the OLD behavior) — the
+/// object arm would synthesize a private name for the two volatile
+/// namespaces again, and this whole-document comparison would fail on
+/// exactly those routines.
 #[test]
 fn the_two_arms_agree_on_every_stdlib_routine() {
     let dir = scratch("header_two_arms_stdlib");
@@ -503,49 +477,30 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
         source_routines.keys().collect::<Vec<_>>(),
         object_routines.keys().collect::<Vec<_>>()
     );
-
     for (name, source_line) in &source_routines {
         let object_line = &object_routines[name];
-        assert_eq!(
-            write_set_suffix(source_line),
-            write_set_suffix(object_line),
-            "write sets disagree for `{name}`:\n source: {source_line}\n object: {object_line}"
-        );
-        if name.contains("Volatile::") {
-            assert_ne!(
-                source_line, object_line,
-                "`{name}`: expected the object arm to synthesize a distinct \
-                 alphabet name for its sibling-namespace `use` import, but \
-                 it matched the source arm exactly: {object_line}"
-            );
-        } else {
-            assert_eq!(
-                source_line, object_line,
-                "`{name}`: the two arms disagree despite an unqualified-reachable alphabet"
-            );
-        }
+        assert_eq!(source_line, object_line, "`{name}`: the two arms disagree");
     }
 
-    // Bound the new `use`-line divergence to EXACTLY those two
-    // namespaces and EXACTLY those two lines, nothing wider.
-    assert!(
-        !object_out.stdout.contains("use "),
-        "the object arm printed a `use` line, which the wire cannot carry \
-         yet: {}",
-        object_out.stdout
-    );
-    let use_lines: Vec<&str> = source_out
-        .stdout
-        .lines()
-        .filter(|l| l.trim_start().starts_with("use "))
-        .collect();
+    // The two arms' `use` lines agree too — both print exactly the same
+    // set, in the same namespaces, now that the object arm's rule (2)
+    // reaches the same sibling-namespace case the source arm's
+    // "target lives in another unit" clause does. (The DOC-LINE
+    // difference — `?` comments the object arm never carries, since the
+    // wire has no doc-line field — is pre-existing and out of scope
+    // here, which is why this compares `use` lines specifically rather
+    // than the whole rendered document.)
+    fn use_lines(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|l| l.trim_start().starts_with("use "))
+            .collect::<Vec<_>>()
+    }
     assert_eq!(
-        use_lines,
-        vec![
-            "    use std::binaryNumbers::symbols;",
-            "    use std::binaryNumbersBare::symbols;",
-        ],
-        "unexpected `use` lines on the source arm: {use_lines:?}"
+        use_lines(&source_out.stdout),
+        use_lines(&object_out.stdout),
+        "source arm:\n{}\nobject arm:\n{}",
+        source_out.stdout,
+        object_out.stdout
     );
 }
 
@@ -704,20 +659,21 @@ machine {
     );
 }
 
-/// The object arm matches a tape's glyph list only against exported
-/// alphabets the routine could spell UNQUALIFIED in source (its own
-/// namespace, or an ENCLOSING one) — a content match in a SIBLING
-/// namespace, reachable only through an explicit `use` alias, must not be
-/// used, since the object carries no record of that alias to spell it
-/// with. `nsB::plusOne`'s tape draws from a LOCAL (unexported) alphabet
-/// whose content is byte-identical to `nsA::bits`, the object's only
-/// exported alphabet with that content, in a SIBLING namespace (`nsA` is
-/// not an ancestor of `nsB`). Mutation: matching across every exported
-/// alphabet in the object regardless of namespace — the reference would
-/// then read `bits` (`nsA`'s alphabet) instead of a synthesized name, and
-/// no synthesized declaration would appear.
+/// A content match in a SIBLING namespace — reachable only through an
+/// explicit `use`, never unqualified — names the tape by a `use
+/// <qualified name>;` line in the routine's OWN namespace plus the short
+/// name, not a synthesized private declaration: rule (2) of
+/// `resolve_object_alphabet`. `nsB::plusOne`'s tape draws from a LOCAL
+/// (unexported) alphabet whose content is byte-identical to `nsA::bits`,
+/// the object's only exported alphabet with that content, in a SIBLING
+/// namespace (`nsA` is not an ancestor of `nsB`, so rule (1) — reachable
+/// unqualified — does not match it). Mutation: synthesizing instead of
+/// matching across namespaces (the OLD behavior, before this rule had
+/// tiers) — the `use nsA::bits;` line and the `bits`-named reference
+/// would both disappear, replaced by a synthesized
+/// `nsB_plusOne__num` declaration and reference.
 #[test]
-fn the_object_arm_does_not_match_alphabets_across_namespaces() {
+fn the_object_arm_names_a_sibling_namespaces_alphabet_by_use() {
     const CROSS_NAMESPACE_FIXTURE: &str = "\
 namespace nsA {
   export alphabet bits { '_', '0', '1' }
@@ -746,20 +702,150 @@ namespace nsB {
 
     let out = run_interface(&obj_path);
     assert!(
-        out.stdout
-            .contains("alphabet nsB_plusOne__num { '_', '0', '1' }"),
-        "did not synthesize a name for the cross-namespace content match: {}",
+        out.stdout.contains("use nsA::bits;"),
+        "no `use` line for the sibling-namespace match: {}",
         out.stdout
     );
     assert!(
         out.stdout
-            .contains("export routine plusOne(tape num: nsB_plusOne__num writes { '0', '1' });"),
+            .contains("export routine plusOne(tape num: bits writes { '0', '1' });"),
         "{}",
         out.stdout
     );
     assert!(
-        !out.stdout.contains("tape num: bits"),
-        "matched an exported alphabet across namespaces: {}",
+        !out.stdout.contains("__num"),
+        "synthesized a private alphabet instead of matching the sibling namespace: {}",
+        out.stdout
+    );
+}
+
+/// An alphabet this object IMPORTED from ANOTHER unit
+/// (`Interface::imports`) — rule (3) of `resolve_object_alphabet`: a `use
+/// <qualified name>;` line and the short name, the same shape rule (2)
+/// gives a same-object cross-namespace match, sourced from the wire's
+/// import record instead. `caller.tmc` never declares `bits` itself —
+/// only `--extern lib.tmh` supplies it — so a match here can only have
+/// come from `Interface::imports`, never from `Interface::alphabets`.
+/// Mutation: ignoring `Interface::imports` entirely (rule (3) deleted) —
+/// the tape would fall through to rule (4) and synthesize a private name
+/// instead of `use lib::bits;` + `bits`.
+#[test]
+fn the_object_arm_names_an_imported_alphabet_by_use() {
+    const LIB_HEADER: &str = "\
+namespace lib {
+  export alphabet bits { '_', '0', '1' }
+}
+";
+    const CALLER: &str = "\
+use lib::bits;
+
+export routine touch(tape t: bits writes {}) {
+  entry state s { [*] -> return; }
+}
+";
+    let dir = scratch("header_object_import");
+    let header_path = dir.join("lib.tmh");
+    std::fs::write(&header_path, LIB_HEADER).unwrap();
+    let caller_path = dir.join("caller.tmc");
+    std::fs::write(&caller_path, CALLER).unwrap();
+    let obj_path = dir.join("caller.tmo");
+
+    let compile_out = execute(&args(&[
+        "compile",
+        caller_path.to_str().unwrap(),
+        "--extern",
+        header_path.to_str().unwrap(),
+        "-o",
+        obj_path.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile: {e}"));
+    assert_eq!(compile_out.code, 0, "{}", compile_out.stderr);
+
+    let out = run_interface(&obj_path);
+    assert!(
+        out.stdout.contains("use lib::bits;"),
+        "no `use` line for the imported alphabet: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("export routine touch(tape t: bits writes {});"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("alphabet bits {"),
+        "printed a local declaration for a cross-unit import: {}",
+        out.stdout
+    );
+}
+
+/// A short-name COLLISION inside one namespace — `nsA::bits` and
+/// `nsC::bits` are two DIFFERENT full paths that would both want the
+/// short name `bits` inside `nsB` (neither is reachable unqualified from
+/// `nsB`, so both are rule-(2) candidates) — refuses the SECOND claim
+/// rather than printing an ambiguous `use`, falling back to rule (4) for
+/// it. `touch`'s two tape parameters are processed in signature order, so
+/// `a` (matching `nsA::bits`) claims `bits` first and `c` (matching
+/// `nsC::bits`) loses the race. Mutation: claiming BOTH under `bits`
+/// regardless of the collision — the header would then declare `use
+/// nsC::bits;` too, alongside `use nsA::bits;`, and `c`'s signature would
+/// ALSO read `bits`, ambiguously naming two different alphabets in one
+/// scope.
+#[test]
+fn a_short_name_clash_falls_back_to_a_synthesized_name() {
+    const CLASH_FIXTURE: &str = "\
+namespace nsA {
+  export alphabet bits { '_', '0', '1' }
+}
+
+namespace nsC {
+  export alphabet bits { '_', 'x', 'y' }
+}
+
+namespace nsB {
+  alphabet likeA { '_', '0', '1' }
+  alphabet likeC { '_', 'x', 'y' }
+
+  export routine touch(tape a: likeA writes {}, tape c: likeC writes {}) {
+    entry state s { [*, *] -> return; }
+  }
+}
+";
+    let dir = scratch("header_object_clash");
+    let object = compile(
+        CLASH_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile CLASH_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("clash.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+
+    let out = run_interface(&obj_path);
+    assert!(
+        out.stdout.contains("use nsA::bits;"),
+        "the first (winning) claim's `use` line is missing: {}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("use nsC::bits;"),
+        "a colliding `use` line was printed: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("nsB_touch__c"),
+        "the losing claim did not fall back to a synthesized name: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains(
+            "export routine touch(tape a: bits writes {}, tape c: nsB_touch__c writes {});"
+        ),
+        "{}",
         out.stdout
     );
 }
@@ -974,6 +1060,58 @@ namespace consumer {
     );
 
     let header_path = dir.join("use_needed.tmh");
+    std::fs::write(&header_path, &source_out.stdout).unwrap();
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, source_out.stdout,
+        "the printed header did not reparse to itself"
+    );
+}
+
+/// A `use` naming an alphabet declared in ANOTHER unit — resolved through
+/// the compile's declarations table (the embedded standard library, no
+/// `--extern` needed here), never through this unit's own declarations —
+/// must still print, or the reprinted signature's bare `symbols` cannot
+/// resolve when the header is read back (docs/tmt/cli.md (interface)).
+/// This is the concrete shape cross-unit alphabet resolution made
+/// reachable: before it existed, `use std::binaryNumbers::symbols; tape
+/// t: symbols` failed to COMPILE at all (`unresolved-alphabet`), so `tmt
+/// interface` could never even reach the printer with it. Mutation: the
+/// OLD source-arm rule (`printed_full_names` alone, with no "target
+/// lives in another unit" clause) — `symbols` is never printed by THIS
+/// unit, so the `use` line would be dropped and the reparse below would
+/// fail `unresolved-alphabet` on `symbols`, the same failure class the
+/// real stdlib's volatile twins showed before their own fix.
+#[test]
+fn a_header_keeps_the_use_of_an_alphabet_from_another_unit() {
+    const CROSS_UNIT_FIXTURE: &str = "\
+use std::binaryNumbers::symbols;
+
+export routine touch(tape t: symbols writes {}) {
+  entry state s { [*] -> return; }
+}
+";
+    let dir = scratch("header_cross_unit_use");
+    let src_path = dir.join("caller.tmc");
+    std::fs::write(&src_path, CROSS_UNIT_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    assert!(
+        source_out
+            .stdout
+            .contains("use std::binaryNumbers::symbols;"),
+        "the printer dropped the cross-unit `use` line: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out
+            .stdout
+            .contains("export routine touch(tape t: symbols writes {});"),
+        "{}",
+        source_out.stdout
+    );
+
+    let header_path = dir.join("caller.tmh");
     std::fs::write(&header_path, &source_out.stdout).unwrap();
     let reparsed = run_interface(&header_path);
     assert_eq!(
