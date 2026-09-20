@@ -14,7 +14,7 @@ use mtc_core::formats::tapeblock::TapeSnapshot;
 use mtc_core::linker::{CallMech, LinkOptions};
 use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, WideTape};
 use mtc_turing_machine::arch::Tm1;
-use mtc_turing_machine::asm::link;
+use mtc_turing_machine::asm::{assemble, disassemble_object, link};
 use mtc_turing_machine::cli::execute;
 use mtc_turing_machine::compiler::{CompileOptions, compile};
 use mtc_turing_machine::optimizer::OptLevel;
@@ -244,6 +244,87 @@ fn the_three_mechanisms_agree() {
             }
         }
     }
+}
+
+/// Everything the compiler can put in an object is expressible in
+/// hand-written assembly, proven by dis → asm byte-identity. The exit
+/// vocabulary is the newest thing it emits — `exits=K` on the signature,
+/// the `exits=(…)` operand, `retx #k` — and this fixture exports no
+/// alphabet, so none of the declared exceptions to that gate applies.
+///
+/// Mutation: print an exit clause or operand the assembler cannot read
+/// back (a bare number for a label, a missing binding group); the
+/// reassemble step fails or the bytes differ.
+#[test]
+fn an_exit_bearing_object_disassembles_back_to_itself() {
+    let object = compile(&two_exits("-"), CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile: {e}"))
+        .object;
+    let text = disassemble_object(&object);
+    assert!(text.contains("exits=2"), "{text}");
+    assert!(text.contains("retx    #0"), "{text}");
+    assert!(text.contains("exits=("), "{text}");
+    let again = assemble(&text, false).expect("the disassembly reassembles");
+    assert_eq!(again.to_bytes(), object.to_bytes(), "{text}");
+}
+
+/// A routine whose exit-bearing call reaches ITSELF through the callee's
+/// exits is the one shape the copy paths refuse: a per-site copy cannot
+/// close that loop, so the linker names it and advises the mechanism that
+/// can — frames, where the vector lives in the site's descriptor rather
+/// than in a splice. The refusal is a typed link error, not a miscompile,
+/// and the escape it advises is asserted here too.
+///
+/// Mutation: dropping the exits vector at the recursive site; mono then
+/// links a program whose inner call resumes wherever the outer one did.
+#[test]
+fn a_recursive_exit_bearing_call_is_refused_by_the_copy_path() {
+    const RECURSIVE: &str = "\
+alphabet ab { '_', '0', '1' }
+
+routine walk(tape t: ab, state hit, state miss) {
+  entry state s {
+    ['_'] -> goto hit;
+    ['0'] -> move [>] call walk(t = t, hit = gotHit, miss = gotMiss) then done;
+    [*]   -> goto miss;
+  }
+  state gotHit  { [*] -> goto hit; }
+  state gotMiss { [*] -> goto miss; }
+  state done    { [*] -> return; }
+}
+
+machine {
+  tape d: ab;
+  entry state m { [*] -> call walk(t = d, hit = won, miss = lost) then fin; }
+  state won  { [*] -> write ['0'] stop; }
+  state lost { [*] -> write ['1'] stop; }
+  state fin  { [*] -> halt; }
+}
+";
+    let object = compile(RECURSIVE, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile: {e}"))
+        .object;
+    let err = link(
+        std::slice::from_ref(&object),
+        &[],
+        LinkOptions {
+            call_mech: CallMech::Mono,
+            ..Default::default()
+        },
+    )
+    .expect_err("a copy per site cannot close a recursive exit loop")
+    .to_string();
+    assert!(err.contains("--call-mech=frames"), "{err}");
+
+    link(
+        &[object],
+        &[],
+        LinkOptions {
+            call_mech: CallMech::Frames,
+            ..Default::default()
+        },
+    )
+    .expect("frames carries the vector in the descriptor and links");
 }
 
 // ── the two optimizer guards ───────────────────────────────────────────────
