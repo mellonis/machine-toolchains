@@ -337,8 +337,8 @@ impl NsNode {
 
     /// Like [`insert`](Self::insert), but places its one `Item` BEFORE
     /// everything already in that scope rather than after — for a scope's
-    /// `use` lines, which print ahead of its own declarations (RULING 25
-    /// — docs/tmt/cli.md (interface)). Lazily creates the scope exactly
+    /// `use` lines, which print ahead of its own declarations
+    /// (docs/tmt/cli.md (interface)). Lazily creates the scope exactly
     /// as `insert` does, for the edge case of a namespace whose only
     /// printed content turns out to be its `use` lines.
     fn prepend(&mut self, ns: &[String], lines: Vec<String>) {
@@ -459,8 +459,10 @@ fn render_source(program: &Program, resolved: &Resolved, footprint: &FootprintTa
     // Every declaration this render will ITSELF print, by full qualified
     // name — an exported alphabet, an alphabet merely referenced (see
     // above), an exported routine, or an exported graph. This is the
-    // "printed" half of RULING 25's `use`-line criterion (docs/tmt/cli.md
-    // (interface)): a `use` whose target is not in this set could not
+    // "printed" half of the `use`-line rule (docs/tmt/cli.md
+    // (interface)): a `use` line is printed only when this scope's
+    // printed content references its name AND the header prints its
+    // target — a `use` whose target is not in this set could not
     // possibly resolve when the header is read back, no matter how the
     // scope that declared it prints, so it is never a candidate to keep.
     let mut printed_full_names: HashSet<String> = HashSet::new();
@@ -564,9 +566,11 @@ fn use_line_text(import: &Import) -> String {
 }
 
 /// The imports declared exactly at `ns` that this render both NEEDS and
-/// CAN reprint — two independent conditions, both required (RULING 25 —
-/// docs/tmt/cli.md (interface); "a `use` whose target is not printed is
-/// dropped — it could not resolve in the header"):
+/// CAN reprint — two independent conditions, both required
+/// (docs/tmt/cli.md (interface)): a `use` line is printed only when this
+/// scope's printed content references its name and the header prints
+/// its target; a `use` whose target is not printed is dropped — it could
+/// not resolve in the header.
 ///
 /// - referenced: the bound short name (`Import::binding`) is used,
 ///   unqualified, by a PRINTED declaration in that same scope — a tape

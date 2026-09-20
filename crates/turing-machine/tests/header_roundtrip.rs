@@ -449,18 +449,19 @@ fn write_set_suffix(line: &str) -> &str {
 /// (declared in its own namespace) and its object-arm name must match the
 /// source arm's exactly.
 ///
-/// RULING 25 (docs/tmt/cli.md (interface)) widens the SOURCE arm's own
-/// divergence from the object arm: those same two namespaces now also
-/// print a `use` line for that same sibling-namespace alphabet, since the
-/// object arm still prints none at all (the wire carries no import
-/// record yet). `qualified_routines` never looks at `use` lines (it only
-/// tracks `namespace … {`, `}`, and `export routine …` lines), so this
-/// test's EXISTING routine-line comparison is unaffected either way; the
-/// bound below makes the new divergence explicit rather than merely
-/// unexamined, keeping the tolerance to EXACTLY those two namespaces and
-/// EXACTLY those two `use` lines — nothing wider. Mutation: a `use` line
-/// leaking into the object arm, or into any OTHER namespace on the source
-/// arm — either would move this assertion off its exact expected set.
+/// The `use`-line rule (docs/tmt/cli.md (interface)) widens the SOURCE
+/// arm's own divergence from the object arm: those same two namespaces
+/// now also print a `use` line for that same sibling-namespace alphabet,
+/// since the object arm still prints none at all (the wire carries no
+/// import record yet). `qualified_routines` never looks at `use` lines
+/// (it only tracks `namespace … {`, `}`, and `export routine …` lines),
+/// so this test's EXISTING routine-line comparison is unaffected either
+/// way; the bound below makes the new divergence explicit rather than
+/// merely unexamined, keeping the tolerance to EXACTLY those two
+/// namespaces and EXACTLY those two `use` lines — nothing wider.
+/// Mutation: a `use` line leaking into the object arm, or into any OTHER
+/// namespace on the source arm — either would move this assertion off
+/// its exact expected set.
 #[test]
 fn the_two_arms_agree_on_every_stdlib_routine() {
     let dir = scratch("header_two_arms_stdlib");
@@ -519,7 +520,7 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
         }
     }
 
-    // RULING 25: bound the new `use`-line divergence to EXACTLY those two
+    // Bound the new `use`-line divergence to EXACTLY those two
     // namespaces and EXACTLY those two lines, nothing wider.
     assert!(
         !object_out.stdout.contains("use "),
@@ -900,15 +901,14 @@ fn interface_output_reparses_as_a_header() {
     assert_eq!(reparsed.stdout, header);
 }
 
-/// The real stdlib source, not a small fixture — the exact case that
-/// blocked Task 7's `std.tmh` generation before RULING 25 (docs/tmt/cli.md
+/// The real embedded standard-library source, not a small fixture — the
+/// case that first surfaced this printer defect (docs/tmt/cli.md
 /// (interface)): `binaryNumbersVolatile` and `binaryNumbersBareVolatile`
 /// each import their representation alphabet from a SIBLING namespace via
 /// an explicit `use`, unqualified in every one of their routines' tape
 /// signatures. Mutation: dropping the `use`-line pass entirely — the
 /// reparse below fails `unresolved-alphabet` at
-/// `binaryNumbersVolatile::goToNumber`'s tape signature, exactly the
-/// error this task's own report recorded before the fix.
+/// `binaryNumbersVolatile::goToNumber`'s tape signature.
 #[test]
 fn the_real_stdlib_source_reparses_as_a_header() {
     let dir = scratch("header_stdlib_reparses");
@@ -930,10 +930,10 @@ fn the_real_stdlib_source_reparses_as_a_header() {
 /// unqualified in a tape signature: the header must reprint that `use`
 /// line, or the alphabet name in the reprinted signature is unresolvable
 /// when the header is read back through the strict declarations-only
-/// reader. RULING 25 (docs/tmt/cli.md (interface)). Mutation: dropping
-/// the `use`-line pass — the reparse below fails `unresolved-alphabet`
-/// instead of reproducing the header, the same failure this task's report
-/// recorded against the real stdlib before the fix.
+/// reader (docs/tmt/cli.md (interface)). Mutation: dropping the
+/// `use`-line pass — the reparse below fails `unresolved-alphabet`
+/// instead of reproducing the header, the same failure the real stdlib
+/// showed before this fix.
 #[test]
 fn a_header_prints_the_use_lines_its_declarations_need() {
     const USE_ALPHABET_FIXTURE: &str = "\
@@ -983,10 +983,10 @@ namespace consumer {
 /// Mutation: printing every import regardless of whether its target is
 /// printed — the header would then carry `use producer::secret;` naming
 /// a namespace that never appears anywhere else in the output. Caught
-/// here by CONTENT, not by a reparse failure: VERIFIED by hand (see the
-/// task report) that feeding that hand-mutated text back through
-/// `tmt interface` still exits 0 — resolving an unreferenced, `::`-
-/// absolute import path is `unused-import`, a lint finding, never fatal
+/// here by CONTENT, not by a reparse failure: VERIFIED by hand that
+/// feeding that hand-mutated text back through `tmt interface` still
+/// exits 0 — resolving an unreferenced, `::`-absolute import path is
+/// `unused-import`, a lint finding, never fatal
 /// (docs/tmt/language.md (namespaces, visibility, and imports): "An
 /// import nothing references is a lint finding"). The positive
 /// assertion — the `use` line, and `producer` itself, are simply absent

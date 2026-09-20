@@ -122,8 +122,8 @@ fn write_set_suffix(line: &str) -> &str {
 /// The byte pin: `std.tmh` is committed, derived output, and this is the
 /// standing proof it is exactly `tmt interface`'s own printer output over
 /// `std.tmc` (plus the generated notice) — never hand-edited. Mutation:
-/// ANY change to the printer (RULING 25's `use`-line pass included, since
-/// this pin was RED against the unpatched printer — see the task report)
+/// ANY change to the printer (the `use`-line pass included — this pin
+/// went red against the printer before it learned to print `use` lines)
 /// that is not ALSO regenerated into the committed file.
 #[test]
 fn std_tmh_is_what_tmt_interface_prints() {
@@ -149,12 +149,12 @@ fn regen() {
 /// run (the source arm, independent of whatever is currently committed)
 /// against the COMMITTED `std.tmh` text itself, both read by the
 /// identical `qualified_routines`/`write_set_suffix` extraction
-/// `header_roundtrip.rs`'s two-arm test uses. This also proves the F1
-/// case specifically: `invertNumber`'s `preserves`-only shape must
+/// `header_roundtrip.rs`'s two-arm test uses. This also proves the
+/// `preserves`-only case specifically: `invertNumber`'s shape must
 /// compare EQUAL (both sides already publish the same reduced EFFECTIVE
 /// set), not merely happen not to differ. Mutation: dropping the `writes`
-/// clause from the printer entirely — VERIFIED by hand (see the task
-/// report): with `tape_param_text` printing bare `tape NAME: ALPHABET`
+/// clause from the printer entirely — VERIFIED by hand: with
+/// `tape_param_text` printing bare `tape NAME: ALPHABET`
 /// (no `writes { … }` suffix at all), this test's `write_set_suffix`
 /// comparison goes red on every routine (the byte pin above ALSO catches
 /// that specific mutation, since std.tmh would go stale against the
@@ -201,7 +201,7 @@ fn the_header_and_the_source_agree_on_every_declared_contract() {
         );
     }
 
-    // Non-vacuity for the F1 case specifically: both `preserves`-only
+    // Non-vacuity for the `preserves`-only case specifically: both
     // routines must be present, on both sides, already collapsed to the
     // reduced effective set `{ '0', '1' }` (the alphabet `{ '_', '0', '1' }`
     // minus `'_'`) rather than a coincidental agreement over some other
@@ -233,15 +233,14 @@ fn the_header_and_the_source_agree_on_every_declared_contract() {
 /// exercise the printer, and could never independently catch a printer
 /// regression (VERIFIED by hand: this exact mutation, applied against the
 /// STATIC committed constant instead of a fresh run, left this test
-/// green — see the task report). Mutation: a printer that renders a
-/// graph's `state` blocks without their `rules` (an empty body, e.g.
-/// `entry state walk { }`) — this still compiles (a state may legally
-/// carry zero rules) and would silently make every library graft against
-/// it produce a no-op instead of the real behavior, since nothing would
-/// be left to splice. VERIFIED RED by hand (see the task report): with
-/// `graph_lines`'s rule-printing loop deleted, the `['$'] -> goto done;`
-/// spot-check below fails while the header still parses cleanly and the
-/// routine count is unaffected.
+/// green). Mutation: a printer that renders a graph's `state` blocks
+/// without their `rules` (an empty body, e.g. `entry state walk { }`) —
+/// this still compiles (a state may legally carry zero rules) and would
+/// silently make every library graft against it produce a no-op instead
+/// of the real behavior, since nothing would be left to splice. VERIFIED
+/// RED by hand: with `graph_lines`'s rule-printing loop deleted, the
+/// `['$'] -> goto done;` spot-check below fails while the header still
+/// parses cleanly and the routine count is unaffected.
 #[test]
 fn every_exported_stdlib_graph_is_in_the_header_with_its_body() {
     let dir = scratch("stdlib_header_graph_bodies");
