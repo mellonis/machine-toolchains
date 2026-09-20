@@ -206,9 +206,16 @@ fn has_debugger(st: &IrState) -> bool {
     st.rules.iter().any(|r| r.debugger)
 }
 
-/// Every intra-world reference to each state: the sources of `goto` and
-/// `call … then goto` edges. Used to test the "all inbound within the region"
-/// privacy condition during growth.
+/// Every intra-world reference to each state: the sources of `goto`,
+/// `call … then goto` and `call … exits=(…)` edges. Used to test the "all
+/// inbound within the region" privacy condition during growth.
+///
+/// The exits edges are what keep an exit handler out of a folded region:
+/// the fold rewrites `goto`s and orphans the region's non-root members, so
+/// a state a call site resumes at through its exit vector must never be
+/// one. A region member is exit-free by construction (every rule a plain
+/// `goto`), so an exits edge always comes from OUTSIDE the region and the
+/// privacy test excludes such a state on its own.
 fn compute_inbound(w: &IrWorld) -> HashMap<u32, Vec<u32>> {
     let mut inbound: HashMap<u32, Vec<u32>> = HashMap::new();
     for st in &w.states {
@@ -220,6 +227,11 @@ fn compute_inbound(w: &IrWorld) -> HashMap<u32, Vec<u32>> {
                     ..
                 } => inbound.entry(*state).or_default().push(st.id),
                 _ => {}
+            }
+            if let IrTransition::CallThen { exits, .. } = &r.transition {
+                for e in exits {
+                    inbound.entry(*e).or_default().push(st.id);
+                }
             }
         }
     }

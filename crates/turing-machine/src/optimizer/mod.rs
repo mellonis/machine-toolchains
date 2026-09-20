@@ -95,9 +95,15 @@ fn renumber_dense(w: &mut IrWorld) {
         for r in &mut st.rules {
             match &mut r.transition {
                 IrTransition::Goto { state } => *state = remap[state],
-                IrTransition::CallThen { then, .. } => {
+                IrTransition::CallThen { exits, then, .. } => {
                     if let IrThen::Goto { state } = then {
                         *state = remap[state];
+                    }
+                    // An exits entry is an in-world state id like any
+                    // other: a renumbering that skipped it would leave the
+                    // site resuming at whatever now sits at the old index.
+                    for e in exits {
+                        *e = remap[e];
                     }
                 }
                 // Terminals and the cross-world `TailCall`/`ReturnExit` carry

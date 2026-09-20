@@ -361,7 +361,19 @@ pub(crate) fn infer_ir(program: &IrProgram) -> FootprintTable {
                             target, binding, ..
                         } => (target.as_str(), binding.as_slice()),
                         IrTransition::TailCall { target } => (target.as_str(), [].as_slice()),
-                        _ => continue,
+                        // Nothing else reaches another world's writes: a
+                        // site's `exits` are in-world resume points, and
+                        // `ReturnExit` only leaves this one. Both are
+                        // named rather than swallowed by a wildcard, so a
+                        // new cross-world transition has to be considered
+                        // here.
+                        IrTransition::Goto { .. }
+                        | IrTransition::Return
+                        | IrTransition::ReturnExit { .. }
+                        | IrTransition::Stop
+                        | IrTransition::Halt
+                        | IrTransition::TrapRead
+                        | IrTransition::TrapWrite => continue,
                     };
                     let contribution =
                         call_contribution(program, &by_name, &sets, wi, target, binding);

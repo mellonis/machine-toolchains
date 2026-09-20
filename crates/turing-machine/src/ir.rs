@@ -60,7 +60,7 @@ use crate::expand::{
     Cell, Expanded, ExpandedRule, ExpandedTape, ExpandedWorld, Transition2, WriteOut,
 };
 use crate::footprint::FootprintTable;
-use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, SymLit};
+use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, SymLit, TermKind};
 
 /// The TM IR encoding version. Bumps on any change to the serialized shape
 /// (field names, serde tags) ONCE A VERSION HAS SHIPPED — the `.pmc`
@@ -137,7 +137,8 @@ pub struct IrWorld {
     /// Source line of the world's definition; `0` if unknown.
     pub line: u32,
     /// The `.routine`'s declared exit count (its `exits=` clause) — `0` when
-    /// none is declared. No pass produces a nonzero value yet.
+    /// none is declared, which is every `machine` and every routine whose
+    /// signature takes no `state` parameter.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub exits: u8,
     /// Whether the world can resume normally at a call site's `then` —
@@ -328,15 +329,18 @@ pub enum IrTransition {
         /// declared exits (`IrWorld::exits`) resume at, in exit order —
         /// `ReturnExit { exit: k }` in the callee resumes at `exits[k]`
         /// instead of at `then`. Empty for a call whose callee declares no
-        /// exits (the only shape any pass produces today).
+        /// exits. Built in the CALLEE's `state`-parameter order, which is
+        /// the order the callee's own `retx` numbers read
+        /// (`resolve_exits`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exits: Vec<u32>,
         then: IrThen,
     },
     Return,
     /// A return through one of the callee's declared exits (`retx #k`) —
-    /// resumes at the call site's `exits[k]` instead of at `then`. Never
-    /// produced by lowering yet: no routine declares `exits=` today.
+    /// resumes at the call site's `exits[k]` instead of at `then`. Lowered
+    /// from `goto <state parameter>`, whose position in the signature IS
+    /// `exit`.
     ReturnExit {
         exit: u32,
     },
@@ -466,8 +470,24 @@ impl IrWorld {
                     IrTransition::Goto { state } => {
                         let _ = writeln!(edges, "    S{} -->|\"{label}\"| S{state}", st.id);
                     }
-                    IrTransition::CallThen { target, then, .. } => {
+                    IrTransition::CallThen {
+                        target,
+                        exits,
+                        then,
+                        ..
+                    } => {
                         let call = format!("{label} call {}", escape(target));
+                        // Each declared exit resumes at a state of this
+                        // world, so the graph carries one edge per exit
+                        // alongside the `then` — the whole control flow is
+                        // what this rendering exists to show.
+                        for (k, state) in exits.iter().enumerate() {
+                            let _ = writeln!(
+                                edges,
+                                "    S{} -->|\"{call} exit #{k}\"| S{state}",
+                                st.id
+                            );
+                        }
                         match then {
                             IrThen::Goto { state } => {
                                 let _ = writeln!(edges, "    S{} -->|\"{call}\"| S{state}", st.id);
@@ -764,9 +784,17 @@ fn lower_world(
         states,
         local: rw.map(|w| w.local).unwrap_or(false),
         line: rw.map(|w| w.name_span.start.line).unwrap_or(0),
-        // No routine declares `exits=`/`noreturn` yet — every world lowers
-        // with no exits and normal-return semantics.
-        exits: 0,
+        // A routine's `state` parameters ARE its exits, in signature order.
+        // The published count is one byte wide (docs/formats.md (routine
+        // interfaces)), so the narrowing is an explicit conversion whose
+        // failure is a diagnostic — never a truncation that would publish
+        // a count the body's own `retx #k` rows contradict.
+        exits: u8::try_from(ew.state_params.len()).map_err(|_| CompileError {
+            span: rw.map(|w| w.name_span).unwrap_or(Span::point(0, 0)),
+            kind: CompileErrorKind::TooManyStateParams(ew.state_params.len()),
+        })?,
+        // Whether a routine can also resume normally is inferred from its
+        // body elsewhere; lowering publishes the permissive reading.
         returns: true,
     };
 
@@ -821,27 +849,38 @@ fn lower_rule(
         )
     };
 
-    let resolve_state = |name: &str| -> Result<u32, CompileError> {
+    let resolve_state = |name: &str| -> Result<StateTarget, CompileError> {
         if let Some(id) = name_to_id.get(name).copied() {
-            return Ok(id);
+            return Ok(StateTarget::State(id));
         }
-        // A goto/continuation target that names no concrete state. For a
-        // T4-validated module this is either the routine's own STATE PARAMETER
-        // (a continuation the call site supplies — the composition engine's
-        // work, out of scope here) or a genuine dangling reference. Report each
-        // honestly rather than folding a not-yet-supported construct into
-        // "undefined state".
-        let kind = if ew.state_params.iter().any(|p| p == name) {
-            CompileErrorKind::StateParamContinuationUnsupported(name.to_string())
-        } else {
-            CompileErrorKind::UndefinedState(name.to_string())
-        };
-        Err(CompileError { span: r.span, kind })
+        // A goto/continuation target that names no concrete state is either
+        // the routine's own STATE PARAMETER — one of its declared exits,
+        // numbered by its position in the signature — or a genuine dangling
+        // reference.
+        if let Some(k) = ew.state_params.iter().position(|p| p == name) {
+            return Ok(StateTarget::Exit(k as u32));
+        }
+        Err(CompileError {
+            span: r.span,
+            kind: CompileErrorKind::UndefinedState(name.to_string()),
+        })
+    };
+    // A resume point — a `then` continuation, or a `state` argument at a call
+    // site — names a LABEL of this world in the emitted assembly, so an exit
+    // of the enclosing routine cannot stand there.
+    let local_state = |name: &str| -> Result<u32, CompileError> {
+        match resolve_state(name)? {
+            StateTarget::State(id) => Ok(id),
+            StateTarget::Exit(_) => Err(CompileError {
+                span: r.span,
+                kind: CompileErrorKind::ExitTargetUnsupported(name.to_string()),
+            }),
+        }
     };
     let then_of = |cont: &Continuation| -> Result<IrThen, CompileError> {
         Ok(match cont {
             Continuation::State { name, .. } => IrThen::Goto {
-                state: resolve_state(name)?,
+                state: local_state(name)?,
             },
             Continuation::Return { .. } => IrThen::Return,
             Continuation::Stop { .. } => IrThen::Stop,
@@ -851,8 +890,12 @@ fn lower_rule(
 
     let (transition, synthesized) = match &r.transition {
         Transition2::Goto(name) => (
-            IrTransition::Goto {
-                state: resolve_state(name)?,
+            // `goto` is the one position an exit may stand in: handing
+            // control to a `state` parameter leaves the routine through
+            // that exit (`retx #k`) instead of returning to the `then`.
+            match resolve_state(name)? {
+                StateTarget::State(state) => IrTransition::Goto { state },
+                StateTarget::Exit(exit) => IrTransition::ReturnExit { exit },
             },
             false,
         ),
@@ -867,15 +910,26 @@ fn lower_rule(
             args,
             then,
         } => {
+            // Exits first: a `state` argument that the binding resolution
+            // would otherwise try to read as a tape target gets its own
+            // diagnostic here.
+            let exits = resolve_exits(
+                ew,
+                target,
+                args,
+                *external,
+                expanded,
+                externals,
+                &local_state,
+                r.span,
+            )?;
             let binding =
                 resolve_binding(ew, target, args, *external, expanded, externals, r.span)?;
             (
                 IrTransition::CallThen {
                     target: target.clone(),
                     binding,
-                    // No `.routine` declares `exits=` yet, so no call site
-                    // ever resolves a multi-exit resume table.
-                    exits: Vec::new(),
+                    exits,
                     then: then_of(then)?,
                 },
                 false,
@@ -895,6 +949,19 @@ fn lower_rule(
                 .iter()
                 .find(|b| b.name == *name)
                 .expect("a bind-call names a declared bind");
+            // A bind fixes its arguments once, at the declaration — its
+            // `state` arguments included — so its exits vector is built from
+            // the very same list a direct call's is.
+            let exits = resolve_exits(
+                ew,
+                &bind.target,
+                &bind.args,
+                bind.external,
+                expanded,
+                externals,
+                &local_state,
+                r.span,
+            )?;
             let binding = resolve_binding(
                 ew,
                 &bind.target,
@@ -908,7 +975,7 @@ fn lower_rule(
                 IrTransition::CallThen {
                     target: bind.target.clone(),
                     binding,
-                    exits: Vec::new(),
+                    exits,
                     then: then_of(then)?,
                 },
                 false,
@@ -928,6 +995,126 @@ fn lower_rule(
         direct: false,
         line: r.span.start.line,
     })
+}
+
+/// What a `goto`/continuation name resolves to inside one world: a state of
+/// the world, or one of the enclosing routine's declared exits.
+///
+/// An exit's NUMBER is its `state` parameter's position in the signature.
+/// That one list is read from both ends — here, for the `retx #k` a body
+/// emits, and at every call site, for the order of its `exits=(…)` operand
+/// ([`resolve_exits`]) — which is what makes `retx #k` land on the site's
+/// `exits[k]` (docs/formats.md (bound calls)).
+enum StateTarget {
+    State(u32),
+    Exit(u32),
+}
+
+/// A call/bind site's `exits=(…)` operand: the same-world state ids the
+/// callee's declared exits resume at, in the CALLEE's `state`-parameter
+/// order — empty for a callee that declares none.
+///
+/// The order is the callee's, never the site's: the vector travels
+/// POSITIONALLY on the wire and carries no parameter names at all, so the
+/// callee's own signature is the only thing that can say which slot is
+/// which. That is why an out-of-unit callee whose declarations this unit
+/// does not have is refused here rather than written down in source order —
+/// the linker's own fix-up reorders NAMED binding entries, and an exits
+/// vector has no names to reorder by.
+#[allow(clippy::too_many_arguments)]
+fn resolve_exits(
+    host: &ExpandedWorld,
+    target: &str,
+    args: &[BindingArg],
+    external: bool,
+    expanded: &Expanded,
+    externals: &Declarations,
+    resolve_state: &dyn Fn(&str) -> Result<u32, CompileError>,
+    site: Span,
+) -> Result<Vec<u32>, CompileError> {
+    let state_params: Vec<String> = if external {
+        match externals.routine(target) {
+            Some(sig) => sig.state_params.clone(),
+            None => {
+                // With no declarations a `state` argument cannot be told
+                // from a tape one by shape alone — both are `name =
+                // something`. What gives one away is a value that could
+                // never be a tape binding: a terminator, or a bare name
+                // this world does not declare as a tape. Either way the
+                // callee's parameter order is unknown, so the site is
+                // refused instead of guessed at.
+                for a in args {
+                    let cannot_bind_a_tape = match &a.value {
+                        BindingValue::Terminator { .. } => true,
+                        BindingValue::Named {
+                            target: name, map, ..
+                        } => map.is_none() && !host.tapes.iter().any(|t| t.name == *name),
+                    };
+                    if cannot_bind_a_tape {
+                        return Err(CompileError {
+                            span: a.span,
+                            kind: CompileErrorKind::StateArgsNeedDeclarations(target.to_string()),
+                        });
+                    }
+                }
+                return Ok(Vec::new());
+            }
+        }
+    } else {
+        expanded
+            .worlds
+            .iter()
+            .find(|w| w.name == target)
+            .expect("a non-external callee is one of the module's emitted worlds")
+            .state_params
+            .clone()
+    };
+
+    let mut exits = Vec::with_capacity(state_params.len());
+    for param in &state_params {
+        let Some(arg) = args.iter().find(|a| a.name == *param) else {
+            // Every exit must be supplied: the callee leaves through it,
+            // and the vector has no hole to leave.
+            return Err(CompileError {
+                span: site,
+                kind: CompileErrorKind::MissingArg(param.clone()),
+            });
+        };
+        match &arg.value {
+            BindingValue::Named {
+                target: name,
+                map: None,
+                ..
+            } => exits.push(resolve_state(name)?),
+            // A `with map` makes the argument definitively a tape target.
+            BindingValue::Named { .. } => {
+                return Err(CompileError {
+                    span: arg.span,
+                    kind: CompileErrorKind::WrongArgKind {
+                        name: arg.name.clone(),
+                        expected: "a state or terminator",
+                    },
+                });
+            }
+            // The operand names labels of this world; a terminator has
+            // none to name (a `graft` wires one straight into the spliced
+            // copy instead, which is why the same spelling is legal there).
+            BindingValue::Terminator { kind, span } => {
+                return Err(CompileError {
+                    span: *span,
+                    kind: CompileErrorKind::ExitTargetUnsupported(
+                        match kind {
+                            TermKind::Return => "return",
+                            TermKind::Stop => "stop",
+                            TermKind::Halt => "halt",
+                        }
+                        .to_string(),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(exits)
 }
 
 /// The host physical tape a binding arg's target names — the CALLER-side
@@ -1214,15 +1401,17 @@ fn unreachable_state_warnings(world: &IrWorld, ew: &ExpandedWorld, warnings: &mu
         for r in &world.states[id as usize].rules {
             match &r.transition {
                 IrTransition::Goto { state } => work.push(*state),
-                IrTransition::CallThen { then, .. } => {
+                IrTransition::CallThen { exits, then, .. } => {
                     if let IrThen::Goto { state } = then {
                         work.push(*state);
                     }
+                    // Every exit of the callee resumes at one of this
+                    // world's states — an edge as real as the `then`, and
+                    // the only way an exit handler is ever reached.
+                    work.extend(exits.iter().copied());
                 }
                 // `TailCall`/`ReturnExit` leave the world (no in-world
-                // successor), like the terminators. Lowering never produces
-                // either, but the walk stays exhaustive so a later
-                // intra-world variant must be considered.
+                // successor), like the terminators.
                 IrTransition::TailCall { .. }
                 | IrTransition::Return
                 | IrTransition::ReturnExit { .. }
@@ -1393,9 +1582,19 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
             }
             match &r.transition {
                 IrTransition::Goto { state } => in_state(*state)?,
-                IrTransition::CallThen { binding, then, .. } => {
+                IrTransition::CallThen {
+                    binding,
+                    exits,
+                    then,
+                    ..
+                } => {
                     if let IrThen::Goto { state } = then {
                         in_state(*state)?;
+                    }
+                    // An exits entry is an in-world resume point, so it is
+                    // bounds-checked exactly as a `then` target is.
+                    for e in exits {
+                        in_state(*e)?;
                     }
                     for tb in binding {
                         if tb.caller_tape as usize >= arity {
@@ -1415,15 +1614,21 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                         }
                     }
                 }
+                // `retx #k` leaves through exit `k` of THIS world, so the
+                // number must fall inside the count the world declares.
+                IrTransition::ReturnExit { exit } => {
+                    if *exit >= w.exits as u32 {
+                        return Err(format!(
+                            "{}: state {} returns through exit {} (the world declares {})",
+                            w.name, st.id, exit, w.exits
+                        ));
+                    }
+                }
                 // A `TailCall` names another WORLD (like `CallThen.target`), so
                 // there is no in-world state target to bounds-check — legal
                 // wherever a `CallThen` is, which is anywhere a terminal is.
-                // `ReturnExit`'s `exit` is bounds-checked against the
-                // declaring world's `exits` count once a pass produces it —
-                // not here, and not yet (no pass does).
                 IrTransition::TailCall { .. }
                 | IrTransition::Return
-                | IrTransition::ReturnExit { .. }
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
@@ -2311,29 +2516,62 @@ machine {
         assert!(call.1.is_empty(), "a plain call carries no binding");
     }
 
-    /// A routine that hands control to one of its own `state` parameters
-    /// (`goto <state-param>`) is a T4-valid definition, but lowering it on its
-    /// own needs the composition engine to thread the continuation from the
-    /// call site. It reports the honest not-yet-supported error, not the
-    /// misleading `undefined-state` (`k` IS a declared parameter).
+    /// A routine hands control to one of its own `state` parameters
+    /// (`goto <state-param>`) by leaving through the matching exit: the
+    /// parameter's position in the signature IS the exit number, and the
+    /// world publishes one exit per parameter.
     #[test]
-    fn routine_goto_state_param_is_a_clear_error() {
+    fn routine_goto_state_param_lowers_to_the_matching_exit() {
         let src = "\
 alphabet ab { '_', 'a' }
+routine r(tape t: ab, state first, state second) {
+  entry state s { ['a'] -> goto second; [*] -> goto first; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}";
+        let (ir, _) = lower_of(src);
+        let r = world(&ir, "r");
+        assert_eq!(r.exits, 2, "one exit per `state` parameter");
+        let exits: Vec<u32> = state(r, "s")
+            .rules
+            .iter()
+            .filter_map(|rule| match &rule.transition {
+                IrTransition::ReturnExit { exit } => Some(*exit),
+                _ => None,
+            })
+            .collect();
+        // Row order is the emitted one; both exits appear, and `second`
+        // (the SECOND parameter) is exit 1.
+        assert!(exits.contains(&0) && exits.contains(&1), "{exits:?}");
+        let second = state(r, "s")
+            .rules
+            .iter()
+            .find(|rule| rule.pattern == vec![IrCell::Index { index: 1 }])
+            .expect("the 'a' row");
+        assert_eq!(second.transition, IrTransition::ReturnExit { exit: 1 });
+    }
+
+    /// A `then` continuation names a LABEL of the calling world, so an
+    /// exit of the enclosing routine cannot stand there — reported rather
+    /// than silently resumed at the wrong place.
+    #[test]
+    fn a_state_param_cannot_be_a_then_continuation() {
+        let src = "\
+alphabet ab { '_', 'a' }
+routine leaf(tape t: ab) {
+  entry state s { [*] -> return; }
+}
 routine r(tape t: ab, state k) {
-  entry state s { [*] -> goto k; }
+  entry state s { [*] -> call leaf(t = t) then k; }
 }
 machine {
   tape t: ab;
   entry state go { [*] -> stop; }
 }";
         let e = lower_err_of(src);
-        assert_eq!(e.kind.code(), "state-param-continuation-unsupported");
-        assert!(
-            matches!(&e.kind, CompileErrorKind::StateParamContinuationUnsupported(n) if n == "k"),
-            "{:?}",
-            e.kind
-        );
+        assert_eq!(e.kind.code(), "exit-target-unsupported");
     }
 
     #[test]

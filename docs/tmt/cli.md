@@ -291,7 +291,9 @@ subsection.
 | `fold-overflow` | A write-cell fold overflows `i64` during evaluation. |
 | `exact-row-conflict` | Two rules in one state match the same concrete tuple with neither carrying a wildcard. |
 | `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
-| `state-param-continuation-unsupported` | A routine body hands control to one of its own `state` parameters — threading it to the call site is not lowered yet. |
+| `too-many-state-params` | A signature declares more than 255 `state` parameters — the published exit count is one byte wide. |
+| `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (pass `--extern`, or declare it locally). |
+| `exit-target-unsupported` | A resume point — a `call`'s `state` argument, or its `then` — names a terminator or the enclosing routine's own `state` parameter rather than a state of this world. |
 | `internal-error` | The compiler broke its own invariant — generated assembly failed to assemble, or a compiler-built IR world failed validation. A compiler bug, not a source error; please report it. |
 
 ## `tmt asm`

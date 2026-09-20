@@ -307,12 +307,22 @@ pub enum CompileErrorKind {
     RowWidth { expected: usize, got: usize },
 
     // -- IR-lowering scope limits -------------------------------------------
-    /// A routine body's `goto` (or continuation) targets one of the routine's
-    /// own `state` parameters. Threading a state parameter to its call-site
-    /// continuation is not lowered yet — a routine that hands control to a
-    /// `state` param cannot be compiled on its own. `name` is the state
-    /// parameter.
-    StateParamContinuationUnsupported(String),
+    /// A signature declares more `state` parameters than an exit count can
+    /// carry: the published count is one byte wide
+    /// (docs/formats.md (routine interfaces)), so 255 is the ceiling. The
+    /// payload is the declared count.
+    TooManyStateParams(usize),
+    /// A `call` supplies `state` arguments to a routine whose declarations
+    /// this unit does not have. The exits vector travels POSITIONALLY and
+    /// carries no parameter names, so without the callee's own signature
+    /// there is no order to write it in. `name` is the callee.
+    StateArgsNeedDeclarations(String),
+    /// A resume point names something that is not a state of this world: a
+    /// terminator, or the enclosing routine's own `state` parameter. Both a
+    /// `call`'s `state` argument and its `then` resume at a LABEL of the
+    /// calling world, so neither can carry one yet. `name` is what was
+    /// written.
+    ExitTargetUnsupported(String),
 
     // -- codegen / assemble orchestration ----------------------------------
     /// A compiler-internal invariant broke: the codegen-produced `.tma`
@@ -447,7 +457,9 @@ impl CompileErrorKind {
         CompileErrorKind::FoldOverflow => "fold-overflow",
         CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
         CompileErrorKind::RowWidth { .. } => "row-width",
-        CompileErrorKind::StateParamContinuationUnsupported(_) => "state-param-continuation-unsupported",
+        CompileErrorKind::TooManyStateParams(_) => "too-many-state-params",
+        CompileErrorKind::StateArgsNeedDeclarations(_) => "state-args-need-declarations",
+        CompileErrorKind::ExitTargetUnsupported(_) => "exit-target-unsupported",
         CompileErrorKind::Internal(_) => "internal-error",
     }
 }
@@ -822,10 +834,19 @@ impl std::fmt::Display for CompileErrorKind {
                     "a rule vector has {got} elements but the world has {expected} tapes"
                 )
             }
-            CompileErrorKind::StateParamContinuationUnsupported(name) => {
+            CompileErrorKind::TooManyStateParams(n) => {
+                write!(f, "{n} `state` parameters — a routine has at most 255")
+            }
+            CompileErrorKind::StateArgsNeedDeclarations(name) => {
                 write!(
                     f,
-                    "this routine hands control to its `state` parameter `{name}` — threading a state parameter to the call site is not supported yet"
+                    "this call hands `state` arguments to `{name}`, whose declarations are not given — an exits vector is positional, so the callee's own parameter order is needed (pass `--extern`, or declare it locally)"
+                )
+            }
+            CompileErrorKind::ExitTargetUnsupported(name) => {
+                write!(
+                    f,
+                    "`{name}` cannot be a resume point — a `call`'s `state` argument and its `then` each name a state of this world"
                 )
             }
             CompileErrorKind::Internal(m) => write!(f, "internal compiler error: {m}"),
@@ -2414,7 +2435,27 @@ fn resolve_world(
                     )?,
                 });
             }
-            SigParamKind::State => state_params.push(p.name.clone()),
+            SigParamKind::State => {
+                // A routine's `state` parameters are its exits, and the
+                // published exit count is one byte wide
+                // (docs/formats.md (routine interfaces)) — so the 256th has
+                // no number to carry. Refused at the parameter itself;
+                // `ir::lower_world`'s own narrowing raises the same error
+                // from its explicit conversion, so neither the check nor
+                // the narrowing can drift into a silent truncation.
+                if state_params.len() == u8::MAX as usize {
+                    let declared = sig
+                        .params
+                        .iter()
+                        .filter(|q| matches!(q.kind, SigParamKind::State))
+                        .count();
+                    return Err(CompileError {
+                        span: p.name_span,
+                        kind: CompileErrorKind::TooManyStateParams(declared),
+                    });
+                }
+                state_params.push(p.name.clone());
+            }
         }
     }
     let (grafts, binds, entry) = resolve_world_reuse(grafts, binds, states, ns, scopes)?;
@@ -3852,7 +3893,9 @@ mod tests {
                 expected: 2,
                 got: 3,
             },
-            CompileErrorKind::StateParamContinuationUnsupported("x".into()),
+            CompileErrorKind::TooManyStateParams(256),
+            CompileErrorKind::StateArgsNeedDeclarations("x".into()),
+            CompileErrorKind::ExitTargetUnsupported("x".into()),
             CompileErrorKind::Internal("x".into()),
         ];
         let witnessed: Vec<&str> = all.iter().map(|k| k.code()).collect();

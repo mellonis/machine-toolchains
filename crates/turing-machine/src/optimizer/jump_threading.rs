@@ -76,11 +76,21 @@ pub fn run(w: &mut IrWorld) -> u32 {
                             changes += 1;
                         }
                     }
-                    IrTransition::CallThen { then, .. } => {
+                    IrTransition::CallThen { exits, then, .. } => {
                         if let IrThen::Goto { state } = then {
                             let new = resolve(*state);
                             if new != *state {
                                 *state = new;
+                                changes += 1;
+                            }
+                        }
+                        // An exits entry is an inbound reference like the
+                        // `then`, and threads the same way: resuming at a
+                        // forwarder is resuming at what it forwards to.
+                        for e in exits {
+                            let new = resolve(*e);
+                            if new != *e {
+                                *e = new;
                                 changes += 1;
                             }
                         }

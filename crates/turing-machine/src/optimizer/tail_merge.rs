@@ -79,9 +79,16 @@ fn retarget(w: &mut IrWorld, from: u32, to: u32) {
         for r in &mut st.rules {
             match &mut r.transition {
                 IrTransition::Goto { state } => fix(state),
-                IrTransition::CallThen { then, .. } => {
+                IrTransition::CallThen { exits, then, .. } => {
                     if let IrThen::Goto { state } = then {
                         fix(state);
+                    }
+                    // Exits name states, so a merge has to move them onto
+                    // the keeper too. Two states differing ONLY in their
+                    // exit targets never merge in the first place — the
+                    // exits vector is part of the transition's equality.
+                    for e in exits {
+                        fix(e);
                     }
                 }
                 IrTransition::TailCall { .. }

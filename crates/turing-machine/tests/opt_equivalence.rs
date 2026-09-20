@@ -845,6 +845,36 @@ machine {
   state advance { [*, *] -> move [>, .] goto scan; }
 }";
 
+// ── the exit-bearing call (a routine's `state` parameters) ──────────────────
+
+/// A routine that leaves through one of its two `state` parameters rather
+/// than returning: the first tape decides which, the exit handlers write
+/// different glyphs on the second tape, and `then done` halts — so a call
+/// that resumed normally would change the TERMINATION KIND, not just the
+/// tape. The construct every mechanism has to lower: mono splices a copy
+/// whose `retx #k` become jumps, frames carries the vector in the site's
+/// descriptor, hybrid decides per fold group.
+///
+/// `-O1` must leave the call standing (an exit-bearing callee is never
+/// inlined), which is what makes this fixture meaningful at both levels
+/// rather than only at `-O0`.
+const EXIT_CALL: &str = "\
+alphabet ab { '_', '0', '1' }
+routine sub(tape t: ab, state hit, state miss) {
+  entry state s {
+    ['_'] -> goto hit;
+    [*]   -> goto miss;
+  }
+}
+machine {
+  tape d: ab;
+  tape out: ab;
+  entry state go { [*, *] -> call sub(t = d, hit = won, miss = lost) then done; }
+  state won  { [*, *] -> write [-, '0'] stop; }
+  state lost { [*, *] -> write [-, '1'] stop; }
+  state done { [*, *] -> halt; }
+}";
+
 #[test]
 fn inline_arity_reducing_projection_is_equivalent_across_the_matrix() {
     // Three cases across the full 2×3 matrix. The last two carry data on the
@@ -1166,13 +1196,20 @@ fn everything_matrix_is_green() {
                 &[(&[2, 1], 0), (&[2, 1], 0)],
             ],
         ),
+        (
+            // Both exits, seeded: a blank first tape leaves through exit
+            // 0, a seeded one through exit 1.
+            "exit_call",
+            EXIT_CALL.to_string(),
+            vec![&[(&[], 0), (&[], 0)], &[(&[2], 0), (&[], 0)]],
+        ),
     ];
     assert_eq!(
         roster.len(),
-        13,
+        14,
         "the single-source pass-exercise roster: 6 Appendix A + nested graft + \
-         6 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
-         dead-rows, inline ×2, the brk barrier)"
+         7 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
+         dead-rows, inline ×2, the brk barrier, the exit-bearing call)"
     );
     for (label, src, cases) in &roster {
         assert!(!src.is_empty(), "roster program `{label}` has a source");

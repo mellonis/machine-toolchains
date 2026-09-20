@@ -62,13 +62,22 @@
 //! # Callee eligibility
 //!
 //! A candidate callee is a **routine** (never the machine — the entry world's
-//! terminators are `stp`/`hlt`, and nothing calls it), a **leaf** (no
-//! `CallThen`/`TailCall` in its body — first-iteration simplicity, so a splice
-//! never drags a nested call in), and **small** (rule count ≤ [`INLINE_MAX_RULES`],
+//! terminators are `stp`/`hlt`, and nothing calls it), **exit-free** (see
+//! below), a **leaf** (no `CallThen`/`TailCall` in its body —
+//! first-iteration simplicity, so a splice never drags a nested call in),
+//! and **small** (rule count ≤ [`INLINE_MAX_RULES`],
 //! the state-graph analog of the `.pmc` op-count cap). The candidate set is
 //! fixed from the pre-pass program state (a routine that calls another is not a
 //! leaf and so never a candidate, even though the callee it invokes may be
 //! spliced INTO it).
+//!
+//! **An exit-bearing callee is never spliced — a deliberate conservatism.**
+//! Its `retx #k` rows leave through the SITE's exit vector, so a splice
+//! would have to rewrite each of them into the site's own `exits[k]`, the
+//! way the linker's copy path does. That fold is not attempted here: the
+//! pass takes `return`-to-`then` rewriting only, and a callee declaring
+//! exits is dropped from the candidate set instead. Pinned by a test, so
+//! it stays a decision.
 //!
 //! # The splice
 //!
@@ -162,6 +171,8 @@ pub fn run(ir: &mut IrProgram, options: &OptOptions) -> u32 {
         .filter(|(i, w)| {
             w.kind == IrWorldKind::Routine
                 && Some(*i) != entry
+                // Exit-free callees only — see the module doc.
+                && w.exits == 0
                 && is_leaf(w)
                 && rule_count(w) <= cap
         })
@@ -188,9 +199,16 @@ fn find_site(caller: &IrWorld, candidates: &HashMap<String, IrWorld>) -> Option<
     for (si, st) in caller.states.iter().enumerate() {
         for (ri, r) in st.rules.iter().enumerate() {
             if let IrTransition::CallThen {
-                target, binding, ..
+                target,
+                binding,
+                exits,
+                ..
             } = &r.transition
                 && target != &caller.name
+                // Redundant with the candidate filter for an in-unit
+                // callee, and stated anyway: a site lending its exit
+                // vector is never spliced.
+                && exits.is_empty()
                 && let Some(callee) = candidates.get(target)
                 && callee.arity <= caller.arity
                 && is_full_passthrough(binding, caller, callee)
@@ -284,10 +302,10 @@ fn remap_transition(t: &IrTransition, base: u32, then: IrThen) -> IrTransition {
         IrTransition::CallThen { .. } | IrTransition::TailCall { .. } => {
             unreachable!("inline candidates are leaves — no nested call to remap")
         }
-        // Never produced by lowering or the optimizer yet — no routine
-        // declares `exits=`, so a leaf candidate can never carry one.
+        // A candidate declares no exits (the module doc's conservatism), so
+        // no copied row can carry the terminal that leaves through one.
         IrTransition::ReturnExit { .. } => {
-            unreachable!("ReturnExit is not yet produced by any pass")
+            unreachable!("an exit-bearing callee is never an inline candidate")
         }
     }
 }

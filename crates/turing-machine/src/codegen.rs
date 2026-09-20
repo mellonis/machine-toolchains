@@ -96,12 +96,18 @@ enum Term {
     Djmp(String),
     /// `goto <state>` — `jmp <label>` or elided fall-through.
     Goto(String),
-    /// `call <name>[ [<binding>]]` then a resume.
+    /// `call <name>[ [<binding>]][ exits=(<label>, …)]` then a resume. The
+    /// exit labels stay a list rather than text folded into `operand`: the
+    /// label printer needs the names, since a state reached only through an
+    /// exits operand has no other reference to print its label for.
     Call {
         operand: String,
+        exits: Vec<String>,
         then: Then,
     },
     Ret,
+    /// `retx #k` — leave through exit `k` of the call site's exit vector.
+    RetExit(u32),
     Stop,
     Halt,
     /// `jmp @<name>` — a relocated external jump to a routine (the `tail_call`
@@ -627,12 +633,14 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
         IrTransition::CallThen {
             target,
             binding,
+            exits,
             then,
-            // The `exits=(…)` operand — no call site carries one yet; its
-            // codegen arm lands with the pass that first produces one.
-            ..
         } => {
-            let operand = if binding.is_empty() {
+            // A bindless call prints its target alone — unless it carries
+            // an exit vector, which the assembly grammar reads only after
+            // a binding group, so an empty one is written out
+            // (docs/formats.md (bound calls)).
+            let operand = if binding.is_empty() && exits.is_empty() {
                 target.clone()
             } else {
                 format!("{} {}", target, render_binding(binding))
@@ -643,7 +651,12 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
                 IrThen::Stop => Then::Stop,
                 IrThen::Halt => Then::Halt,
             };
-            Term::Call { operand, then }
+            Term::Call {
+                operand,
+                // In exit order — the callee's `retx #k` indexes this list.
+                exits: exits.iter().map(|s| state_label(w, *s)).collect(),
+                then,
+            }
         }
         IrTransition::Return => Term::Ret,
         IrTransition::Stop => Term::Stop,
@@ -651,11 +664,7 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
         IrTransition::TailCall { target } => Term::TailCall(target.clone()),
         IrTransition::TrapRead => Term::TrapRead,
         IrTransition::TrapWrite => Term::TrapWrite,
-        // Never produced by any pass yet — `retx #k`'s codegen arm lands
-        // with the pass that first emits this variant.
-        IrTransition::ReturnExit { .. } => {
-            unreachable!("ReturnExit is not yet produced by any pass")
-        }
+        IrTransition::ReturnExit { exit } => Term::RetExit(*exit),
     }
 }
 
@@ -850,12 +859,21 @@ fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
 /// laid-out blocks.
 fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
     let alpha: Vec<String> = w.tapes.iter().map(|t| t.cardinality.to_string()).collect();
+    // `exits=` prints only for a routine that declares one, so a world
+    // without `state` parameters emits the signature it always did
+    // (docs/formats.md (routine interfaces)).
+    let exits = if w.exits > 0 {
+        format!(", exits={}", w.exits)
+    } else {
+        String::new()
+    };
     e.push(
         format!(
-            ".routine {}, tapes={}, alpha=({})",
+            ".routine {}, tapes={}, alpha=({}){}",
             w.name,
             w.arity,
-            alpha.join(", ")
+            alpha.join(", "),
+            exits
         ),
         0,
     );
@@ -899,6 +917,15 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
         {
             printed.insert(t);
         }
+        // Every exit label is an operand of the `call`, never a
+        // fall-through, so it always needs a printed label — the same
+        // unconditional rule a `.targets` entry gets. A state reached ONLY
+        // through an exits operand has no other reference to print it.
+        if let Term::Call { exits, .. } = &b.term {
+            for t in exits {
+                printed.insert(t.as_str());
+            }
+        }
         // `jm` never elides (`Term::JumpIfMatch`'s doc), so its target always
         // needs a printed label — a `direct`-threaded selective rule's target
         // is another state's own block, which the table-targets loop above
@@ -924,8 +951,17 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
         match &b.term {
             Term::Djmp(d) => e.push(grid(None, "djmp", d), b.term_line),
             Term::Goto(t) => emit_goto(e, t),
-            Term::Call { operand, then } => {
-                e.push(grid(None, "call", operand), b.term_line);
+            Term::Call {
+                operand,
+                exits,
+                then,
+            } => {
+                let operand = if exits.is_empty() {
+                    operand.clone()
+                } else {
+                    format!("{operand} exits=({})", exits.join(", "))
+                };
+                e.push(grid(None, "call", &operand), b.term_line);
                 match then {
                     Then::Goto(t) => emit_goto(e, t),
                     Then::Ret => e.push(grid(None, "ret", ""), b.term_line),
@@ -934,6 +970,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                 }
             }
             Term::Ret => e.push(grid(None, "ret", ""), b.term_line),
+            Term::RetExit(k) => e.push(grid(None, "retx", &format!("#{k}")), b.term_line),
             Term::Stop => e.push(grid(None, "stp", ""), b.term_line),
             Term::Halt => e.push(grid(None, "hlt", ""), b.term_line),
             // `jmp @<name>` — the relocated external jump. No fall-through

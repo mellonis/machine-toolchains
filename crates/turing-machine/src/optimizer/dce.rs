@@ -32,10 +32,14 @@ pub fn run(w: &mut IrWorld) -> u32 {
         for r in &w.states[id as usize].rules {
             match &r.transition {
                 IrTransition::Goto { state } => work.push(*state),
-                IrTransition::CallThen { then, .. } => {
+                IrTransition::CallThen { exits, then, .. } => {
                     if let IrThen::Goto { state } = then {
                         work.push(*state);
                     }
+                    // An exit handler is reached ONLY through the site's
+                    // exits vector, so the walk that decides what lives
+                    // has to follow it.
+                    work.extend(exits.iter().copied());
                 }
                 // A `TailCall`/`ReturnExit` leaves the world (its target is
                 // another world, or another `then`-site's exit table), like

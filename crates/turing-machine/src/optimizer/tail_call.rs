@@ -14,6 +14,12 @@
 //!   structural, matching the `.pmc` pass's "never in `main`" rule (whose
 //!   return is `stp`, which a callee `ret` would underflow).
 //!
+//! * **Exit-free sites only.** An exit-bearing site (`exits` non-empty)
+//!   lends the callee its own resume vector: `retx #k` in the callee leaves
+//!   through this site's exit `k`. A tail jump has no site to lend one, so
+//!   the callee would index the ORIGINAL caller's vector — a silently wrong
+//!   destination rather than a link failure. Excluded, and pinned by a test.
+//!
 //! * **Bindless calls only.** A BOUND call (`binding` non-empty) rides the
 //!   frames stack discipline: the paired `call`/`ret` pushes and restores the
 //!   frame register FR (docs/tmt/isa.md (the frames execution profile)).
@@ -39,11 +45,15 @@ pub fn run(w: &mut IrWorld) -> u32 {
     for st in &mut w.states {
         for r in &mut st.rules {
             // A bindless `call target … then return`: rewrite in place to a
-            // `TailCall`. Bound calls (non-empty binding) are excluded.
+            // `TailCall`. Bound calls (non-empty binding) are excluded, and
+            // so are EXIT-BEARING ones: the callee's `retx #k` leaves
+            // through exit `k` of the SITE's exit vector, and a tail jump
+            // carries no site — the callee would index the original
+            // caller's vector instead.
             let is_tail = matches!(
                 &r.transition,
-                IrTransition::CallThen { binding, then, .. }
-                    if binding.is_empty() && matches!(then, IrThen::Return)
+                IrTransition::CallThen { binding, exits, then, .. }
+                    if binding.is_empty() && exits.is_empty() && matches!(then, IrThen::Return)
             );
             if is_tail {
                 let IrTransition::CallThen { target, .. } = &r.transition else {
