@@ -197,11 +197,13 @@ fn project_write_back(
     for symbol in callee.iter() {
         let mut listed = false;
         for pair in pairs {
-            // This is an intra-compilation-unit analysis — the pairs it
-            // walks always resolve to a concrete `Index` (no pass mints a
-            // `Label` dst yet); a `Label` simply never matches, falling
-            // through to the completion rules below like any unlisted
-            // symbol.
+            // This is an intra-compilation-unit analysis, reached only for
+            // a LOCAL callee (`call_contribution`'s caller): its pairs
+            // always resolve to a concrete `Index`. A `Label` dst — minted
+            // only for an out-of-unit callee, whose target never resolves
+            // to a local `callee_ix` and so never reaches this loop —
+            // would simply never match, falling through to the completion
+            // rules below like any unlisted symbol.
             if !pair.one_way && pair.dst == IrMapDst::Index(symbol) {
                 // A repeat with a different image is a link-time conflict;
                 // taking every image keeps the answer on the safe side.
@@ -898,6 +900,7 @@ mod tests {
                 })
                 .collect(),
             param: None,
+            map_written: !pairs.is_empty(),
         }]
     }
 

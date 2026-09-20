@@ -291,7 +291,6 @@ subsection.
 | `fold-overflow` | A write-cell fold overflows `i64` during evaluation. |
 | `exact-row-conflict` | Two rules in one state match the same concrete tuple with neither carrying a wildcard. |
 | `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
-| `external-binding-unsupported` | A `call`/`bind` with tape bindings into a routine not defined in this compilation unit — a plain external call stays legal. |
 | `state-param-continuation-unsupported` | A routine body hands control to one of its own `state` parameters — threading it to the call site is not lowered yet. |
 | `internal-error` | The compiler broke its own invariant — generated assembly failed to assemble, or a compiler-built IR world failed validation. A compiler bug, not a source error; please report it. |
 

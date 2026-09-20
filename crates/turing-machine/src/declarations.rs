@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use crate::compiler::Resolved;
+use crate::compiler::{Resolved, ResolvedWorld};
 
 /// Where one declaration module came from. Read by the diagnostics that
 /// must tell "no such name" from "its declarations were not given"
@@ -91,6 +91,22 @@ impl Declarations {
             .iter()
             .find(|(_, candidate)| std::ptr::eq(candidate, resolved))
             .map(|(origin, _)| origin)
+    }
+
+    /// The declared world named `name` (a routine, first-match over
+    /// `modules()` in table order — `--extern` files in command-line
+    /// order, then the embedded stdlib last), or `None` when no module
+    /// this compile was given declares it. The one lookup an external
+    /// call/bind site's own arg-list checks and ordering read
+    /// (`ir::resolve_binding`, `compiler::expand_named_maps_in_args`):
+    /// when a callee's declarations are in hand, its tape order and
+    /// parameter names are checked at compile time exactly as a local
+    /// signature's are; when they are not, the checks defer to the
+    /// linker (docs/formats.md (bound calls)).
+    pub(crate) fn routine(&self, name: &str) -> Option<&ResolvedWorld> {
+        self.modules()
+            .into_iter()
+            .find_map(|m| m.worlds.iter().find(|w| w.name == name))
     }
 
     /// How many declaration modules this carries — the public shape of

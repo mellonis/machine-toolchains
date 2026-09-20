@@ -25,6 +25,20 @@
 //! one fixture that exercises the linker's `AlphabetDrift` check
 //! (`crates/core/src/linker/interface.rs`), dormant since it had nothing
 //! populating `Interface::imports` to compare.
+//!
+//! **Symbolic emission** (docs/formats.md (bound calls)): a `call`/`bind`
+//! that binds tapes into a routine outside this compilation unit compiles
+//! to a SYMBOLIC binding record — the callee's parameter NAME where an
+//! in-unit site writes a caller-tape position, and a bound map's
+//! destination as a glyph LABEL rather than an index, because the callee's
+//! own tape order and index space belong to the LINKER to resolve. When the
+//! callee's declarations are known (a sibling, `--extern`, or the embedded
+//! standard library), the entries print in the callee's OWN tape order and
+//! every parameter is checked at compile time; when they are not, the site
+//! keeps its source order and every entry is named, and the checks defer to
+//! the linker. An omitted map emits NO pairs — index identity, the
+//! linker's `glyph-mismatch` warning stands guard — and `with map { }`
+//! emits a WRITTEN empty map, which silences that warning on purpose.
 
 use std::path::{Path, PathBuf};
 
@@ -398,4 +412,543 @@ machine {
         out.stderr
     );
     assert!(out_path.exists());
+}
+
+// -- symbolic emission: a bound call into another compilation unit --------
+
+/// `mylib`'s declared interface: one exported alphabet and one exported
+/// routine with a single `bits`-typed tape parameter. `--extern`-ed as a
+/// `.tmh` wherever the caller's declarations are known.
+const MYLIB_HEADER: &str = "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine plusOne(tape num: bits writes { '0', '1' });
+}
+";
+
+/// The caller side of the symbolic-emission fixture: a 2-tape machine
+/// (`ctl: bits`, `data: wide`) binding `data` into `mylib::plusOne`'s one
+/// tape parameter through an inline map — the `.tmc` pair that must produce
+/// the plan's own tool-verified `.tma` target text (`docs/formats.md` (bound
+/// calls)): `call    mylib::plusOne [num: 1{3->'0', 4->'1'}]`.
+fn app_src(map: &str) -> String {
+    format!(
+        "\
+use mylib::bits;
+
+alphabet wide {{ '_', '^', '$', '0', '1' }}
+
+machine {{
+  tape ctl: bits;
+  tape data: wide;
+  entry state go {{ [*, *] -> call mylib::plusOne(num = data{map}) then done; }}
+  state done {{ [*, *] -> stop; }}
+}}
+"
+    )
+}
+
+/// **[tool-verified]** against the plan's own D1/D2 `.tma` pair
+/// (`.superpowers/plan3a-fixture-check.md`): the exact same operand,
+/// reached from `.tmc` source through `--extern` rather than hand-authored
+/// assembly. Mutation (verified by hand — see the task report): emitting
+/// `dst` as an index instead of a label (`IrMapDst::Index(src)` in place
+/// of `IrMapDst::Label(glyph_label(&p.dst))`); the byte compare here goes
+/// red. `the_pair_links_and_runs` below assembles the D1/D2 `.tma` pair
+/// directly rather than compiling it, so this particular mutation does not
+/// reach it — the two tests are independent proofs (compiler emission
+/// here, linker resolution there), not one continuous pipeline.
+#[test]
+fn an_external_bound_call_emits_the_symbolic_operand() {
+    let dir = scratch("symbolic_emission");
+    let header = write(&dir, "mylib.tmh", MYLIB_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        &app_src(" with map { '0' -> '0', '1' -> '1' }"),
+    );
+    let out = compile(
+        &dir,
+        &input,
+        "app.tma",
+        &["-S", "--extern", header.to_str().unwrap()],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+    let tma = std::fs::read_to_string(dir.join("app.tma")).unwrap();
+    let call_line = tma
+        .lines()
+        .find(|l| l.contains("mylib::plusOne"))
+        .unwrap_or_else(|| panic!("no call line in:\n{tma}"))
+        .trim();
+    assert_eq!(
+        call_line, "call    mylib::plusOne [num: 1{3->'0', 4->'1'}]",
+        "{tma}"
+    );
+}
+
+/// A bound call into a routine whose declarations are NOT given (no
+/// `--extern`, no sibling, no library — a bare `tmt compile` with no
+/// knowledge of `mylib` at all) still compiles: the site keeps its source
+/// order and every entry is named, which is exactly what the linker's own
+/// `reorder_named` exists to fix up once it has the callee's real
+/// signature. Links clean against the real library object. Mutation:
+/// requiring declarations before emitting a binding at all — compilation
+/// would fail here, contradicting the "a bare `tmt compile` with no
+/// knowledge of any library still produces a linkable object" claim.
+#[test]
+fn an_external_bound_call_without_declarations_still_compiles_and_links() {
+    let dir = scratch("symbolic_no_decl");
+    // No `use mylib::bits;` — that would itself need `mylib`'s declarations
+    // (`unresolved-alphabet`), which this test deliberately withholds. The
+    // caller declares its own local alphabet instead.
+    let app = "\
+alphabet wide { '_', '^', '$', '0', '1' }
+
+machine {
+  tape data: wide;
+  entry state go { [*] -> call mylib::plusOne(num = data with map { '0' -> '0', '1' -> '1' }) then done; }
+  state done { [*] -> stop; }
+}
+";
+    let input = write(&dir, "app.tmc", app);
+    let app_obj = compile(&dir, &input, "app.tmo", &["--nostdlib"]);
+    assert!(app_obj.is_ok(), "{:?}", app_obj.err());
+
+    let lib_src = write(
+        &dir,
+        "mylib.tmc",
+        "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine plusOne(tape num: bits writes { '0', '1' }) {
+    entry state s { [*] -> write ['1'] return; }
+  }
+}
+",
+    );
+    let lib_obj = compile(&dir, &lib_src, "mylib.tmo", &["--nostdlib"]);
+    assert!(lib_obj.is_ok(), "{:?}", lib_obj.err());
+
+    let out = link(
+        &dir,
+        &[&dir.join("app.tmo"), &dir.join("mylib.tmo")],
+        "app.tmx",
+        &["--nostdlib", "--call-mech", "frames"],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+    assert!(dir.join("app.tmx").exists());
+}
+
+/// A caller tape whose alphabet is the SAME SIZE as `bits` but declares its
+/// two non-blank glyphs in the OPPOSITE order — the one shape that triggers
+/// `glyph-mismatch` specifically (a cardinality difference would trigger
+/// `narrow-alphabet` instead, checked first and returning early — established
+/// fact G in `.superpowers/plan3a-fixture-check.md`, the shipped corpus's own
+/// alphabets being position-identical with the stdlib's).
+fn reordered_app_src(map: &str) -> String {
+    format!(
+        "\
+alphabet swapped {{ '_', '1', '0' }}
+
+machine {{
+  tape data: swapped;
+  entry state go {{ [*] -> call mylib::plusOne(num = data{map}) then done; }}
+  state done {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+/// An OMITTED map (no `with map` at all) emits NO pairs — index identity —
+/// so the linker's `glyph-mismatch` warning still fires when the caller and
+/// callee alphabets are equal-size but declare their glyphs in a different
+/// order. Mutation: "helpfully" expanding the omitted map into identity
+/// pairs; the warning stops firing, the silent-failure shape the arc exists
+/// to raise.
+#[test]
+fn an_omitted_map_emits_no_pairs() {
+    let dir = scratch("symbolic_omitted_map");
+    let header = write(&dir, "mylib.tmh", MYLIB_HEADER);
+    let input = write(&dir, "app.tmc", &reordered_app_src(""));
+    let out = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap(), "--nostdlib"],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+
+    let lib_src = write(
+        &dir,
+        "mylib.tmc",
+        "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine plusOne(tape num: bits writes { '0', '1' }) {
+    entry state s { [*] -> return; }
+  }
+}
+",
+    );
+    let lib_obj = compile(&dir, &lib_src, "mylib.tmo", &["--nostdlib"]);
+    assert!(lib_obj.is_ok(), "{:?}", lib_obj.err());
+
+    let out = link(
+        &dir,
+        &[&dir.join("app.tmo"), &dir.join("mylib.tmo")],
+        "app.tmx",
+        &["--nostdlib", "--call-mech", "frames", "-v"],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+    assert!(
+        out.unwrap().stderr.contains("glyph-mismatch"),
+        "an omitted map over a reordered, equal-size alphabet must warn"
+    );
+}
+
+/// `with map { }` — a WRITTEN empty map — silences the same warning on
+/// purpose: it tells the linker "bind by index, deliberately," the
+/// documented distinction from an omitted map. Same reordered-alphabet
+/// fixture as `an_omitted_map_emits_no_pairs`, the ONE difference between
+/// the two tests being the `{ }`. Mutation: treating `{}` as an omitted map
+/// (`map_written` collapsed to `false`); the warning returns, making this
+/// test fail exactly where its sibling passes.
+#[test]
+fn with_map_empty_silences_the_warning() {
+    let dir = scratch("symbolic_empty_map");
+    let header = write(&dir, "mylib.tmh", MYLIB_HEADER);
+    let input = write(&dir, "app.tmc", &reordered_app_src(" with map { }"));
+    let out = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap(), "--nostdlib"],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+
+    let lib_src = write(
+        &dir,
+        "mylib.tmc",
+        "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine plusOne(tape num: bits writes { '0', '1' }) {
+    entry state s { [*] -> return; }
+  }
+}
+",
+    );
+    let lib_obj = compile(&dir, &lib_src, "mylib.tmo", &["--nostdlib"]);
+    assert!(lib_obj.is_ok(), "{:?}", lib_obj.err());
+
+    let out = link(
+        &dir,
+        &[&dir.join("app.tmo"), &dir.join("mylib.tmo")],
+        "app.tmx",
+        &["--nostdlib", "--call-mech", "frames", "-v"],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+    assert!(
+        !out.unwrap().stderr.contains("glyph-mismatch"),
+        "a written empty map silences the warning on purpose"
+    );
+}
+
+/// The in-unit regression gate: a local bound call, byte-compared against
+/// the fixture's own record of what it printed BEFORE this task (the
+/// existing corpus's own binary-plus-one call, `cli_programs.rs`'s
+/// `A2_BINARY_PLUS_ONE`-shaped site — reconstructed here rather than
+/// imported, since fixtures are per-file by house convention). Mutation:
+/// taking the symbolic (named, out-of-unit) path for an in-unit callee —
+/// the operand would gain a `name: ` prefix that never printed before.
+#[test]
+fn an_in_unit_bound_call_is_byte_identical_to_before() {
+    let dir = scratch("symbolic_in_unit_gate");
+    let src = "\
+alphabet wide { '_', '^', '$', '0', '1' }
+alphabet bits { '_', '0', '1' }
+
+routine plusOne(tape num: bits writes { '0', '1' }) {
+  entry state s { [*] -> write ['1'] return; }
+}
+
+machine {
+  tape ctl: bits;
+  tape data: wide;
+  entry state go { [*, *] -> call plusOne(num = data with map { '0' -> '0', '1' -> '1' }) then done; }
+  state done { [*, *] -> stop; }
+}
+";
+    let input = write(&dir, "app.tmc", src);
+    let out = compile(&dir, &input, "app.tma", &["-S"]);
+    assert!(out.is_ok(), "{:?}", out.err());
+    let tma = std::fs::read_to_string(dir.join("app.tma")).unwrap();
+    let call_line = tma
+        .lines()
+        .find(|l| l.contains("call    plusOne"))
+        .unwrap_or_else(|| panic!("no call line in:\n{tma}"))
+        .trim();
+    assert_eq!(
+        call_line, "call    plusOne [1{3->1, 4->2}]",
+        "an in-unit entry stays positional and index-only: {tma}"
+    );
+}
+
+/// `mylib::combine`'s TWO tape parameters — a single-parameter callee
+/// cannot exercise "missing" at all (a call binding zero of its args is a
+/// PLAIN call, not a partial binding). Declared both as a `.tmh` header
+/// (the compile-error half) and as a real compiled object (the link-error
+/// half, `MYLIB_COMBINE_TMC`).
+const MYLIB_COMBINE_HEADER: &str = "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine combine(tape a: bits writes { '0', '1' }, tape b: bits writes { '0', '1' });
+}
+";
+const MYLIB_COMBINE_TMC: &str = "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine combine(tape a: bits writes { '0', '1' }, tape b: bits writes { '0', '1' }) {
+    entry state s { [*, *] -> return; }
+  }
+}
+";
+
+/// The missing-parameter pair: with the callee's declarations given, an
+/// unbound parameter is a COMPILE error naming it — checked here exactly as
+/// a local signature's arity is. With no declarations at all, the same
+/// shape compiles (every entry named, source order) and the arity gap
+/// surfaces only at LINK time instead. Mutation: requiring declarations for
+/// the compile-error half to fire, or checking arity even with no
+/// declarations — either collapses the pair into one behavior.
+#[test]
+fn a_missing_parameter_is_a_link_error_not_a_compile_error() {
+    // With declarations: `combine` takes TWO tape parameters (`a`, `b`),
+    // and this call binds only `a` — a compile error naming `b`.
+    let dir = scratch("symbolic_missing_arg_compile");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  entry state go { [*] -> call mylib::combine(a = data) then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[missing-arg]"), "{err}");
+    assert!(err.contains('b'), "{err}");
+
+    // Without declarations: the identical shape compiles (nothing here to
+    // check it against) and links against the REAL library object, whose
+    // second parameter the call never binds — an arity mismatch the
+    // LINKER's own interface pre-pass catches instead
+    // (`crates/core/src/linker/interface.rs::reorder_named`).
+    let dir2 = scratch("symbolic_missing_arg_link");
+    let app2 = "\
+alphabet bits2 { '_', '0', '1' }
+
+machine {
+  tape data: bits2;
+  entry state go { [*] -> call mylib::combine(a = data) then done; }
+  state done { [*] -> stop; }
+}
+";
+    let input2 = write(&dir2, "app.tmc", app2);
+    let app_obj = compile(&dir2, &input2, "app.tmo", &["--nostdlib"]);
+    assert!(app_obj.is_ok(), "{:?}", app_obj.err());
+
+    let lib_src = write(&dir2, "mylib.tmc", MYLIB_COMBINE_TMC);
+    let lib_obj = compile(&dir2, &lib_src, "mylib.tmo", &["--nostdlib"]);
+    assert!(lib_obj.is_ok(), "{:?}", lib_obj.err());
+
+    let link_err = link(
+        &dir2,
+        &[&dir2.join("app.tmo"), &dir2.join("mylib.tmo")],
+        "app.tmx",
+        &["--nostdlib", "--call-mech", "frames"],
+    )
+    .unwrap_err();
+    assert!(link_err.contains("does not bind parameter"), "{link_err}");
+    assert!(link_err.contains('b'), "{link_err}");
+}
+
+/// A binding arg naming something `combine` does NOT declare: `order_by_
+/// callee_tapes` alone only walks the FORWARD direction (a declared tape
+/// with no matching arg), so an extra, unrecognized arg name is silently
+/// dropped rather than reported unless checked separately — the exact
+/// silent-failure shape this arc exists to raise, and invisible in the
+/// missing-parameter test above because there the omission always left
+/// some declared parameter unbound too. This fixture binds every real
+/// parameter correctly and adds one bogus name, isolating the reverse
+/// direction. Mutation: checking only that every DECLARED parameter has an
+/// arg (the forward direction already covered by
+/// `a_missing_parameter_is_a_link_error_not_a_compile_error`), never that
+/// every ARG names something declared; the compile would wrongly succeed
+/// and `xyz` would vanish from the emitted operand.
+#[test]
+fn an_unrecognized_argument_name_is_a_compile_error_with_declarations() {
+    let dir = scratch("symbolic_unknown_arg");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+alphabet bits2 { '_', '0', '1' }
+
+machine {
+  tape data: bits2;
+  tape data2: bits2;
+  entry state go { [*, *] -> call mylib::combine(a = data, b = data2, xyz = data) then done; }
+  state done { [*, *] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[unknown-arg]"), "{err}");
+    assert!(err.contains("xyz"), "{err}");
+}
+
+/// The same reverse-direction gap, on a repeated name instead of an
+/// unrecognized one: `order_by_callee_tapes`'s forward walk finds the
+/// FIRST arg matching each declared tape and never notices a second one
+/// naming it again, so a duplicate silently overwrote its first binding
+/// rather than being reported. Binds `num` twice into a single-parameter
+/// callee — the second binding simply vanishes without this check.
+/// Mutation: checking only unknown names, not repeats; the compile would
+/// wrongly succeed, keeping whichever binding source order happens to
+/// list first and silently dropping the other.
+#[test]
+fn a_duplicate_argument_name_is_a_compile_error_with_declarations() {
+    let dir = scratch("symbolic_duplicate_arg");
+    let header = write(&dir, "mylib.tmh", MYLIB_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+
+machine {
+  tape data: bits;
+  tape data2: bits;
+  entry state go { [*, *] -> call mylib::plusOne(num = data, num = data2) then done; }
+  state done { [*, *] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[duplicate-arg]"), "{err}");
+    assert!(err.contains("num"), "{err}");
+}
+
+/// D1/D2's own `.tma` pair, assembled, linked and RUN — the end-to-end
+/// proof that a symbolic site the compiler emits is exactly what the
+/// linker's already-landed pre-pass expects. `plusOne` unconditionally
+/// writes `bits` symbol 1 (`'0'`) to its one tape; the two-way pair set
+/// `{3->'0', 4->'1'}` decides which CALLER symbol that write-back becomes.
+/// `data` is SEEDED with `'$'` before the call (neither candidate answer),
+/// so the assertion proves the call actually wrote, not merely that the
+/// tape stayed at its initial value. Mutation: swapping the two pairs'
+/// `dst` labels (`{3->'1', 4->'0'}`) — the callee's write-back now resolves
+/// through the OTHER pair, landing `'1'` (wide index 4) instead of `'0'`
+/// (index 3); verified by hand (see the task report) rather than committed
+/// as a second test, since the two branches are mutually exclusive
+/// assertions on the same cell.
+#[test]
+fn the_pair_links_and_runs() {
+    use mtc_core::formats::tapeblock::TapeSnapshot;
+    use mtc_core::linker::{CallMech, LinkOptions};
+    use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, WideTape};
+    use mtc_turing_machine::arch::Tm1;
+    use mtc_turing_machine::asm::{assemble, link};
+
+    const MYLIB_TMA: &str = "\
+.routine mylib::plusOne, tapes=1, alpha=(3)
+.param num, ('_','0','1'), writes=('0','1')
+.section code
+.func mylib::plusOne
+        wr      [1]
+        ret
+";
+    const APP_TMA: &str = "\
+.routine main, tapes=2, alpha=(3, 5)
+.param ctl, ('_','0','1')
+.param data, ('_','^','$','0','1')
+.section code
+.func main
+        call    mylib::plusOne [num: 1{3->'0', 4->'1'}]
+        stp
+";
+
+    let app_obj = assemble(APP_TMA, false).expect("app.tma assembles");
+    let lib_obj = assemble(MYLIB_TMA, false).expect("mylib.tma assembles");
+    let opts = LinkOptions {
+        call_mech: CallMech::Frames,
+        ..Default::default()
+    };
+    let exe = link(&[app_obj, lib_obj], &[], opts)
+        .expect("the composition engine links the symbolic site")
+        .executable;
+
+    let mut registry = ArchRegistry::new();
+    registry.register(Box::new(Tm1::new(exe.tape_count)));
+    let machine = Machine::from_executable(&exe, &registry).expect("loads");
+    let mut ctl = WideTape::new(3);
+    // Seed `data` with '$' (wide index 2) — neither candidate answer ('0'
+    // at 3, '1' at 4) — so the assertion below proves the call wrote,
+    // rather than merely that the tape held its initial value.
+    let mut data = WideTape::from_snapshot(
+        &TapeSnapshot {
+            origin: 0,
+            cells: vec![2],
+            head: 0,
+            alphabet: None,
+        },
+        5,
+    )
+    .expect("seeds");
+    let mut devices: Vec<&mut dyn Tape> = vec![&mut ctl, &mut data];
+    let result = machine
+        .run_tapes(
+            &mut devices,
+            RunOptions {
+                limits: RunLimits {
+                    max_steps: Some(100_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("run set-up ok");
+    assert_eq!(result.outcome, Outcome::Stopped);
+    drop(devices);
+    let snap = data.to_snapshot();
+    let idx = (0 - snap.origin) as usize;
+    assert_eq!(
+        snap.cells.get(idx).copied().unwrap_or(0),
+        3,
+        "the callee's write-back resolves through the FIRST pair (3->'0'): {snap:?}"
+    );
 }

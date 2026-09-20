@@ -557,16 +557,27 @@ can never declare more tapes than the caller has to bind them to
 (`callee_arity ≤ caller_arity`) — a routine wider than its caller is
 unrepresentable, not merely unwritten.
 
-A call whose target lives in *another* compilation unit is the opposite
-case — it must not bind tapes at all. Projecting them would need the
-callee's signature, which this unit does not have, so the empty list is
-the only legal form and the linker resolves the symbol.
+A call whose target lives in *another* compilation unit may still bind
+tapes: the compiler emits a SYMBOLIC binding — the callee's parameter name
+in place of a caller-tape position, and a bound map's destination as a
+glyph in place of an index — because the callee's own tape order and index
+space belong to the LINKER to resolve, not this unit (see "Bound calls"
+in `docs/formats.md`). When the callee's declarations are known (a
+sibling source, `--extern`, or the embedded standard library), the
+argument list is checked against them here, exactly as a local signature's
+is: a missing, duplicate, or unrecognized argument name is still a compile
+error naming the parameter. When they are not known, the call still
+compiles — every entry is written by name, in source order — and the same
+checks run at LINK time instead, against the callee's real object.
 
 ```
 use hidden;
 …
 [*] -> call hidden() then done;          // fine — resolved at link
-[*] -> call hidden(t = main) then done;  // error: needs hidden's tape signature
+[*] -> call hidden(t = main) then done;  // fine — a symbolic binding,
+                                          // checked when `hidden`'s
+                                          // declarations are known,
+                                          // otherwise at link
 ```
 
 ### `graft`

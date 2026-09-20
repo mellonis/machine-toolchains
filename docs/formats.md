@@ -1237,7 +1237,7 @@ to the callee.
 
 ### The `.tmc` state-graph IR
 
-`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 4`. The
+`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 5`. The
 form follows the model — a Turing world is a set of states, each a
 priority-ordered list of classical match rows, so the document is a graph of
 states rather than a CFG of basic blocks. `tmt ir graph` renders one of its
@@ -1245,7 +1245,7 @@ worlds as a diagram (`docs/tmt/cli.md`).
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "worlds": [
     {
       "name": "main",
@@ -1313,16 +1313,22 @@ pre-version-4 document has neither field.
   `halt`, `tail_call` (`target`), and the two synthesized trap terminals
   `trap_read` and `trap_write`. A `binding` entry carries the same
   per-callee-tape data the `.tma` binding-call operand does: `caller_tape`,
-  each authored `src`/`dst` pair resolved to a caller alphabet index and a
-  callee destination (a callee alphabet index for an in-unit callee, or a
-  glyph label when the callee is resolved only at link time), one-way pairs
-  flagged, and an optional `param` naming a symbolic (non-tape) binding
-  entry. No blank pin or closure is applied here — the composition engine
-  does that at link time. As of version 4 no compiler pass produces
-  `return_exit`, a nonempty `call_then.exits`, a label `dst`, or a `param` —
-  every one of these is reserved shape, filled by lowering with its empty
-  value until a routine can declare `exits=`/`noreturn` and a binding can
-  name something other than a caller tape.
+  an optional `param` naming a symbolic (out-of-unit) entry's callee
+  parameter, `map_written` (whether a `with map` was authored at all — an
+  omitted map is `false` with no `pairs`, and the linker's
+  `glyph-mismatch` guard stays live; a written EMPTY map, `with map { }`,
+  is `true` with no `pairs`, which silences that guard on purpose), and the
+  authored `src`/`dst` pairs, each `src` a caller-alphabet index and `dst`
+  a callee destination — a callee alphabet index for an in-unit callee, or
+  a glyph label when the callee is resolved only at link time, one-way
+  pairs flagged. No blank pin or closure is applied here — the composition
+  engine does that at link time. A call/bind that binds tapes into a
+  routine outside the compilation unit is the one producer of a
+  `param`-bearing entry and a label `dst` (`ir::resolve_binding`); every
+  in-unit entry still lowers to the positional, index-only shape. As of
+  version 5 no compiler pass produces `return_exit` or a nonempty
+  `call_then.exits` — both stay reserved shape, filled by lowering with
+  their empty value until a routine can declare `exits=`/`noreturn`.
 - `dispatch` is a codegen hint, `table` (the canonical form: a match table
   plus an indexed jump) or `branch` (the two-row form the optimizer's
   dispatch-selection pass picks). `tail_call`, `branch`, and the `debugger`

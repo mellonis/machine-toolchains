@@ -256,11 +256,12 @@ fn dis_refuses_a_foreign_architecture_object() {
 /// and runs to a stop. Passing `--nostdlib` removes the auto-link, so the
 /// same object fails to link with the symbol unresolved.
 ///
-/// The call is bindingless (transparent, same-shape tape): a cross-unit
-/// call that BOUND a tape into a stdlib routine would need the routine's
-/// signature at compile time and is rejected (`external-binding-unsupported`),
-/// so identity/same-alphabet transparent calls are the compiled stdlib's
-/// consumption path.
+/// The call is bindingless (transparent, same-shape tape) deliberately —
+/// this test is about auto-linking, not about the bound-call shape: a
+/// cross-unit call that bound a tape into a stdlib routine would compile to
+/// a symbolic binding record too (docs/formats.md (bound calls)), but
+/// identity/same-alphabet transparent calls stay the simplest way to
+/// consume the compiled stdlib and are what this fixture isolates.
 #[test]
 fn stdlib_auto_links_and_nostdlib_opts_out() {
     let dir = scratch("stdlib_autolink");
@@ -990,7 +991,7 @@ machine {
 // ── compile flags: --emit-ir, -S, -Werror, ir graph ─────────────────────────
 
 #[test]
-fn compile_emit_ir_writes_a_version_4_sidecar() {
+fn compile_emit_ir_writes_a_version_5_sidecar() {
     let dir = scratch("tmc_emit_ir");
     let obj = dir.join("a1.tmo");
     execute(&args(&[
@@ -1005,7 +1006,7 @@ fn compile_emit_ir_writes_a_version_4_sidecar() {
     assert!(ir_path.exists(), "the --emit-ir sidecar is written");
     let text = fs::read_to_string(&ir_path).unwrap();
     let program = IrProgram::from_json(&text).expect("the sidecar parses as IR JSON");
-    assert_eq!(program.version, 4, "IR version 4");
+    assert_eq!(program.version, 5, "IR version 5");
     assert!(program.worlds.iter().any(|w| w.name == "main"));
 }
 
@@ -1046,12 +1047,12 @@ machine {
 }
 
 #[test]
-fn compile_emit_ir_after_a_real_pass_writes_a_version_4_snapshot() {
+fn compile_emit_ir_after_a_real_pass_writes_a_version_5_snapshot() {
     let dir = scratch("tmc_emit_ir_after");
     // A forwarder program: `scan` hops to the empty forwarder `hop`, which
     // `jump-threading` retargets away at -O1 — so `after:jump-threading` names
     // a snapshot that is actually captured (the pass fires). The snapshot must
-    // parse back as version-4 IR JSON.
+    // parse back as version-5 IR JSON.
     let src = "\
 alphabet ab { '_', 'a' }
 machine {
@@ -1080,7 +1081,7 @@ machine {
     assert!(ir_path.exists(), "the after:<pass> IR sidecar is written");
     let text = fs::read_to_string(&ir_path).unwrap();
     let program = IrProgram::from_json(&text).expect("the after:<pass> sidecar parses as IR JSON");
-    assert_eq!(program.version, 4, "IR version 4");
+    assert_eq!(program.version, 5, "IR version 5");
     assert!(program.worlds.iter().any(|w| w.name == "main"));
 }
 

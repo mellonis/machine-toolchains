@@ -75,16 +75,21 @@ std::binaryNumbers::symbols        '_'=0  '^'=1  '$'=2  '0'=3  '1'=4
 std::binaryNumbersBare::symbols    '_'=0  '0'=1  '1'=2
 ```
 
-A call that *binds* a tape (`call std::…::plusOne(num = num)`) needs the
-callee's tape signature, which the compiler only has for a routine defined in
-the same compilation unit; binding into a library routine reports
-`external-binding-unsupported` — the compiler names this a limit it has not
-lifted yet, not a property of the language. A `graft` of one of the exported graphs is
-subject to the same rule for a different reason — a graft splices the graph's
-source, so it needs that source in the unit and reports `undefined-graph`
-otherwise. Both forms work when the library's source is compiled into the
-consumer's own unit; the transparent call is what works against the linked
-object.
+A call that *binds* a tape (`call std::…::plusOne(num = num)`) compiles to a
+SYMBOLIC binding record — the parameter's name in place of a list position,
+and a bound map's destination as a glyph in place of an index — because the
+callee's own tape order and index space belong to the LINKER to resolve, not
+the compiler (docs/formats.md (bound calls)). The standard library's
+declarations are always in scope by default (unless `--nostdlib`), so a
+binding call into it is checked at compile time in the callee's own tape
+order, exactly like a local signature's; a routine with no declarations
+available at all still compiles, in source order with every entry named, and
+the check happens at link time instead. A `graft` of one of the exported
+graphs is a different case — a graft splices the graph's source, so it needs
+that source in the unit and reports `undefined-graph` otherwise. Both a
+binding call and a graft work when the library's source is compiled into the
+consumer's own unit; the transparent call is the simplest way to consume the
+linked object, and a bound call now works against it too.
 
 ## Roster
 

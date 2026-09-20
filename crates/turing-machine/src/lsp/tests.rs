@@ -845,10 +845,11 @@ machine {
   tape ctl: bits;
   bind ";
     // Argless, like the transparent form `call` uses across a link
-    // boundary — a BOUND tape argument into an external routine is
-    // `external-binding-unsupported` at `tmt compile` (docs/tmt/stdlib.md
-    // (transparent call)), and the fixture should stay legal code, not
-    // merely something the LSP's staged analysis happens to tolerate.
+    // boundary — this fixture is testing completion behavior, not the
+    // bound-call shape, and a bound tape argument into an external routine
+    // now compiles to a symbolic binding record the linker resolves
+    // (docs/formats.md (bound calls)), so staying argless is a choice of
+    // scope here, not something the fixture needs to avoid.
     let bind_tail = "() as inc1;\n  entry state main { [*] -> call inc1() then main; }\n}\n";
     let bind_got = labels(&complete_typing(
         bind_head,

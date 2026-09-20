@@ -1262,11 +1262,13 @@ mod tests {
 /// call reachable from `main` to stay inside the comparable region.
 /// The strict twin of `crates/post-machine/src/lsp/overlay.rs`'s own
 /// `faithfulness` module, TM spellings throughout: every cross-object
-/// call here is ARGLESS (a bound tape argument into a routine outside
-/// this compilation unit is `external-binding-unsupported`, raised only
-/// during IR lowering — a stage `analyze_staged` never reaches — so a
-/// fixture with bound cross-object calls could look green on the overlay
-/// side while a real `tmt build` would reject it).
+/// call here is ARGLESS. A bound tape argument into a routine outside this
+/// compilation unit now compiles to a symbolic binding record the linker
+/// resolves (docs/formats.md (bound calls)) — a fact `ir::resolve_binding`
+/// establishes, in a stage `analyze_staged` never reaches — so this fixture
+/// stays argless deliberately: it is comparing the overlay's NAME
+/// resolution against the linker's, and a bound site's own arg-list and
+/// glyph checks are outside what either side of this comparison covers.
 #[cfg(test)]
 mod faithfulness {
     use std::fs;

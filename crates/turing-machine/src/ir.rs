@@ -33,10 +33,15 @@
 //!
 //! A cross-world `call` carries the declarative binding-call record
 //! ([`IrTransition::CallThen`]'s `binding`): the SAME per-callee-tape data the
-//! `.tma` binding-call operand carries (codegen renders it), with `caller_tape`
-//! the host physical tape index and each pair's `src`/`dst` the AUTHORED
-//! symbols resolved to caller/callee alphabet indices. No blank pin or closure
-//! is applied here — the composition engine does that at link.
+//! `.tma` binding-call operand carries (codegen renders it), with
+//! `caller_tape` the host physical tape index and each pair's `src` the
+//! AUTHORED symbol resolved to the caller's own alphabet index. An in-unit
+//! callee's `dst` resolves the same way, against the callee's alphabet; an
+//! out-of-unit callee's `dst` travels as the authored glyph's LABEL instead —
+//! its index space belongs to the linker, which resolves it against the
+//! callee's real interface at link time (docs/formats.md (bound calls)). No
+//! blank pin or closure is applied here — the composition engine does that
+//! at link.
 //!
 //! `compile()` wires the lowering + `validate_world` into the pipeline and
 //! codegen consumes the output; the JSON round-trip (`to_json`/`from_json`)
@@ -51,7 +56,9 @@ use mtc_core::diagnostics::{Diagnostic, Span};
 
 use crate::compiler::{CompileError, CompileErrorKind, Resolved, ResolvedWorld, WorldKind};
 use crate::declarations::Declarations;
-use crate::expand::{Cell, Expanded, ExpandedRule, ExpandedWorld, Transition2, WriteOut};
+use crate::expand::{
+    Cell, Expanded, ExpandedRule, ExpandedTape, ExpandedWorld, Transition2, WriteOut,
+};
 use crate::footprint::FootprintTable;
 use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, SymLit};
 
@@ -75,11 +82,24 @@ use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, S
 /// [`IrTransition::ReturnExit`] terminal, [`IrTransition::CallThen`]'s
 /// `exits` field, [`IrTapeBinding::param`] (a symbolic binding entry), and
 /// [`IrMapPair::dst`]'s widening from a bare index to [`IrMapDst`] (a
-/// glyph-labelled pair against an out-of-unit callee). No pass produces the
-/// new variant or a `Label` dst yet — lowering fills every new field with its
-/// empty value, so a plain `-O0` document's only visible change is `glyphs`
-/// and the version digit.
-pub const TM_IR_VERSION: u32 = 4;
+/// glyph-labelled pair against an out-of-unit callee). A call/bind into a
+/// routine outside this compilation unit is the first (and, at this
+/// version, the only) producer of a `param`-bearing entry and a `Label`
+/// dst (`ir::resolve_binding`); every in-unit entry still lowers to the
+/// positional, index-only shape, so a plain `-O0` document with no
+/// cross-unit bound call has no visible change but `glyphs` and the
+/// version digit.
+///
+/// Version 5 adds [`IrTapeBinding::map_written`] — the wire's own
+/// `TapeBinding.map_written` distinction (`docs/formats.md` (bound calls)),
+/// carried by neither v4 field: an OMITTED map (`pairs` empty,
+/// `map_written` false) is index identity and leaves the linker's
+/// `glyph-mismatch` guard live; a WRITTEN empty map (`with map { }`,
+/// `pairs` empty, `map_written` true) silences it on purpose. Applies to
+/// both a positional (in-unit) and a symbolic (out-of-unit) entry alike —
+/// the distinction predates `param` and was simply never expressible
+/// before this version.
+pub const TM_IR_VERSION: u32 = 5;
 
 /// A whole compiled module: its emitted worlds plus the index (into `worlds`)
 /// of the `machine` block — the program entry — or `None` for a library.
@@ -346,19 +366,35 @@ pub enum IrThen {
 
 /// One virtual-tape binding at a call site — the SAME shape as the `.tma`
 /// binding-call operand: which host physical tape feeds this callee tape, and
-/// the authored symbol map between their alphabets (resolved to indices).
+/// the authored symbol map between their alphabets. An in-unit callee's
+/// entry is POSITIONAL (`param: None`, its position in the vector IS the
+/// callee's tape index) and every pair's `dst` resolves to a concrete
+/// callee-alphabet index; an out-of-unit callee's entry is NAMED (`param:
+/// Some`, the callee's parameter name) and every pair's `dst` travels as a
+/// glyph LABEL, because the callee's own tape order and index space belong
+/// to the LINKER to resolve, not this unit (docs/formats.md (bound calls)).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrTapeBinding {
-    /// Host physical tape index (< 16).
+    /// Host physical tape index (< 16) — always numeric: it names the
+    /// CALLER's own band, which this unit declares either way.
     pub caller_tape: u32,
     /// `(src, dst, one_way)` per authored pair, in source order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pairs: Vec<IrMapPair>,
-    /// A symbolic binding entry's name — a named binding arg that resolves to
-    /// something other than a caller tape. `None` for every entry lowering
-    /// emits today.
+    /// The callee's parameter NAME, for a symbolic (out-of-unit) entry;
+    /// `None` for a positional (in-unit) one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub param: Option<String>,
+    /// Whether a `with map` was authored at all — the wire's own
+    /// distinction between an OMITTED map (`pairs` empty, this `false`:
+    /// index identity, the linker's `glyph-mismatch` guard stays live) and
+    /// a WRITTEN empty map (`with map { }`; `pairs` empty, this `true`:
+    /// "bind by index, deliberately," which silences that guard on
+    /// purpose). A map that carries pairs is written by definition, so
+    /// this is only load-bearing when `pairs` is empty
+    /// (docs/formats.md (bound calls)).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub map_written: bool,
 }
 
 /// One `src -> dst` (or `src => dst`, `one_way`) symbol-map pair: `src` a
@@ -565,7 +601,10 @@ fn escape(s: &str) -> String {
 /// tape falls back to (see [`IrTape::writes`]) — the same declarations a
 /// compile's own `check_contracts` believes, so an uncontracted call into
 /// the standard library is credited its declared effective set rather than
-/// the whole alphabet.
+/// the whole alphabet. It is also what a cross-unit `call`/`bind` site's own
+/// binding resolution consults (`resolve_binding`): a callee whose
+/// declarations are here gets its tape order and parameter names checked at
+/// compile time, exactly as a local signature's are.
 pub(crate) fn lower(
     expanded: &Expanded,
     resolved: &Resolved,
@@ -595,6 +634,7 @@ pub(crate) fn lower(
             rw,
             expanded,
             resolved,
+            externals,
             &footprint,
             &mut warnings,
         )?);
@@ -618,6 +658,7 @@ fn lower_world(
     rw: Option<&ResolvedWorld>,
     expanded: &Expanded,
     resolved: &Resolved,
+    externals: &Declarations,
     footprint: &FootprintTable,
     warnings: &mut Vec<Diagnostic>,
 ) -> Result<IrWorld, CompileError> {
@@ -643,7 +684,14 @@ fn lower_world(
     for (i, s) in ew.states.iter().enumerate() {
         let mut rules = Vec::with_capacity(s.rules.len());
         for r in &s.rules {
-            rules.push(lower_rule(r, ew, &name_to_id, expanded, resolved)?);
+            rules.push(lower_rule(
+                r,
+                ew,
+                &name_to_id,
+                expanded,
+                resolved,
+                externals,
+            )?);
         }
         states.push(IrState {
             id: i as u32,
@@ -728,6 +776,7 @@ fn lower_rule(
     name_to_id: &HashMap<&str, u32>,
     expanded: &Expanded,
     resolved: &Resolved,
+    externals: &Declarations,
 ) -> Result<IrRule, CompileError> {
     let pattern: Vec<IrCell> = r
         .pattern
@@ -814,7 +863,8 @@ fn lower_rule(
             args,
             then,
         } => {
-            let binding = resolve_binding(ew, target, args, *external, expanded, r.span)?;
+            let binding =
+                resolve_binding(ew, target, args, *external, expanded, externals, r.span)?;
             (
                 IrTransition::CallThen {
                     target: target.clone(),
@@ -847,6 +897,7 @@ fn lower_rule(
                 &bind.args,
                 bind.external,
                 expanded,
+                externals,
                 r.span,
             )?;
             (
@@ -875,17 +926,75 @@ fn lower_rule(
     })
 }
 
+/// The host physical tape a binding arg's target names — the CALLER-side
+/// lookup shared by the in-unit and out-of-unit paths below, since the
+/// caller's own tapes are this unit's to know either way.
+fn host_tape_of<'a>(
+    host: &'a ExpandedWorld,
+    host_name: &str,
+    name_span: Span,
+) -> Result<(usize, &'a ExpandedTape), CompileError> {
+    host.tapes
+        .iter()
+        .enumerate()
+        .find(|(_, t)| t.name == host_name)
+        .ok_or(CompileError {
+            span: name_span,
+            kind: CompileErrorKind::UnresolvedTapeTarget(host_name.to_string()),
+        })
+}
+
+/// Order a binding call's named args by the callee's own tape-parameter
+/// order — `callee_tape_names` in signature order — erroring on any
+/// parameter left unbound. The in-unit loop's own walk, generalized so an
+/// out-of-unit callee's DECLARED order (when its declarations are known)
+/// drives the identical check (docs/formats.md (bound calls)).
+fn order_by_callee_tapes<'a>(
+    callee_tape_names: impl Iterator<Item = &'a str>,
+    named_args: &[&'a BindingArg],
+    site: Span,
+) -> Result<Vec<&'a BindingArg>, CompileError> {
+    let mut order = Vec::new();
+    for name in callee_tape_names {
+        let Some(arg) = named_args.iter().find(|a| a.name == name) else {
+            // Every callee tape must be bound (T4's arity check locally;
+            // the declared signature's own arity for a known external one).
+            return Err(CompileError {
+                span: site,
+                kind: CompileErrorKind::MissingArg(name.to_string()),
+            });
+        };
+        order.push(*arg);
+    }
+    Ok(order)
+}
+
 /// Resolve a call/bind site's source-form binding args to the per-callee-tape
-/// binding-call record. `binding[k]` binds the callee's tape `k`, so the
-/// records are emitted in the callee's signature tape order; `src` glyphs
-/// resolve against the host (caller) tape alphabet, `dst` glyphs against the
+/// binding-call record.
+///
+/// An IN-UNIT callee's record is POSITIONAL: `binding[k]` binds the callee's
+/// tape `k` (`expanded.worlds` carries its signature), `src` resolves
+/// against the host (caller) tape alphabet, and `dst` resolves against the
 /// callee tape alphabet — the same direction the graft splice uses.
+///
+/// An OUT-OF-UNIT callee's tape order, parameter names and glyph indices are
+/// the LINKER's to resolve, not this unit's — so its record is SYMBOLIC:
+/// each entry carries the callee's parameter NAME (`param`) in place of a
+/// position, and each pair's `dst` carries the authored glyph's LABEL in
+/// place of an index. `caller_tape` and `src` stay numeric in both forms:
+/// both name THIS unit's own bands and alphabet. When the callee's
+/// declarations are known (`externals`), its tape order and parameter names
+/// are checked here, exactly as a local signature's are; when they are not,
+/// the site keeps its source order and every entry is named, which is
+/// exactly what the linker's own `reorder_named` exists to fix up once the
+/// callee's real signature is known.
 fn resolve_binding(
     host: &ExpandedWorld,
     target: &str,
     args: &[BindingArg],
     external: bool,
     expanded: &Expanded,
+    externals: &Declarations,
     site: Span,
 ) -> Result<Vec<IrTapeBinding>, CompileError> {
     // A named binding arg (`name = target`) is a tape-target binding OR a
@@ -902,19 +1011,106 @@ fn resolve_binding(
         return Ok(Vec::new());
     }
 
-    // Binding args need the callee's tape signature to rewrite its rows. That
-    // signature is unknown for a routine defined outside this compilation unit
-    // (imported-to-external / `::`-absolute) — a cross-object concern for the
-    // composition engine, not this lowering. Refuse with a clear error rather
-    // than the earlier panic on the missing world.
     if external {
-        return Err(CompileError {
-            span: site,
-            kind: CompileErrorKind::ExternalBindingUnsupported(target.to_string()),
-        });
+        let callee_decl = externals.routine(target);
+        let order: Vec<&BindingArg> = match callee_decl {
+            Some(sig) => {
+                // Every named arg must name a real declared parameter of
+                // the callee — tape or state — and no name may repeat,
+                // checked here because `order_by_callee_tapes` below only
+                // walks the FORWARD direction (a tape param with no
+                // matching arg): an arg naming nothing the callee declares,
+                // or naming the same parameter twice, would otherwise be
+                // silently dropped or silently overwritten rather than
+                // reported — the silent-failure shape this arc exists to
+                // raise. A legitimate state-param arg is excluded from the
+                // unknown-name check (it never matches a tape name and is
+                // not this branch's to bind), not flagged.
+                let mut seen: HashSet<&str> = HashSet::new();
+                for a in &named_args {
+                    if !seen.insert(a.name.as_str()) {
+                        return Err(CompileError {
+                            span: a.name_span,
+                            kind: CompileErrorKind::DuplicateArg(a.name.clone()),
+                        });
+                    }
+                    if !sig.tapes.iter().any(|t| t.name == a.name)
+                        && !sig.state_params.iter().any(|p| p == &a.name)
+                    {
+                        return Err(CompileError {
+                            span: a.name_span,
+                            kind: CompileErrorKind::UnknownArg(a.name.clone()),
+                        });
+                    }
+                }
+                order_by_callee_tapes(sig.tapes.iter().map(|t| t.name.as_str()), &named_args, site)?
+            }
+            // No declarations for this callee: keep the site's own source
+            // order and name every entry — the linker's `reorder_named`
+            // fixes the order up once it has the callee's real signature.
+            None => named_args.clone(),
+        };
+
+        let mut binding = Vec::with_capacity(order.len());
+        for arg in order {
+            let BindingValue::Named {
+                target: host_name,
+                map,
+                ..
+            } = &arg.value
+            else {
+                unreachable!("named_args are Named by construction");
+            };
+            let (phys, host_tape) = host_tape_of(host, host_name, arg.name_span)?;
+            let host_glyphs = &expanded.alphabets[&host_tape.alphabet].glyphs;
+
+            // An OMITTED map (`map: None`) emits NO pairs and clears
+            // `map_written` — index identity, and the linker's
+            // glyph-mismatch warning stands guard. Expanding it into
+            // identity pairs here would silence that warning, which is
+            // exactly the silent-failure shape the arc exists to raise. A
+            // WRITTEN empty map (`with map { }`, `map: Some(SymMap{pairs:
+            // vec![], ..})`) sets `map_written` even though `pairs` stays
+            // empty — the wire's own distinction (`IrTapeBinding::
+            // map_written`), which is what silences the warning on
+            // purpose: an omitted and a written-empty map would otherwise
+            // be bit-for-bit identical here.
+            let mut pairs = Vec::new();
+            if let Some(m) = map {
+                for p in &m.pairs {
+                    // `src` resolves against the CALLER's alphabet, which is
+                    // this unit's; `dst` travels as a label — the callee's
+                    // own index space is the linker's to resolve.
+                    let src = glyph_index(host_glyphs, &p.src).ok_or(CompileError {
+                        span: p.src.span(),
+                        kind: CompileErrorKind::MapSymbolNotInAlphabet(glyph_label(&p.src)),
+                    })?;
+                    pairs.push(IrMapPair {
+                        src: src as u32,
+                        dst: IrMapDst::Label(glyph_label(&p.dst)),
+                        one_way: p.arrow == MapArrow::ReadOnly,
+                    });
+                }
+            }
+            binding.push(IrTapeBinding {
+                param: Some(arg.name.clone()),
+                caller_tape: phys as u32,
+                pairs,
+                map_written: map.is_some(),
+            });
+        }
+        // Entries are named or positional, never mixed in one list (a
+        // partially-resolved callee is exactly the bug shape) — every entry
+        // this branch builds carries `param`, by construction of the loop
+        // above; assert it rather than trust the construction silently.
+        debug_assert!(
+            binding.iter().all(|b| b.param.is_some()),
+            "an out-of-unit binding entry is always named"
+        );
+        return Ok(binding);
     }
 
-    // Non-external ⇒ the callee is one of the module's emitted worlds (`expand`
+    // In-unit ⇒ the callee is one of the module's emitted worlds (`expand`
     // emits the machine and every routine, reachable or not).
     let callee = expanded
         .worlds
@@ -922,15 +1118,14 @@ fn resolve_binding(
         .find(|w| w.name == target)
         .expect("a non-external callee is one of the module's emitted worlds");
 
-    let mut binding = Vec::with_capacity(callee.tapes.len());
-    for ct in &callee.tapes {
-        let Some(arg) = named_args.iter().find(|a| a.name == ct.name) else {
-            // Every callee tape is bound (T4's arity check); defensive.
-            return Err(CompileError {
-                span: site,
-                kind: CompileErrorKind::MissingArg(ct.name.clone()),
-            });
-        };
+    let order = order_by_callee_tapes(
+        callee.tapes.iter().map(|t| t.name.as_str()),
+        &named_args,
+        site,
+    )?;
+
+    let mut binding = Vec::with_capacity(order.len());
+    for arg in order {
         let BindingValue::Named {
             target: host_name,
             map,
@@ -939,17 +1134,14 @@ fn resolve_binding(
         else {
             unreachable!("named_args are Named by construction");
         };
-
-        // The host physical tape this callee tape draws from.
-        let (phys, host_tape) = host
+        let ct = callee
             .tapes
             .iter()
-            .enumerate()
-            .find(|(_, t)| t.name == *host_name)
-            .ok_or(CompileError {
-                span: arg.name_span,
-                kind: CompileErrorKind::UnresolvedTapeTarget(host_name.clone()),
-            })?;
+            .find(|t| t.name == arg.name)
+            .expect("order_by_callee_tapes only returns args matching a callee tape name");
+
+        // The host physical tape this callee tape draws from.
+        let (phys, host_tape) = host_tape_of(host, host_name, arg.name_span)?;
         let host_glyphs = &expanded.alphabets[&host_tape.alphabet].glyphs;
         let callee_glyphs = &expanded.alphabets[&ct.alphabet].glyphs;
 
@@ -967,7 +1159,7 @@ fn resolve_binding(
                 pairs.push(IrMapPair {
                     src: src as u32,
                     // The callee is always in this compilation unit here
-                    // (the `external` case refused above), so `dst` always
+                    // (the `external` case returns above), so `dst` always
                     // resolves to a concrete index — never a label.
                     dst: IrMapDst::Index(dst as u32),
                     one_way: p.arrow == MapArrow::ReadOnly,
@@ -977,9 +1169,13 @@ fn resolve_binding(
         binding.push(IrTapeBinding {
             caller_tape: phys as u32,
             pairs,
-            // No named binding arg resolves to anything but a caller tape
-            // yet.
+            // A positional (in-unit) entry never carries a parameter name.
             param: None,
+            // A WRITTEN empty map (`with map { }`) silences the linker's
+            // glyph-mismatch guard on purpose, exactly as it does for an
+            // out-of-unit entry — the wire's `map_written` distinction is
+            // not symbolic-only (docs/formats.md (bound calls)).
+            map_written: map.is_some(),
         });
     }
     Ok(binding)
@@ -1330,25 +1526,25 @@ machine {
         let (ir, _) = lower_of(A1);
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
-        assert!(json.contains("\"version\": 4"), "{json}");
+        assert!(json.contains("\"version\": 5"), "{json}");
     }
 
     /// The bare version literal names the acceptance contract, not a hint —
     /// bumping it is what marks the vocabulary grown in this round as part of
-    /// v4. Mutation: leaving `TM_IR_VERSION` at 3.
+    /// v5. Mutation: leaving `TM_IR_VERSION` at 4.
     #[test]
-    fn the_version_literal_is_four() {
-        assert_eq!(TM_IR_VERSION, 4);
+    fn the_version_literal_is_five() {
+        assert_eq!(TM_IR_VERSION, 5);
     }
 
-    /// A document exercising every v4 field — glyphs and an effective write
-    /// set, a two-exit `CallThen` alongside a `ReturnExit`, a `noreturn`
-    /// world, a named binding-call param, and a glyph-labelled map pair —
-    /// round-trips unchanged. Mutation: `#[serde(skip_serializing)]` on
-    /// `IrTapeBinding.param` drops it from the wire form, so the compare
-    /// goes red.
+    /// A document exercising every v4/v5 field — glyphs and an effective
+    /// write set, a two-exit `CallThen` alongside a `ReturnExit`, a
+    /// `noreturn` world, a named (WRITTEN) binding-call param, and a
+    /// glyph-labelled map pair — round-trips unchanged. Mutation:
+    /// `#[serde(skip_serializing)]` on `IrTapeBinding.param` (or on
+    /// `map_written`) drops it from the wire form, so the compare goes red.
     #[test]
-    fn v4_documents_round_trip() {
+    fn v5_documents_round_trip() {
         let ir = IrProgram {
             version: TM_IR_VERSION,
             worlds: vec![
@@ -1392,6 +1588,7 @@ machine {
                                             },
                                         ],
                                         param: Some("k".into()),
+                                        map_written: true,
                                     }],
                                     // A two-exit call: the exits= operand
                                     // names the resume states.
@@ -1585,6 +1782,7 @@ machine {
                                             one_way: true,
                                         }],
                                         param: None,
+                                        map_written: true,
                                     }],
                                     exits: Vec::new(),
                                     then: IrThen::Goto { state: 0 },
@@ -1923,13 +2121,15 @@ machine {
     }
 
     /// A call that binds tapes into an EXTERNAL routine (imported, no local
-    /// definition) cannot be lowered — the binding rewrite needs the callee's
-    /// tape signature, which lives in another compilation unit. The reviewer's
-    /// exact repro; the compiler reports a clear error, never panicking. Both
-    /// the with-map and the bindless (`num = t`) forms of the tape binding
-    /// trigger it — the binding operand needs the signature either way.
+    /// definition, and no declarations given for `mylib` — `lower_of` reads
+    /// with `Declarations::stdlib()` only) lowers to a SYMBOLIC binding
+    /// entry: the parameter's authored name (source order, since nothing
+    /// declares `mylib`'s real tape order) and, for the with-map form, a
+    /// glyph-LABELLED pair rather than an index. Both the with-map and the
+    /// bindless (`num = t`) forms of the tape binding lower cleanly — the
+    /// binding operand no longer needs the callee's signature to exist.
     #[test]
-    fn external_call_binding_tapes_is_a_clear_error_not_a_panic() {
+    fn external_call_binding_tapes_lowers_to_a_symbolic_entry() {
         // With a `with map { … }`.
         let with_map = "\
 alphabet ab { '_', 'a', 'b' }
@@ -1942,15 +2142,31 @@ machine {
   }
   state done { [*] -> stop; }
 }";
-        let e = lower_err_of(with_map);
-        assert_eq!(e.kind.code(), "external-binding-unsupported");
-        assert!(
-            matches!(&e.kind, CompileErrorKind::ExternalBindingUnsupported(n) if n == "mylib::plusOne"),
-            "{:?}",
-            e.kind
+        let (ir, _) = lower_of(with_map);
+        let m = world(&ir, "main");
+        let main = state(m, "main");
+        let binding = main
+            .rules
+            .iter()
+            .find_map(|r| match &r.transition {
+                IrTransition::CallThen { binding, .. } => Some(binding.clone()),
+                _ => None,
+            })
+            .expect("a call row");
+        assert_eq!(binding.len(), 1);
+        assert_eq!(binding[0].param, Some("num".to_string()));
+        assert_eq!(binding[0].caller_tape, 0);
+        assert_eq!(
+            binding[0].pairs,
+            vec![IrMapPair {
+                src: 1, // 'a' at index 1 of ab { '_', 'a', 'b' }
+                dst: IrMapDst::Label("b".to_string()),
+                one_way: false,
+            }]
         );
 
-        // Bindless (`num = t`, no map) triggers it too — still a tape binding.
+        // Bindless (`num = t`, no map) lowers too — still a tape binding,
+        // this time with NO pairs at all (an omitted map, not an empty one).
         let bindless = "\
 alphabet ab { '_', 'a', 'b' }
 use mylib::plusOne;
@@ -1962,17 +2178,30 @@ machine {
   }
   state done { [*] -> stop; }
 }";
-        assert_eq!(
-            lower_err_of(bindless).kind.code(),
-            "external-binding-unsupported"
+        let (ir2, _) = lower_of(bindless);
+        let m2 = world(&ir2, "main");
+        let main2 = state(m2, "main");
+        let binding2 = main2
+            .rules
+            .iter()
+            .find_map(|r| match &r.transition {
+                IrTransition::CallThen { binding, .. } => Some(binding.clone()),
+                _ => None,
+            })
+            .expect("a call row");
+        assert_eq!(binding2.len(), 1);
+        assert_eq!(binding2[0].param, Some("num".to_string()));
+        assert!(
+            binding2[0].pairs.is_empty(),
+            "an omitted map emits no pairs"
         );
     }
 
     /// The bind-sugar path reaches the same lowering as a direct call, so an
-    /// external bind that binds tapes is the same clear error — with-map and
-    /// bindless alike.
+    /// external bind that binds tapes lowers to the same symbolic shape —
+    /// with-map and bindless alike.
     #[test]
-    fn external_bind_sugar_binding_tapes_is_a_clear_error() {
+    fn external_bind_sugar_binding_tapes_lowers_to_a_symbolic_entry() {
         let with_map = "\
 alphabet ab { '_', 'a', 'b' }
 use mylib::plusOne;
@@ -1982,12 +2211,26 @@ machine {
   entry state main { [*] -> call h() then done; }
   state done { [*] -> stop; }
 }";
-        let e = lower_err_of(with_map);
-        assert_eq!(e.kind.code(), "external-binding-unsupported");
-        assert!(
-            matches!(&e.kind, CompileErrorKind::ExternalBindingUnsupported(n) if n == "mylib::plusOne"),
-            "{:?}",
-            e.kind
+        let (ir, _) = lower_of(with_map);
+        let m = world(&ir, "main");
+        let main = state(m, "main");
+        let binding = main
+            .rules
+            .iter()
+            .find_map(|r| match &r.transition {
+                IrTransition::CallThen { binding, .. } => Some(binding.clone()),
+                _ => None,
+            })
+            .expect("a call row");
+        assert_eq!(binding.len(), 1);
+        assert_eq!(binding[0].param, Some("num".to_string()));
+        assert_eq!(
+            binding[0].pairs,
+            vec![IrMapPair {
+                src: 1,
+                dst: IrMapDst::Label("b".to_string()),
+                one_way: false,
+            }]
         );
 
         let bindless = "\
@@ -1999,9 +2242,22 @@ machine {
   entry state main { [*] -> call h() then done; }
   state done { [*] -> stop; }
 }";
-        assert_eq!(
-            lower_err_of(bindless).kind.code(),
-            "external-binding-unsupported"
+        let (ir2, _) = lower_of(bindless);
+        let m2 = world(&ir2, "main");
+        let main2 = state(m2, "main");
+        let binding2 = main2
+            .rules
+            .iter()
+            .find_map(|r| match &r.transition {
+                IrTransition::CallThen { binding, .. } => Some(binding.clone()),
+                _ => None,
+            })
+            .expect("a call row");
+        assert_eq!(binding2.len(), 1);
+        assert_eq!(binding2[0].param, Some("num".to_string()));
+        assert!(
+            binding2[0].pairs.is_empty(),
+            "an omitted map emits no pairs"
         );
     }
 

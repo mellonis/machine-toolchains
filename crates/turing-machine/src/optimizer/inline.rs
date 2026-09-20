@@ -369,6 +369,38 @@ machine {
         validate_world(main).unwrap();
     }
 
+    /// A call into an out-of-unit routine can never be a splice candidate —
+    /// it has no body in this unit to splice. Structural, not a special
+    /// case: `candidates` is built from `ir.worlds` (this unit's own emitted
+    /// worlds only), and an external target never names one of them, so
+    /// `find_site` never even reaches `is_full_passthrough` for it. Pins
+    /// that with a symbolic (named, bindless) entry — the shape a bound
+    /// call into a routine with no declarations lowers to — which would
+    /// otherwise look tantalizingly close to the bindless-identity case
+    /// `a_bindless_call_is_inlined` splices. Mutation: keying `candidates`
+    /// on `resolved.worlds` (which, unlike `ir.worlds`, could in principle
+    /// grow an external entry) instead of `ir.worlds`; this test would then
+    /// need the splice to fail for a DIFFERENT reason, not fail to find one.
+    #[test]
+    fn an_external_callee_is_never_a_splice_candidate() {
+        let mut ir = ir_of(
+            "alphabet ab { '_', 'a' }
+use mylib::helper;
+machine {
+  tape t: ab;
+  entry state m { [*] -> call mylib::helper(t = t) then done; }
+  state done     { [*] -> stop; }
+}",
+        );
+        assert_eq!(run(&mut ir, &OptOptions::default()), 0, "nothing to inline");
+        let main = world(&ir, "main");
+        assert!(
+            any_callthen(main),
+            "the call into the external routine is untouched"
+        );
+        validate_world(main).unwrap();
+    }
+
     #[test]
     fn a_widened_arity_call_pads_the_unbound_tape() {
         // A 2-tape machine calls a 1-tape helper binding its tape `x` (tape 0).

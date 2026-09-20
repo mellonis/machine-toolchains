@@ -664,33 +664,55 @@ fn state_label(w: &IrWorld, id: u32) -> String {
 }
 
 /// Render the binding-call operand's bracket interior (docs/formats.md
-/// (bound calls)): one entry per callee virtual tape, `<physIdx>` with an
-/// optional `{ <pair>, … }` symbol map (`->` two-way, `=>` one-way). Every
-/// pair the record carries is rendered, in order.
+/// (bound calls)): one entry per callee virtual tape, `<physIdx>` (or,
+/// symbolically, `<param>: <physIdx>`) with an optional `{ <pair>, … }`
+/// symbol map (`->` two-way, `=>` one-way). Every pair the record carries
+/// is rendered, in order. `map_written` decides whether an EMPTY pair list
+/// still prints `{}`: an omitted map (`pairs` empty, `map_written` false)
+/// prints no braces at all — index identity, and the linker's
+/// `glyph-mismatch` guard stays live; a WRITTEN empty map (`with map { }`)
+/// prints `{}` — "bind by index, deliberately," which silences that guard.
 fn render_binding(binding: &[IrTapeBinding]) -> String {
     let entries: Vec<String> = binding
         .iter()
         .map(|b| {
+            // A symbolic entry (an out-of-unit callee) names the callee's
+            // parameter — the linker resolves it to the callee's own tape
+            // position only once it has the callee's real signature
+            // (docs/formats.md (bound calls)). A positional (in-unit) entry
+            // prints just the physical tape index, as it always has.
+            let prefix = match &b.param {
+                Some(name) => format!("{}: {}", name, b.caller_tape),
+                None => b.caller_tape.to_string(),
+            };
             if b.pairs.is_empty() {
-                b.caller_tape.to_string()
+                if b.map_written {
+                    format!("{prefix}{{}}")
+                } else {
+                    prefix
+                }
             } else {
                 let pairs: Vec<String> = b
                     .pairs
                     .iter()
                     .map(|p| {
                         let arrow = if p.one_way { "=>" } else { "->" };
-                        // `Index` renders exactly as the bare `u32` used to —
-                        // the only shape any pass produces today. `Label`
-                        // (a glyph-labelled pair against an out-of-unit
-                        // callee) is reserved shape; nothing emits it yet.
+                        // `Index` renders exactly as the bare `u32` an
+                        // in-unit callee resolves to. `Label` (a
+                        // glyph-labelled pair against an out-of-unit
+                        // callee, whose own index space is the linker's to
+                        // resolve) renders as a glyph literal — the same
+                        // canonical spelling a `.param` line's glyph list
+                        // uses, so the two surfaces never disagree on how a
+                        // glyph is quoted.
                         let dst = match &p.dst {
                             IrMapDst::Index(n) => n.to_string(),
-                            IrMapDst::Label(s) => s.clone(),
+                            IrMapDst::Label(s) => render_glyph_element(s),
                         };
                         format!("{}{}{}", p.src, arrow, dst)
                     })
                     .collect();
-                format!("{}{{{}}}", b.caller_tape, pairs.join(", "))
+                format!("{}{{{}}}", prefix, pairs.join(", "))
             }
         })
         .collect();

@@ -338,14 +338,20 @@ machine {
 }
 
 /// A named map into an EXTERNAL callee (a routine reached only through a
-/// header, never defined in this unit) is refused the same way the
-/// inline form already is: a tape-binding argument into an external
-/// callee is unsupported regardless of whether its map is named or
-/// inline (`ir::resolve_binding`), and `compiler::expand_named_maps_in_args`
-/// returns early for an external target — so neither site check even
-/// runs before that more fundamental refusal.
+/// header, never defined in this unit) expands to its pairs exactly like
+/// the inline form does, and the site emits the SAME symbolic operand a
+/// hand-written inline map would — a name is a spelling, not a semantics,
+/// at an external site too (`compiler::expand_named_maps_in_args` now reads
+/// the callee's tape signature from the declarations table for an external
+/// target, in place of the local `callee_tapes` snapshot, so the pairs are
+/// filled in before `ir::resolve_binding` ever sees the site). Mutation:
+/// reverting to the early `if external { return Ok(()); }` this test used
+/// to exercise the ABSENCE of — the named map's pairs would come back
+/// empty, and the assembly would read `[num: 0]` (an omitted map, wrongly
+/// silencing the linker's glyph-mismatch guard) instead of the two labelled
+/// pairs asserted below.
 #[test]
-fn a_named_map_into_an_external_callee_is_refused() {
+fn a_named_map_into_an_external_callee_expands_to_its_pairs() {
     let dir = scratch("named_maps_external_callee");
     const EXTERNAL_LIB_TMC: &str = "\
 namespace mylib {
@@ -378,9 +384,18 @@ machine {
         "-o",
         out_path.to_str().unwrap(),
     ]);
-    let err =
-        execute(&argv).expect_err("a tape-binding argument into an external callee is unsupported");
-    assert!(err.contains("external-binding-unsupported"), "{err}");
+    let out = execute(&argv).unwrap_or_else(|e| panic!("named map into an external callee: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    // `bits = { '_', '0', '1' }`: '0' is index 1, '1' is index 2 — both on
+    // `data`'s own alphabet, which is the SAME `bits` by import. The pairs
+    // print in the map's declared order, labelled (not indexed): the
+    // callee's own index space belongs to the linker, not this unit.
+    let dis = run_dis(&out_path).stdout;
+    assert!(
+        dis.contains("call    mylib::plusOne [num: 0{1->'0',2->'1'}]"),
+        "{dis}"
+    );
 }
 
 /// A map declaration's SOURCE and TARGET may themselves be qualified
@@ -427,6 +442,13 @@ fn run_interface(path: &Path) -> CliOutput {
     let out = execute(&args(&["interface", path.to_str().unwrap()]))
         .unwrap_or_else(|e| panic!("interface {}: {e}", path.display()));
     assert_eq!(out.code, 0, "interface {}: {}", path.display(), out.stderr);
+    out
+}
+
+fn run_dis(path: &Path) -> CliOutput {
+    let out = execute(&args(&["dis", path.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("dis {}: {e}", path.display()));
+    assert_eq!(out.code, 0, "dis {}: {}", path.display(), out.stderr);
     out
 }
 

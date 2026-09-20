@@ -306,21 +306,12 @@ pub enum CompileErrorKind {
     /// tape count (a signed-function width mismatch). `expected` is the arity.
     RowWidth { expected: usize, got: usize },
 
-    // -- IR-lowering scope limits (composition engine not yet online) -------
-    /// A `call`/`bind` binds tapes into a routine that is not defined in this
-    /// compilation unit (an imported-to-external or `::`-absolute target). A
-    /// tape-binding operand rewrites the callee's rows through the binding
-    /// map, which needs the callee's tape signature — unknown for an external
-    /// routine until the composition engine crosses object boundaries.
-    /// `name` is the external target. A PLAIN external call (no tape binding)
-    /// stays legal — the linker resolves it. The `graft-call-unsupported`
-    /// analog for cross-object calls.
-    ExternalBindingUnsupported(String),
+    // -- IR-lowering scope limits -------------------------------------------
     /// A routine body's `goto` (or continuation) targets one of the routine's
     /// own `state` parameters. Threading a state parameter to its call-site
-    /// continuation is the composition engine's work; a routine that hands
-    /// control to a `state` param cannot yet be lowered on its own. `name` is
-    /// the state parameter.
+    /// continuation is not lowered yet — a routine that hands control to a
+    /// `state` param cannot be compiled on its own. `name` is the state
+    /// parameter.
     StateParamContinuationUnsupported(String),
 
     // -- codegen / assemble orchestration ----------------------------------
@@ -456,7 +447,6 @@ impl CompileErrorKind {
         CompileErrorKind::FoldOverflow => "fold-overflow",
         CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
         CompileErrorKind::RowWidth { .. } => "row-width",
-        CompileErrorKind::ExternalBindingUnsupported(_) => "external-binding-unsupported",
         CompileErrorKind::StateParamContinuationUnsupported(_) => "state-param-continuation-unsupported",
         CompileErrorKind::Internal(_) => "internal-error",
     }
@@ -830,12 +820,6 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "a rule vector has {got} elements but the world has {expected} tapes"
-                )
-            }
-            CompileErrorKind::ExternalBindingUnsupported(name) => {
-                write!(
-                    f,
-                    "this call binds tapes into `{name}`, which needs `{name}`'s tape signature — unknown for a routine defined outside this compilation unit; compile `{name}` in the same unit (a plain call with no tape binding is fine — the linker resolves it)"
                 )
             }
             CompileErrorKind::StateParamContinuationUnsupported(name) => {
@@ -1368,12 +1352,18 @@ fn resolve_map_ref(
 /// the map's declared SOURCE, the callee parameter's alphabet its declared
 /// TARGET), and its `pairs` filled in from the declaration's own — after
 /// which it reads exactly like the inline `with map { … }` form to every
-/// consumer downstream (footprint inference, the lint layer, IR lowering).
-/// `callee_name` not found in `callee_tapes` (an external callee, or a
-/// bind-call carrying no args of its own) is silently skipped: an external
-/// callee's binding args are refused elsewhere
-/// (`CompileErrorKind::ExternalBindingUnsupported`, `ir::resolve_binding`)
-/// regardless of whether the map they carry is named or inline.
+/// consumer downstream (footprint inference, the lint layer, IR lowering,
+/// and codegen — a named map at an EXTERNAL site is emitted exactly like an
+/// inline one, as a glyph-labelled pair list, docs/formats.md (bound
+/// calls)). The callee's own tape signature — read locally from
+/// `callee_tapes` for an in-unit target, or from `externals` for an
+/// out-of-unit one when its declarations are known — decides site check 2;
+/// when neither has it (a local target with no args of its own, or an
+/// out-of-unit target with no declarations given), that check is silently
+/// skipped and the pairs still expand — the compiler cannot rule the
+/// mismatch out, but it must not leave the map unexpanded either, or an
+/// omitted-map's "no pairs" meaning would wrongly swallow a WRITTEN named
+/// map too.
 #[allow(clippy::too_many_arguments)]
 fn expand_named_maps_in_args(
     args: &mut [BindingArg],
@@ -1383,14 +1373,19 @@ fn expand_named_maps_in_args(
     callee_tapes: &HashMap<String, Vec<(String, String)>>,
     maps: &HashMap<String, ResolvedMapDecl>,
     ext_modules: &[&Resolved],
+    externals: &Declarations,
     scopes: &Scopes,
     ns: &[String],
 ) -> Result<(), CompileError> {
-    if external {
-        return Ok(());
-    }
-    let Some(callee_sig) = callee_tapes.get(callee_name) else {
-        return Ok(());
+    let callee_sig: Option<Vec<(String, String)>> = if external {
+        externals.routine(callee_name).map(|w| {
+            w.tapes
+                .iter()
+                .map(|t| (t.name.clone(), t.alphabet.clone()))
+                .collect()
+        })
+    } else {
+        callee_tapes.get(callee_name).cloned()
     };
     for arg in args.iter_mut() {
         let BindingValue::Named { target, map, .. } = &mut arg.value else {
@@ -1419,8 +1414,12 @@ fn expand_named_maps_in_args(
             });
         }
         // Site check 2: the callee parameter's alphabet is the map's
-        // TARGET.
-        if let Some((_, callee_alpha)) = callee_sig.iter().find(|(n, _)| n == &arg.name)
+        // TARGET. Skipped (not failed) when the callee's tape signature is
+        // not known here — a local target with no args of its own, or an
+        // out-of-unit target with no declarations given.
+        if let Some((_, callee_alpha)) = callee_sig
+            .as_ref()
+            .and_then(|sig| sig.iter().find(|(n, _)| n == &arg.name))
             && *callee_alpha != decl.dst
         {
             return Err(CompileError {
@@ -1497,6 +1496,7 @@ fn expand_named_maps(
                 &callee_tapes,
                 &maps,
                 &ext_modules,
+                externals,
                 scopes,
                 &ns,
             )?;
@@ -1512,6 +1512,7 @@ fn expand_named_maps(
                 &callee_tapes,
                 &maps,
                 &ext_modules,
+                externals,
                 scopes,
                 &ns,
             )?;
@@ -1533,6 +1534,7 @@ fn expand_named_maps(
                     &callee_tapes,
                     &maps,
                     &ext_modules,
+                    externals,
                     scopes,
                     &ns,
                 )?;
@@ -3496,8 +3498,12 @@ impl WorldCtx<'_> {
                 },
             }),
             Some(_) => {
-                // Absolute-external, or imported-to-external routine — allowed,
-                // resolved at link; no arg check (no local signature).
+                // Absolute-external, or imported-to-external routine —
+                // allowed; no arg check HERE (no local signature). Its own
+                // arg-list check, against a DECLARED signature when one is
+                // known, runs later in `ir::resolve_binding`
+                // (docs/formats.md (bound calls)); with no declarations at
+                // all it defers to the linker.
                 Ok(())
             }
             None => {
@@ -3541,8 +3547,10 @@ impl WorldCtx<'_> {
     /// continuations legitimately share one target state. Every `call`,
     /// `graft`, and `bind` funnels through here, so one check covers all
     /// three; a `.tmc` bound call always has a local signature to check
-    /// against, since binding tapes into another compilation unit is
-    /// rejected outright (`external-binding-unsupported`).
+    /// against here — an out-of-unit callee's own arg-list check runs
+    /// against its DECLARED signature instead, in `ir::resolve_binding`
+    /// (docs/formats.md (bound calls)), which is also where a call with no
+    /// declarations for its callee at all defers the check to the linker.
     #[allow(clippy::too_many_arguments)]
     fn check_binding_args(
         &self,
@@ -3844,7 +3852,6 @@ mod tests {
                 expected: 2,
                 got: 3,
             },
-            CompileErrorKind::ExternalBindingUnsupported("x".into()),
             CompileErrorKind::StateParamContinuationUnsupported("x".into()),
             CompileErrorKind::Internal("x".into()),
         ];
