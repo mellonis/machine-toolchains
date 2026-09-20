@@ -812,14 +812,11 @@ fn lower_world(
         local: rw.map(|w| w.local).unwrap_or(false),
         line: rw.map(|w| w.name_span.start.line).unwrap_or(0),
         // A routine's `state` parameters ARE its exits, in signature order.
-        // The published count is one byte wide (docs/formats.md (routine
-        // interfaces)), so the narrowing is an explicit conversion whose
-        // failure is a diagnostic — never a truncation that would publish
-        // a count the body's own `retx #k` rows contradict.
-        exits: u8::try_from(ew.state_params.len()).map_err(|_| CompileError {
-            span: rw.map(|w| w.name_span).unwrap_or(Span::point(0, 0)),
-            kind: CompileErrorKind::TooManyStateParams(ew.state_params.len()),
-        })?,
+        // The count was narrowed to its one wire byte where the signature
+        // was resolved (`compiler::ResolvedWorld::exits`) — the single
+        // place that check lives — so it is read here, never re-derived
+        // from the list.
+        exits: rw.map(|w| w.exits).unwrap_or(0),
         // Whether a routine can also resume normally is inferred from its
         // body elsewhere; lowering publishes the permissive reading.
         returns: true,

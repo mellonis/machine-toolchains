@@ -519,10 +519,9 @@ fn a_terminator_state_argument_ends_the_run() {
 /// the instruction after the call — `retx #k` where a `return`
 /// continuation prints `ret` — so it needs no resume state at all.
 ///
-/// Mutation: print `ret` there; control comes back to the machine's
-/// `then never`, and the run halts instead of stopping.
+/// Mutation: print `ret` there; the instruction after the call changes.
 #[test]
-fn a_then_that_names_a_state_parameter_returns_through_its_exit() {
+fn a_then_that_names_a_state_parameter_prints_retx() {
     let tma = assembly(THEN_EXIT, OptLevel::O0);
     let call_then: Vec<&str> = tma
         .lines()
@@ -531,7 +530,17 @@ fn a_then_that_names_a_state_parameter_returns_through_its_exit() {
         .map(|l| l.trim())
         .collect();
     assert_eq!(call_then, vec!["call    leaf [0]", "retx    #0"], "{tma}");
+}
 
+/// The behavioural half, standing on its own so the consequence is
+/// observed and not merely implied by the text: leaving through the exit
+/// reaches the machine's `fin`, which stops. A continuation that returned
+/// normally instead would come back to `then never`, which halts.
+///
+/// Mutation: print `ret` for such a `then`; every run halts instead of
+/// stopping, and the tape stays blank.
+#[test]
+fn a_then_that_names_a_state_parameter_returns_through_its_exit() {
     for level in [OptLevel::O0, OptLevel::O1] {
         for mech in MECHS {
             let (outcome, snaps) = run_program(THEN_EXIT, level, mech, &[3, 3]);
@@ -661,14 +670,17 @@ fn a_program_without_state_parameters_is_byte_identical() {
 
 /// A routine with `n` `state` parameters, generated rather than written
 /// out: the wire's exit count is one byte, so 255 is the ceiling and 256
-/// is the diagnostic.
+/// is the diagnostic. Each parameter sits on its OWN line, so the span a
+/// diagnostic reports names one parameter and not merely the signature.
 fn many_state_params(n: usize) -> String {
-    let params: Vec<String> = (0..n).map(|i| format!("state p{i}")).collect();
+    let params: Vec<String> = (0..n).map(|i| format!("  state p{i},\n")).collect();
     format!(
         "\
 alphabet ab {{ '_', '0' }}
 
-routine wide(tape t: ab, {}) {{
+routine wide(
+  tape t: ab,
+{}) {{
   entry state s {{ [*] -> goto p0; }}
 }}
 
@@ -677,25 +689,32 @@ machine {{
   entry state m {{ [*] -> stop; }}
 }}
 ",
-        params.join(", ")
+        // The last parameter carries no trailing comma.
+        params.join("").trim_end().trim_end_matches(',')
     )
 }
 
-/// The ceiling lives in ONE place — the explicit narrowing that publishes
-/// the count — so this pins that one guard.
+/// The ceiling is ONE conversion, where a signature is resolved — so the
+/// count a compiled world publishes and the count a merely DECLARED one
+/// carries are the same check.
 ///
-/// Mutation: narrow the count with a bare `as u8`; the 256-parameter
-/// routine then publishes `exits=0` while its body leaves through exit 0,
-/// and the compile fails as `internal-error` (the world invariants catch
-/// it) rather than naming the ceiling — silent corruption turned into a
-/// compiler-bug report instead of a diagnostic.
+/// Mutation: narrow that conversion with a bare `as u8`; the
+/// 256-parameter routine publishes `exits=0` while its body leaves
+/// through exit 0, and the compile fails as `internal-error` (the world
+/// invariants catch it) rather than naming the ceiling.
 #[test]
 fn more_than_255_state_parameters_is_a_typed_error() {
     let err = compile(&many_state_params(256), CompileOptions::default())
         .expect_err("256 state parameters is one too many");
     assert_eq!(err.kind.code(), "too-many-state-params", "{err}");
-    // The signature the count came from, not some later use of it.
-    assert_eq!(err.span.start.line, 3, "{err}");
+    // The OFFENDING PARAMETER, not the routine's name: `wide(` opens on
+    // line 3, the tape parameter is line 4, so the 256th `state`
+    // parameter is line 260, at the column its name starts.
+    assert_eq!(
+        (err.span.start.line, err.span.start.col),
+        (260, 9),
+        "the diagnostic points at the parameter past the ceiling: {err}"
+    );
 }
 
 /// The near miss: exactly 255 is the widest signature the wire can carry,
@@ -707,6 +726,88 @@ fn exactly_255_state_parameters_compiles() {
         tma.contains(".routine wide, tapes=1, alpha=(2), exits=255"),
         "{tma}"
     );
+}
+
+/// A header declaring `n` exits, and a caller that binds every one of
+/// them — the pair that reaches the exit count through DECLARATIONS
+/// rather than through a compiled body.
+fn header_with_exits(n: usize) -> String {
+    let params: Vec<String> = (0..n).map(|i| format!("state e{i}")).collect();
+    format!(
+        "\
+namespace lib {{
+  export alphabet bits {{ '_', '0', '1' }}
+  export routine big(tape n: bits, {});
+}}
+",
+        params.join(", ")
+    )
+}
+
+fn caller_binding_exits(n: usize) -> String {
+    let args: Vec<String> = (0..n).map(|i| format!("e{i} = done")).collect();
+    format!(
+        "\
+use lib::bits;
+
+machine {{
+  tape d: bits;
+  entry state go {{ [*] -> call lib::big(n = d, {}) then done; }}
+  state done {{ [*] -> stop; }}
+}}
+",
+        args.join(", ")
+    )
+}
+
+/// The ceiling covers a signature that is only DECLARED, not compiled:
+/// the wire cannot hold the count either way, and the exits vector a
+/// caller builds from that declaration is what would carry it. Reported
+/// against the HEADER's own path, since that is the file to fix.
+///
+/// Mutation: check the ceiling only where a world is lowered; this pair
+/// then reaches the object writer with a 256-entry exit vector and
+/// panics there instead of reporting anything.
+#[test]
+fn a_header_declaring_too_many_state_parameters_is_a_typed_error() {
+    let dir = scratch("header_exit_ceiling");
+    let header = write_file(&dir, "lib.tmh", &header_with_exits(256));
+    let app = write_file(&dir, "app.tmc", &caller_binding_exits(256));
+    let err = execute(&args(&[
+        "compile",
+        app.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        dir.join("app.tmo").to_str().unwrap(),
+    ]))
+    .expect_err("a declared signature is held to the same ceiling");
+    assert!(err.contains("[too-many-state-params]"), "{err}");
+    assert!(
+        err.contains("lib.tmh"),
+        "the header is the file to fix: {err}"
+    );
+}
+
+/// The near miss on the declarations path: 255 declared exits compile,
+/// link-ready, through the same route.
+#[test]
+fn a_header_declaring_exactly_255_state_parameters_compiles() {
+    let dir = scratch("header_exit_ceiling_near");
+    let header = write_file(&dir, "lib.tmh", &header_with_exits(255));
+    let app = write_file(&dir, "app.tmc", &caller_binding_exits(255));
+    let out = execute(&args(&[
+        "compile",
+        app.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        dir.join("app.tmo").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("255 declared exits is the ceiling, not past it: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
 }
 
 // ── out-of-unit callees ────────────────────────────────────────────────────

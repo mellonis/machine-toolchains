@@ -1056,6 +1056,13 @@ pub(crate) struct ResolvedWorld {
     /// State-parameter names (routine/graph), in signature order — valid
     /// goto / continuation targets inside the body.
     pub state_params: Vec<String>,
+    /// `state_params.len()` as the one-byte count a signature publishes
+    /// (docs/formats.md (routine interfaces)) — narrowed HERE, where the
+    /// signature is resolved, so a world that is only DECLARED (a header
+    /// read for `--extern`) is checked exactly like one that is compiled.
+    /// Every consumer reads this field rather than narrowing the list
+    /// again, which is what keeps the ceiling a single check.
+    pub exits: u8,
     /// States, rules in SOURCE form.
     pub states: Vec<State>,
     /// Graft instances declared in this world.
@@ -2422,14 +2429,28 @@ fn resolve_world(
                     )?,
                 });
             }
-            // A signature's `state` parameters are its exits. The ceiling
-            // on how many there may be is enforced in ONE place — the
-            // explicit narrowing that publishes the count
-            // (`ir::lower_world`) — so the check and the conversion cannot
-            // drift apart, and no second guard can mask a truncation here.
             SigParamKind::State => state_params.push(p.name.clone()),
         }
     }
+    // A signature's `state` parameters are its exits, and the published
+    // count is one byte wide (docs/formats.md (routine interfaces)). The
+    // narrowing happens ONCE, here: every later consumer reads the `u8`
+    // this produces, so there is no second conversion to drift from it and
+    // no path — compiled or merely declared — that can carry a count the
+    // wire cannot hold. The offending parameter is the one the diagnostic
+    // points at, the way the tape ceiling points at the 17th tape.
+    let exits = u8::try_from(state_params.len()).map_err(|_| {
+        let offender = sig
+            .params
+            .iter()
+            .filter(|p| matches!(p.kind, SigParamKind::State))
+            .nth(u8::MAX as usize)
+            .expect("a count past the ceiling has a parameter past it");
+        CompileError {
+            span: offender.name_span,
+            kind: CompileErrorKind::TooManyStateParams(state_params.len()),
+        }
+    })?;
     let (grafts, binds, entry) = resolve_world_reuse(grafts, binds, states, ns, scopes)?;
     let calls = resolve_world_calls(states, &binds, ns, scopes);
     Ok(ResolvedWorld {
@@ -2440,6 +2461,7 @@ fn resolve_world(
         local: !exported,
         tapes,
         state_params,
+        exits,
         states: states.to_vec(),
         grafts,
         binds,
@@ -2534,7 +2556,9 @@ fn resolve_machine_world(
         exported: true,
         local: false,
         tapes,
+        // A `machine` block has no signature, so it declares no exits.
         state_params: Vec::new(),
+        exits: 0,
         states: m.states.to_vec(),
         grafts,
         binds,
