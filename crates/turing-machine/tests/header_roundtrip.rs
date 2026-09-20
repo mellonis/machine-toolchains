@@ -1453,6 +1453,79 @@ namespace mylib {
     assert_eq!(err.span.start.line, 4);
 }
 
+/// A routine with `state` parameters, for the two arms below: the source
+/// declares two exits and the compiled object carries their COUNT.
+const STATE_PARAM_FIXTURE: &str = "\
+export alphabet bits { '_', '0', '1' }
+
+export routine pick(tape n: bits, state hit, state miss) {
+  entry state s {
+    ['_'] -> goto hit;
+    [*]   -> goto miss;
+  }
+}
+";
+
+/// The source arm has the declaration in front of it, so it prints each
+/// `state` parameter by its real name, in signature order. The printed
+/// header re-parses through the strict declarations-only reader.
+///
+/// Mutation: dropping `state` parameters from `signature_text`; the
+/// printed signature loses them and the assertion goes red.
+#[test]
+fn the_source_arm_prints_state_parameters_by_name() {
+    let dir = scratch("header_source_state_params");
+    let path = dir.join("pick.tmc");
+    std::fs::write(&path, STATE_PARAM_FIXTURE).unwrap();
+
+    let out = run_interface(&path);
+    assert!(
+        out.stdout
+            .contains("export routine pick(tape n: bits writes {}, state hit, state miss);"),
+        "{}",
+        out.stdout
+    );
+
+    let header_path = dir.join("pick.tmh");
+    std::fs::write(&header_path, &out.stdout).unwrap();
+    assert_eq!(run_interface(&header_path).stdout, out.stdout);
+}
+
+/// The object arm has only the exit COUNT — a `state` parameter's name
+/// is compile-time material the wire never carries (docs/formats.md
+/// (routine interfaces)) — so it prints the exits positionally, one
+/// `state exit<k>` per declared exit, and that header re-parses too.
+///
+/// Mutation: printing the tape parameters alone; a caller reading the
+/// object's header would see a routine that takes no exits at all.
+#[test]
+fn the_object_arm_prints_state_parameters_positionally() {
+    let dir = scratch("header_object_state_params");
+    let object = compile(
+        STATE_PARAM_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile STATE_PARAM_FIXTURE: {e}"))
+    .object;
+    let obj_path = dir.join("pick.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+
+    let out = run_interface(&obj_path);
+    assert!(
+        out.stdout
+            .contains("export routine pick(tape n: bits writes {}, state exit0, state exit1);"),
+        "{}",
+        out.stdout
+    );
+
+    let header_path = dir.join("pick.tmh");
+    std::fs::write(&header_path, &out.stdout).unwrap();
+    assert_eq!(run_interface(&header_path).stdout, out.stdout);
+}
+
 /// `TMC_LANG_VERSION` moved `0.1` → `0.2` in this task — the first task
 /// in the binding arc's phase 3a to change the `.tmc` grammar (the
 /// bodiless-signature alternative). Pre-1.0, `N` bumps on ANY grammar

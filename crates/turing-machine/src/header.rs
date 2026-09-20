@@ -314,6 +314,14 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
                 };
                 params.push(tape_param_text(param_name, &alphabet_name, writes));
             }
+            // The wire carries the exit COUNT and no names — a `state`
+            // parameter's name is compile-time material the object never
+            // holds (docs/formats.md (routine interfaces)) — so the exits
+            // print positionally. A caller reading this header binds them
+            // by position, which is exactly how the vector travels.
+            for k in 0..routine.exits {
+                params.push(format!("state exit{k}"));
+            }
             let lines = vec![format!("export routine {local}({});", params.join(", "))];
             root.insert(&ns, lines);
         }
