@@ -1545,10 +1545,17 @@ machine {
 
     /// A document exercising every v4 field — glyphs and an effective
     /// write set, a two-exit `CallThen` alongside a `ReturnExit`, a
-    /// `noreturn` world, a named (WRITTEN) binding-call param, and a
-    /// glyph-labelled map pair — round-trips unchanged. Mutation:
-    /// `#[serde(skip_serializing)]` on `IrTapeBinding.param` (or on
-    /// `map_written`) drops it from the wire form, so the compare goes red.
+    /// `noreturn` world, a named (WRITTEN) binding-call param, a
+    /// glyph-labelled map pair, and a SECOND binding entry that is
+    /// `map_written: true` with an EMPTY `pairs` list — the one shape
+    /// where the field carries the whole meaning, since a pair-bearing
+    /// entry is written by definition either way. Round-trips unchanged.
+    /// Mutation: `#[serde(skip_serializing)]` on `IrTapeBinding.param`
+    /// (or on `map_written`) drops it from the wire form, so the compare
+    /// goes red — the second entry is what makes the `map_written`
+    /// mutation observable at all, since the first entry's own
+    /// `map_written: true` is otherwise redundant with its non-empty
+    /// `pairs`.
     #[test]
     fn v4_documents_round_trip() {
         let ir = IrProgram {
@@ -1579,23 +1586,31 @@ machine {
                                 debugger: false,
                                 transition: IrTransition::CallThen {
                                     target: "r".into(),
-                                    binding: vec![IrTapeBinding {
-                                        caller_tape: 0,
-                                        pairs: vec![
-                                            IrMapPair {
-                                                src: 1,
-                                                dst: IrMapDst::Index(1),
-                                                one_way: false,
-                                            },
-                                            IrMapPair {
-                                                src: 2,
-                                                dst: IrMapDst::Label("y".into()),
-                                                one_way: true,
-                                            },
-                                        ],
-                                        param: Some("k".into()),
-                                        map_written: true,
-                                    }],
+                                    binding: vec![
+                                        IrTapeBinding {
+                                            caller_tape: 0,
+                                            pairs: vec![
+                                                IrMapPair {
+                                                    src: 1,
+                                                    dst: IrMapDst::Index(1),
+                                                    one_way: false,
+                                                },
+                                                IrMapPair {
+                                                    src: 2,
+                                                    dst: IrMapDst::Label("y".into()),
+                                                    one_way: true,
+                                                },
+                                            ],
+                                            param: Some("k".into()),
+                                            map_written: true,
+                                        },
+                                        IrTapeBinding {
+                                            caller_tape: 0,
+                                            pairs: Vec::new(),
+                                            param: Some("j".into()),
+                                            map_written: true,
+                                        },
+                                    ],
                                     // A two-exit call: the exits= operand
                                     // names the resume states.
                                     exits: vec![1, 2],

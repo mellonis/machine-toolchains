@@ -92,6 +92,22 @@ fn link(
     execute(&argv)
 }
 
+/// `tmt asm INPUT.tma -o OUT.tmo`.
+fn asm(dir: &Path, input: &Path, out_name: &str) -> Result<CliOutput, String> {
+    let out = dir.join(out_name);
+    execute(&[
+        "asm".to_string(),
+        input.to_str().unwrap().to_string(),
+        "-o".to_string(),
+        out.to_str().unwrap().to_string(),
+    ])
+}
+
+/// `tmt dis OBJECT`.
+fn dis(path: &Path) -> Result<CliOutput, String> {
+    execute(&["dis".to_string(), path.to_str().unwrap().to_string()])
+}
+
 // -- the two grammar positions -----------------------------------------
 
 const QUALIFIED_TAPE: &str = "\
@@ -429,8 +445,8 @@ namespace mylib {
 /// The caller side of the symbolic-emission fixture: a 2-tape machine
 /// (`ctl: bits`, `data: wide`) binding `data` into `mylib::plusOne`'s one
 /// tape parameter through an inline map — the `.tmc` pair that must produce
-/// the plan's own tool-verified `.tma` target text (`docs/formats.md` (bound
-/// calls)): `call    mylib::plusOne [num: 1{3->'0', 4->'1'}]`.
+/// exactly the operand text `docs/formats.md` (bound calls) documents:
+/// `call    mylib::plusOne [num: 1{3->'0', 4->'1'}]`.
 fn app_src(map: &str) -> String {
     format!(
         "\
@@ -448,16 +464,16 @@ machine {{
     )
 }
 
-/// **[tool-verified]** against the plan's own D1/D2 `.tma` pair
-/// (`.superpowers/plan3a-fixture-check.md`): the exact same operand,
-/// reached from `.tmc` source through `--extern` rather than hand-authored
-/// assembly. Mutation (verified by hand — see the task report): emitting
-/// `dst` as an index instead of a label (`IrMapDst::Index(src)` in place
-/// of `IrMapDst::Label(glyph_label(&p.dst))`); the byte compare here goes
-/// red. `the_pair_links_and_runs` below assembles the D1/D2 `.tma` pair
-/// directly rather than compiling it, so this particular mutation does not
-/// reach it — the two tests are independent proofs (compiler emission
-/// here, linker resolution there), not one continuous pipeline.
+/// The same operand text a hand-written `.tma` pair (below,
+/// `the_pair_links_and_runs`) independently assembles, links and
+/// disassembles back to — reached here from `.tmc` source through
+/// `--extern` instead. Mutation: emitting `dst` as an index instead of a
+/// label (`IrMapDst::Index(src)` in place of
+/// `IrMapDst::Label(glyph_label(&p.dst))`); the byte compare here goes
+/// red. `the_pair_links_and_runs` below assembles its `.tma` pair directly
+/// rather than compiling it, so this particular mutation does not reach it
+/// — the two tests are independent proofs (compiler emission here, linker
+/// resolution there), not one continuous pipeline.
 #[test]
 fn an_external_bound_call_emits_the_symbolic_operand() {
     let dir = scratch("symbolic_emission");
@@ -541,10 +557,11 @@ namespace mylib {
 
 /// A caller tape whose alphabet is the SAME SIZE as `bits` but declares its
 /// two non-blank glyphs in the OPPOSITE order — the one shape that triggers
-/// `glyph-mismatch` specifically (a cardinality difference would trigger
-/// `narrow-alphabet` instead, checked first and returning early — established
-/// fact G in `.superpowers/plan3a-fixture-check.md`, the shipped corpus's own
-/// alphabets being position-identical with the stdlib's).
+/// `glyph-mismatch` specifically. A cardinality difference triggers
+/// `narrow-alphabet` instead, checked first and returning early before the
+/// glyph comparison ever runs (`crates/core/src/linker/engine.rs::
+/// grade_tape`), which is why an equal-size, reordered pair is the fixture
+/// this test needs rather than a merely differently-sized one.
 fn reordered_app_src(map: &str) -> String {
     format!(
         "\
@@ -863,19 +880,20 @@ machine {
     assert!(err.contains("num"), "{err}");
 }
 
-/// D1/D2's own `.tma` pair, assembled, linked and RUN — the end-to-end
-/// proof that a symbolic site the compiler emits is exactly what the
-/// linker's already-landed pre-pass expects. `plusOne` unconditionally
-/// writes `bits` symbol 1 (`'0'`) to its one tape; the two-way pair set
-/// `{3->'0', 4->'1'}` decides which CALLER symbol that write-back becomes.
-/// `data` is SEEDED with `'$'` before the call (neither candidate answer),
-/// so the assertion proves the call actually wrote, not merely that the
-/// tape stayed at its initial value. Mutation: swapping the two pairs'
-/// `dst` labels (`{3->'1', 4->'0'}`) — the callee's write-back now resolves
-/// through the OTHER pair, landing `'1'` (wide index 4) instead of `'0'`
-/// (index 3); verified by hand (see the task report) rather than committed
-/// as a second test, since the two branches are mutually exclusive
-/// assertions on the same cell.
+/// A hand-written `.tma` pair carrying the exact operand text
+/// `an_external_bound_call_emits_the_symbolic_operand` above compiles to,
+/// assembled, linked and RUN — the end-to-end proof that a symbolic site
+/// the compiler emits is exactly what the linker's own pre-pass expects.
+/// `plusOne` unconditionally writes `bits` symbol 1 (`'0'`) to its one
+/// tape; the two-way pair set `{3->'0', 4->'1'}` decides which CALLER
+/// symbol that write-back becomes. `data` is SEEDED with `'$'` before the
+/// call (neither candidate answer), so the assertion proves the call
+/// actually wrote, not merely that the tape stayed at its initial value.
+/// Mutation: swapping the two pairs' `dst` labels (`{3->'1', 4->'0'}`) —
+/// the callee's write-back now resolves through the OTHER pair, landing
+/// `'1'` (wide index 4) instead of `'0'` (index 3). Not committed as a
+/// second test, since the two branches are mutually exclusive assertions
+/// on the same cell; verified by hand instead.
 #[test]
 fn the_pair_links_and_runs() {
     use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -951,4 +969,370 @@ fn the_pair_links_and_runs() {
         3,
         "the callee's write-back resolves through the FIRST pair (3->'0'): {snap:?}"
     );
+}
+
+// -- a numeric glyph label in a pair destination ---------------------------
+
+const NUMERIC_GLYPH_HEADER: &str = "\
+namespace mylib {
+  export alphabet nums { '_', 10, 11, 12 }
+  export routine plusOne(tape num: nums writes { 10, 11, 12 });
+}
+";
+
+/// A caller alphabet declared LOCALLY, not imported: an imported alphabet
+/// is a compiler fact with no `.tma` directive of its own (printed only as
+/// a disassembly comment, which reassembling drops), so a byte-compare
+/// against a freshly reassembled object would fail for a reason unrelated
+/// to the glyph label under test if this fixture imported `mylib`'s
+/// alphabet instead of declaring its own.
+const NUMERIC_GLYPH_APP: &str = "\
+alphabet localnums { '_', 10, 11, 12 }
+
+machine {
+  tape data: localnums;
+  entry state go { [*] -> call mylib::plusOne(num = data with map { 10 -> 12 }) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+/// A LABEL whose text is a canonical multi-digit decimal number must still
+/// print QUOTED in a bound-call pair's destination: that slot's grammar
+/// reads a bare canonical number as an INDEX, never a label, so the
+/// `.param` glyph-list shortcut that lets a multi-digit number print bare
+/// does not apply here. Mutation: reusing that shortcut in the destination
+/// slot; the emitted text loses its quotes around `12`.
+#[test]
+fn a_numeric_glyph_label_is_quoted_in_a_pair_destination() {
+    let dir = scratch("symbolic_numeric_glyph_text");
+    let header = write(&dir, "mylib.tmh", NUMERIC_GLYPH_HEADER);
+    let input = write(&dir, "app.tmc", NUMERIC_GLYPH_APP);
+    let out = compile(
+        &dir,
+        &input,
+        "app.tma",
+        &["-S", "--extern", header.to_str().unwrap(), "--nostdlib"],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+    let tma = std::fs::read_to_string(dir.join("app.tma")).unwrap();
+    let call_line = tma
+        .lines()
+        .find(|l| l.contains("mylib::plusOne"))
+        .unwrap_or_else(|| panic!("no call line in:\n{tma}"))
+        .trim();
+    assert_eq!(
+        call_line, "call    mylib::plusOne [num: 0{1->'12'}]",
+        "{tma}"
+    );
+}
+
+/// The quoted spelling is not merely legible — it is what makes the operand
+/// REASSEMBLE to the same object the compiler itself produced, and what
+/// makes a disassembly of that object reassemble byte-identically too (the
+/// disassembler is not this task's to change and prints the label quoted
+/// already). Mutation: the same bare-number shortcut as above; the
+/// reassembled object would carry an INDEX-form pair instead of a
+/// LABEL-form one, diverging from the compiler's own object at the pair's
+/// own bytes.
+#[test]
+fn a_numeric_glyph_label_reassembles_to_the_same_object() {
+    let dir = scratch("symbolic_numeric_glyph_reasm");
+    let header = write(&dir, "mylib.tmh", NUMERIC_GLYPH_HEADER);
+    let input = write(&dir, "app.tmc", NUMERIC_GLYPH_APP);
+
+    let compiled = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap(), "--nostdlib"],
+    );
+    assert!(compiled.is_ok(), "{:?}", compiled.err());
+    let compiled_bytes = std::fs::read(dir.join("app.tmo")).unwrap();
+
+    let emitted = compile(
+        &dir,
+        &input,
+        "app.tma",
+        &["-S", "--extern", header.to_str().unwrap(), "--nostdlib"],
+    );
+    assert!(emitted.is_ok(), "{:?}", emitted.err());
+    let reasm = asm(&dir, &dir.join("app.tma"), "app_reasm.tmo");
+    assert!(reasm.is_ok(), "{:?}", reasm.err());
+    let reasm_bytes = std::fs::read(dir.join("app_reasm.tmo")).unwrap();
+    assert_eq!(
+        compiled_bytes, reasm_bytes,
+        "the emitted assembly must reassemble to the compiler's own object"
+    );
+
+    let disassembly = dis(&dir.join("app.tmo")).unwrap_or_else(|e| panic!("dis: {e}"));
+    assert_eq!(disassembly.code, 0, "{}", disassembly.stderr);
+    assert!(
+        disassembly.stdout.contains("[num: 0{1->'12'}]"),
+        "the disassembly must print the label quoted too: {}",
+        disassembly.stdout
+    );
+    let dis_path = write(&dir, "app_dis.tma", &disassembly.stdout);
+    let dis_reasm = asm(&dir, &dis_path, "app_dis_reasm.tmo");
+    assert!(dis_reasm.is_ok(), "{:?}", dis_reasm.err());
+    let dis_reasm_bytes = std::fs::read(dir.join("app_dis_reasm.tmo")).unwrap();
+    assert_eq!(
+        compiled_bytes, dis_reasm_bytes,
+        "the disassembly must reassemble to the same object too"
+    );
+}
+
+/// A numeric glyph label's binding survives past text into the linker and
+/// the run: `plusOne` unconditionally writes the glyph labelled `12`,
+/// which sits at index 1 of its own (wider) alphabet — deliberately NOT at
+/// index 12, and the callee alphabet is deliberately wide enough (13
+/// symbols) that index 12 is itself a valid, but WRONG, destination. A
+/// destination read back as the bare index 12 would therefore bind a real
+/// but incorrect symbol rather than fail outright, which is exactly the
+/// silent-miscompile shape this closes. Seeding the caller tape at a THIRD
+/// symbol makes the run prove a write actually happened, not merely that
+/// the tape kept its initial value. Mutation (verified by hand): reusing
+/// the bare-number shortcut in the destination slot turns the pair into
+/// `1->12` — the callee's actual write (index 1, the real `12`) then
+/// matches no pair (dst 12 does not equal the written index 1) and,
+/// because the two alphabets are of UNEQUAL size, the run traps
+/// `UnmappedWrite` instead of completing.
+#[test]
+fn a_numeric_glyph_label_binds_the_correct_symbol_at_link_and_run() {
+    use mtc_core::formats::executable::Executable;
+    use mtc_core::formats::tapeblock::TapeSnapshot;
+    use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, WideTape};
+    use mtc_turing_machine::arch::Tm1;
+
+    const WIDE_NUMERIC_HEADER: &str = "\
+namespace mylib {
+  export alphabet nums { '_', 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }
+  export routine plusOne(tape num: nums writes { 12 });
+}
+";
+    const WIDE_NUMERIC_LIB: &str = "\
+namespace mylib {
+  export alphabet nums { '_', 12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }
+  export routine plusOne(tape num: nums writes { 12 }) {
+    entry state s { [*] -> write [12] return; }
+  }
+}
+";
+    const WIDE_NUMERIC_APP: &str = "\
+alphabet ab { '_', 10, 11, 12 }
+
+machine {
+  tape data: ab;
+  entry state go { [*] -> call mylib::plusOne(num = data with map { 10 -> 12 }) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+    let dir = scratch("symbolic_numeric_glyph_run");
+    let header = write(&dir, "mylib.tmh", WIDE_NUMERIC_HEADER);
+    let input = write(&dir, "app.tmc", WIDE_NUMERIC_APP);
+    let app_obj = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap(), "--nostdlib"],
+    );
+    assert!(app_obj.is_ok(), "{:?}", app_obj.err());
+
+    let lib_src = write(&dir, "mylib.tmc", WIDE_NUMERIC_LIB);
+    let lib_obj = compile(&dir, &lib_src, "mylib.tmo", &["--nostdlib"]);
+    assert!(lib_obj.is_ok(), "{:?}", lib_obj.err());
+
+    let out = link(
+        &dir,
+        &[&dir.join("app.tmo"), &dir.join("mylib.tmo")],
+        "app.tmx",
+        &["--nostdlib", "--call-mech", "frames"],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+
+    let bytes = std::fs::read(dir.join("app.tmx")).unwrap();
+    let exe = Executable::from_bytes(&bytes).expect("app.tmx parses");
+    let mut registry = ArchRegistry::new();
+    registry.register(Box::new(Tm1::new(exe.tape_count)));
+    let machine = Machine::from_executable(&exe, &registry).expect("loads");
+    // `ab = { '_', 10, 11, 12 }`: seed index 2 ('11') — neither blank nor
+    // the expected final answer ('10', index 1).
+    let mut data = WideTape::from_snapshot(
+        &TapeSnapshot {
+            origin: 0,
+            cells: vec![2],
+            head: 0,
+            alphabet: None,
+        },
+        4,
+    )
+    .expect("seeds");
+    let mut devices: Vec<&mut dyn Tape> = vec![&mut data];
+    let result = machine
+        .run_tapes(
+            &mut devices,
+            RunOptions {
+                limits: RunLimits {
+                    max_steps: Some(100_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("run set-up ok");
+    assert_eq!(result.outcome, Outcome::Stopped, "{:?}", result.outcome);
+    drop(devices);
+    let snap = data.to_snapshot();
+    let idx = (0 - snap.origin) as usize;
+    assert_eq!(
+        snap.cells.get(idx).copied().unwrap_or(0),
+        1,
+        "the callee's write of glyph '12' resolves through the label to caller index 1 ('10'): {snap:?}"
+    );
+}
+
+// -- minor coverage: a compiler-emitted symbolic site under all three
+// -- call mechanisms, and the with-declarations ordering permutation ------
+
+/// A compile → link → run chain over a COMPILER-EMITTED object pair (not
+/// hand-written `.tma`) at an external site with declarations present,
+/// under all three `--call-mech` values, agreeing on the same final tape.
+/// `plusOne` unconditionally writes `'1'`; the two-way swap map decides
+/// which caller symbol that becomes. Mutation: any single mechanism
+/// resolving the symbolic site differently from the other two would show
+/// up as a mismatched final cell for that one mechanism.
+#[test]
+fn all_call_mechs_agree_on_a_compiler_emitted_symbolic_site() {
+    use mtc_core::formats::executable::Executable;
+    use mtc_core::formats::tapeblock::TapeSnapshot;
+    use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, WideTape};
+    use mtc_turing_machine::arch::Tm1;
+
+    const SWAP_LIB: &str = "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine plusOne(tape num: bits writes { '0', '1' }) {
+    entry state s { [*] -> write ['1'] return; }
+  }
+}
+";
+    const SWAP_APP: &str = "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  entry state go { [*] -> call mylib::plusOne(num = data with map { '0' -> '1', '1' -> '0' }) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+    let dir = scratch("symbolic_all_call_mechs");
+    let header = write(&dir, "mylib.tmh", MYLIB_HEADER);
+    let input = write(&dir, "app.tmc", SWAP_APP);
+    let app_obj = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap(), "--nostdlib"],
+    );
+    assert!(app_obj.is_ok(), "{:?}", app_obj.err());
+
+    let lib_src = write(&dir, "mylib.tmc", SWAP_LIB);
+    let lib_obj = compile(&dir, &lib_src, "mylib.tmo", &["--nostdlib"]);
+    assert!(lib_obj.is_ok(), "{:?}", lib_obj.err());
+
+    for mech in ["mono", "frames", "hybrid"] {
+        let out_name = format!("app_{mech}.tmx");
+        let out = link(
+            &dir,
+            &[&dir.join("app.tmo"), &dir.join("mylib.tmo")],
+            &out_name,
+            &["--nostdlib", "--call-mech", mech],
+        );
+        assert!(out.is_ok(), "{mech}: {:?}", out.err());
+
+        let bytes = std::fs::read(dir.join(&out_name)).unwrap();
+        let exe = Executable::from_bytes(&bytes).unwrap_or_else(|e| panic!("{mech}: {e}"));
+        let mut registry = ArchRegistry::new();
+        registry.register(Box::new(Tm1::new(exe.tape_count)));
+        let machine =
+            Machine::from_executable(&exe, &registry).unwrap_or_else(|e| panic!("{mech}: {e}"));
+        // `bits = { '_', '0', '1' }`: seed index 2 ('1') so the write-back
+        // to index 1 ('0') proves the call actually wrote.
+        let mut data = WideTape::from_snapshot(
+            &TapeSnapshot {
+                origin: 0,
+                cells: vec![2],
+                head: 0,
+                alphabet: None,
+            },
+            3,
+        )
+        .expect("seeds");
+        let mut devices: Vec<&mut dyn Tape> = vec![&mut data];
+        let result = machine
+            .run_tapes(
+                &mut devices,
+                RunOptions {
+                    limits: RunLimits {
+                        max_steps: Some(100_000),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{mech}: {e}"));
+        assert_eq!(
+            result.outcome,
+            Outcome::Stopped,
+            "{mech}: {:?}",
+            result.outcome
+        );
+        drop(devices);
+        let snap = data.to_snapshot();
+        let idx = (0 - snap.origin) as usize;
+        assert_eq!(
+            snap.cells.get(idx).copied().unwrap_or(0),
+            1,
+            "{mech}: expected caller index 1 ('0'): {snap:?}"
+        );
+    }
+}
+
+/// The with-declarations ordering is not merely present but OBSERVABLE:
+/// `combine`'s two parameters are bound at the site in the OPPOSITE order
+/// to the callee's own declared tape order, and the emitted entries must
+/// still come out in the callee's order (`a` before `b`). Mutation:
+/// keeping source order regardless of declarations; the emitted operand
+/// would read `[b: 1, a: 0]` instead.
+#[test]
+fn with_declarations_the_site_reorders_to_the_callees_tape_order() {
+    let dir = scratch("symbolic_ordering");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry state go { [*, *] -> call mylib::combine(b = y, a = x) then done; }
+  state done { [*, *] -> stop; }
+}
+",
+    );
+    let out = compile(
+        &dir,
+        &input,
+        "app.tma",
+        &["-S", "--extern", header.to_str().unwrap(), "--nostdlib"],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+    let tma = std::fs::read_to_string(dir.join("app.tma")).unwrap();
+    let call_line = tma
+        .lines()
+        .find(|l| l.contains("mylib::combine"))
+        .unwrap_or_else(|| panic!("no call line in:\n{tma}"))
+        .trim();
+    assert_eq!(call_line, "call    mylib::combine [a: 0, b: 1]", "{tma}");
 }

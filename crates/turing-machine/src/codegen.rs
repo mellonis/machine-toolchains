@@ -701,13 +701,16 @@ fn render_binding(binding: &[IrTapeBinding]) -> String {
                         // in-unit callee resolves to. `Label` (a
                         // glyph-labelled pair against an out-of-unit
                         // callee, whose own index space is the linker's to
-                        // resolve) renders as a glyph literal — the same
-                        // canonical spelling a `.param` line's glyph list
-                        // uses, so the two surfaces never disagree on how a
-                        // glyph is quoted.
+                        // resolve) is ALWAYS quoted, through `quote_glyph`
+                        // rather than `render_glyph_element`: this slot's
+                        // grammar reads a bare number as an INDEX, not a
+                        // label, so the `.param` glyph-list shortcut for a
+                        // multi-digit canonical decimal does not apply
+                        // here — applying it would silently turn a numeric
+                        // glyph label into a different binding.
                         let dst = match &p.dst {
                             IrMapDst::Index(n) => n.to_string(),
-                            IrMapDst::Label(s) => render_glyph_element(s),
+                            IrMapDst::Label(s) => quote_glyph(s),
                         };
                         format!("{}{}{}", p.src, arrow, dst)
                     })
@@ -782,6 +785,18 @@ pub(crate) fn render_glyph_element(glyph: &str) -> String {
     if multi_char && glyph.parse::<u32>().is_ok_and(|n| n.to_string() == glyph) {
         return glyph.to_string();
     }
+    quote_glyph(glyph)
+}
+
+/// A glyph as a single-quoted literal, escaping `'` and `\` — the notation's
+/// own two special characters. No bare-number shortcut: the canonical
+/// spelling this exists for is `.param`'s glyph-LIST grammar, where a bare
+/// multi-digit number IS a label (`render_glyph_element`, above). A
+/// bound-call pair's `dst` slot is a DIFFERENT grammar — the assembler reads
+/// a bare number there as an INDEX, not a label — so a label headed for
+/// that slot is always quoted through this function instead, never through
+/// `render_glyph_element` (`render_binding`, below).
+fn quote_glyph(glyph: &str) -> String {
     let mut out = String::with_capacity(glyph.len() + 2);
     out.push('\'');
     for c in glyph.chars() {
