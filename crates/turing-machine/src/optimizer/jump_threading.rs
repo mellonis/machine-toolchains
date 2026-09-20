@@ -77,12 +77,20 @@ pub fn run(w: &mut IrWorld) -> u32 {
                         }
                     }
                     IrTransition::CallThen { exits, then, .. } => {
-                        if let IrThen::Goto { state } = then {
-                            let new = resolve(*state);
-                            if new != *state {
-                                *state = new;
-                                changes += 1;
+                        match then {
+                            IrThen::Goto { state } => {
+                                let new = resolve(*state);
+                                if new != *state {
+                                    *state = new;
+                                    changes += 1;
+                                }
                             }
+                            // The other resume points are instructions, not
+                            // in-world targets to thread.
+                            IrThen::Return
+                            | IrThen::ReturnExit { .. }
+                            | IrThen::Stop
+                            | IrThen::Halt => {}
                         }
                         // An exits entry is an inbound reference like the
                         // `then`, and threads the same way: resuming at a

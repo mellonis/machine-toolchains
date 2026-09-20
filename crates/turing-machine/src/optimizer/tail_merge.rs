@@ -80,8 +80,13 @@ fn retarget(w: &mut IrWorld, from: u32, to: u32) {
             match &mut r.transition {
                 IrTransition::Goto { state } => fix(state),
                 IrTransition::CallThen { exits, then, .. } => {
-                    if let IrThen::Goto { state } = then {
-                        fix(state);
+                    match then {
+                        IrThen::Goto { state } => fix(state),
+                        // The other resume points name no state to retarget.
+                        IrThen::Return
+                        | IrThen::ReturnExit { .. }
+                        | IrThen::Stop
+                        | IrThen::Halt => {}
                     }
                     // Exits name states, so a merge has to move them onto
                     // the keeper too. Two states differing ONLY in their

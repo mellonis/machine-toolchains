@@ -79,7 +79,9 @@ use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, S
 /// Version 3 adds the [`IrRule::direct`] lowering hint (the `jump_threading`
 /// pass's output). Internal — no released artifact carries it.
 ///
-/// Version 4 adds the binding-arc vocabulary: [`IrTape::glyphs`] and
+/// Version 4 adds the binding-arc vocabulary: [`IrThen::ReturnExit`] (a
+/// call whose continuation leaves the enclosing routine through one of its
+/// own exits), [`IrTape::glyphs`] and
 /// [`IrTape::writes`] (a contracted signature tape's effective write set),
 /// [`IrWorld::exits`] and [`IrWorld::returns`] (a routine's declared exit
 /// count and whether it can resume normally), the
@@ -362,12 +364,25 @@ pub enum IrTransition {
     TrapWrite,
 }
 
-/// A `call … then` resume point: a same-world state (its id) or a terminator.
+/// A `call … then` resume point: a same-world state (its id), a terminator,
+/// or a return through one of the ENCLOSING routine's own exits.
+///
+/// `then` is not a label — it is the instruction after the call — so each
+/// variant is one instruction: `jmp`, `ret`, `stp`, `hlt`, and `retx #k`
+/// for [`IrThen::ReturnExit`], which is what `call r(…) then <state
+/// parameter>` lowers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IrThen {
-    Goto { state: u32 },
+    Goto {
+        state: u32,
+    },
     Return,
+    /// Resume by leaving the enclosing routine through its exit `exit` —
+    /// `retx #k` printed where `Return` prints `ret`.
+    ReturnExit {
+        exit: u32,
+    },
     Stop,
     Halt,
 }
@@ -495,6 +510,13 @@ impl IrWorld {
                             IrThen::Return => {
                                 declare(&mut out, "T_ret", "ret", &mut terms);
                                 let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_ret", st.id);
+                            }
+                            IrThen::ReturnExit { exit } => {
+                                if ret_exit_terms.insert(*exit) {
+                                    let _ = writeln!(out, "    T_ret{exit}((\"ret #{exit}\"))");
+                                }
+                                let _ =
+                                    writeln!(edges, "    S{} -->|\"{call}\"| T_ret{exit}", st.id);
                             }
                             IrThen::Stop => {
                                 declare(&mut out, "T_stp", "stp", &mut terms);
@@ -705,6 +727,7 @@ fn lower_world(
         .expect("the entry names one of the world's states");
 
     let mut states = Vec::with_capacity(ew.states.len());
+    let mut forwarders = Forwarders::new(ew);
     for (i, s) in ew.states.iter().enumerate() {
         let mut rules = Vec::with_capacity(s.rules.len());
         for r in &s.rules {
@@ -715,6 +738,7 @@ fn lower_world(
                 expanded,
                 resolved,
                 externals,
+                &mut forwarders,
             )?);
         }
         states.push(IrState {
@@ -727,6 +751,9 @@ fn lower_world(
             dispatch: IrDispatch::Table,
         });
     }
+    // The one-row resume states the sites above minted, appended after the
+    // world's own — ids keep counting from where those left off.
+    states.extend(forwarders.into_states());
 
     let world = IrWorld {
         name: ew.name.clone(),
@@ -802,6 +829,7 @@ fn lower_world(
     Ok(world)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_rule(
     r: &ExpandedRule,
     ew: &ExpandedWorld,
@@ -809,6 +837,7 @@ fn lower_rule(
     expanded: &Expanded,
     resolved: &Resolved,
     externals: &Declarations,
+    forwarders: &mut Forwarders,
 ) -> Result<IrRule, CompileError> {
     let pattern: Vec<IrCell> = r
         .pattern
@@ -865,22 +894,14 @@ fn lower_rule(
             kind: CompileErrorKind::UndefinedState(name.to_string()),
         })
     };
-    // A resume point — a `then` continuation, or a `state` argument at a call
-    // site — names a LABEL of this world in the emitted assembly, so an exit
-    // of the enclosing routine cannot stand there.
-    let local_state = |name: &str| -> Result<u32, CompileError> {
-        match resolve_state(name)? {
-            StateTarget::State(id) => Ok(id),
-            StateTarget::Exit(_) => Err(CompileError {
-                span: r.span,
-                kind: CompileErrorKind::ExitTargetUnsupported(name.to_string()),
-            }),
-        }
-    };
+    // A `then` is the instruction AFTER the call, not a label, so an exit of
+    // the enclosing routine needs no state of its own there: it prints
+    // `retx #k` exactly where a `return` continuation prints `ret`.
     let then_of = |cont: &Continuation| -> Result<IrThen, CompileError> {
         Ok(match cont {
-            Continuation::State { name, .. } => IrThen::Goto {
-                state: local_state(name)?,
+            Continuation::State { name, .. } => match resolve_state(name)? {
+                StateTarget::State(state) => IrThen::Goto { state },
+                StateTarget::Exit(exit) => IrThen::ReturnExit { exit },
             },
             Continuation::Return { .. } => IrThen::Return,
             Continuation::Stop { .. } => IrThen::Stop,
@@ -914,14 +935,7 @@ fn lower_rule(
             // would otherwise try to read as a tape target gets its own
             // diagnostic here.
             let exits = resolve_exits(
-                ew,
-                target,
-                args,
-                *external,
-                expanded,
-                externals,
-                &local_state,
-                r.span,
+                ew, target, args, *external, expanded, externals, name_to_id, forwarders, r.span,
             )?;
             let binding =
                 resolve_binding(ew, target, args, *external, expanded, externals, r.span)?;
@@ -959,7 +973,8 @@ fn lower_rule(
                 bind.external,
                 expanded,
                 externals,
-                &local_state,
+                name_to_id,
+                forwarders,
                 r.span,
             )?;
             let binding = resolve_binding(
@@ -1029,7 +1044,8 @@ fn resolve_exits(
     external: bool,
     expanded: &Expanded,
     externals: &Declarations,
-    resolve_state: &dyn Fn(&str) -> Result<u32, CompileError>,
+    name_to_id: &HashMap<&str, u32>,
+    forwarders: &mut Forwarders,
     site: Span,
 ) -> Result<Vec<u32>, CompileError> {
     let state_params: Vec<String> = if external {
@@ -1080,12 +1096,31 @@ fn resolve_exits(
                 kind: CompileErrorKind::MissingArg(param.clone()),
             });
         };
+        let line = site.start.line;
         match &arg.value {
             BindingValue::Named {
                 target: name,
                 map: None,
                 ..
-            } => exits.push(resolve_state(name)?),
+            } => {
+                // A state of this world is the id itself; the enclosing
+                // routine's own exit needs somewhere to stand, since the
+                // operand names labels — so it resumes at a one-row state
+                // that leaves through that exit.
+                let id = match name_to_id.get(name.as_str()).copied() {
+                    Some(id) => id,
+                    None => match host.state_params.iter().position(|p| p == name) {
+                        Some(k) => forwarders.resume(Resume::Exit(k as u32), line),
+                        None => {
+                            return Err(CompileError {
+                                span: arg.span,
+                                kind: CompileErrorKind::UndefinedState(name.clone()),
+                            });
+                        }
+                    },
+                };
+                exits.push(id);
+            }
             // A `with map` makes the argument definitively a tape target.
             BindingValue::Named { .. } => {
                 return Err(CompileError {
@@ -1096,25 +1131,144 @@ fn resolve_exits(
                     },
                 });
             }
-            // The operand names labels of this world; a terminator has
-            // none to name (a `graft` wires one straight into the spliced
-            // copy instead, which is why the same spelling is legal there).
+            // A terminator resumes at a one-row state that ends the run,
+            // the same way a forwarded exit does — the operand has only
+            // labels to name. `return` outside a routine stays the front
+            // end's refusal rather than becoming a `ret` the machine world
+            // would underflow on.
             BindingValue::Terminator { kind, span } => {
-                return Err(CompileError {
-                    span: *span,
-                    kind: CompileErrorKind::ExitTargetUnsupported(
-                        match kind {
-                            TermKind::Return => "return",
-                            TermKind::Stop => "stop",
-                            TermKind::Halt => "halt",
+                let resume = match kind {
+                    TermKind::Return => {
+                        if host.kind != WorldKind::Routine {
+                            return Err(CompileError {
+                                span: *span,
+                                kind: CompileErrorKind::ReturnOutsideRoutine,
+                            });
                         }
-                        .to_string(),
-                    ),
-                });
+                        Resume::Return
+                    }
+                    TermKind::Stop => Resume::Stop,
+                    TermKind::Halt => Resume::Halt,
+                };
+                exits.push(forwarders.resume(resume, line));
             }
         }
     }
     Ok(exits)
+}
+
+/// What one exit of a call site resumes at when the `state` argument names
+/// no state of the calling world: an exit of the ENCLOSING routine (a
+/// forwarded continuation — the facade idiom), or a terminator.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Resume {
+    Exit(u32),
+    Return,
+    Stop,
+    Halt,
+}
+
+/// The one-row states those resume points need, minted per world.
+///
+/// An `exits=(…)` operand names LABELS, so a resume point that is not a
+/// state of the calling world gets one: a single all-wildcard row with no
+/// write and no move, whose transition is the `retx #k` / `ret` / `stp` /
+/// `hlt` the argument asked for. One state per distinct resume point per
+/// world (memoized), named so it cannot collide with a state the source
+/// declares, and appended after the world's own states so every id stays
+/// dense.
+///
+/// Nothing else in the pipeline needs to know they are minted: they are
+/// ordinary reachable states, their single row is never a `goto` (so
+/// `jump_threading` leaves them alone and `outline` cannot absorb them),
+/// and two identical ones legitimately merge. The only place that must
+/// care is the unreachable-state warning, which correlates ids back to
+/// SOURCE states and has none for these.
+struct Forwarders {
+    arity: usize,
+    /// The id the next minted state takes — the world's own states first.
+    next_id: u32,
+    /// Every state name already spoken for, so a minted one is distinct.
+    used: HashSet<String>,
+    memo: HashMap<Resume, u32>,
+    states: Vec<IrState>,
+}
+
+impl Forwarders {
+    fn new(ew: &ExpandedWorld) -> Self {
+        Forwarders {
+            arity: ew.tapes.len(),
+            next_id: ew.states.len() as u32,
+            used: ew.states.iter().map(|s| s.name.clone()).collect(),
+            memo: HashMap::new(),
+            states: Vec::new(),
+        }
+    }
+
+    /// The id of the state resuming at `kind`, minting it on first use.
+    /// `line` is the first site that asked — the source position a debug
+    /// build maps the row to.
+    fn resume(&mut self, kind: Resume, line: u32) -> u32 {
+        if let Some(id) = self.memo.get(&kind) {
+            return *id;
+        }
+        let base = match kind {
+            Resume::Exit(k) => format!("exit{k}"),
+            Resume::Return => "exitReturn".to_string(),
+            Resume::Stop => "exitStop".to_string(),
+            Resume::Halt => "exitHalt".to_string(),
+        };
+        let name = fresh_state_name(&mut self.used, &base);
+        let id = self.next_id;
+        self.next_id += 1;
+        self.states.push(IrState {
+            id,
+            name,
+            line,
+            rules: vec![IrRule {
+                pattern: vec![IrCell::Wildcard; self.arity],
+                write: None,
+                moves: None,
+                debugger: false,
+                transition: match kind {
+                    Resume::Exit(exit) => IrTransition::ReturnExit { exit },
+                    Resume::Return => IrTransition::Return,
+                    Resume::Stop => IrTransition::Stop,
+                    Resume::Halt => IrTransition::Halt,
+                },
+                // `synthesized` marks a graft hole's trap row, which this
+                // is not: the flag gates traps, and this row carries none.
+                synthesized: false,
+                direct: false,
+                line,
+            }],
+            dispatch: IrDispatch::Table,
+        });
+        self.memo.insert(kind, id);
+        id
+    }
+
+    fn into_states(self) -> Vec<IrState> {
+        self.states
+    }
+}
+
+/// A state name distinct from every name already taken, inserting it before
+/// returning: `base`, then `base_1`, `base_2`, … Mirrors codegen's own
+/// label minting, and keeps the result a plain identifier so it stays a
+/// legal assembly label.
+fn fresh_state_name(used: &mut HashSet<String>, base: &str) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut i = 1;
+    loop {
+        let cand = format!("{base}_{i}");
+        if used.insert(cand.clone()) {
+            return cand;
+        }
+        i += 1;
+    }
 }
 
 /// The host physical tape a binding arg's target names — the CALLER-side
@@ -1191,9 +1345,10 @@ fn resolve_binding(
     // A named binding arg (`name = target`) is a tape-target binding OR a
     // state-param continuation — a bare name is either, resolution decides.
     // A call with no named args carries no binding at all (a plain call the
-    // linker resolves), so it needs no callee signature. State-param args do
-    // not match any callee tape and drop out of the loop below; the composition
-    // engine threads them (out of scope here).
+    // linker resolves), so it needs no callee signature. A state-param arg
+    // matches no callee tape and drops out of the loop below: it belongs to
+    // the exits vector, which this function's own caller resolves first
+    // (`resolve_exits`).
     let named_args: Vec<&BindingArg> = args
         .iter()
         .filter(|a| matches!(&a.value, BindingValue::Named { .. }))
@@ -1402,8 +1557,13 @@ fn unreachable_state_warnings(world: &IrWorld, ew: &ExpandedWorld, warnings: &mu
             match &r.transition {
                 IrTransition::Goto { state } => work.push(*state),
                 IrTransition::CallThen { exits, then, .. } => {
-                    if let IrThen::Goto { state } = then {
-                        work.push(*state);
+                    match then {
+                        IrThen::Goto { state } => work.push(*state),
+                        // The other resumes are instructions, not states.
+                        IrThen::Return
+                        | IrThen::ReturnExit { .. }
+                        | IrThen::Stop
+                        | IrThen::Halt => {}
                     }
                     // Every exit of the callee resumes at one of this
                     // world's states — an edge as real as the `then`, and
@@ -1423,10 +1583,19 @@ fn unreachable_state_warnings(world: &IrWorld, ew: &ExpandedWorld, warnings: &mu
         }
     }
     for st in &world.states {
+        // Only a state the SOURCE declares can be reported: the resume
+        // states a call site mints have no source counterpart to point at,
+        // and each exists only because a site names it, so none is ever
+        // unreachable in the first place. Correlating by index rather than
+        // assuming the two lists are the same length is what keeps that a
+        // fact about the warning rather than about the id space.
+        let Some(source) = ew.states.get(st.id as usize) else {
+            continue;
+        };
         if !seen.contains(&st.id) {
             warnings.push(Diagnostic {
                 code: "unreachable-state",
-                span: ew.states[st.id as usize].name_span,
+                span: source.name_span,
                 message: format!("state `{}` is unreachable in `{}`", st.name, world.name),
                 fix: None,
             });
@@ -1588,8 +1757,20 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                     then,
                     ..
                 } => {
-                    if let IrThen::Goto { state } = then {
-                        in_state(*state)?;
+                    match then {
+                        IrThen::Goto { state } => in_state(*state)?,
+                        // `retx #k` at the resume point leaves through an
+                        // exit of THIS world, so the number is bounded the
+                        // same way the terminal form is.
+                        IrThen::ReturnExit { exit } => {
+                            if *exit >= w.exits as u32 {
+                                return Err(format!(
+                                    "{}: state {} resumes through exit {} (the world declares {})",
+                                    w.name, st.id, exit, w.exits
+                                ));
+                            }
+                        }
+                        IrThen::Return | IrThen::Stop | IrThen::Halt => {}
                     }
                     // An exits entry is an in-world resume point, so it is
                     // bounds-checked exactly as a `then` target is.
@@ -2553,25 +2734,110 @@ machine {
         assert_eq!(second.transition, IrTransition::ReturnExit { exit: 1 });
     }
 
-    /// A `then` continuation names a LABEL of the calling world, so an
-    /// exit of the enclosing routine cannot stand there — reported rather
-    /// than silently resumed at the wrong place.
+    /// A `then` continuation is the instruction after the call, so an exit
+    /// of the enclosing routine needs no state of its own there: the
+    /// continuation IS the `retx #k`. Mutation: resolving the continuation
+    /// through the world's states first, which would report the parameter
+    /// as an undefined state.
     #[test]
-    fn a_state_param_cannot_be_a_then_continuation() {
+    fn a_state_param_as_a_then_continuation_returns_through_its_exit() {
         let src = "\
 alphabet ab { '_', 'a' }
 routine leaf(tape t: ab) {
   entry state s { [*] -> return; }
 }
-routine r(tape t: ab, state k) {
-  entry state s { [*] -> call leaf(t = t) then k; }
+routine r(tape t: ab, state first, state second) {
+  entry state s { [*] -> call leaf(t = t) then second; }
 }
 machine {
   tape t: ab;
   entry state go { [*] -> stop; }
 }";
+        let (ir, _) = lower_of(src);
+        let r = world(&ir, "r");
+        let IrTransition::CallThen { then, .. } = &state(r, "s").rules[0].transition else {
+            panic!("a call row");
+        };
+        // `second` is the SECOND `state` parameter, so exit 1 — and no
+        // state was minted for it (the world keeps its one source state).
+        assert_eq!(*then, IrThen::ReturnExit { exit: 1 });
+        assert_eq!(r.states.len(), 1, "a `then` needs no resume state");
+    }
+
+    /// A `state` ARGUMENT, unlike a `then`, names a label — so an argument
+    /// that is not a state of this world resumes at a one-row state that
+    /// leaves the way the argument asked. One per distinct resume point,
+    /// shared by every site that asks for it.
+    ///
+    /// Mutation: minting a fresh state per SITE instead of memoizing;
+    /// the state count goes up and the two sites stop sharing.
+    #[test]
+    fn a_forwarded_exit_and_a_terminator_argument_resume_at_one_row_states() {
+        let src = "\
+alphabet ab { '_', 'a' }
+routine inner(tape t: ab, state hit, state miss) {
+  entry state s { ['a'] -> goto hit; [*] -> goto miss; }
+}
+routine outer(tape t: ab, state done) {
+  entry state s { [*] -> call inner(t = t, hit = done, miss = stop) then again; }
+  state again { [*] -> call inner(t = t, hit = done, miss = stop) then done2; }
+  state done2 { [*] -> return; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call outer(t = t, done = fin) then fin; }
+  state fin { [*] -> stop; }
+}";
+        let (ir, _) = lower_of(src);
+        let outer = world(&ir, "outer");
+        // Three source states plus exactly two minted ones — the forwarded
+        // exit and the `stop`, each shared by both sites.
+        assert_eq!(outer.states.len(), 5, "{:?}", outer.states);
+        let minted: Vec<(&str, &IrTransition)> = outer.states[3..]
+            .iter()
+            .map(|s| (s.name.as_str(), &s.rules[0].transition))
+            .collect();
+        assert_eq!(
+            minted,
+            vec![
+                ("exit0", &IrTransition::ReturnExit { exit: 0 }),
+                ("exitStop", &IrTransition::Stop),
+            ]
+        );
+        for st in &outer.states[3..] {
+            assert_eq!(st.rules.len(), 1, "one row");
+            assert!(
+                st.rules[0].write.is_none() && st.rules[0].moves.is_none(),
+                "a resume state disturbs no tape: {:?}",
+                st.rules[0]
+            );
+        }
+        // Both sites name the same two ids, in the callee's order.
+        let exits_of = |name: &str| match &state(outer, name).rules[0].transition {
+            IrTransition::CallThen { exits, .. } => exits.clone(),
+            other => panic!("a call row, got {other:?}"),
+        };
+        assert_eq!(exits_of("s"), vec![3, 4]);
+        assert_eq!(exits_of("again"), vec![3, 4]);
+    }
+
+    /// `return` as a `state` argument inside the machine world keeps the
+    /// front end's refusal: `main` has no caller to return to. Mutation:
+    /// minting a `Return` resume state regardless of the world kind.
+    #[test]
+    fn a_return_argument_in_the_machine_world_is_refused() {
+        let src = "\
+alphabet ab { '_', 'a' }
+routine inner(tape t: ab, state hit) {
+  entry state s { [*] -> goto hit; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call inner(t = t, hit = return) then fin; }
+  state fin { [*] -> stop; }
+}";
         let e = lower_err_of(src);
-        assert_eq!(e.kind.code(), "exit-target-unsupported");
+        assert_eq!(e.kind.code(), "return-outside-routine");
     }
 
     #[test]
@@ -2650,6 +2916,45 @@ machine {
         assert!(mer.contains("-->|"), "{mer}");
         // The `stop` row routes to the shared terminal node.
         assert!(mer.contains("T_stp"), "{mer}");
+    }
+
+    /// The graph shows every way control leaves a call: one edge per
+    /// declared exit, labelled with its number, plus the `then` — a
+    /// call whose exits were dropped would render as a straight line
+    /// through code that can branch three ways.
+    ///
+    /// Mutation: render the `then` alone; both exit edges disappear.
+    #[test]
+    fn to_mermaid_renders_a_calls_exit_edges() {
+        let src = "\
+alphabet ab { '_', 'a' }
+routine inner(tape t: ab, state hit, state miss) {
+  entry state s { ['a'] -> goto hit; [*] -> goto miss; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call inner(t = t, hit = won, miss = lost) then done; }
+  state won  { [*] -> stop; }
+  state lost { [*] -> stop; }
+  state done { [*] -> halt; }
+}";
+        let (ir, _) = lower_of(src);
+        let m = world(&ir, "main");
+        let mer = m.to_mermaid();
+        let won = state(m, "won").id;
+        let lost = state(m, "lost").id;
+        assert!(
+            mer.contains(&format!("exit #0\"| S{won}")),
+            "exit 0 reaches `won`:\n{mer}"
+        );
+        assert!(
+            mer.contains(&format!("exit #1\"| S{lost}")),
+            "exit 1 reaches `lost`:\n{mer}"
+        );
+        // A `then` that leaves through an exit renders as a terminal, the
+        // way `ret` does — pinned here because nothing else renders one.
+        let routine_graph = world(&ir, "inner").to_mermaid();
+        assert!(routine_graph.contains("ret #0"), "{routine_graph}");
     }
 
     #[test]

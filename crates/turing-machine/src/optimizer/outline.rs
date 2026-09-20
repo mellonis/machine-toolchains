@@ -221,17 +221,28 @@ fn compute_inbound(w: &IrWorld) -> HashMap<u32, Vec<u32>> {
     for st in &w.states {
         for r in &st.rules {
             match &r.transition {
-                IrTransition::Goto { state }
-                | IrTransition::CallThen {
-                    then: IrThen::Goto { state },
-                    ..
-                } => inbound.entry(*state).or_default().push(st.id),
-                _ => {}
-            }
-            if let IrTransition::CallThen { exits, .. } = &r.transition {
-                for e in exits {
-                    inbound.entry(*e).or_default().push(st.id);
+                IrTransition::Goto { state } => inbound.entry(*state).or_default().push(st.id),
+                IrTransition::CallThen { exits, then, .. } => {
+                    match then {
+                        IrThen::Goto { state } => inbound.entry(*state).or_default().push(st.id),
+                        // The other resume points are instructions after
+                        // the call, naming no state of this world.
+                        IrThen::Return
+                        | IrThen::ReturnExit { .. }
+                        | IrThen::Stop
+                        | IrThen::Halt => {}
+                    }
+                    for e in exits {
+                        inbound.entry(*e).or_default().push(st.id);
+                    }
                 }
+                IrTransition::TailCall { .. }
+                | IrTransition::Return
+                | IrTransition::ReturnExit { .. }
+                | IrTransition::Stop
+                | IrTransition::Halt
+                | IrTransition::TrapRead
+                | IrTransition::TrapWrite => {}
             }
         }
     }

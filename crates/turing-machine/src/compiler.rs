@@ -317,12 +317,6 @@ pub enum CompileErrorKind {
     /// carries no parameter names, so without the callee's own signature
     /// there is no order to write it in. `name` is the callee.
     StateArgsNeedDeclarations(String),
-    /// A resume point names something that is not a state of this world: a
-    /// terminator, or the enclosing routine's own `state` parameter. Both a
-    /// `call`'s `state` argument and its `then` resume at a LABEL of the
-    /// calling world, so neither can carry one yet. `name` is what was
-    /// written.
-    ExitTargetUnsupported(String),
 
     // -- codegen / assemble orchestration ----------------------------------
     /// A compiler-internal invariant broke: the codegen-produced `.tma`
@@ -459,7 +453,6 @@ impl CompileErrorKind {
         CompileErrorKind::RowWidth { .. } => "row-width",
         CompileErrorKind::TooManyStateParams(_) => "too-many-state-params",
         CompileErrorKind::StateArgsNeedDeclarations(_) => "state-args-need-declarations",
-        CompileErrorKind::ExitTargetUnsupported(_) => "exit-target-unsupported",
         CompileErrorKind::Internal(_) => "internal-error",
     }
 }
@@ -835,18 +828,12 @@ impl std::fmt::Display for CompileErrorKind {
                 )
             }
             CompileErrorKind::TooManyStateParams(n) => {
-                write!(f, "{n} `state` parameters — a routine has at most 255")
+                write!(f, "{n} `state` parameters — a signature has at most 255")
             }
             CompileErrorKind::StateArgsNeedDeclarations(name) => {
                 write!(
                     f,
-                    "this call hands `state` arguments to `{name}`, whose declarations are not given — an exits vector is positional, so the callee's own parameter order is needed (pass `--extern`, or declare it locally)"
-                )
-            }
-            CompileErrorKind::ExitTargetUnsupported(name) => {
-                write!(
-                    f,
-                    "`{name}` cannot be a resume point — a `call`'s `state` argument and its `then` each name a state of this world"
+                    "this call hands `state` arguments to `{name}`, whose declarations are not given — an exits vector is positional, so the callee's own parameter order is needed: give them with `tmt compile --extern <file>.tmh`, or declare the callee in this unit. If the argument meant a tape instead, it names none of this world's"
                 )
             }
             CompileErrorKind::Internal(m) => write!(f, "internal compiler error: {m}"),
@@ -2435,27 +2422,12 @@ fn resolve_world(
                     )?,
                 });
             }
-            SigParamKind::State => {
-                // A routine's `state` parameters are its exits, and the
-                // published exit count is one byte wide
-                // (docs/formats.md (routine interfaces)) — so the 256th has
-                // no number to carry. Refused at the parameter itself;
-                // `ir::lower_world`'s own narrowing raises the same error
-                // from its explicit conversion, so neither the check nor
-                // the narrowing can drift into a silent truncation.
-                if state_params.len() == u8::MAX as usize {
-                    let declared = sig
-                        .params
-                        .iter()
-                        .filter(|q| matches!(q.kind, SigParamKind::State))
-                        .count();
-                    return Err(CompileError {
-                        span: p.name_span,
-                        kind: CompileErrorKind::TooManyStateParams(declared),
-                    });
-                }
-                state_params.push(p.name.clone());
-            }
+            // A signature's `state` parameters are its exits. The ceiling
+            // on how many there may be is enforced in ONE place — the
+            // explicit narrowing that publishes the count
+            // (`ir::lower_world`) — so the check and the conversion cannot
+            // drift apart, and no second guard can mask a truncation here.
+            SigParamKind::State => state_params.push(p.name.clone()),
         }
     }
     let (grafts, binds, entry) = resolve_world_reuse(grafts, binds, states, ns, scopes)?;
@@ -3895,7 +3867,6 @@ mod tests {
             },
             CompileErrorKind::TooManyStateParams(256),
             CompileErrorKind::StateArgsNeedDeclarations("x".into()),
-            CompileErrorKind::ExitTargetUnsupported("x".into()),
             CompileErrorKind::Internal("x".into()),
         ];
         let witnessed: Vec<&str> = all.iter().map(|k| k.code()).collect();

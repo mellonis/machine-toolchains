@@ -318,9 +318,15 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
             // parameter's name is compile-time material the object never
             // holds (docs/formats.md (routine interfaces)) — so the exits
             // print positionally. A caller reading this header binds them
-            // by position, which is exactly how the vector travels.
+            // by position, which is exactly how the vector travels. The
+            // minted names are freshened against the tape parameters this
+            // routine already prints: a tape literally named `exit0` would
+            // otherwise yield a signature naming one parameter twice,
+            // which the strict reader rejects — a header that does not
+            // re-parse.
+            let mut taken: HashSet<String> = routine.params.iter().cloned().collect();
             for k in 0..routine.exits {
-                params.push(format!("state exit{k}"));
+                params.push(format!("state {}", fresh_param_name(&mut taken, k)));
             }
             let lines = vec![format!("export routine {local}({});", params.join(", "))];
             root.insert(&ns, lines);
@@ -1083,6 +1089,25 @@ fn sig_param_text(
                 .collect();
             tape_param_text(&param.name, alphabet, &writes)
         }
+    }
+}
+
+/// The positional name exit `k` prints under on the object arm: `exit<k>`
+/// unless something already printed in this signature claims it, then
+/// `exit<k>_1`, `exit<k>_2`, … Deterministic given the signature, and
+/// distinct from every name beside it, so the rendered header re-parses.
+fn fresh_param_name(taken: &mut HashSet<String>, k: u8) -> String {
+    let base = format!("exit{k}");
+    if taken.insert(base.clone()) {
+        return base;
+    }
+    let mut i = 1;
+    loop {
+        let cand = format!("{base}_{i}");
+        if taken.insert(cand.clone()) {
+            return cand;
+        }
+        i += 1;
     }
 }
 

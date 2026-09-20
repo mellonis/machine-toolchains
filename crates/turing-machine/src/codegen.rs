@@ -124,10 +124,14 @@ enum Term {
     TrapWrite,
 }
 
-/// A `call … then` resume point.
+/// A `call … then` resume point — one instruction after the call, except
+/// a `goto` that may elide into a fall-through.
 enum Then {
     Goto(String),
     Ret,
+    /// `retx #k` where [`Then::Ret`] prints `ret`: the continuation leaves
+    /// the enclosing routine through its exit `k`.
+    RetExit(u32),
     Stop,
     Halt,
 }
@@ -648,6 +652,7 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
             let then = match then {
                 IrThen::Goto { state } => Then::Goto(state_label(w, *state)),
                 IrThen::Return => Then::Ret,
+                IrThen::ReturnExit { exit } => Then::RetExit(*exit),
                 IrThen::Stop => Then::Stop,
                 IrThen::Halt => Then::Halt,
             };
@@ -965,6 +970,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                 match then {
                     Then::Goto(t) => emit_goto(e, t),
                     Then::Ret => e.push(grid(None, "ret", ""), b.term_line),
+                    Then::RetExit(k) => e.push(grid(None, "retx", &format!("#{k}")), b.term_line),
                     Then::Stop => e.push(grid(None, "stp", ""), b.term_line),
                     Then::Halt => e.push(grid(None, "hlt", ""), b.term_line),
                 }

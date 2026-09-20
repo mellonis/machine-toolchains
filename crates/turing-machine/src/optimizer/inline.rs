@@ -198,17 +198,15 @@ pub fn run(ir: &mut IrProgram, options: &OptOptions) -> u32 {
 fn find_site(caller: &IrWorld, candidates: &HashMap<String, IrWorld>) -> Option<(usize, usize)> {
     for (si, st) in caller.states.iter().enumerate() {
         for (ri, r) in st.rules.iter().enumerate() {
+            // A site's exits are non-empty exactly when its callee declares
+            // some, and such a callee is not in the candidate set at all
+            // (the module doc's conservatism) — so the eligibility rule
+            // lives in ONE place rather than being restated here, where a
+            // second guard would mask its removal.
             if let IrTransition::CallThen {
-                target,
-                binding,
-                exits,
-                ..
+                target, binding, ..
             } = &r.transition
                 && target != &caller.name
-                // Redundant with the candidate filter for an in-unit
-                // callee, and stated anyway: a site lending its exit
-                // vector is never spliced.
-                && exits.is_empty()
                 && let Some(callee) = candidates.get(target)
                 && callee.arity <= caller.arity
                 && is_full_passthrough(binding, caller, callee)
@@ -292,6 +290,9 @@ fn remap_transition(t: &IrTransition, base: u32, then: IrThen) -> IrTransition {
         IrTransition::Return => match then {
             IrThen::Goto { state } => IrTransition::Goto { state },
             IrThen::Return => IrTransition::Return,
+            // The site resumed by leaving the CALLER through one of its own
+            // exits, so a copied `return` does exactly that instead.
+            IrThen::ReturnExit { exit } => IrTransition::ReturnExit { exit },
             IrThen::Stop => IrTransition::Stop,
             IrThen::Halt => IrTransition::Halt,
         },
