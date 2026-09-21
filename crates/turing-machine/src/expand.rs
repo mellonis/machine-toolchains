@@ -1130,12 +1130,18 @@ pub(crate) fn check_named_map_decl(
 /// substitution (graph state-param → the host continuation the graft binds).
 /// The T4 world checks guarantee every parameter is bound with a
 /// kind-correct argument, so the "impossible" branches are invariants.
+/// `host_owner`/`graph_owner`: the modules `host` and `graph` respectively
+/// belong to — usually the SAME module (an in-unit graft, or a nested graft
+/// inside one library graph reaching a sibling of the same library), but
+/// never assumed to be: a library graph's own tape alphabet resolves in
+/// `graph_owner`'s scope, the host's in `host_owner`'s
+/// (`alphabet_glyphs`'s own doc).
 fn build_composite(
     graft: &ResolvedGraft,
     host: &ResolvedWorld,
+    host_owner: &Resolved,
     graph: &ResolvedWorld,
-    resolved: &Resolved,
-    ext_modules: &[&Resolved],
+    graph_owner: &Resolved,
 ) -> Result<(Composite, HashMap<String, Transition2>), CompileError> {
     let args: HashMap<&str, &BindingArg> =
         graft.args.iter().map(|a| (a.name.as_str(), a)).collect();
@@ -1153,11 +1159,11 @@ fn build_composite(
             .iter()
             .position(|t| &t.name == target)
             .expect("T4 resolves the tape target to a host tape");
-        let host_glyphs = alphabet_glyphs(&host.tapes[phys].alphabet, resolved, ext_modules);
-        // The graph's OWN tape alphabet — local for an in-unit graph,
-        // resolved through the declarations table for a library graph
-        // grafted from a header (`alphabet_glyphs`'s own doc).
-        let graph_glyphs = alphabet_glyphs(&gt.alphabet, resolved, ext_modules);
+        let host_glyphs = alphabet_glyphs(&host.tapes[phys].alphabet, host_owner);
+        // The graph's OWN tape alphabet resolves in the GRAPH's own owner —
+        // local for an in-unit graph (where `graph_owner` IS `host_owner`),
+        // or the library's own module for one grafted from a header.
+        let graph_glyphs = alphabet_glyphs(&gt.alphabet, graph_owner);
         tapes.push(build_tapemap(
             map.as_ref(),
             phys,
@@ -1309,39 +1315,38 @@ impl NameGen {
     }
 }
 
-fn tape_infos(
-    world: &ResolvedWorld,
-    resolved: &Resolved,
-    ext_modules: &[&Resolved],
-) -> Vec<TapeInfo> {
+/// `owner` is the module `world` itself belongs to (this compile's own
+/// `Resolved` for a host world or a local graph; the declaring library's
+/// `Resolved` for one reached through the declarations table) — NEVER the
+/// consumer's, once `world` is foreign (`alphabet_glyphs`'s own doc).
+fn tape_infos(world: &ResolvedWorld, owner: &Resolved) -> Vec<TapeInfo> {
     world
         .tapes
         .iter()
-        .map(|t| TapeInfo::new(alphabet_glyphs(&t.alphabet, resolved, ext_modules)))
+        .map(|t| TapeInfo::new(alphabet_glyphs(&t.alphabet, owner)))
         .collect()
 }
 
-/// A tape alphabet's glyph list, resolved the same local/cross-unit way
-/// `compiler::resolve_tape_alphabet` resolves a tape's own reference: this
-/// unit's own `resolved.alphabets` first, then the declarations table. A
-/// HOST world's tapes are always local (`resolve_tape_alphabet` already
-/// inserted an imported entry into `resolved.alphabets` at resolve time),
-/// but a GRAFTED library graph's own tapes name alphabets of the LIBRARY's
-/// own unit — the header prints every alphabet a printed graph body
-/// references (`docs/tmt/language.md (headers)`), so those names resolve
-/// here through the same declarations table the graft target itself came
-/// from.
-fn alphabet_glyphs<'a>(
-    name: &str,
-    resolved: &'a Resolved,
-    ext_modules: &[&'a Resolved],
-) -> &'a [String] {
-    if let Some(a) = resolved.alphabets.get(name) {
-        return &a.glyphs;
-    }
-    crate::compiler::find_external_alphabet(ext_modules, name).expect(
-        "a spliced graph's tape alphabet resolves locally or through the declarations table",
-    )
+/// A tape alphabet's glyph list, resolved in `owner`'s OWN scope — never
+/// the consumer's. `owner` already carries every alphabet any of ITS OWN
+/// tapes can reference: `resolve_tape_alphabet` inserts an imported entry
+/// into a module's `resolved.alphabets` at THAT module's own resolve time
+/// (whether that module is this compile's own source or a library read
+/// through `header::read_extern`), so a direct lookup here needs no
+/// further fallback. This is the fix for a name-capture hazard: a spliced
+/// library graph's own tape alphabets must resolve in the LIBRARY's scope
+/// even when the consumer happens to declare an alphabet of the identical
+/// mangled name — looking in the consumer's own table first (the earlier,
+/// wrong shape of this function) let a same-named local declaration
+/// silently re-index or refuse an otherwise-valid graft, while the object
+/// still recorded the library's own digest (docs/tmt/language.md
+/// (headers)).
+fn alphabet_glyphs<'a>(name: &str, owner: &'a Resolved) -> &'a [String] {
+    &owner
+        .alphabets
+        .get(name)
+        .unwrap_or_else(|| panic!("`{name}` is not in its own declaring module's alphabets"))
+        .glyphs
 }
 
 /// A world's user-visible state-name space (own states, graft instances,
@@ -1439,15 +1444,20 @@ fn expand_grafts_into<'a>(
         // own check already proved it is present one place or the other) —
         // a library graph read from a header, `docs/tmt/language.md
         // (headers)`. Record it (deduped) so `compiler::compile` can emit
-        // its `.grafted` digest line.
-        let graph = match graphs.get(graft.target.as_str()) {
-            Some(&g) => g,
+        // its `.grafted` digest line. `graph_owner` is the module `graph`
+        // itself belongs to — `resolved` (this function's own, i.e. the
+        // HOST's owner) for a local target, the declaring library's module
+        // for an external one — never assumed to be `resolved` once the
+        // target is foreign (`alphabet_glyphs`'s own doc).
+        let (graph, graph_owner) = match graphs.get(graft.target.as_str()) {
+            Some(&g) => (g, resolved),
             None => {
                 if !spliced_external.iter().any(|n| n == &graft.target) {
                     spliced_external.push(graft.target.clone());
                 }
-                crate::compiler::find_external_graph(ext_modules, graft.target.as_str())
-                    .expect("resolve_world_reuse only accepts a target present locally or in the declarations table")
+                let (owner, g) = crate::compiler::find_external_graph(ext_modules, graft.target.as_str())
+                    .expect("resolve_world_reuse only accepts a target present locally or in the declarations table");
+                (g, owner)
             }
         };
         let gx = expand_graph(
@@ -1471,7 +1481,7 @@ fn expand_grafts_into<'a>(
                 kind: CompileErrorKind::GraftCallUnsupported(call.to_string()),
             });
         }
-        let (comp, cont) = build_composite(graft, host, graph, resolved, ext_modules)?;
+        let (comp, cont) = build_composite(graft, host, resolved, graph, graph_owner)?;
 
         let mut key = graft.target.clone().into_bytes();
         key.push(0);
@@ -1583,20 +1593,38 @@ fn expand_graph<'a>(
     if let Some(gx) = memo.get(name) {
         return Ok(gx.clone());
     }
-    let world = match graphs.get(name) {
-        Some(&w) => w,
-        None => crate::compiler::find_external_graph(ext_modules, name)
-            .expect("resolve_world_reuse only accepts a target present locally or in the declarations table"),
+    // `owner`: the module `world` itself belongs to — `resolved` (this
+    // call's own host scope) for a local target, or the declaring
+    // library's own module for one reached through the declarations
+    // table. Once a graph is foreign, EVERYTHING about its own body — its
+    // tapes (`tape_infos` below) and any of its OWN nested graft targets
+    // (`owner_graphs` below) — resolves in `owner`'s scope, never the
+    // caller's: a consumer that happens to declare a same-mangled-name
+    // alphabet or graph must not be able to re-target or refuse a body
+    // that is not its own (`alphabet_glyphs`'s own doc).
+    let (world, owner): (&'a ResolvedWorld, &'a Resolved) = match graphs.get(name) {
+        Some(&w) => (w, resolved),
+        None => {
+            let (owner, w) = crate::compiler::find_external_graph(ext_modules, name)
+                .expect("resolve_world_reuse only accepts a target present locally or in the declarations table");
+            (w, owner)
+        }
     };
-    let tapes = tape_infos(world, resolved, ext_modules);
+    let tapes = tape_infos(world, owner);
     let mut states = Vec::new();
     expand_own_states(world, &tapes, warn, &mut states)?;
     let mut namegen = NameGen::new(reserved_names(world));
     let mut alias = HashMap::new();
+    let owner_graphs: HashMap<&str, &ResolvedWorld> = owner
+        .worlds
+        .iter()
+        .filter(|w| w.kind == WorldKind::Graph)
+        .map(|w| (w.name.as_str(), w))
+        .collect();
     let graft_entry = expand_grafts_into(
         world,
-        resolved,
-        graphs,
+        owner,
+        &owner_graphs,
         ext_modules,
         memo,
         warn,
@@ -1759,7 +1787,7 @@ pub(crate) fn expand(
         if Some(idx) == resolved.entry_world {
             entry_world = Some(worlds.len());
         }
-        let tapes = tape_infos(world, resolved, &ext_modules);
+        let tapes = tape_infos(world, resolved);
         let mut states = Vec::new();
         expand_own_states(world, &tapes, &mut diagnostics, &mut states)?;
         let mut namegen = NameGen::new(reserved_names(world));
@@ -1779,10 +1807,15 @@ pub(crate) fn expand(
         resolve_aliases(&mut states, &alias);
         let entry = Some(world_entry(world, graft_entry, &alias));
 
+        // A HOST world's own tapes, never foreign — the same direct lookup
+        // `alphabet_glyphs` makes, inlined here since `per_tape_glyphs`
+        // wants owned `Vec<String>`s rather than borrowed slices (M3: this
+        // line and `tape_infos`'s own lookup, three lines above, now agree
+        // on how an alphabet is resolved).
         let per_tape_glyphs: Vec<Vec<String>> = world
             .tapes
             .iter()
-            .map(|t| resolved.alphabets[&t.alphabet].glyphs.clone())
+            .map(|t| alphabet_glyphs(&t.alphabet, resolved).to_vec())
             .collect();
         for st in &states {
             check_state_rows(st, &per_tape_glyphs, &mut diagnostics)?;

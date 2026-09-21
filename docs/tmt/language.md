@@ -651,7 +651,14 @@ its signature, so a cross-unit graft resolves against the declarations
 table the same way an unresolved alphabet reference does. The object
 records the digest of the body it spliced, checked at link time against
 the exporting object's own digest for the same graph — a header with no
-compiled object in the link is not checked.
+compiled object in the link is not checked. A library graph's own body
+may only reach the library's own declarations and the embedded standard
+library's — a library graph whose body names a THIRD unit's alphabet or
+map cannot currently be printed as a header or consumed from one. A
+hand-written header must spell an alphabet reference exactly the way the
+printer does (a bare name where the printer would use one, a qualified
+path where it would); a differently-spelled but equivalent reference
+digests differently and trips the drift check at link.
 
 ### `bind`
 

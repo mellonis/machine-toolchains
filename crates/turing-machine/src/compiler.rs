@@ -2758,15 +2758,23 @@ fn find_external_map<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a R
 /// `--extern .tmc`). `pub(crate)`: both `resolve_world_reuse` (does the
 /// declarations table carry this target at all) and `expand.rs` (the
 /// splice itself, and its recursive nested grafts) call it.
+///
+/// Returns the OWNING module alongside the world, mirroring
+/// `footprint::find_external`'s own shape — `expand.rs` needs it: a spliced
+/// graph's own tape alphabets and any of ITS OWN nested graft targets
+/// resolve in the scope of the module that declared it, never the
+/// consumer's (docs/tmt/language.md (headers)), so the splice must carry
+/// that module forward, not just the world.
 pub(crate) fn find_external_graph<'a>(
     externals: &[&'a Resolved],
     name: &str,
-) -> Option<&'a ResolvedWorld> {
+) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
     externals.iter().find_map(|module| {
         module
             .worlds
             .iter()
             .find(|w| w.kind == WorldKind::Graph && w.name == name)
+            .map(|w| (*module, w))
     })
 }
 
@@ -3137,20 +3145,30 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     // grafts) — `expand::expand` records the name at the point its target
     // missed the local graph map; the digest itself was stamped onto that
     // graph's `ResolvedWorld` when its declarations module was read, since
-    // this unit has no AST of its own to recompute it from.
-    let spliced_grafts: Vec<GraftProvenance> = expanded
-        .spliced_external_graphs
-        .iter()
-        .map(|name| {
-            let digest = find_external_graph(&ext_modules, name)
-                .and_then(|w| w.digest)
-                .expect("a graph reached through the declarations table carries a stamped digest");
-            GraftProvenance {
-                graph: name.clone(),
-                digest,
-            }
-        })
-        .collect();
+    // this unit has no AST of its own to recompute it from. Every producer
+    // of a `Declarations` table stamps every graph world it carries
+    // (`Declarations::push_stdlib`, `header::read_extern`) — a missing
+    // digest here is a compiler bug in that invariant, not a user error, so
+    // it is reported the same way an internal invariant failure elsewhere in
+    // this function is (`CompileErrorKind::Internal`), never a panic
+    // reachable from ordinary source.
+    let mut spliced_grafts: Vec<GraftProvenance> =
+        Vec::with_capacity(expanded.spliced_external_graphs.len());
+    for name in &expanded.spliced_external_graphs {
+        let digest = find_external_graph(&ext_modules, name)
+            .and_then(|(_, w)| w.digest)
+            .ok_or_else(|| CompileError {
+                span: Span::point(0, 0),
+                kind: CompileErrorKind::Internal(format!(
+                    "graph `{name}` was reached through the declarations table but carries \
+                     no stamped digest"
+                )),
+            })?;
+        spliced_grafts.push(GraftProvenance {
+            graph: name.clone(),
+            digest,
+        });
+    }
 
     let tma = emit_program(
         &ir,
