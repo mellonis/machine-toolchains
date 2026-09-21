@@ -196,21 +196,34 @@ fn render_from_source(source: &str, mode: ReadMode) -> Result<String, CompileErr
     // itself runs over a freshly-expanded module — never re-derived by a
     // second walk. `ReadMode::DeclarationsOnly` gives every routine an
     // EMPTY body (a header has none to infer from), so `expand::expand`
-    // is skipped there entirely and `routine_lines` falls back to echoing
-    // the DECLARED clause instead (`Routine::noreturn`) — the only source
-    // of truth a bodiless signature has.
+    // is skipped there entirely.
+    //
+    // An interface printer answers what a unit DECLARES, not what it
+    // compiles to — `analyze` (resolution) is as far as this render ever
+    // otherwise goes, and expansion errors (a descending range, a graft
+    // map conflict, …) are strictly LATER than that. A unit with such an
+    // error in one routine must still print every OTHER routine's
+    // signature, so a failed expansion here is not propagated: `returns`
+    // is left EMPTY instead, and `render_source`'s own per-routine lookup
+    // already falls back to the routine's DECLARED clause (or its
+    // conservative absence) when an entry is missing — the identical
+    // fallback a bodiless routine always takes, so the two failure modes
+    // share one path rather than needing a second.
     let returns: HashMap<String, bool> = if analysis.program.routines.iter().any(|r| r.has_body) {
-        let expanded = crate::expand::expand(&analysis.resolved)?;
-        expanded
-            .worlds
-            .iter()
-            .map(|w| {
-                (
-                    w.name.clone(),
-                    crate::ir::body_can_return(w, &analysis.resolved),
-                )
+        crate::expand::expand(&analysis.resolved)
+            .map(|expanded| {
+                expanded
+                    .worlds
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.name.clone(),
+                            crate::ir::body_can_return(w, &analysis.resolved),
+                        )
+                    })
+                    .collect()
             })
-            .collect()
+            .unwrap_or_default()
     } else {
         HashMap::new()
     };
@@ -763,13 +776,17 @@ fn render_source(
         }
         let full = full_name(&routine.ns, &routine.name);
         let world = worlds[full.as_str()];
-        // Inferred for a bodied routine (`returns` was built from one),
-        // echoed from the declared clause otherwise (`render_from_source`'s
-        // own doc).
-        let noreturn = if routine.has_body {
-            !returns.get(&full).copied().unwrap_or(true)
-        } else {
-            routine.noreturn.is_some()
+        // Inferred when this routine's own fact is in `returns` (a bodied
+        // routine, expansion having succeeded); echoed from the declared
+        // clause otherwise — a bodiless routine has no body to infer from
+        // at all, and a bodied one whose UNIT failed to expand (a sibling
+        // routine's own error, `render_from_source`'s own doc) has no
+        // provable fact either, so the declared clause — the author's own
+        // assertion — is the best available answer, and its absence
+        // conservatively omits `noreturn` rather than guessing.
+        let noreturn = match returns.get(&full) {
+            Some(&can_return) => !can_return,
+            None => routine.noreturn.is_some(),
         };
         root.insert(
             &routine.ns,

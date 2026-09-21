@@ -1,28 +1,36 @@
 //! `unreachable-continuation`: a `then` written on a call whose callee is
 //! KNOWN to be `noreturn` — the continuation can never run, since the
-//! callee never hands control back. "Known" means the callee's
-//! DECLARATION carries the `noreturn` clause and this unit can see it: an
-//! IN-UNIT callee's own `ResolvedWorld::declared_noreturn`, or an
-//! out-of-unit one's entry in `ctx.externals` (docs/tmt/language.md
-//! (declarations)). A callee this unit cannot see at all — an external
-//! call with no declarations for it — is left alone even when it happens
-//! to BE `noreturn` in reality: the linker never checks a `then` either
-//! way, so nothing here can tell "unreachable" from "merely unproven".
+//! callee never hands control back. "Known" is `ir::known_noreturn`'s own
+//! meaning, the SAME function `ir::lower_rule` uses to decide whether an
+//! OMITTED `then` is legal, so this rule flags exactly the calls the
+//! compiler would itself have let omit `then`: an IN-UNIT callee's fact is
+//! the INFERRED one (its body's own `ir::body_can_return`), an
+//! out-of-unit one's is its DECLARED `noreturn` clause in `ctx.externals`
+//! (docs/tmt/language.md (declarations)). A callee this unit cannot see at
+//! all — an external call with no declarations for it — is left alone
+//! even when it happens to BE `noreturn` in reality: the linker never
+//! checks a `then` either way, so nothing here can tell "unreachable"
+//! from "merely unproven".
 //!
-//! Deliberately DECLARATION-only, never the full body inference
-//! `ir::body_can_return` runs: this rule works over `Resolved` (lint never
-//! runs `expand`/`lower` — the module doc's own reasoning: those stages
-//! can fatal on input `analyze` accepted). A routine that is genuinely
-//! `noreturn` but never says so in its own signature is a false negative
-//! here — under-reporting, which a lint may do; a `then` this rule leaves
-//! alone is never wrongly flagged.
+//! The lint layer otherwise never runs `expand`/`lower` (the module doc's
+//! own reasoning: those stages can fatal on input `analyze` accepted), but
+//! this ONE rule needs the inferred fact to agree with the compiler's, so
+//! it builds its own `Expanded` — BEST EFFORT: an expansion failure
+//! (a sibling world's own error, nothing to do with THIS call) leaves the
+//! in-unit fact table empty, degrading every in-unit callee's answer to
+//! `None` ("cannot tell") rather than propagating the error out of a lint
+//! run. Under-reporting either way — a lint may miss a finding, never
+//! invent one on a live `then`.
 //!
 //! The fix drops the whole ` then …` clause (`spans::then_clause_span`),
 //! subject to the shared comment guard (`crate::lint::run_rules`).
 
+use std::collections::HashMap;
+
 use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
 
 use crate::compiler::ResolvedCallTarget;
+use crate::ir::{body_can_return, known_noreturn};
 use crate::lint::LintContext;
 use crate::lint::rules::spans::then_clause_span;
 use crate::parser::Continuation;
@@ -36,24 +44,24 @@ fn continuation_span(cont: &Continuation) -> Span {
     }
 }
 
-/// Whether `target` is KNOWN, to this unit, to be `noreturn` — `None` when
-/// it cannot be seen at all (an external call this unit has no
-/// declarations for).
-fn known_noreturn(ctx: &LintContext, target: &str, external: bool) -> Option<bool> {
-    if external {
-        ctx.externals
-            .routine(target)
-            .map(|rw| rw.declared_noreturn.is_some())
-    } else {
-        ctx.resolved
-            .worlds
-            .iter()
-            .find(|w| w.name == target)
-            .map(|w| w.declared_noreturn.is_some())
-    }
-}
-
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
+    // Best-effort, computed once: an expansion error anywhere in the unit
+    // (a sibling world's own error, nothing to do with any one call) leaves
+    // `can_return` empty, degrading every in-unit lookup below to "cannot
+    // tell" (`known_noreturn`'s own `can_return.get` misses), never a
+    // fatal. `expanded` is bound in this scope, not inside the `.map`
+    // closure, so `can_return`'s borrowed keys outlive it.
+    let expanded = crate::expand::expand(ctx.resolved).ok();
+    let can_return: HashMap<&str, bool> = expanded
+        .as_ref()
+        .map(|expanded| {
+            expanded
+                .worlds
+                .iter()
+                .map(|w| (w.name.as_str(), body_can_return(w, ctx.resolved)))
+                .collect()
+        })
+        .unwrap_or_default();
     for world in &ctx.resolved.worlds {
         for call in &world.calls {
             // An omitted `then` is exactly what this rule wants — nothing
@@ -71,7 +79,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                     (bind.target.as_str(), bind.external)
                 }
             };
-            if known_noreturn(ctx, target, external) != Some(true) {
+            if known_noreturn(target, external, &can_return, ctx.externals) != Some(true) {
                 continue;
             }
             let fix = then_clause_span(ctx, call.span).map(|span| Fix {
@@ -213,6 +221,18 @@ machine {{
         let fix = d.fix.as_ref().expect("a fix");
         assert_eq!(fix.edits.len(), 1);
         assert!(fix.edits[0].replacement.is_empty());
+        // The span itself, not just its emptiness: applying the edit must
+        // leave a valid call statement — `call forever(t = t);` — not a
+        // truncated rule or a dangling `;`.
+        let index = mtc_core::syntax::TextLineIndex::new(&src);
+        let span = fix.edits[0].span;
+        let start = index.offset(span.start) as usize;
+        let end = index.offset(span.end) as usize;
+        let patched = format!("{}{}", &src[..start], &src[end..]);
+        assert!(
+            patched.contains("call forever(t = t);"),
+            "applying the fix did not leave a plain call statement:\n{patched}"
+        );
     }
 
     #[test]
@@ -239,6 +259,39 @@ machine {{
                 .diagnostics
                 .iter()
                 .all(|d| d.code != "unreachable-continuation")
+        );
+    }
+
+    /// An IN-UNIT callee that is `noreturn` by INFERENCE alone — its own
+    /// signature never writes the clause — is still a finding: this rule
+    /// reads the same fact `ir::lower_rule` would accept a `then`-less
+    /// call against (`ir::known_noreturn`), never merely the callee's own
+    /// declared clause. `forever` here leaves only through a self-`goto`,
+    /// exactly the shape `noreturn_is_inferred_from_the_body_
+    /// independently_of_opt_level` (`state_params.rs`) infers `noreturn`
+    /// for, with no `noreturn` clause anywhere in its own text.
+    ///
+    /// Mutation: reverting to a DECLARED-only check (the pre-fix
+    /// `ResolvedWorld::declared_noreturn` reading) — this finding
+    /// disappears, since `forever` never writes the clause.
+    #[test]
+    fn an_in_unit_callee_inferred_noreturn_without_declaring_it_is_a_finding() {
+        let src = "\
+alphabet ab { '_', 'a' }
+
+routine forever(tape t: ab) {
+  entry state s { [*] -> goto s; }
+}
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> call forever(t = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+        assert_eq!(
+            findings(src),
+            vec!["this `then` is unreachable — `forever` is `noreturn`"]
         );
     }
 }

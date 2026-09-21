@@ -137,18 +137,25 @@ pub(crate) enum Transition2 {
     /// source-form binding args the IR lowers to a bound-call record. `then`
     /// is `None` only when the author omitted it — legal exactly when
     /// `target` is a callee KNOWN to be `noreturn`, a check `ir::lower_rule`
-    /// makes (docs/tmt/language.md (reuse)).
+    /// makes (docs/tmt/language.md (reuse)). `span` is the call SITE's own
+    /// span (`ResolvedCall::span`, the `call` keyword through the end of
+    /// its `then`/binding) — narrower than the enclosing `ExpandedRule`'s,
+    /// which also covers the pattern/write/move ahead of it; kept here so a
+    /// diagnostic about the call itself (`ThenRequired`) can underline it
+    /// rather than the whole rule.
     Call {
         target: String,
         external: bool,
         args: Vec<BindingArg>,
         then: Option<Continuation>,
+        span: Span,
     },
     /// A call on a world-local bind name (the bind carries the binding).
-    /// `then` is the SITE's own resume point — see [`Self::Call`]'s doc.
+    /// `then`/`span` are the SITE's own — see [`Self::Call`]'s doc.
     BindCall {
         name: String,
         then: Option<Continuation>,
+        span: Span,
     },
     Return,
     Stop,
@@ -1340,10 +1347,12 @@ fn expand_own_states(
                             external: *external,
                             args: args.clone(),
                             then: rc.then.clone(),
+                            span: rc.span,
                         },
                         ResolvedCallTarget::Bind { name } => Transition2::BindCall {
                             name: name.clone(),
                             then: rc.then.clone(),
+                            span: rc.span,
                         },
                     }
                 }

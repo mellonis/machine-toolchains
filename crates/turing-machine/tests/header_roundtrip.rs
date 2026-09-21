@@ -1579,3 +1579,48 @@ export routine pick(tape exit0: bits, state hit) {
 fn the_language_version_is_two() {
     assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.2");
 }
+
+/// `tmt interface` answers what a unit DECLARES, not what it compiles
+/// to. Expansion errors (a descending pattern range, here) are strictly
+/// LATER than the resolution stage the printer otherwise stops at, so a
+/// body-level error in ONE routine must not take down the whole header:
+/// every OTHER routine still prints its signature, and a routine that
+/// DECLARES `noreturn` prints it as declared even though the unit's
+/// `noreturn` INFERENCE could not run at all (it needs a successful
+/// expansion, which this unit never reaches).
+///
+/// Mutation: propagating the expansion error out of `render_from_source`
+/// (`?` instead of falling back to an empty `returns` map) — `tmt
+/// interface` would exit nonzero and print nothing at all.
+#[test]
+fn an_expansion_error_in_one_routine_does_not_block_the_whole_header() {
+    let dir = scratch("header_expansion_error");
+    let src = "\
+alphabet nb { '0'..'5' }
+
+export routine broken(tape t: nb writes {}) {
+  entry state s { ['5'..'0'] -> return; }
+}
+
+export routine honest(tape t: nb writes {}) noreturn {
+  entry state s { [*] -> goto s; }
+}
+";
+    let path = dir.join("badexp.tmc");
+    std::fs::write(&path, src).unwrap();
+
+    let out = run_interface(&path);
+    assert!(
+        out.stdout
+            .contains("export routine broken(tape t: nb writes {});"),
+        "the routine with the bad body must still print its signature: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("export routine honest(tape t: nb writes {}) noreturn;"),
+        "a declared `noreturn` must still print even though inference \
+         could not run: {}",
+        out.stdout
+    );
+}

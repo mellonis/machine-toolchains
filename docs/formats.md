@@ -1307,8 +1307,14 @@ pre-version-4 document has neither field.
   under which codegen elides the action instruction.
 - Per-transition tags (`kind` field, snake_case): `goto` (`state`),
   `call_then` (`target`, an optional `binding`, an `exits` list of same-world
-  resume states, and a `then` resume point that is itself a
-  `goto`/`return`/`stop`/`halt`), `return`, `return_exit` (`exit`, a resume
+  resume states, and an OPTIONAL `then` resume point that is itself a
+  `goto`/`return`/`stop`/`halt` when present — absent only for a call in
+  TAIL POSITION, the source having omitted `then` against a callee KNOWN
+  to be `noreturn`; codegen still emits an instruction there, a
+  synthesized safety trap rather than nothing, so a `noreturn` claim that
+  turns out false stops in a controlled way instead of falling through
+  into whatever follows — docs/tmt/language.md (routines)), `return`,
+  `return_exit` (`exit`, a resume
   through one of the callee's declared exits instead of `then`), `stop`,
   `halt`, `tail_call` (`target`), and the two synthesized trap terminals
   `trap_read` and `trap_write`. A `binding` entry carries the same
@@ -1325,10 +1331,13 @@ pre-version-4 document has neither field.
   engine does that at link time. A call/bind that binds tapes into a
   routine outside the compilation unit is the one producer of a
   `param`-bearing entry and a label `dst` (`ir::resolve_binding`); every
-  in-unit entry still lowers to the positional, index-only shape. As of
-  version 4 no compiler pass produces `return_exit` or a nonempty
-  `call_then.exits` — both stay reserved shape, filled by lowering with
-  their empty value until a routine can declare `exits=`/`noreturn`.
+  in-unit entry still lowers to the positional, index-only shape.
+  `return_exit` and a nonempty `call_then.exits` are the wire vocabulary
+  for a routine's `state`-parameter exits; `call_then.then`'s own absence
+  (above) is the wire vocabulary for `noreturn`. Both were reserved shape
+  at v4's own start and are filled by lowering only once a routine
+  actually declares `exits=`/is inferred `noreturn`, per the language
+  reference (docs/tmt/language.md (routines)).
 - `dispatch` is a codegen hint, `table` (the canonical form: a match table
   plus an indexed jump) or `branch` (the two-row form the optimizer's
   dispatch-selection pass picks). `tail_call`, `branch`, and the `debugger`

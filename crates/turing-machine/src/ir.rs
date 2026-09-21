@@ -339,9 +339,14 @@ pub enum IrTransition {
         /// `None` only for a call in TAIL POSITION — the source omitted
         /// `then` against a callee KNOWN to be `noreturn`
         /// (`compiler::CompileErrorKind::ThenRequired` refuses every other
-        /// omission), so codegen emits no instruction after the `call` at
-        /// all: control never comes back to resume one
-        /// (docs/tmt/language.md (reuse)). The wire's absent-key default is
+        /// omission), so control is never MEANT to come back to resume one
+        /// (docs/tmt/language.md (reuse)). Codegen still emits a
+        /// synthesized `trap #0` there rather than nothing: an honest
+        /// program never reaches it, but a callee whose declared
+        /// `noreturn` turns out to be a lie (a header, or a shadowed
+        /// definition) would otherwise fall through into whatever the
+        /// linker placed next (`codegen.rs`'s own comment on the emission
+        /// site has the full reasoning). The wire's absent-key default is
         /// `None` for the identical "absence reads as itself" reason
         /// `writes`/`enters`/`leaves` already fold to their empty forms —
         /// a v3 document, which never omitted `then`, always carried one.
@@ -764,7 +769,7 @@ pub(crate) fn body_can_return(ew: &ExpandedWorld, resolved: &Resolved) -> bool {
                         return true;
                     }
                 }
-                Transition2::BindCall { name, then } => {
+                Transition2::BindCall { name, then, .. } => {
                     if matches!(then, Some(Continuation::Return { .. })) {
                         return true;
                     }
@@ -806,14 +811,25 @@ fn args_return(args: &[BindingArg]) -> bool {
 /// unit's table — to be `noreturn`: `Some(true)`/`Some(false)` when known,
 /// `None` when not (an external call with no declarations for it).
 ///
-/// An IN-UNIT callee's fact is the INFERRED one, already computed once in
-/// `lower` (`can_return`) over the same expanded module — never re-derived
-/// here. An OUT-OF-UNIT callee has no body this unit can read, so its fact
-/// is its DECLARED `noreturn` clause alone, exactly as the object arm's
-/// printer reads a bodiless header (docs/tmt/language.md (routines)); the
-/// header-versus-object question — whether a lying header is later caught
-/// — is a different, later check (docs/formats.md (routine interfaces)).
-fn known_noreturn(
+/// An IN-UNIT callee's fact is the INFERRED one — `can_return`'s entry for
+/// it, built by mapping every world of an EXPANDED module through
+/// `body_can_return` (exactly what `lower` does once, up front, before its
+/// own per-world loop runs). An OUT-OF-UNIT callee has no body this unit
+/// can read, so its fact is its DECLARED `noreturn` clause alone, exactly
+/// as the object arm's printer reads a bodiless header
+/// (docs/tmt/language.md (routines)); the header-versus-object question —
+/// whether a lying header is later caught — is a different, later check
+/// (docs/formats.md (routine interfaces)).
+///
+/// The ONE function both the compiler (`lower_rule`'s `then_of`, which
+/// builds `can_return` once from the module it is already lowering) and
+/// the `unreachable-continuation` lint (which has no `Expanded` of its own
+/// and builds a best-effort one — `lint/rules/unreachable_continuation.rs`
+/// has the reasoning) read — so an in-unit callee's "known `noreturn`"
+/// answer means the identical thing on both sides, never a lint-only
+/// declared-clause reading that would diverge from what the compiler
+/// itself would accept a `then`-less call against.
+pub(crate) fn known_noreturn(
     target: &str,
     external: bool,
     can_return: &HashMap<&str, bool>,
@@ -1065,7 +1081,8 @@ fn lower_rule(
     // (reuse)).
     let then_of = |cont: &Option<Continuation>,
                    target: &str,
-                   external: bool|
+                   external: bool,
+                   call_span: Span|
      -> Result<Option<IrThen>, CompileError> {
         match cont {
             Some(cont) => Ok(Some(match cont {
@@ -1081,8 +1098,14 @@ fn lower_rule(
                 if known_noreturn(target, external, can_return, externals) == Some(true) {
                     Ok(None)
                 } else {
+                    // `call_span` is the call SITE's own span
+                    // (`Transition2::Call`/`BindCall`'s `span`, ultimately
+                    // `ResolvedCall::span`) — narrower than `r.span`, the
+                    // whole rule, which also covers the pattern/write/move
+                    // ahead of the call and would underline from there
+                    // instead of from `call` itself.
                     Err(CompileError {
-                        span: r.span,
+                        span: call_span,
                         kind: CompileErrorKind::ThenRequired(target.to_string()),
                     })
                 }
@@ -1111,6 +1134,7 @@ fn lower_rule(
             external,
             args,
             then,
+            span,
         } => {
             // Exits first: a `state` argument that the binding resolution
             // would otherwise try to read as a tape target gets its own
@@ -1125,12 +1149,12 @@ fn lower_rule(
                     target: target.clone(),
                     binding,
                     exits,
-                    then: then_of(then, target, *external)?,
+                    then: then_of(then, target, *external, *span)?,
                 },
                 false,
             )
         }
-        Transition2::BindCall { name, then } => {
+        Transition2::BindCall { name, then, span } => {
             // A bind is pure sugar: look up its routine + args in the world's
             // resolved bind table and lower to the same CallThen a direct call
             // would produce (dedup keys on (routine, binding) regardless).
@@ -1172,7 +1196,7 @@ fn lower_rule(
                     target: bind.target.clone(),
                     binding,
                     exits,
-                    then: then_of(then, &bind.target, bind.external)?,
+                    then: then_of(then, &bind.target, bind.external, *span)?,
                 },
                 false,
             )

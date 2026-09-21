@@ -252,7 +252,17 @@ fn splice(caller: &mut IrWorld, si: usize, ri: usize, candidates: &HashMap<Strin
         st.name = fresh(&mut used, &cst.name);
         for r in &mut st.rules {
             widen_rule(r, n);
-            r.transition = remap_transition(&r.transition, base, then);
+            let (transition, synthesized) = remap_transition(&r.transition, base, then);
+            r.transition = transition;
+            // Only the defensive fallback below turns a genuine `Return`
+            // row into a trap; every other arm either passes an already-
+            // synthesized row through unchanged (a graft-hole trap the
+            // callee itself carried) or produces an ordinary rewrite, so
+            // `synthesized` is otherwise left at whatever `cst.clone()`
+            // already copied.
+            if synthesized {
+                r.synthesized = true;
+            }
         }
         caller.states.push(st);
     }
@@ -281,36 +291,46 @@ fn widen_rule(r: &mut IrRule, n: usize) {
 /// Rewrite a copied callee transition into the caller's id space: in-world
 /// `goto`s shift by `base`; a `return` becomes the call's `then` continuation
 /// (its `goto` target is already a caller-space id); terminals and traps pass
-/// through. Candidates are leaves, so no nested call is ever reached.
+/// through. Candidates are leaves, so no nested call is ever reached. The
+/// returned `bool` is `true` only for the defensive fallback below, telling
+/// the caller to mark that ONE copied row `synthesized` (never for a
+/// passed-through trap, which is already marked on the row `cst.clone()`
+/// copied).
 ///
 /// `then: None` is a tail-position site — legal only against a callee KNOWN
 /// to be `noreturn`, which by that very fact has NO `return` transition
 /// anywhere in its body, dead or live (`ir::body_can_return`). A candidate
 /// spliced from such a callee therefore never reaches the `Return` arm
-/// below at all, which is why `None` there is `unreachable!` rather than a
-/// third rewrite to define.
-fn remap_transition(t: &IrTransition, base: u32, then: Option<IrThen>) -> IrTransition {
+/// below in practice. It is handled rather than `unreachable!`ing anyway:
+/// a future unsoundness in `body_can_return` would otherwise turn a wrong
+/// BIT into an `-O1` panic on ordinary user input instead of a diagnosable
+/// stop, and the whole point of this task's `trap`-after-tail-call
+/// decision (`codegen.rs`) is that a `noreturn` claim proving false is a
+/// controlled trap everywhere else it can surface — this is the one
+/// remaining place it could surface as a panic instead, so it gets the
+/// same treatment: a synthesized `trap #0`, never a crash.
+fn remap_transition(t: &IrTransition, base: u32, then: Option<IrThen>) -> (IrTransition, bool) {
     match t {
-        IrTransition::Goto { state } => IrTransition::Goto {
-            state: base + state,
-        },
+        IrTransition::Goto { state } => (
+            IrTransition::Goto {
+                state: base + state,
+            },
+            false,
+        ),
         IrTransition::Return => match then {
-            Some(IrThen::Goto { state }) => IrTransition::Goto { state },
-            Some(IrThen::Return) => IrTransition::Return,
+            Some(IrThen::Goto { state }) => (IrTransition::Goto { state }, false),
+            Some(IrThen::Return) => (IrTransition::Return, false),
             // The site resumed by leaving the CALLER through one of its own
             // exits, so a copied `return` does exactly that instead.
-            Some(IrThen::ReturnExit { exit }) => IrTransition::ReturnExit { exit },
-            Some(IrThen::Stop) => IrTransition::Stop,
-            Some(IrThen::Halt) => IrTransition::Halt,
-            None => unreachable!(
-                "a `return` inside a spliced callee implies the callee CAN return, so its \
-                 call site was never a tail-position (`then: None`) one to begin with"
-            ),
+            Some(IrThen::ReturnExit { exit }) => (IrTransition::ReturnExit { exit }, false),
+            Some(IrThen::Stop) => (IrTransition::Stop, false),
+            Some(IrThen::Halt) => (IrTransition::Halt, false),
+            None => (IrTransition::TrapRead, true),
         },
-        IrTransition::Stop => IrTransition::Stop,
-        IrTransition::Halt => IrTransition::Halt,
-        IrTransition::TrapRead => IrTransition::TrapRead,
-        IrTransition::TrapWrite => IrTransition::TrapWrite,
+        IrTransition::Stop => (IrTransition::Stop, false),
+        IrTransition::Halt => (IrTransition::Halt, false),
+        IrTransition::TrapRead => (IrTransition::TrapRead, false),
+        IrTransition::TrapWrite => (IrTransition::TrapWrite, false),
         IrTransition::CallThen { .. } | IrTransition::TailCall { .. } => {
             unreachable!("inline candidates are leaves — no nested call to remap")
         }
