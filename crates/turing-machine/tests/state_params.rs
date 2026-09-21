@@ -1529,3 +1529,131 @@ fn a_lying_noreturn_header_traps_instead_of_falling_through() {
         );
     }
 }
+
+// ── `tail-call-no-continuation`, end to end ─────────────────────────────
+
+/// The honest counterpart to [`LIAR_LIB`]: `liar` really never returns
+/// (only `stp`, never `retx`/`ret` — this signature has no state
+/// parameters, so `ret` is its only way back at all).
+const HONEST_NORETURN_LIB: &str = "\
+alphabet ab { '_', 'a' }
+
+export routine liar(tape t: ab writes {}) {
+  entry state s { [*] -> stop; }
+}
+";
+
+/// The SAME caller `LIAR_CALLER`/`LIAR_HEADER` pair `a_lying_noreturn_
+/// header_traps_instead_of_falling_through` links, but through the real
+/// `tmt link` CLI rather than the library entry point, so the RENDERED
+/// warning text is observable. The caller's header trusts `liar`'s
+/// `noreturn` and omits `then`, which the compiler backs with a
+/// synthesized `trap #0` (`an_exit_bearing_tail_call_prints_a_trap`
+/// pins the codegen shape) — this test is the LINKER side of the same
+/// story: when the linked `liar` actually returns, the trap sits right
+/// after a call with no continuation, into a callee that CAN return,
+/// which is exactly `tail-call-no-continuation`'s shape.
+///
+/// The caller's compiled shape is `call liar [t: 0]` immediately
+/// followed by `trap #0` as `main`'s LAST instruction — the lone-trap
+/// arm, not the bare one (the compiler always emits the safety trap, so
+/// a real `.tmc` program never reaches the bare "call is the absolute
+/// last byte" shape `crates/core/tests/link_checks.rs` exercises
+/// directly).
+///
+/// Mutation it catches: drop the lone-trap arm in
+/// `tail_call_no_continuation` (`crates/core/src/linker/engine.rs`) and
+/// this compiler-emitted shape — which never hits the bare arm — goes
+/// silent end to end, not just on a synthetic fixture.
+#[test]
+fn a_lying_noreturn_header_prints_the_tail_call_warning() {
+    let dir = scratch("tail_call_warning_fires");
+    let header = write_file(&dir, "liar.tmh", LIAR_HEADER);
+    let caller = write_file(&dir, "caller.tmc", LIAR_CALLER);
+
+    let out = execute(&args(&[
+        "compile",
+        caller.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        dir.join("caller.tmo").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile caller: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let lib_object = compile(LIAR_LIB, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile lib: {e}"))
+        .object;
+    std::fs::write(dir.join("lib.tmo"), lib_object.to_bytes()).unwrap();
+
+    let out = execute(&args(&[
+        "link",
+        dir.join("caller.tmo").to_str().unwrap(),
+        dir.join("lib.tmo").to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        dir.join("caller.tmx").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("link: {e}"));
+    assert_eq!(
+        out.code, 0,
+        "a warning does not fail the link: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("[tail-call-no-continuation]"),
+        "{}",
+        out.stderr
+    );
+}
+
+/// The near miss: `liar` really never returns (`HONEST_NORETURN_LIB`),
+/// so the same caller, against the same header, links SILENT — the
+/// header was telling the truth, and the linker has nothing to warn
+/// about.
+///
+/// Mutation it catches: warning unconditionally whenever a call is
+/// followed only by a trap (never consulting `callee_can_return` at
+/// all) and this build, whose `liar` genuinely cannot return, would
+/// warn anyway.
+#[test]
+fn an_honest_noreturn_header_prints_no_tail_call_warning() {
+    let dir = scratch("tail_call_warning_silent");
+    let header = write_file(&dir, "liar.tmh", LIAR_HEADER);
+    let caller = write_file(&dir, "caller.tmc", LIAR_CALLER);
+
+    let out = execute(&args(&[
+        "compile",
+        caller.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        dir.join("caller.tmo").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile caller: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let lib_object = compile(HONEST_NORETURN_LIB, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile lib: {e}"))
+        .object;
+    std::fs::write(dir.join("lib.tmo"), lib_object.to_bytes()).unwrap();
+
+    let out = execute(&args(&[
+        "link",
+        dir.join("caller.tmo").to_str().unwrap(),
+        dir.join("lib.tmo").to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        dir.join("caller.tmx").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("link: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("tail-call-no-continuation"),
+        "an honest `noreturn` callee must not warn: {}",
+        out.stderr
+    );
+}

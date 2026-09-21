@@ -875,6 +875,28 @@ finding lands on follows from what the callee can reach:
   error too: the callee returns through a vector the site never
   supplied.
 
+**A separate check grades a call site's CONTINUATION, independent of
+index-binding grading.** A `Plain` site, or a transparent `Bound` one
+(its record supplies no exit vector), that is the LAST instruction of
+its function — or is followed only by the dialect's own safety trap,
+the shape a compiler emits for a call written with no explicit
+continuation — into a callee that CAN return, is
+`tail-call-no-continuation`: a return would fall through into whatever
+the linker places next. A callee is read as unable to return when its
+interface declares `noreturn` AND its body carries no return
+instruction; a declared `noreturn` whose body still returns is graded
+as if it returned honestly, the same "the header is a declaration, the
+body is the truth" rule the exit-bearing tail-call refusal already
+applies. A relocated TAIL JUMP is never graded this way — it pushes no
+return address, so there is no continuation to miss, and ending a
+function right there is exactly how tail-call elimination is supposed
+to look. An exit-bearing bound site is never graded this way either: a
+framed call never falls through at all, so tail position costs it
+nothing. A hand-written `call` immediately followed by a deliberate
+trap the author placed there for some other reason reads the same as
+the compiler's own safety trap and warns too — the accepted false
+positive an `--allow` silences.
+
 Every finding is raised once, in the composition engine, so a hybrid
 link — which consults two lowering paths — still reports each one
 exactly once. A link whose ENTRY function carries no signature is graded
@@ -889,6 +911,7 @@ Codes are permanent identifiers: they never change meaning.
 |---|---|
 | `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
 | `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
+| `tail-call-no-continuation` | A call site is the last instruction of its function — or is followed only by the dialect's own trap — into a callee that can return, so a return would fall through into whatever the linker places next. |
 
 Errors are outside this catalog and cannot be suppressed.
 

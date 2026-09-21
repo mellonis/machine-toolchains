@@ -1320,8 +1320,12 @@ fn enter_jump_opcode(syntax: &ArchSyntax, name: &str) -> Result<u8, LinkError> {
 /// The blob offset a call at `addr` returns to — the instruction after
 /// it — or `None` when the call is the last instruction of a blob
 /// `caller_len` bytes long, where that offset is one past the end and
-/// names nothing.
-fn continuation(caller_len: usize, addr: u32) -> Option<u32> {
+/// names nothing. `pub(super)`: also read by `engine::check_sites`'s
+/// `tail-call-no-continuation` link warning (docs/core.md (link
+/// warnings)), which needs the identical "one past the end" test a
+/// splice site does — reused rather than re-derived so the two can never
+/// drift on what "no continuation" means.
+pub(super) fn continuation(caller_len: usize, addr: u32) -> Option<u32> {
     (addr as usize + 5 < caller_len).then(|| addr + 5)
 }
 
@@ -1336,7 +1340,15 @@ fn continuation(caller_len: usize, addr: u32) -> Option<u32> {
 /// cleared bit only earns a look at the body, and a body carrying the
 /// return is treated as returning whatever its header claims. An absent
 /// interface says nothing at all, and is read as "can return".
-fn callee_can_return(syntax: &ArchSyntax, callee: &FuncRef) -> bool {
+///
+/// `pub(super)`: `engine::check_sites` reads the identical fact for the
+/// `tail-call-no-continuation` link warning (docs/core.md (link
+/// warnings)) — a call with no continuation into a callee that CAN
+/// return is exactly the shape a splice site refuses outright when the
+/// callee also declares exits; reusing the predicate keeps the two
+/// checks from ever answering "can return" differently for the same
+/// callee.
+pub(super) fn callee_can_return(syntax: &ArchSyntax, callee: &FuncRef) -> bool {
     match callee.interface {
         Some(i) if !i.returns => body_has_return(syntax, &callee.blob),
         _ => true,

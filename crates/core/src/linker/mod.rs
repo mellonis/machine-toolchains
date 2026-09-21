@@ -379,6 +379,12 @@ pub const DIAGNOSTIC_CODES: &[(&str, &str)] = &[
         "A call site binds by index into a callee whose alphabet is narrower, so \
          the caller's high symbols have no image in it.",
     ),
+    (
+        "tail-call-no-continuation",
+        "A call site is the last instruction of its function — or is followed only \
+         by the dialect's own trap — into a callee that can return, so a return \
+         would fall through into whatever the linker places next.",
+    ),
 ];
 
 /// One hybrid exit-bearing fold decision, for the link report

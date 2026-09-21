@@ -708,3 +708,329 @@ fn a_prefix_imported_alphabet_is_refused() {
         "{err:?}"
     );
 }
+
+// --- `tail-call-no-continuation` --------------------------------------
+//
+// A call site with no continuation — either it is literally the last
+// instruction of its function, or it is followed only by the dialect's
+// own safety trap — into a callee that CAN return
+// (docs/core.md (link warnings)).
+
+/// A `call` as the function's LAST instruction, into a callee that ends
+/// in `ret`: the bare shape, no trap involved.
+///
+/// Mutation it catches: drop the "bare" disjunct (only ever consult
+/// [`is_lone_trap`]) and this fixture — whose blob ends right at the
+/// call, with nothing after it to decode at all — goes silent.
+#[test]
+fn a_bare_tail_call_into_a_returning_callee_warns() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.routine sub, tapes=1, alpha=(3)
+.section code
+.func main
+        call    sub
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames))
+        .expect("a warning does not stop the link");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// The same call, with a `stp` after it: an ordinary continuation, not a
+/// tail call at all.
+///
+/// Mutation it catches: in [`is_lone_trap`]'s wire, drop the opcode
+/// match (treat ANY single instruction after the call as if it were the
+/// dialect's trap) and this fixture — whose `stp` is the whole rest of
+/// the blob, so "one instruction, then the end" still holds — warns.
+#[test]
+fn a_call_followed_by_an_ordinary_instruction_is_silent() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.routine sub, tapes=1, alpha=(3)
+.section code
+.func main
+        call    sub
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames)).expect("links");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// The bare shape into an HONEST `noreturn` callee: the header says
+/// `noreturn` and the body backs it up (no `ret` anywhere), so there is
+/// truly nothing to warn about.
+///
+/// Mutation it catches: drop the `callee_can_return` guard entirely
+/// (never consult the callee at all) and this fixture, which has no
+/// trap to fall back on either, warns.
+#[test]
+fn a_bare_tail_call_into_an_honest_noreturn_callee_is_silent() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), noreturn
+.param p, ('_', '0', '1')
+.section code
+.func main
+        call    sub
+.func sub
+        stp
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames)).expect("links");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// The bare shape into a LYING `noreturn` callee: the header says
+/// `noreturn`, but the body holds a live `ret` — `callee_can_return`
+/// reads the body, exactly as `check_splice_site`'s exit-bearing refusal
+/// already does (mirrors `link_exits.rs`'s
+/// `a_noreturn_header_does_not_excuse_a_body_that_returns`, which pins
+/// the same fact for the OTHER caller of `callee_can_return`).
+///
+/// Mutation it catches: trust the interface's `returns` bit alone (skip
+/// the body scan) inside `callee_can_return` and this fixture — where
+/// the bit lies — goes silent.
+#[test]
+fn a_lying_noreturn_callee_still_warns_on_a_bare_tail_call() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), noreturn
+.param p, ('_', '0', '1')
+.section code
+.func main
+        call    sub
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames))
+        .expect("a warning does not stop the link");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// A call followed by a LONE safety trap — the shape a compiler emits
+/// for a call written with no `then` (docs/core.md (link warnings)):
+/// nothing after the call but the dialect's own trap, and the trap is
+/// itself the function's last instruction.
+///
+/// Mutation it catches: drop the lone-trap arm entirely (only ever
+/// consult "bare") and this fixture — whose call is NOT itself the last
+/// instruction, the trap is — goes silent.
+#[test]
+fn a_lone_safety_trap_after_a_call_warns() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.routine sub, tapes=1, alpha=(3)
+.section code
+.func main
+        call    sub
+        trap    #0
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames))
+        .expect("a warning does not stop the link");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// A call, a trap, and one MORE instruction: the trap is no longer the
+/// function's last instruction, so it is not a lone safety trap — an
+/// ordinary (if unusual) continuation.
+///
+/// Mutation it catches: in [`is_lone_trap`], drop the "last instruction
+/// of the blob" check (accept a trap anywhere right after the call) and
+/// this fixture, whose trap has a `stp` after it, warns.
+#[test]
+fn a_trap_followed_by_more_code_is_not_a_lone_trap() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.routine sub, tapes=1, alpha=(3)
+.section code
+.func main
+        call    sub
+        trap    #0
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames)).expect("links");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// A lone safety trap after a call into a callee that CANNOT return: the
+/// honest-`noreturn` shape again, reached through the trap arm instead
+/// of the bare one.
+///
+/// Mutation it catches: drop the `callee_can_return` guard entirely and
+/// this fixture — whose trap would otherwise satisfy the lone-trap arm
+/// on its own — warns regardless of the callee.
+#[test]
+fn a_lone_trap_after_a_call_into_a_noreturn_callee_is_silent() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), noreturn
+.param p, ('_', '0', '1')
+.section code
+.func main
+        call    sub
+        trap    #0
+.func sub
+        stp
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames)).expect("links");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// The lone-trap match is by OPCODE alone — never the immediate, which a
+/// compiler may spend on any trap kind. `#7` names no kind this dialect
+/// defines; the check does not care.
+///
+/// Mutation it catches: require the immediate to be `#0` inside
+/// `is_lone_trap` and this fixture, whose trap carries `#7`, goes
+/// silent.
+#[test]
+fn the_lone_trap_match_ignores_the_immediate() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.routine sub, tapes=1, alpha=(3)
+.section code
+.func main
+        call    sub
+        trap    #7
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames))
+        .expect("a warning does not stop the link");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// A RELOCATED TAIL JUMP as the function's last instruction:
+/// `SiteKind::Plain` covers a genuine call and a jump the tail-call pass
+/// substituted for one alike, but a jump pushes no return address — there
+/// is no continuation to miss, and ending right there is exactly how
+/// tail-call elimination is supposed to look.
+///
+/// Mutation it catches: drop the `is_call` guard in
+/// `tail_call_no_continuation` and this fixture — a bare `jmp`, which
+/// `continuation` cannot distinguish from a bare `call` by offset math
+/// alone — warns.
+#[test]
+fn a_relocated_tail_jump_is_not_a_bare_tail_call() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.routine sub, tapes=1, alpha=(3)
+.section code
+.func main
+        jmp     @sub
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames)).expect("links");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// A BOUND call declaring exits, in tail position, under FRAMES: a
+/// framed call never falls through at all (it leaves through the exit
+/// vector's runtime dispatch, not a pushed return address), so tail
+/// position costs it nothing — the same shape `link_exits.rs`'s
+/// `TAIL_POSITION_NORETURN` proves at the executable level, from the
+/// diagnostics side instead.
+///
+/// Mutation it catches: drop the `record.exits.is_empty()` gate on the
+/// `SiteKind::Bound` arm (grade every bound site the same as a
+/// transparent one) and this fixture, exit-bearing and tail-positioned
+/// on purpose, warns.
+#[test]
+fn an_exit_bearing_tail_position_bound_call_does_not_warn_under_frames() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=1
+.param p, ('_', '0', '1')
+.section code
+.func main
+won:    nop
+        call    sub [0] exits=(won)
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames)).expect("links");
+    assert!(
+        out.report
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}

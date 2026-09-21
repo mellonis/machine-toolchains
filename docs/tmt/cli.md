@@ -418,9 +418,10 @@ a header-only library is a `tmt build` concept only.
 ### Link warnings
 
 A link warning names a site the linker can see is suspect but will not
-refuse — a callee whose alphabet is narrower than the caller's band, or
-one whose glyphs differ at the same width. It prints always, in the same
-format a compile warning does, and carries a bracketed code:
+refuse — a callee whose alphabet is narrower than the caller's band, one
+whose glyphs differ at the same width, or a call with no continuation
+into a callee that can return. It prints always, in the same format a
+compile warning does, and carries a bracketed code:
 
 ```
 main+0x0001: warning: `sub` reads a 3-symbol alphabet where `main`'s tape 0 is 5 wide [narrow-alphabet]
@@ -436,6 +437,18 @@ open binding into a tape the callee does not declare opaque, a graft or
 an imported alphabet whose digest drifted, and the copy path's own
 refusals (`docs/core.md (call mechanisms)`).
 
+`tail-call-no-continuation` fires on a call written with no `then` (a
+callee known `noreturn`) whose compiler-synthesized safety trap sits
+right after it, when the linked callee turns out to be able to return
+after all — the linker-side half of the same story `then` optional
+against `noreturn`, and the trap it earns, cover on the compiler side
+(`docs/tmt/language.md (reuse)`). It also fires on the equivalent
+hand-written `.tma` shape: a `call` as a function's last instruction, or
+one followed only by a `trap`, into a callee that can return. A
+hand-written `call` immediately followed by a deliberate `trap` placed
+for some other reason reads the same way and warns too — the accepted
+false positive `--allow tail-call-no-continuation` silences.
+
 In manifest mode `-Werror`'s promotion is per TARGET, not per build: a
 strict refusal stops the build where it stands, and the targets already
 linked keep the artifacts they wrote — the same way a plain link error
@@ -445,6 +458,7 @@ on a later target behaves.
 |---|---|
 | `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
 | `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
+| `tail-call-no-continuation` | A call site is the last instruction of its function — or is followed only by the dialect's own trap — into a callee that can return, so a return would fall through into whatever the linker places next. |
 
 ## `tmt build`
 

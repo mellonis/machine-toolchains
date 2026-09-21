@@ -182,7 +182,7 @@ pub(super) fn lower<'a>(
     // mechanism shares (docs/core.md (link warnings)) — before the
     // bindingless early-out below, so a plain-call-only link is graded
     // too.
-    let diagnostics = check_sites(&order, &sites, machine_sig)?;
+    let diagnostics = check_sites(syntax, &order, &sites, machine_sig)?;
     let has_bound = sites
         .iter()
         .any(|s| s.iter().any(|k| matches!(k, SiteKind::Bound { .. })));
@@ -778,6 +778,7 @@ pub(super) fn scan_sites<'a>(
 /// yields diagnostics in (function order, then blob offset) — the order
 /// `LinkReport.diagnostics` promises.
 pub(super) fn check_sites(
+    syntax: &ArchSyntax,
     order: &[FuncRef],
     sites: &[Vec<SiteKind>],
     machine_sig: &RoutineSig,
@@ -805,6 +806,15 @@ pub(super) fn check_sites(
                             ),
                         ));
                     }
+                    // `declared == 0` here (the arm above already returned
+                    // otherwise), so this site is never the exit-bearing
+                    // shape `check_splice_site` grades as a hard error —
+                    // safe to grade it as the ordinary "no continuation"
+                    // warning instead (docs/core.md (link warnings)).
+                    if let Some(diag) = tail_call_no_continuation(syntax, order, fi, *addr, *callee)
+                    {
+                        out.push(diag);
+                    }
                     let Some(callee_sig) = order[*callee].signature else {
                         continue; // nothing declared, nothing to compare
                     };
@@ -823,6 +833,20 @@ pub(super) fn check_sites(
                     record,
                     ..
                 } => {
+                    // An EXIT-BEARING record (`record.exits` non-empty) is
+                    // graded by `check_splice_site` instead, as a hard
+                    // error under mono/hybrid — under frames it is exactly
+                    // as legal in tail position as anywhere else, since a
+                    // framed call never falls through at all. Only a
+                    // transparent binding (no exit vector) is the same
+                    // "falls through into whatever comes next" shape a
+                    // plain call is.
+                    if record.exits.is_empty()
+                        && let Some(diag) =
+                            tail_call_no_continuation(syntax, order, fi, *addr, *callee)
+                    {
+                        out.push(diag);
+                    }
                     let Some(callee_sig) = order[*callee].signature else {
                         continue;
                     };
@@ -848,6 +872,76 @@ pub(super) fn check_sites(
         }
     }
     Ok(out)
+}
+
+/// The `tail-call-no-continuation` link warning (docs/core.md (link
+/// warnings)): a call at `addr` in function `fi` that either IS the last
+/// instruction of its function, or is followed only by the dialect's own
+/// safety trap (see [`is_lone_trap`]), into a callee that CAN return.
+///
+/// `None` for a relocated TAIL JUMP: `SiteKind::Plain` covers both a real
+/// call and a jump the tail-call optimizer substituted for one, and a
+/// jump pushes no return address — there is no continuation to be
+/// missing, and a tail-jumped function ending right there is exactly how
+/// tail-call elimination is SUPPOSED to look. Only a genuine `Flow::Call`
+/// opcode at `addr` is graded.
+fn tail_call_no_continuation(
+    syntax: &ArchSyntax,
+    order: &[FuncRef],
+    fi: usize,
+    addr: u32,
+    callee: usize,
+) -> Option<super::LinkDiagnostic> {
+    let caller = &order[fi];
+    if !syntax.is_call(caller.blob[addr as usize]) {
+        return None;
+    }
+    if !super::stamp::callee_can_return(syntax, &order[callee]) {
+        return None;
+    }
+    let caller_len = caller.blob.len();
+    let bare = super::stamp::continuation(caller_len, addr).is_none();
+    if !bare && !is_lone_trap(syntax, &caller.blob, addr, caller_len) {
+        return None;
+    }
+    Some(diag_at(
+        order,
+        fi,
+        addr,
+        "tail-call-no-continuation",
+        format!(
+            "`{}` calls `{}` with no continuation, but `{}` can return",
+            caller.name, order[callee].name, order[callee].name
+        ),
+    ))
+}
+
+/// Whether the instruction right after a call at `addr` is the dialect's
+/// OWN trap opcode (`ArchSyntax::trap_opcode`, matched by opcode alone —
+/// never the immediate, which a compiler is free to spend on a different
+/// trap kind) AND that trap is itself the last instruction of the
+/// `caller_len`-byte blob. This is the shape a compiler emits for a call
+/// written with no `then`: a synthesized safety trap that only an
+/// honest `noreturn` callee ever leaves unreached (docs/core.md (link
+/// warnings)). `false` when the dialect has no trap instruction at all.
+fn is_lone_trap(syntax: &ArchSyntax, blob: &[u8], addr: u32, caller_len: usize) -> bool {
+    let Some(trap_opcode) = syntax.trap_opcode else {
+        return false;
+    };
+    let next = addr + 5;
+    if next as usize >= caller_len {
+        return false;
+    }
+    let Some(d) = decode::decode_at(syntax, blob, next, caller_len as u32) else {
+        return false;
+    };
+    let Body::Instr { mnemonic, .. } = &d.body else {
+        return false;
+    };
+    let is_trap = syntax
+        .by_mnemonic(mnemonic)
+        .is_some_and(|e| e.opcode == trap_opcode);
+    is_trap && next + d.len == caller_len as u32
 }
 
 /// One tape of one index-binding site: caller band `ct` against callee

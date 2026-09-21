@@ -204,9 +204,12 @@ fn check_opaque(callee: &FuncRef, binding: &[TapeBinding]) -> Result<(), LinkErr
     Ok(())
 }
 
-/// The callee's interface, or the refusal that replaces
-/// `external-binding-unsupported` for a callee that describes none
-/// (docs/core.md (symbolic resolution)).
+/// The callee's interface, or the refusal earned by a callee that
+/// describes none at all: the compiler emits a symbolic binding for an
+/// external callee sight unseen, and it is here — resolving that binding
+/// against the callee's ACTUAL interface, once the real object is in
+/// hand at link time — that a callee with no interface to resolve it
+/// against is caught (docs/core.md (symbolic resolution)).
 fn require_interface<'a>(
     callee: &FuncRef<'a>,
     form: &str,
