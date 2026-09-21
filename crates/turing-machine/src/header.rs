@@ -164,34 +164,44 @@ use crate::parser::{
 };
 
 /// Render every exported declaration of a `.tmc` source as a header — the
-/// complete arm.
-pub(crate) fn from_source(source: &str) -> Result<String, CompileError> {
-    render_from_source(source, ReadMode::Program)
+/// complete arm. `externals` is the declarations table a library that
+/// itself depends on another unit's alphabet, map or graph needs
+/// (`--extern`/`--nostdlib` on `tmt interface`, docs/tmt/cli.md
+/// (interface)) — callers with no such dependency pass
+/// `&Declarations::stdlib()`, the implicit default every other reader in
+/// this module already assumes.
+pub(crate) fn from_source(source: &str, externals: &Declarations) -> Result<String, CompileError> {
+    render_from_source(source, ReadMode::Program, externals)
 }
 
 /// [`from_source`]'s declarations-only twin: the SAME reader, in
 /// [`ReadMode::DeclarationsOnly`] (docs/tmt/language.md (headers)) — a
-/// `.tmh`, or (once `--extern` lands) a `.tmc` read as one. Every routine
-/// is bodiless and every graph carries its body, so rendering it back
-/// reproduces the identical text `from_source` would have printed for the
-/// program it was itself rendered from — the round-trip
-/// `tmt interface` promises.
-pub(crate) fn from_declarations(source: &str) -> Result<String, CompileError> {
-    render_from_source(source, ReadMode::DeclarationsOnly)
+/// `.tmh`, or a `.tmc` read as one (`tmt interface`'s own extension rule).
+/// Every routine is bodiless and every graph carries its body, so
+/// rendering it back reproduces the identical text `from_source` would
+/// have printed for the program it was itself rendered from — the
+/// round-trip `tmt interface` promises. See [`from_source`] for
+/// `externals`.
+pub(crate) fn from_declarations(
+    source: &str,
+    externals: &Declarations,
+) -> Result<String, CompileError> {
+    render_from_source(source, ReadMode::DeclarationsOnly, externals)
 }
 
 /// The shared body of [`from_source`]/[`from_declarations`]: the mode is a
 /// flag on this ONE reader, not a fork — same lexer, same green parse,
 /// same `extract_program` either way (docs/tmt/language.md (headers)).
-fn render_from_source(source: &str, mode: ReadMode) -> Result<String, CompileError> {
-    // The SAME externals `compiler::analyze` resolves against (its own
-    // default) and the SAME inference `ir::lower` runs — computed here
-    // rather than threaded out of `analyze`, since `Analysis` does not
-    // retain the `Declarations` it resolved with. Both go through
+fn render_from_source(
+    source: &str,
+    mode: ReadMode,
+    externals: &Declarations,
+) -> Result<String, CompileError> {
+    // The SAME externals `compiler::analyze` resolves against and the SAME
+    // inference `ir::lower` runs. Both go through
     // `compiler::published_writes`, the one function that decides a tape's
     // published write set (docs/tmt/cli.md (interface)).
-    let externals = Declarations::stdlib();
-    let analysis = compiler::analyze_with_mode(source, &externals, mode)?;
+    let analysis = compiler::analyze_with_mode(source, externals, mode)?;
     let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
     // A routine's `noreturn` fact: INFERRED from its body for a BODIED
     // routine (`ReadMode::Program`, the ONLY mode where `has_body` is ever
@@ -213,7 +223,7 @@ fn render_from_source(source: &str, mode: ReadMode) -> Result<String, CompileErr
     // fallback a bodiless routine always takes, so the two failure modes
     // share one path rather than needing a second.
     let returns: HashMap<String, bool> = if analysis.program.routines.iter().any(|r| r.has_body) {
-        crate::expand::expand(&analysis.resolved, &externals)
+        crate::expand::expand(&analysis.resolved, externals)
             .map(|expanded| {
                 expanded
                     .worlds

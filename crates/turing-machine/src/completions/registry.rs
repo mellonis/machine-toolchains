@@ -518,6 +518,19 @@ fn interface_spec() -> CommandSpec {
         positional: Positional::One(PositionalHint::File(ext(&["tmc", "tmo"]))),
         flags: vec![
             FlagSpec::value("-o", "output path", ValueHint::File(any_file())),
+            // Same meaning as `tmt compile`'s own pair (`compile_spec`
+            // above) — a library that itself depends on another unit's
+            // declarations needs them to header at all.
+            FlagSpec::value(
+                "--extern",
+                "read a .tmh/.tmc's declarations (repeatable, in order)",
+                ValueHint::File(ext(&["tmh", "tmc"])),
+            )
+            .repeatable(),
+            FlagSpec::boolean(
+                "--nostdlib",
+                "do not read the embedded standard library's declarations",
+            ),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }

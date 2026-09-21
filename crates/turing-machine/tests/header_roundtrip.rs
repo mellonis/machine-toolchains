@@ -2009,3 +2009,118 @@ namespace lib7 {
         "the printed header did not reparse to itself"
     );
 }
+
+// ── `tmt interface --extern`/`--nostdlib` ──────────────────────────────
+//
+// The hand-off from library-grafts-from-headers work (docs/tmt/cli.md
+// (interface)): a library whose own exported routine's tape is over
+// ANOTHER unit's alphabet cannot be headered without that other unit's
+// declarations — the exact "declarations were not given" refusal
+// `tmt compile` already gives, now reachable from `tmt interface` too.
+
+const OTHER_UNIT: &str = "\
+namespace other {
+  export alphabet bits { '_', '0', '1' }
+}
+";
+
+/// `widen`'s tape is over `other::bits` — a `use`-declared alphabet from
+/// a DIFFERENT unit, never declared locally.
+const DEPENDS_ON_OTHER_UNIT: &str = "\
+use other::bits;
+
+export routine widen(tape n: bits writes { '0' }) {
+  entry state s { [*] -> write ['0'] return; }
+}
+";
+
+/// Mutation: `tmt interface` still resolving `--extern`/`--nostdlib`
+/// against a FIXED `Declarations::stdlib()` internally (the pre-task
+/// shape, `from_source`/`from_declarations` with no `externals`
+/// parameter) — `other::bits` would stay unresolvable regardless of
+/// `--extern`, and this header render would fail exactly as the negative
+/// control below does.
+#[test]
+fn interface_extern_lets_a_dependent_library_header_print() {
+    let dir = scratch("interface_extern_lib");
+    let other_path = dir.join("other.tmc");
+    std::fs::write(&other_path, OTHER_UNIT).unwrap();
+    let other_header_out = run_interface(&other_path);
+    let other_header_path = dir.join("other.tmh");
+    std::fs::write(&other_header_path, &other_header_out.stdout).unwrap();
+
+    let lib_path = dir.join("lib.tmc");
+    std::fs::write(&lib_path, DEPENDS_ON_OTHER_UNIT).unwrap();
+
+    let out = execute(&args(&[
+        "interface",
+        lib_path.to_str().unwrap(),
+        "--extern",
+        other_header_path.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("interface --extern: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("use other::bits;"),
+        "the printed header needs the cross-unit `use` line: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("export routine widen(tape n: bits writes { '0' });"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// The negative control `interface_extern_lets_a_dependent_library_
+/// header_print`'s own mutation note describes: without `--extern`,
+/// `other::bits` is declared by `use` but never given, so the header
+/// cannot print at all.
+#[test]
+fn interface_without_extern_fails_with_declarations_not_given() {
+    let dir = scratch("interface_no_extern_lib");
+    let lib_path = dir.join("lib.tmc");
+    std::fs::write(&lib_path, DEPENDS_ON_OTHER_UNIT).unwrap();
+
+    let err = execute(&args(&["interface", lib_path.to_str().unwrap()]))
+        .expect_err("other::bits's declarations were never given");
+    assert!(err.contains("declarations were not given"), "{err}");
+    assert!(err.contains("[unresolved-alphabet]"), "{err}");
+}
+
+/// `--nostdlib` on `tmt interface` takes exactly `tmt compile`'s own
+/// meaning (`tests/extern_declarations.rs::nostdlib_empties_the_table`'s
+/// own precedent): a transparent call into a real embedded-stdlib routine
+/// stops being believed at its declared write set once the embedded
+/// standard library's declarations are excluded, so a narrow contract
+/// that depended on it is violated.
+///
+/// Mutation: `--nostdlib` parsed but never threaded into the declarations
+/// `render_from_source` resolves against — the header would print
+/// (wrongly) instead of failing here.
+#[test]
+fn interface_nostdlib_excludes_the_embedded_standard_library() {
+    let dir = scratch("interface_nostdlib");
+    const CALLS_STDLIB: &str = "\
+alphabet bin { '_', '^', '$', '0', '1' }
+
+routine caller(tape n: bin writes {}) {
+  entry state s { [*] -> call std::binaryNumbers::goToNumbersStart() then return; }
+}
+";
+    let src = dir.join("caller.tmc");
+    std::fs::write(&src, CALLS_STDLIB).unwrap();
+
+    // Without --nostdlib the embedded stdlib is believed and the header
+    // prints clean.
+    let with_stdlib = execute(&args(&["interface", src.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface: {e}"));
+    assert_eq!(with_stdlib.code, 0, "{}", with_stdlib.stderr);
+
+    // With --nostdlib, goToNumbersStart is opaque and caller's empty
+    // `writes {}` contract is violated.
+    let err = execute(&args(&["interface", src.to_str().unwrap(), "--nostdlib"]))
+        .expect_err("goToNumbersStart's declarations were excluded by --nostdlib");
+    assert!(err.contains("writes-outside-contract"), "{err}");
+}

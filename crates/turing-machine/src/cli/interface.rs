@@ -13,7 +13,7 @@ use mtc_core::vm::LoadError;
 use super::{Args, CliOutput};
 
 pub(super) const INTERFACE_USAGE: &str = "\
-USAGE: tmt interface INPUT [-o OUT.tmh]
+USAGE: tmt interface INPUT [-o OUT.tmh] [FLAGS]
 
 INPUT is told apart by its container magic, never by its extension: a
 .tmc source or a compiled .tmo object. A .tmh extension (case-insensitive)
@@ -27,6 +27,12 @@ source the header is complete: it also carries exported graph bodies in
 full and every `?` doc line. From an object it carries signatures and
 alphabets only — no graph body, no map, no doc line, since none of those
 exist on the wire. Without -o the header goes to stdout.
+
+FLAGS (text INPUT only — a .tmo object carries no external references of
+its own left to resolve):
+  --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
+                     repeatable, in command-line order)
+  --nostdlib         do not read the embedded standard library's declarations
 ";
 
 pub(super) fn interface(raw: &[String]) -> Result<CliOutput, String> {
@@ -35,6 +41,11 @@ pub(super) fn interface(raw: &[String]) -> Result<CliOutput, String> {
         return Ok(CliOutput::ok(INTERFACE_USAGE.into(), String::new()));
     }
     let explicit_out = args.value("-o")?;
+    // Read BEFORE the input, exactly as `tmt compile` does (`cli/build.rs`
+    // (compile)): a broken `--extern` file's error then names ITS OWN
+    // path, never the primary input's.
+    let extern_paths = args.values("--extern")?;
+    let nostdlib = args.flag("--nostdlib");
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
         return Err(format!(
@@ -71,12 +82,18 @@ pub(super) fn interface(raw: &[String]) -> Result<CliOutput, String> {
                 .extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("tmh"));
-            let render = if is_header {
-                crate::header::from_declarations
+            // The same declarations table `tmt compile` builds from
+            // `--extern`/`--nostdlib` (`cli/build.rs::read_externals`): a
+            // library whose exported routine, graph or map reaches
+            // another unit's alphabet needs it to header at all
+            // (docs/tmt/cli.md (interface)).
+            let externals = super::build::read_externals(&extern_paths, nostdlib)?;
+            let text = if is_header {
+                crate::header::from_declarations(&source, &externals)
             } else {
-                crate::header::from_source
+                crate::header::from_source(&source, &externals)
             };
-            render(&source).map_err(|e| {
+            text.map_err(|e| {
                 format!(
                     "{}:{}:{}: error: {} [{}]",
                     path.display(),

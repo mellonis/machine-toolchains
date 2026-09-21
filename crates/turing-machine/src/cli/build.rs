@@ -56,8 +56,13 @@ FLAGS:
 /// `std` when both are given. Each file's own declarations-only read is
 /// [`crate::header::read_extern`] (STRICT on a `.tmh`, LENIENT on
 /// anything else); a file that fails to read or parse is reported by ITS
-/// OWN path, never the primary compile's input.
-fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declarations, String> {
+/// OWN path, never the primary compile's input. Shared with `tmt
+/// interface`'s own `--extern`/`--nostdlib` (`cli/interface.rs`), which
+/// takes exactly this same meaning for a library that itself depends on
+/// another unit's declarations — `tmt build` derives its own siblings'
+/// and libraries' declarations independently (`cli/driver.rs`) and does
+/// NOT call this function.
+pub(super) fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declarations, String> {
     let mut externals = Declarations::none();
     for raw in paths {
         let path = Path::new(raw);
@@ -624,7 +629,7 @@ namespace lib {
     }
 
     fn write_fixture_header(dir: &Path) {
-        let text = crate::header::from_source(FIND_LIBRARY_FIXTURE)
+        let text = crate::header::from_source(FIND_LIBRARY_FIXTURE, &Declarations::stdlib())
             .unwrap_or_else(|e| panic!("interface: {e}"));
         fs::write(dir.join("lib.tmh"), text).unwrap();
     }

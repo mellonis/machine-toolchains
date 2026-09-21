@@ -631,7 +631,7 @@ address column remains an exact index of where each instruction starts.
 ## `tmt interface`
 
 ```
-USAGE: tmt interface INPUT [-o OUT.tmh]
+USAGE: tmt interface INPUT [-o OUT.tmh] [FLAGS]
 
 INPUT is told apart by its container magic, never by its extension: a
 .tmc source or a compiled .tmo object. A .tmh extension (case-insensitive)
@@ -645,6 +645,12 @@ source the header is complete: it also carries exported graph bodies in
 full and every `?` doc line. From an object it carries signatures and
 alphabets only — no graph body, no map, no doc line, since none of those
 exist on the wire. Without -o the header goes to stdout.
+
+FLAGS (text INPUT only — a .tmo object carries no external references of
+its own left to resolve):
+  --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
+                     repeatable, in command-line order)
+  --nostdlib         do not read the embedded standard library's declarations
 ```
 
 Renders a unit's exported declarations as one canonical, deterministic
@@ -652,6 +658,19 @@ text — the same shape a header file carries (docs/tmt/language.md
 (headers)). Like `dis`, `INPUT` is told apart by its container magic
 rather than its extension (`docs/formats.md`): a `.tmc` renamed to
 `.tmo`, or the reverse, still runs the arm its bytes actually are.
+
+**`--extern`/`--nostdlib` take exactly `tmt compile`'s own meaning**
+(above): a library whose exported routine, graph or map itself reaches
+another unit's alphabet, named map or graph — through a `use` or a
+qualified path — cannot be headered without that other unit's
+declarations in hand, the same "declarations were not given" refusal a
+compile hits. `--extern FILE` (repeatable, in command-line order; `.tmh`
+strict, anything else lenient) and `--nostdlib` (do not read the embedded
+standard library's declarations) populate the SAME declarations table
+`tmt compile` builds, resolved independently of whatever the eventual
+`tmt build` of this unit is itself given. Both flags apply to a text
+`INPUT` only — a `.tmo` object carries no external references left
+unresolved to need them.
 
 **Two arms, one printer.** From a `.tmc` source the header is complete:
 every exported alphabet, every exported routine's signature with its `?`
