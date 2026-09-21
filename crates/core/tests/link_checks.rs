@@ -878,11 +878,11 @@ fn a_call_immediately_followed_by_a_trap_warns() {
 
 /// A call, a trap, and one MORE instruction after the trap: this still
 /// warns — the check only looks at the byte right after the call, never
-/// at what follows the trap itself. On compiled `.tmc` this is the
-/// common shape (every state of a world shares one function, so the
-/// synthesized trap is the LAST instruction of its function only when
-/// the calling state happens to be laid out last); a rule that required
-/// the trap to end the function would miss it whenever it is not.
+/// at what follows the trap itself. Compiler output makes this the
+/// common shape whenever one function holds several call sites — the
+/// synthesized trap is the function's LAST instruction only for the site
+/// that happens to be laid out last; a rule that required the trap to
+/// end the function would miss every other one.
 ///
 /// Mutation it catches: in [`next_is_trap`] (or its caller), require the
 /// trap to be the function's last instruction, and this fixture — whose

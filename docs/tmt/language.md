@@ -1263,9 +1263,13 @@ reach a graph defined elsewhere.
 
 A declarations reading yields: exported alphabets, exported named maps,
 exported graphs *with their bodies*, and exported routine signatures —
-each routine's tapes with their glyph lists and published write set, its
-`state` parameter count, and whether it can return. Routine bodies and
-the `machine` block contribute nothing and are not needed.
+each routine's tapes with their glyph lists and declared effective write
+set, its `state` parameter count, and its declared `noreturn` clause.
+Routine bodies and the `machine` block contribute nothing and are not
+needed. Both of those last two are DECLARED facts, never inferred ones:
+the reading never walks a body, so a routine that declares no `writes`
+clause is read as able to write its whole alphabet, and one that does not
+say `noreturn` is read as able to return.
 
 What a compile is given to read is a matter for the tools rather than the
 language: `tmt compile --extern FILE`, the sibling sources and libraries

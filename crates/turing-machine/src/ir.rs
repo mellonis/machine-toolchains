@@ -2565,9 +2565,10 @@ machine {
     /// carries the EFFECTIVE set (`compiler::declared_effective`) — never the
     /// raw `writes` clause. The `preserves`-only routine mirrors
     /// `std::…::invertNumber` (`preserves { '_' }`, no `writes` clause): the
-    /// controller's ruling is that this must still yield `Some` (the
-    /// alphabet minus the preserved glyph), not the `None` a raw reading of
-    /// "no `writes` clause" would produce. Mutation: reading `tape.writes`
+    /// a `preserves` clause on its own DOES constrain the tape, so this
+    /// must still yield `Some` (the alphabet minus the preserved glyph),
+    /// not the `None` a raw reading of "no `writes` clause" would produce
+    /// (docs/tmt/language.md (contract clauses)). Mutation: reading `tape.writes`
     /// directly instead of calling `declared_effective` makes the
     /// `preserves`-only assertion fail (it would see `None`).
     #[test]

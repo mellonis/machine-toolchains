@@ -489,9 +489,9 @@ machine {
         // its `.param` line's `writes=` suffix — and therefore the whole
         // `.tma` text and object — legitimately differ between the two
         // sources. `walk`'s `writes {}` happens to coincide with "no
-        // clause" (both print no suffix, per the ruling that `writes=()`
-        // and an absent clause are indistinguishable on the wire), which is
-        // why only `sweep`'s routine actually moves.
+        // clause" (both print no suffix — the wire has no way to spell an
+        // EMPTY declared set apart from an absent one), which is why only
+        // `sweep`'s routine actually moves.
         assert_eq!(
             declared.object.blobs, bare.object.blobs,
             "{level:?}: a contract clause must not move the emitted CODE"

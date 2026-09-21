@@ -475,9 +475,10 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
 /// (`std::binaryNumbersBare::invertNumber` and its volatile twin, each
 /// declaring `preserves { '_' }` with no `writes` clause) diverges,
 /// because the object arm has no `preserves` to print back: it only ever
-/// carries the EFFECTIVE set. This pins the F1 ruling
-/// (docs/formats.md (routine interfaces)) at the surface where it is
-/// observable. VERIFIED RED by hand: printing `preserves`'s raw elements
+/// carries the EFFECTIVE set. This pins the wire's own rule — a routine
+/// interface records one write set per tape and has no field for the
+/// source-level `preserves` sugar (docs/formats.md (routine interfaces))
+/// — at the surface where it is observable. VERIFIED RED by hand: printing `preserves`'s raw elements
 /// instead of the effective set on the source arm's tape signature made
 /// this test fail on exactly the two `invertNumber` entries, restored
 /// afterward (see the task report).

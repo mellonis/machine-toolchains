@@ -221,6 +221,22 @@ link means nothing for the graft-drift check to compare a spliced body
 against either, which is by design — a header-only library is the one
 place a header is trusted outright (`docs/core.md (graft drift)`).
 
+**A generated header is STRONGER than the source it came from.** A
+declarations reading uses declared facts only (`docs/tmt/language.md
+(declarations)`): a routine that declares no `writes` clause is read as
+able to write its whole alphabet, and one that does not say `noreturn`
+is read as able to return. `tmt interface` is where the compiler's own
+INFERENCE is turned into a declared fact — it writes the inferred write
+set into a `writes { … }` clause and prints `noreturn` for a routine
+whose body cannot return, whether or not the source said either. So the
+SAME unit supports strictly more when it is read as its own generated
+header than when it is read as a sibling source: a caller under a narrow
+write contract, or one omitting `then` at a call that never returns, can
+build against the header and fail against the sibling. Two ways to
+settle it, both fine: declare the clauses in the source so both readings
+agree, or generate the header with `tmt interface` and build against
+that.
+
 Argv mode's own `-L`/`-l` (`docs/tmt/cli.md (build)`) select compile-time
 declarations too, exactly like a manifest's `libraries` — `tmt link`'s
 own `-l` does NOT: it links an object and nothing else, with no

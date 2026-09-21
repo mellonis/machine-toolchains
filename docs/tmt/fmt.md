@@ -72,7 +72,7 @@ between: the printer may change the whitespace around a comment, never
 which tokens it sits between. See [Comments](#comments) below for the
 layout each position takes, and
 [Comments are never moved](#comments-are-never-moved) for the rule's
-consequences and its two recorded residuals.
+consequences and its three recorded residuals.
 
 ## Indentation
 
@@ -401,8 +401,8 @@ between its own tokens — the one place a substitution reprints spaced
 rather than tight, since a comment cannot be concatenated into the tight
 form.
 
-**Two recorded residuals** still relocate, both stable on the first
-pass, both inside a construct whose own list machinery claims every
+**Three recorded residuals** still relocate, all stable on the first
+pass, all inside a construct whose own list machinery claims every
 pending comment wholesale:
 
 - inside a `call` transition, past the target: a comment between the
@@ -411,8 +411,23 @@ pending comment wholesale:
   the `call` keyword, or between the transition and the `;`, stays.
 - in a `with map`-bearing binding argument, a comment between `with` and
   `map` moves onto the map's `{`.
+- in a signature's parameter list, a comment between a parameter and the
+  following `,` crosses the comma and prints after it. The parameter's
+  own interior is unaffected — a comment inside the parameter, including
+  one inside its `writes`/`preserves` clause, stays where it was
+  written, and so does one written after the comma:
 
-Lifting either means teaching that machinery the in-place rule; nothing
+  ```
+  routine r(tape t: ab writes /* o */ {} /* p */ , /* q */ state /* r */ hit)
+
+  routine r(
+    tape t: ab writes /* o */ { }, /* p */ /* q */
+    state /* r */ hit
+  )
+  ```
+
+Nothing is lost in any of the three, and each output is a fixed point.
+Lifting one means teaching that machinery the in-place rule; nothing
 else moves a comment.
 
 ## `.tma` formatting

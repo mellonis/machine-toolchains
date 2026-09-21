@@ -207,6 +207,16 @@ does not, by itself, resolve a call target or an alphabet reached through
 `use` — an unresolved `use`-imported name fails exactly as it does without
 `--extern`.
 
+A declarations reading believes DECLARED facts only, so which of the two
+forms of a unit you point `--extern` at changes what compiles: a routine
+declaring no `writes` clause is read as able to write its whole
+alphabet, and one not saying `noreturn` as able to return. `tmt
+interface` is where inference becomes a declared fact — it writes the
+inferred write set and `noreturn` down — so a unit given as its own
+generated `.tmh` supports strictly more than the same unit given as a
+`.tmc` sibling (`docs/tmt/project.md (Declaration derivation)`). Declare
+the clauses in the source, or point `--extern` at the generated header.
+
 `--extern` takes declaration **source** text. A compiled container given
 to it — an object, an executable, a tape block — is refused on its magic,
 by name, with the rule stated: an object's declarations reach a build as
@@ -1355,6 +1365,18 @@ alone reports whether stdin would change.
 Exit codes follow `tmt lint`'s convention: 0 = success (every input already
 canonical, or rewritten in place); 1 = under `--check` at least one input
 would change, or a lex/parse error occurred anywhere in the batch.
+
+**A `.tmh` header is refused by extension**, exactly as `tmt lint`
+refuses one — `error: unknown source extension (expected .tmc or .tma)`,
+exit 1 — and for the reason stated there: a header is written by `tmt
+interface` and read by `tmt compile --extern` and `tmt build`, not
+edited by hand. A consequence worth stating plainly, since a header is
+`.tmc` syntax and could be fed to stdin: **what `tmt interface` prints
+is canonical for the header printer, not for `tmt fmt`.** The two are
+separate printers, and a generated header run through `tmt fmt - --lang
+tmc --check` can report that it would change. That is not a defect in
+either one — neither output is ever read by the other — but it does mean
+a `.tmh` must not be put into a formatted source set.
 
 Unlike `tmt lint`, `tmt fmt` takes no **configuration** from `tmt.json` —
 formatting has no configurable surface for a project file to set, and there
