@@ -1555,16 +1555,19 @@ export routine liar(tape t: ab writes {}) {
 /// which is exactly `tail-call-no-continuation`'s shape.
 ///
 /// The caller's compiled shape is `call liar [t: 0]` immediately
-/// followed by `trap #0` as `main`'s LAST instruction — the lone-trap
-/// arm, not the bare one (the compiler always emits the safety trap, so
-/// a real `.tmc` program never reaches the bare "call is the absolute
-/// last byte" shape `crates/core/tests/link_checks.rs` exercises
-/// directly).
+/// followed by `trap #0`, which HERE also happens to be `main`'s last
+/// instruction (this fixture has one state) — the trap arm, not the
+/// "call is the last instruction" one (the compiler always emits the
+/// safety trap, so a real `.tmc` program never reaches the latter, the
+/// shape `crates/core/tests/link_checks.rs` exercises directly). The
+/// trap arm does not require the trap to end the function — see
+/// `a_lying_noreturn_header_prints_the_tail_call_warning_with_a_later_
+/// state` below for a caller where it does not.
 ///
-/// Mutation it catches: drop the lone-trap arm in
-/// `tail_call_no_continuation` (`crates/core/src/linker/engine.rs`) and
-/// this compiler-emitted shape — which never hits the bare arm — goes
-/// silent end to end, not just on a synthetic fixture.
+/// Mutation it catches: drop the trap arm in `tail_call_no_continuation`
+/// (`crates/core/src/linker/engine.rs`) and this compiler-emitted shape
+/// — which never hits the "last instruction" arm — goes silent end to
+/// end, not just on a synthetic fixture.
 #[test]
 fn a_lying_noreturn_header_prints_the_tail_call_warning() {
     let dir = scratch("tail_call_warning_fires");
@@ -1623,6 +1626,132 @@ fn an_honest_noreturn_header_prints_no_tail_call_warning() {
     let dir = scratch("tail_call_warning_silent");
     let header = write_file(&dir, "liar.tmh", LIAR_HEADER);
     let caller = write_file(&dir, "caller.tmc", LIAR_CALLER);
+
+    let out = execute(&args(&[
+        "compile",
+        caller.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        dir.join("caller.tmo").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile caller: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let lib_object = compile(HONEST_NORETURN_LIB, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile lib: {e}"))
+        .object;
+    std::fs::write(dir.join("lib.tmo"), lib_object.to_bytes()).unwrap();
+
+    let out = execute(&args(&[
+        "link",
+        dir.join("caller.tmo").to_str().unwrap(),
+        dir.join("lib.tmo").to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        dir.join("caller.tmx").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("link: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("tail-call-no-continuation"),
+        "an honest `noreturn` callee must not warn: {}",
+        out.stderr
+    );
+}
+
+/// A SECOND caller, with a state AFTER the one that makes the `then`-less
+/// call: `go`'s block, the one that ends in the synthesized safety trap,
+/// is no longer the function's last block — `after` follows it. This is
+/// what a real multi-state `.tmc` program looks like far more often than
+/// the single-state `LIAR_CALLER`: a world's states all share ONE
+/// function, in source order, and the calling state is laid out last
+/// only when it happens to be the last one written.
+///
+/// `after` is unreachable here on purpose — the fixture only needs a
+/// second block after `go`'s, not a program that does anything with
+/// it — and the compiler says so as an ordinary warning, not a fatal.
+const MULTI_STATE_LIAR_CALLER: &str = "\
+alphabet ab { '_', 'a' }
+
+use liar;
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> call liar(t = t); }
+  state after { [*] -> stop; }
+}
+";
+
+/// The multi-state counterpart to `a_lying_noreturn_header_prints_the_
+/// tail_call_warning`: same lying header, same library that actually
+/// returns, but `go`'s call is now followed by `trap #0` followed by
+/// `after`'s own block — the trap is NOT `main`'s last instruction. The
+/// warning must still fire: the check looks only at the instruction
+/// right after the call, never at what comes after the trap.
+///
+/// Mutation it catches: require the trap to be the function's last
+/// instruction (`next_is_trap`, `crates/core/src/linker/engine.rs`) and
+/// this fixture — whose trap has `after`'s `stp` right behind it — goes
+/// silent, even though the single-state fixture above still fires.
+#[test]
+fn a_lying_noreturn_header_prints_the_tail_call_warning_with_a_later_state() {
+    let dir = scratch("tail_call_warning_fires_multi_state");
+    let header = write_file(&dir, "liar.tmh", LIAR_HEADER);
+    let caller = write_file(&dir, "caller.tmc", MULTI_STATE_LIAR_CALLER);
+
+    let out = execute(&args(&[
+        "compile",
+        caller.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        dir.join("caller.tmo").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile caller: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let lib_object = compile(LIAR_LIB, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile lib: {e}"))
+        .object;
+    std::fs::write(dir.join("lib.tmo"), lib_object.to_bytes()).unwrap();
+
+    let out = execute(&args(&[
+        "link",
+        dir.join("caller.tmo").to_str().unwrap(),
+        dir.join("lib.tmo").to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        dir.join("caller.tmx").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("link: {e}"));
+    assert_eq!(
+        out.code, 0,
+        "a warning does not fail the link: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("[tail-call-no-continuation]"),
+        "{}",
+        out.stderr
+    );
+}
+
+/// The near miss for the multi-state shape: `liar` really never returns,
+/// so the same multi-state caller, against the same header, links
+/// SILENT.
+///
+/// Mutation it catches: warning unconditionally whenever a call is
+/// immediately followed by a trap (never consulting `callee_can_return`
+/// at all) and this build, whose `liar` genuinely cannot return, would
+/// warn anyway.
+#[test]
+fn an_honest_noreturn_header_prints_no_tail_call_warning_with_a_later_state() {
+    let dir = scratch("tail_call_warning_silent_multi_state");
+    let header = write_file(&dir, "liar.tmh", LIAR_HEADER);
+    let caller = write_file(&dir, "caller.tmc", MULTI_STATE_LIAR_CALLER);
 
     let out = execute(&args(&[
         "compile",

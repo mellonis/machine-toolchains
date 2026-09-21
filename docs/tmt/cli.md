@@ -439,15 +439,20 @@ refusals (`docs/core.md (call mechanisms)`).
 
 `tail-call-no-continuation` fires on a call written with no `then` (a
 callee known `noreturn`) whose compiler-synthesized safety trap sits
-right after it, when the linked callee turns out to be able to return
-after all — the linker-side half of the same story `then` optional
-against `noreturn`, and the trap it earns, cover on the compiler side
+right after it — whatever code the linked program places after THAT
+trap — when the linked callee turns out to be able to return after all:
+the linker-side half of the same story `then` optional against
+`noreturn`, and the trap it earns, cover on the compiler side
 (`docs/tmt/language.md (reuse)`). It also fires on the equivalent
 hand-written `.tma` shape: a `call` as a function's last instruction, or
-one followed only by a `trap`, into a callee that can return. A
-hand-written `call` immediately followed by a deliberate `trap` placed
-for some other reason reads the same way and warns too — the accepted
-false positive `--allow tail-call-no-continuation` silences.
+one immediately followed by a `trap` (whatever follows the trap
+itself), into a callee that can return. On the first shape an honest
+return falls through into whatever the linker places next; on the
+second it lands on the trap instead, a controlled stop rather than a
+fall-through. A hand-written `call` immediately followed by a
+deliberate `trap` placed for some other reason reads the same way and
+warns too — the accepted false positive `--allow
+tail-call-no-continuation` silences.
 
 In manifest mode `-Werror`'s promotion is per TARGET, not per build: a
 strict refusal stops the build where it stands, and the targets already
@@ -458,7 +463,7 @@ on a later target behaves.
 |---|---|
 | `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
 | `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
-| `tail-call-no-continuation` | A call site is the last instruction of its function — or is followed only by the dialect's own trap — into a callee that can return, so a return would fall through into whatever the linker places next. |
+| `tail-call-no-continuation` | A call site is the last instruction of its function, or is immediately followed by the dialect's own trap, into a callee that can return: an honest return either falls through into whatever the linker places next, or lands on the trap in place of a continuation the source never wrote. |
 
 ## `tmt build`
 

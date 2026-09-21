@@ -712,16 +712,17 @@ fn a_prefix_imported_alphabet_is_refused() {
 // --- `tail-call-no-continuation` --------------------------------------
 //
 // A call site with no continuation — either it is literally the last
-// instruction of its function, or it is followed only by the dialect's
-// own safety trap — into a callee that CAN return
-// (docs/core.md (link warnings)).
+// instruction of its function, or the instruction right after it is the
+// dialect's own trap, whatever code follows the trap itself — into a
+// callee that CAN return (docs/core.md (link warnings)).
 
 /// A `call` as the function's LAST instruction, into a callee that ends
 /// in `ret`: the bare shape, no trap involved.
 ///
-/// Mutation it catches: drop the "bare" disjunct (only ever consult
-/// [`is_lone_trap`]) and this fixture — whose blob ends right at the
-/// call, with nothing after it to decode at all — goes silent.
+/// Mutation it catches: drop the "call is the last instruction" arm
+/// (only ever consult [`next_is_trap`]) and this fixture — whose blob
+/// ends right at the call, with no following byte to check at all —
+/// goes silent.
 #[test]
 fn a_bare_tail_call_into_a_returning_callee_warns() {
     const SRC: &str = "\
@@ -745,15 +746,17 @@ fn a_bare_tail_call_into_a_returning_callee_warns() {
     );
 }
 
-/// The same call, with a `stp` after it: an ordinary continuation, not a
-/// tail call at all.
+/// The same call, with a `stp` right after it: an ordinary continuation,
+/// not the dialect's trap and not a tail call at all. Whatever follows
+/// the call, only a TRAP right there counts — this is the near miss for
+/// that opcode check, independent of position.
 ///
-/// Mutation it catches: in [`is_lone_trap`]'s wire, drop the opcode
-/// match (treat ANY single instruction after the call as if it were the
-/// dialect's trap) and this fixture — whose `stp` is the whole rest of
-/// the blob, so "one instruction, then the end" still holds — warns.
+/// Mutation it catches: in [`next_is_trap`], drop the opcode match
+/// (treat ANY instruction right after the call as if it were the
+/// dialect's trap) and this fixture — whose `stp` is exactly the byte
+/// `next_is_trap` inspects — warns.
 #[test]
-fn a_call_followed_by_an_ordinary_instruction_is_silent() {
+fn a_call_followed_by_a_non_trap_instruction_is_silent() {
     const SRC: &str = "\
 .routine main, tapes=1, alpha=(3)
 .routine sub, tapes=1, alpha=(3)
@@ -841,16 +844,16 @@ fn a_lying_noreturn_callee_still_warns_on_a_bare_tail_call() {
     );
 }
 
-/// A call followed by a LONE safety trap — the shape a compiler emits
-/// for a call written with no `then` (docs/core.md (link warnings)):
-/// nothing after the call but the dialect's own trap, and the trap is
-/// itself the function's last instruction.
+/// A call immediately followed by the dialect's safety trap, and
+/// NOTHING else in the function — the shape a compiler emits for a call
+/// with no continuation (docs/core.md (link warnings)), in its simplest
+/// layout.
 ///
-/// Mutation it catches: drop the lone-trap arm entirely (only ever
-/// consult "bare") and this fixture — whose call is NOT itself the last
-/// instruction, the trap is — goes silent.
+/// Mutation it catches: drop the trap arm entirely (only ever consult
+/// "call is the last instruction") and this fixture — whose call is NOT
+/// itself the last instruction, the trap is — goes silent.
 #[test]
-fn a_lone_safety_trap_after_a_call_warns() {
+fn a_call_immediately_followed_by_a_trap_warns() {
     const SRC: &str = "\
 .routine main, tapes=1, alpha=(3)
 .routine sub, tapes=1, alpha=(3)
@@ -873,15 +876,19 @@ fn a_lone_safety_trap_after_a_call_warns() {
     );
 }
 
-/// A call, a trap, and one MORE instruction: the trap is no longer the
-/// function's last instruction, so it is not a lone safety trap — an
-/// ordinary (if unusual) continuation.
+/// A call, a trap, and one MORE instruction after the trap: this still
+/// warns — the check only looks at the byte right after the call, never
+/// at what follows the trap itself. On compiled `.tmc` this is the
+/// common shape (every state of a world shares one function, so the
+/// synthesized trap is the LAST instruction of its function only when
+/// the calling state happens to be laid out last); a rule that required
+/// the trap to end the function would miss it whenever it is not.
 ///
-/// Mutation it catches: in [`is_lone_trap`], drop the "last instruction
-/// of the blob" check (accept a trap anywhere right after the call) and
-/// this fixture, whose trap has a `stp` after it, warns.
+/// Mutation it catches: in [`next_is_trap`] (or its caller), require the
+/// trap to be the function's last instruction, and this fixture — whose
+/// trap has a `stp` after it — goes silent.
 #[test]
-fn a_trap_followed_by_more_code_is_not_a_lone_trap() {
+fn a_trap_right_after_a_call_warns_whatever_follows_the_trap() {
     const SRC: &str = "\
 .routine main, tapes=1, alpha=(3)
 .routine sub, tapes=1, alpha=(3)
@@ -893,26 +900,27 @@ fn a_trap_followed_by_more_code_is_not_a_lone_trap() {
 .func sub
         ret
 ";
-    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames)).expect("links");
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames))
+        .expect("a warning does not stop the link");
     assert!(
         out.report
             .diagnostics
             .iter()
-            .all(|d| d.code != "tail-call-no-continuation"),
+            .any(|d| d.code == "tail-call-no-continuation"),
         "{:?}",
         out.report.diagnostics
     );
 }
 
-/// A lone safety trap after a call into a callee that CANNOT return: the
+/// A trap right after a call into a callee that CANNOT return: the
 /// honest-`noreturn` shape again, reached through the trap arm instead
-/// of the bare one.
+/// of the "last instruction" one.
 ///
 /// Mutation it catches: drop the `callee_can_return` guard entirely and
-/// this fixture — whose trap would otherwise satisfy the lone-trap arm
-/// on its own — warns regardless of the callee.
+/// this fixture — whose trap would otherwise satisfy the trap arm on its
+/// own — warns regardless of the callee.
 #[test]
-fn a_lone_trap_after_a_call_into_a_noreturn_callee_is_silent() {
+fn a_trap_after_a_call_into_a_noreturn_callee_is_silent() {
     const SRC: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
@@ -936,15 +944,15 @@ fn a_lone_trap_after_a_call_into_a_noreturn_callee_is_silent() {
     );
 }
 
-/// The lone-trap match is by OPCODE alone — never the immediate, which a
+/// The trap match is by OPCODE alone — never the immediate, which a
 /// compiler may spend on any trap kind. `#7` names no kind this dialect
 /// defines; the check does not care.
 ///
 /// Mutation it catches: require the immediate to be `#0` inside
-/// `is_lone_trap` and this fixture, whose trap carries `#7`, goes
+/// `next_is_trap` and this fixture, whose trap carries `#7`, goes
 /// silent.
 #[test]
-fn the_lone_trap_match_ignores_the_immediate() {
+fn the_trap_match_ignores_the_immediate() {
     const SRC: &str = "\
 .routine main, tapes=1, alpha=(3)
 .routine sub, tapes=1, alpha=(3)

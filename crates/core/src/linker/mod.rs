@@ -381,9 +381,10 @@ pub const DIAGNOSTIC_CODES: &[(&str, &str)] = &[
     ),
     (
         "tail-call-no-continuation",
-        "A call site is the last instruction of its function — or is followed only \
-         by the dialect's own trap — into a callee that can return, so a return \
-         would fall through into whatever the linker places next.",
+        "A call site is the last instruction of its function, or is immediately \
+         followed by the dialect's own trap, into a callee that can return: an \
+         honest return either falls through into whatever the linker places next, \
+         or lands on the trap in place of a continuation the source never wrote.",
     ),
 ];
 
