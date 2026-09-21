@@ -1932,3 +1932,80 @@ machine {
         "the header-grafted machine's code differs from the in-unit splice"
     );
 }
+
+/// A NON-exported graph, printed only because an EXPORTED graph grafts
+/// it (`a_locally_referenced_graph_prints_unexported_and_the_header_
+/// reparses`'s own shape), itself grafts a graph reached only through a
+/// `use` import from ANOTHER NAMESPACE — the printed-but-not-exported
+/// graph's OWN references need the same `use`-line treatment an exported
+/// graph's own body already gets. Neither committed test discriminates
+/// this specific branch: the local-target test needs no `use` line at
+/// all (its target is local to the SAME namespace), and the imported-
+/// graph test's own target (`core`) is directly named by an EXPORTED
+/// graph, so `needed_imports`'s pre-existing `graph.exported` half alone
+/// already covers it.
+///
+/// Mutation: `needed_imports`'s own `printed` check narrowed back to
+/// `graph.exported` alone (dropping the `referenced_graphs` half) — `mid`
+/// still PRINTS (a different code path, `is_printed_graph`, decides
+/// that), but `needed_imports` no longer scans `mid`'s own body for
+/// references, so `use ext_ns::helper;` goes missing and the reparse
+/// below fails `unresolved-alphabet`/`undefined-graph`.
+#[test]
+fn a_printed_but_unexported_graph_keeps_the_use_line_its_own_body_needs() {
+    const NESTED_USE_FIXTURE: &str = "\
+namespace ext_ns {
+  export alphabet marks { '_', 'x', 'y' }
+  export graph helper(tape t: marks, state done) {
+    entry state w {
+      ['x'] -> write ['y'] goto done;
+      [*]   -> goto done;
+    }
+  }
+}
+
+namespace lib7 {
+  use ext_ns::marks;
+  use ext_ns::helper;
+
+  graph mid(tape t: marks, state done) {
+    entry graft helper(t = t, done = done) as step;
+  }
+
+  export graph outer(tape t: marks, state done) {
+    entry graft mid(t = t, done = done) as wrapped;
+  }
+}
+";
+    let dir = scratch("header_printed_unexported_use_line");
+    let src_path = dir.join("nesteduse.tmc");
+    std::fs::write(&src_path, NESTED_USE_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    assert!(
+        source_out.stdout.contains("use ext_ns::helper;"),
+        "the printer dropped the needed `use` line for the printed-but-\
+         unexported graph's own reference: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out
+            .stdout
+            .contains("graph mid(tape t: marks writes { 'y' }, state done) {"),
+        "{}",
+        source_out.stdout
+    );
+    assert!(
+        !source_out.stdout.contains("export graph mid"),
+        "a non-exported graph must not print `export`: {}",
+        source_out.stdout
+    );
+
+    let header_path = dir.join("nesteduse.tmh");
+    std::fs::write(&header_path, &source_out.stdout).unwrap();
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, source_out.stdout,
+        "the printed header did not reparse to itself"
+    );
+}
