@@ -521,6 +521,99 @@ machine {
 }
 ";
 
+/// A two-graph mutual graft — `a` grafts `b`, `b` grafts `a` — as an
+/// ordinary source unit, its header derived through the real `tmt
+/// interface` printer (`interface`'s own doc: never hand-written, to
+/// avoid a canonical-spelling mismatch). `tmt interface` does not run
+/// expansion (only signature/declaration resolution, `docs/tmt/cli.md
+/// (interface)`), so it prints this pair exactly as it would any other —
+/// the cycle only matters once something actually SPLICES into it.
+const CYCLE_LIB_TMC: &str = "\
+export alphabet marks { '_', 'x' }
+export graph a(tape t: marks, state done) {
+  entry graft b(t = t, done = done) as step;
+}
+export graph b(tape t: marks, state done) {
+  entry graft a(t = t, done = done) as step;
+}
+";
+
+/// Grafts `a` directly from the MACHINE block — no local graph of the
+/// consumer's own anywhere in this unit. A walk that only ever starts
+/// from this unit's own LOCAL graph-kind worlds never reaches `a` at all
+/// from this shape.
+const CONSUMER_CYCLE_DIRECT: &str = "\
+use marks;
+use a;
+machine {
+  tape t: marks;
+  entry graft a(t = t, done = fin) as w;
+  state fin { [*] -> stop; }
+}
+";
+
+/// The consumer's own LOCAL graph `bridge` grafts the declared `a` — the
+/// walk must follow the edge OUT of a local node and INTO the declared
+/// module where the `a`<->`b` cycle lives. `bridge` itself never becomes
+/// part of that cycle (a declared graph's own body cannot name a local
+/// declaration of the primary unit — the declarations table never carries
+/// this unit's own content, only every OTHER module's), it is the entry
+/// point the walk passes THROUGH to reach the cycle.
+const CONSUMER_CYCLE_VIA_LOCAL_BRIDGE: &str = "\
+use marks;
+use a;
+graph bridge(tape t: marks, state done) {
+  entry graft a(t = t, done = done) as into_lib;
+}
+machine {
+  tape t: marks;
+  entry graft bridge(t = t, done = fin) as w;
+  state fin { [*] -> stop; }
+}
+";
+
+/// The near miss: `diamond_a` grafts BOTH `diamond_b` and `diamond_c`
+/// (conditionally, on the tape symbol), and both of those graft
+/// `diamond_d` — a DIAMOND, not a cycle. `diamond_d` is reached twice, by
+/// two DIFFERENT paths, never revisited while still on the CURRENT path
+/// (color 1); the second visit finds it already fully walked (color 2)
+/// and moves on. `diamond_b`/`diamond_c`/`diamond_d` are deliberately
+/// non-exported — reached only through the exported `diamond_a`'s own
+/// body — so this also exercises the printer's own "referenced, printed
+/// even though not exported" path (`tests/header_roundtrip.rs`'s own
+/// coverage) on the way to a REAL splice, not just a reparse.
+const DIAMOND_LIB_TMC: &str = "\
+export alphabet marks { '_', 'x' }
+export graph diamond_a(tape t: marks, state done) {
+  entry state s { [*] -> goto pick; }
+  state pick {
+    ['x'] -> goto via_b;
+    [*]   -> goto via_c;
+  }
+  graft diamond_b(t = t, done = done) as via_b;
+  graft diamond_c(t = t, done = done) as via_c;
+}
+graph diamond_b(tape t: marks, state done) {
+  entry graft diamond_d(t = t, done = done) as step;
+}
+graph diamond_c(tape t: marks, state done) {
+  entry graft diamond_d(t = t, done = done) as step;
+}
+graph diamond_d(tape t: marks, state done) {
+  entry state w { [*] -> goto done; }
+}
+";
+
+const CONSUMER_DIAMOND: &str = "\
+use marks;
+use diamond_a;
+machine {
+  tape t: marks;
+  entry graft diamond_a(t = t, done = fin) as w;
+  state fin { [*] -> stop; }
+}
+";
+
 /// row 1's positive: a BARE graft target nothing local defines and no
 /// `use`/qualified path reaches — `Scopes::resolve` returns a total miss
 /// (`None`), the one shape that reads *no such graph* rather than
@@ -1258,4 +1351,74 @@ fn a_declared_graphs_nested_target_resolves_when_available() {
         snap.head, 2,
         "the nested goToNumberGraph did not walk the head to the '$': {snap:?}"
     );
+}
+
+/// A two-graph cycle ENTIRELY inside a declared header, reached DIRECTLY
+/// from the consumer's own MACHINE block — no local graph of the
+/// consumer's own anywhere in this unit. The acyclicity walk used to
+/// start only from this unit's own LOCAL graph-kind worlds, so a graft
+/// site with no local graph anywhere never reached the cycle at all, and
+/// real expansion (`expand_graph`'s own memo inserts only AFTER a full
+/// splice completes, never before one starts) recursed without bound.
+/// Never a process abort: a typed `graft-cycle` error, exit 1, naming a
+/// graph on the cycle.
+///
+/// **Mutation:** restricting the walk to local graphs (`resolve_graft_
+/// target`'s declarations-table fallback disabled) — verified BY HAND,
+/// not committed, run as a SINGLE filtered test rather than the whole
+/// suite: the mutated binary aborts (stack overflow) instead of
+/// returning a clean `Err`, on both this test and the one below.
+#[test]
+fn a_cycle_entirely_inside_a_header_is_a_typed_error_not_an_abort() {
+    let dir = scratch("lib_graft_header_cycle");
+    let lib_src = write_file(&dir, "cyclib.tmc", CYCLE_LIB_TMC);
+    let header = interface(&dir, &lib_src, "cyclib.tmh");
+    let err = compile_extern_err(&dir, "cycle_app", CONSUMER_CYCLE_DIRECT, &header);
+    assert!(err.contains("[graft-cycle]"), "{err}");
+    assert!(
+        err.contains('`') && (err.contains("`a`") || err.contains("`b`")),
+        "the message should name a graph on the cycle: {err}"
+    );
+}
+
+/// The identical `a`<->`b` cycle, reached through the consumer's own
+/// LOCAL graph `bridge` rather than directly from the machine block —
+/// `bridge` being local was already enough to make the OLD (local-graphs-
+/// only) walk visit it as a root, so this shape pins that the fix's
+/// REACHED-THROUGH-A-DECLARED-MODULE half keeps working once a local hop
+/// is interposed before the declared cycle, not just the direct-from-
+/// machine shape the sibling test above pins.
+///
+/// **Mutation:** the same declarations-table-fallback removal, verified
+/// the same way — a single filtered run, by hand.
+#[test]
+fn a_cycle_reached_through_a_consumers_local_graph_is_a_typed_error_not_an_abort() {
+    let dir = scratch("lib_graft_bridge_cycle");
+    let lib_src = write_file(&dir, "cyclib2.tmc", CYCLE_LIB_TMC);
+    let header = interface(&dir, &lib_src, "cyclib2.tmh");
+    let err = compile_extern_err(&dir, "bridge_app", CONSUMER_CYCLE_VIA_LOCAL_BRIDGE, &header);
+    assert!(err.contains("[graft-cycle]"), "{err}");
+}
+
+/// The near miss: a shared target reached by two DIFFERENT paths (a
+/// diamond) is NOT a cycle and must compile clean — the acyclicity walk's
+/// own three-color scheme (0/1/2) must tell "already fully walked" (2,
+/// harmless to revisit) apart from "still on the CURRENT path" (1, the
+/// actual cycle condition), or an over-eager rewrite that flags ANY
+/// repeat visit would wrongly refuse this shape too.
+#[test]
+fn a_diamond_shaped_shared_target_is_not_a_cycle() {
+    let dir = scratch("lib_graft_diamond");
+    let lib_src = write_file(&dir, "diamond.tmc", DIAMOND_LIB_TMC);
+    let header = interface(&dir, &lib_src, "diamond.tmh");
+    let consumer = compile_extern(&dir, "diamond_app", CONSUMER_DIAMOND, &header);
+    assert_eq!(
+        consumer.grafts.len(),
+        1,
+        "only the direct `diamond_a` graft is recorded on the consumer's \
+         own object — diamond_b/c/d are folded into diamond_a's own \
+         canonical body, not separate top-level splices: {:?}",
+        consumer.grafts
+    );
+    assert_eq!(consumer.grafts[0].graph, "diamond_a");
 }

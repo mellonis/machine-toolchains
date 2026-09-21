@@ -1218,55 +1218,97 @@ fn cont_key(cont: &HashMap<String, Transition2>) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Graph-definition acyclicity: the graft-dependency graph of
-// graph DEFINITIONS must be acyclic (a self- or mutual graft is infinite
-// expansion). Instance-level cycles (continuation loops) stay legal. Over
-// this unit's OWN graphs only — a library's own graft-dependency graph was
-// already checked acyclic when the library's source was itself compiled, and
-// a library graph can never graft back into the unit consuming it (a graft
-// target is a name reachable through THIS unit's own scopes, and nothing on
-// the declarations-table path lets a library body name a graph of the
-// consumer's).
+// Graph-definition acyclicity: the graft-dependency graph of graph
+// DEFINITIONS must be acyclic (a self- or mutual graft is infinite
+// expansion). Instance-level cycles (continuation loops) stay legal. A graft
+// target used to be reachable only through THIS unit's own scopes, so
+// walking this unit's own graphs was already the complete graph — a
+// declared graph is a graft target too now, and a hand-written (or simply
+// independently authored) header can graft back into another declared
+// graph, or into this unit's own, closing a cycle the local-only walk never
+// sees; a MACHINE or ROUTINE block can also graft a declared graph
+// directly, with no local graph of its own anywhere in the unit, so the
+// walk starts from every LOCAL world (any kind, not graph-kind only) and
+// follows a graft target's resolution exactly as expansion itself will
+// (local to the owning module first, then the compile's own declarations
+// table via `find_external_graph`) — reaching every graph an actual
+// expansion could reach, and never more, since a declared module's own
+// graph the compile never grafts into is not part of any graft-dependency
+// edge this compile has. A node is identified by (owning module identity,
+// name) — [`module_id`]'s own by-pointer identity, the same one
+// `expand_graph`'s memo key uses — since two different modules may declare
+// a graph under the identical mangled name. A machine or routine is never
+// itself a graft TARGET (nothing grafts into one), so it never needs its
+// own color entry — it is only ever an edge SOURCE, walked once.
 // ---------------------------------------------------------------------------
 
-fn check_graph_acyclicity(graphs: &HashMap<&str, &ResolvedWorld>) -> Result<(), CompileError> {
+fn check_graph_acyclicity(
+    resolved: &Resolved,
+    ext_modules: &[&Resolved],
+) -> Result<(), CompileError> {
     // 0 = unvisited, 1 = on the current path, 2 = done.
-    let mut color: HashMap<&str, u8> = HashMap::new();
-    for &name in graphs.keys() {
-        if color.get(name).copied().unwrap_or(0) == 0 {
-            acyclicity_dfs(name, graphs, &mut color)?;
-        }
+    let mut color: HashMap<(usize, String), u8> = HashMap::new();
+    for world in &resolved.worlds {
+        walk_grafts(world, resolved, ext_modules, &mut color)?;
     }
     Ok(())
 }
 
-fn acyclicity_dfs<'a>(
-    name: &'a str,
-    graphs: &HashMap<&'a str, &'a ResolvedWorld>,
-    color: &mut HashMap<&'a str, u8>,
+/// A graft target's owning module and its own graph-kind world, resolved
+/// the SAME way expansion resolves one — local to `owner` first, then the
+/// compile's own declarations table (`expand_graph`'s own doc). `None`
+/// means no such graph anywhere this compile can see; that is not this
+/// walk's own job to report — `undefined-graph` fires later, when the graft
+/// is actually resolved for splicing.
+fn resolve_graft_target<'a>(
+    target: &str,
+    owner: &'a Resolved,
+    ext_modules: &[&'a Resolved],
+) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
+    match owner
+        .worlds
+        .iter()
+        .find(|w| w.kind == WorldKind::Graph && w.name == target)
+    {
+        Some(w) => Some((owner, w)),
+        None => crate::compiler::find_external_graph(ext_modules, target),
+    }
+}
+
+/// `world`'s own graft edges (`world` may be a machine, a routine, or a
+/// graph — any kind that can carry a `graft`), each resolved the same way
+/// expansion itself resolves one and recursed into (over the TARGET's own
+/// grafts) if not already fully walked. `color`'s three-value DFS coloring
+/// is standard cycle detection: an edge into a node still `1` (on the
+/// CURRENT recursion path, not yet fully walked) is the cycle itself.
+fn walk_grafts<'a>(
+    world: &ResolvedWorld,
+    owner: &'a Resolved,
+    ext_modules: &[&'a Resolved],
+    color: &mut HashMap<(usize, String), u8>,
 ) -> Result<(), CompileError> {
-    color.insert(name, 1);
-    let world = graphs[name];
     for graft in &world.grafts {
-        // A graft target absent from this LOCAL map is a library graph
-        // (read from a header's declarations table) — its own definition's
-        // acyclicity was already checked when the library's source was
-        // itself compiled, so it is skipped here, not an error.
-        let Some((&target, _)) = graphs.get_key_value(graft.target.as_str()) else {
+        let Some((target_owner, target_world)) =
+            resolve_graft_target(graft.target.as_str(), owner, ext_modules)
+        else {
             continue;
         };
-        match color.get(target).copied().unwrap_or(0) {
+        let key = (module_id(target_owner), graft.target.clone());
+        match color.get(&key).copied().unwrap_or(0) {
             1 => {
                 return Err(CompileError {
                     span: graft.target_span,
                     kind: CompileErrorKind::GraftCycle(graft.target.clone()),
                 });
             }
-            0 => acyclicity_dfs(target, graphs, color)?,
+            0 => {
+                color.insert(key.clone(), 1);
+                walk_grafts(target_world, target_owner, ext_modules, color)?;
+                color.insert(key, 2);
+            }
             _ => {}
         }
     }
-    color.insert(name, 2);
     Ok(())
 }
 
@@ -1619,11 +1661,16 @@ fn module_id(owner: &Resolved) -> usize {
 }
 
 /// Expand a graph to its memoized graph-space form: own states range-expanded,
-/// nested grafts spliced, aliases resolved. The graft-dependency DAG being
-/// acyclic, the recursion terminates. `name` may be a LOCAL graph (in
-/// `graphs`) or a library graph reached only through `ext_modules` — either
-/// way `graphs` stays the acyclicity check's own local-only map, so a miss
-/// here falls back to the declarations table.
+/// nested grafts spliced, aliases resolved. `check_graph_acyclicity` has
+/// already walked the WHOLE graft-dependency graph this compile can reach —
+/// this unit's own graphs and every declared module's graph a graft target
+/// resolves into, keyed by the same (owning module, name) identity this
+/// function's own memo uses — and refused a cycle before this function is
+/// ever called, so the recursion terminates: this function does not itself
+/// re-detect a cycle, and its own memo (inserted only AFTER a full splice
+/// completes) would not catch one if it existed. `name` may be a LOCAL graph
+/// (in `graphs`) or a library graph reached only through `ext_modules` —
+/// either way a miss in `graphs` falls back to the declarations table.
 fn expand_graph<'a>(
     name: &str,
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
@@ -1831,8 +1878,8 @@ pub(crate) fn expand(
         .filter(|w| w.kind == WorldKind::Graph)
         .map(|w| (w.name.as_str(), w))
         .collect();
-    check_graph_acyclicity(&graphs)?;
     let ext_modules = externals.modules();
+    check_graph_acyclicity(resolved, &ext_modules)?;
 
     let mut memo: HashMap<(usize, String), GraphExpansion> = HashMap::new();
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
