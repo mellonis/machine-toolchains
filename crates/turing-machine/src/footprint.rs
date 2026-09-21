@@ -577,6 +577,17 @@ fn unresolved_contribution(host: &ResolvedWorld, args: &[BindingArg]) -> Vec<Sym
 struct Edge<'a> {
     target: Option<&'a str>,
     external: Option<&'a str>,
+    /// Which external lookup the `external` path takes: a GRAFT must match
+    /// a GRAPH, exactly as the splice's own lookup does
+    /// (`compiler::find_external_graph`), so that the clause believed here
+    /// is read from the SAME module the body is spliced from. Both lookups
+    /// are first-match over one table order, so on the kind they agree
+    /// they agree entirely — but a kind-agnostic lookup could match an
+    /// earlier module's ROUTINE of that mangled name while the splice took
+    /// a later module's GRAPH, and then this walk would believe a clause
+    /// belonging to a body nothing splices. A call or bind, which has no
+    /// body to splice, keeps the kind-agnostic lookup it always had.
+    external_is_graph: bool,
     args: &'a [BindingArg],
 }
 
@@ -593,6 +604,7 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
             } => edges.push(Edge {
                 target: (!external).then_some(name.as_str()),
                 external: external.then_some(name.as_str()),
+                external_is_graph: false,
                 args,
             }),
             // A bind-call's binding lives on the `bind` declaration, shared by
@@ -602,6 +614,7 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
                     Some(b) => edges.push(Edge {
                         target: (!b.external).then_some(b.target.as_str()),
                         external: b.external.then_some(b.target.as_str()),
+                        external_is_graph: false,
                         args: &b.args,
                     }),
                     // A bind name with no declaration cannot happen (the call
@@ -609,6 +622,7 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
                     None => edges.push(Edge {
                         target: None,
                         external: None,
+                        external_is_graph: false,
                         args: &[],
                     }),
                 }
@@ -644,6 +658,7 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
         edges.push(Edge {
             target: Some(graft.target.as_str()),
             external: Some(graft.target.as_str()),
+            external_is_graph: true,
             args: &graft.args,
         });
     }
@@ -799,10 +814,13 @@ pub(crate) fn infer_resolved_with(resolved: &Resolved, externals: &[&Resolved]) 
                     // here to walk. A module that vouches for it — declared
                     // contracts on a visible signature — is believed; nothing
                     // vouching, it may write anything it can reach.
-                    None => match edge
-                        .external
-                        .and_then(|path| find_external(externals, path))
-                    {
+                    None => match edge.external.and_then(|path| {
+                        if edge.external_is_graph {
+                            crate::compiler::find_external_graph(externals, path)
+                        } else {
+                            find_external(externals, path)
+                        }
+                    }) {
                         Some((module, callee)) => binding_contribution(
                             resolved,
                             module,

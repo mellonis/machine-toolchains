@@ -1537,6 +1537,74 @@ fn a_library_grafts_declared_write_set_is_believed() {
     );
 }
 
+/// A module declaring a ROUTINE under the mangled name a LATER module
+/// declares its GRAPH under. The splice's own lookup matches a graph and
+/// skips the routine; the write footprint must read the clause from that
+/// SAME module, or it believes a contract belonging to a body nothing
+/// splices. Both `--extern` orders must therefore agree, and both must
+/// refuse: the grafted graph writes outside the host's `writes {}`.
+///
+/// Mutation: give a graft edge the kind-agnostic external lookup a
+/// call uses (`footprint::find_external` in place of
+/// `compiler::find_external_graph`) — the routine-first order then reads
+/// `lib::seek`'s ROUTINE clause, `writes {}`, and the host wrongly
+/// compiles while the graph-first order still refuses.
+#[test]
+fn a_graft_reads_its_clause_from_the_module_the_body_comes_from() {
+    const ROUTINE_MODULE: &str = "\
+namespace lib {
+  export alphabet bits { '_', '0', '1' }
+  export routine seek(tape t: bits writes {});
+}
+";
+    const GRAPH_MODULE: &str = "\
+namespace lib {
+  export alphabet bits { '_', '0', '1' }
+  export graph seek(tape t: bits writes { '0', '1' }, state found) {
+    entry state s {
+      ['_'] -> goto found;
+      [*]   -> write ['1'] move [>] goto s;
+    }
+  }
+}
+";
+    const HOST: &str = "\
+use lib::bits;
+
+export routine facade(tape t: bits writes {}, state out) {
+  entry state s { [*] -> goto walk; }
+  graft lib::seek(t = t, found = out) as walk;
+}
+";
+    let dir = scratch("lib_graft_kind_order");
+    let routine_mod = write_file(&dir, "kind_routine.tmh", ROUTINE_MODULE);
+    let graph_mod = write_file(&dir, "kind_graph.tmh", GRAPH_MODULE);
+    let host = write_file(&dir, "kind_host.tmc", HOST);
+    let out = dir.join("kind_host.tmo");
+
+    for (label, first, second) in [
+        ("routine module first", &routine_mod, &graph_mod),
+        ("graph module first", &graph_mod, &routine_mod),
+    ] {
+        let err = execute(&args(&[
+            "compile",
+            host.to_str().unwrap(),
+            "--nostdlib",
+            "--extern",
+            first.to_str().unwrap(),
+            "--extern",
+            second.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+        ]))
+        .expect_err(&format!("{label}: the host must be refused"));
+        assert!(err.contains("[writes-outside-contract]"), "{label}: {err}");
+        // The set named is the GRAPH's declared one — the routine module's
+        // `writes {}` would name nothing at all.
+        assert!(err.contains("may write '0', '1'"), "{label}: {err}");
+    }
+}
+
 /// The near miss: when the library graph's DECLARED set is wider than
 /// the host's own clause, `writes-outside-contract` still fires — and
 /// names exactly the symbol the declaration adds, not the whole
