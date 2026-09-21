@@ -122,7 +122,7 @@ fn interface_object_round_trips_byte_identically() {
 }
 
 /// A `.param` glyph group carrying a multi-character label — the notation
-/// `docs/tmt/language.md (glyph literal)` already allows in `.tmc` source
+/// `docs/tmt/language.md (glyph literals)` already allows in `.tmc` source
 /// and `parse_glyph_list` already accepts (docs/formats.md (glyph literals
 /// and glyph lists)).
 const MULTI_CHAR_PARAM: &str = "\

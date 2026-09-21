@@ -15,31 +15,31 @@
 //     no markers. One number per region; the graphs are much smaller.
 //
 // Each namespace exports its representation alphabet as `symbols` — the
-// normative statement of the representation. An exported alphabet is a
-// source-level declaration and contributes no linkable symbol, so a caller in
-// another compilation unit cannot name it as `std::binaryNumbers::symbols`. To
-// run these routines over your own tape, declare a local alphabet listing the
-// SAME glyphs in the SAME order and type the tape with it — a transparent call
-// binds by index, so the order is the part that must match.
+// normative statement of the representation. It is a source-level declaration
+// and contributes no linkable symbol, but a consumer can still name it:
+// `use std::binaryNumbers::symbols;` resolves against this library's
+// declarations, which every compile reads by default. Re-declaring a local
+// alphabet with the SAME glyphs in the SAME order works too, and is what a
+// transparent call binds by — there, the order is the part that must match.
 //
 // Anatomy — the facade pattern. Each operation's behavior is defined ONCE as
 // an `export graph` with explicit exit continuations: the `done` state
 // parameter is where control leaves the graph. A one-line `export routine`
 // facade grafts that graph with `done = return`, giving the operation a
-// call-able form. The two forms are complementary, not a per-use-site choice,
-// and which one a consumer can use is decided by where the library's source
-// is. Against the compiled, LINKED object — the normal way to consume the
-// library — the only path is a transparent `call` with an empty argument list:
-// it binds the caller's tape by index and returns dynamically. Binding a tape
-// into a library routine (`call …(num = num)`) needs that routine's tape
-// signature, and grafting one of the graphs needs the graph's source; neither
-// crosses a link boundary, so both are rejected there
-// (`external-binding-unsupported`, `undefined-graph`). Both work only when the
-// library's source is compiled into the consumer's own unit — which is why
-// both forms are exported: the library ships as source. Where an operation is
-// inherently a composition of calls (`minusOne`, and the cross-representation
-// `invertNumber`) it is a plain routine, because a graph cannot contain a
-// call.
+// call-able form. Both forms reach a consumer of the LINKED object, because
+// every compile reads this library's declarations by default — from the
+// generated header shipped beside this source, which carries each routine's
+// signature and each exported graph's body in full. So all three consumption
+// paths work with no flag: a transparent `call` with an empty argument list,
+// which binds the caller's tape by index and returns dynamically; a `call
+// …(num = num)` that binds the tape by name, checked here against the
+// routine's own parameter order and resolved by the linker; and a `graft` of
+// one of the `<op>Graph` graphs, spliced from the body the header carries.
+// The two forms are therefore a per-use-site choice: the routine when the
+// continuation belongs to the caller, the graph when the site wants its own
+// exits. Where an operation is inherently a composition of calls
+// (`minusOne`, and the cross-representation `invertNumber`) it is a plain
+// routine, because a graph cannot contain a call.
 //
 // Convention: the tape parameter is `num`; a behavior graph is named
 // `<op>Graph` and its facade `<op>`. The `?` lines on each entity are its

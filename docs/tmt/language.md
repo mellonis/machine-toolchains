@@ -662,8 +662,8 @@ hold: a same-width alphabet spelling different glyphs is the
 narrower callee alphabet is `narrow-alphabet`; a wider one is an error
 (`docs/tmt/cli.md (link warnings)`). The two ways to stop re-declaring an
 alphabet by position are to **import** the callee's own alphabet
-("Alphabets across units") or to **bind and map explicitly** — the form
-below.
+("Alphabets, maps and graphs across units") or to **bind and map
+explicitly** — the form below.
 
 **The bound call** names arguments, exactly as an in-unit call does. The
 compiler emits a SYMBOLIC binding — the callee's parameter name in place
@@ -964,9 +964,11 @@ what they meant, so it is never graded, and the warning goes quiet:
 
 ```
 // the caller's tape is `{ '_', '1', '0' }`, the callee's `{ '_', '0', '1' }`
-call mark(t = d)                // warns: glyph-mismatch at position 1
-call mark(t = d with map { })   // silent: bind by index, deliberately
+call mark(t = d)                // the LINK warns: glyph-mismatch at position 1
+call mark(t = d with map { })   // the link is silent: bind by index, deliberately
 ```
+
+Both compile without a word; the difference shows at `tmt link`.
 
 Use it when the index re-labelling is the intent — a tape whose glyph
 names differ from the callee's by design, where the positions are what
@@ -1023,23 +1025,35 @@ name is a spelling, not a semantics.
 
 The declaration is checked **once**, at the `map` statement itself, over
 its own two named alphabets (SOURCE, then DST): every pair's glyphs
-resolve in their own alphabet, the blank stays pinned, and — on
-equal-cardinality alphabets — the map is injective, exactly the graft-time
-checks above. On UNEQUAL cardinalities the declaration additionally
-requires every non-blank source symbol to be named explicitly: unlike a
-graft's own inline map (one splice, one visible use, so an unnamed source
-quietly becomes a hole), a named declaration is meant to be reused at
-every site that names it, so a gap left implicit there would be a silent
-runtime trap wherever it is next used. `wideToBits` above satisfies this:
+resolve in their own alphabet (`map-symbol-not-in-alphabet`), the blank
+stays pinned (`map-blank-pin`), no symbol gets two images in one
+direction (`map-conflict`), and — on equal-cardinality alphabets — the
+map is injective (`map-not-injective`), exactly the graft-time checks
+above. On UNEQUAL cardinalities the declaration additionally requires
+every non-blank source symbol to be named explicitly (`map-not-closed`):
+unlike a graft's own inline map (one splice, one visible use, so an
+unnamed source quietly becomes a hole), a named declaration is meant to
+be reused at every site that names it, so a gap left implicit there would
+be a silent runtime trap wherever it is next used. `wideToBits` above
+satisfies this:
 `wide`'s four non-blank symbols (`^`, `$`, `0`, `1`) are all named, even
 though two of them collapse onto the same target glyph — closed, not
 injective, which unequal cardinalities never require.
 
 At each SITE only two further facts are checked: the caller tape's
-alphabet must be the map's own declared SOURCE, and the callee
-parameter's alphabet must be its own declared TARGET — a named map
+alphabet must be the map's own declared SOURCE
+(`named-map-source-mismatch`), and the callee parameter's alphabet must
+be its own declared TARGET (`named-map-target-mismatch`) — a named map
 resolved once at its declaration cannot silently drift onto a
-differently-alphabeted pair of tapes at a use site.
+differently-alphabeted pair of tapes at a use site. A `with map NAME`
+naming no map in scope is `undefined-map`, with the same two cases an
+unresolved alphabet reference has ("Alphabets, maps and graphs across
+units").
+
+`with map NAME` and the inline `with map { … }` are the two ways to write
+a map at a site. The third spelling, `with map { }` with no pairs at all,
+is not an empty map in the same sense — it is how an author says "bind by
+index, deliberately"; see "The written empty map".
 
 ## Range expansion and substitution
 
@@ -1174,7 +1188,7 @@ declares a name defined in another compilation unit — that is how a
 transparent cross-unit call names its callee. An import nothing
 references is a lint finding.
 
-### Alphabets across units
+### Alphabets, maps and graphs across units
 
 An alphabet, a named map and a graph are **source-level** declarations:
 none of them is a linkable symbol, so naming one that lives in another
@@ -1183,11 +1197,18 @@ headers", below). Given them, all three are named exactly like a routine
 — by a qualified path, or by a `use` that binds the short name:
 
 ```
-use lib::bits;          // the import form
+use lib::bits;          // an alphabet, by import
+use lib::wideToBits;    // a named map, the same way
 …
 tape d: bits;           // …and the qualified form
 tape w: lib::wide;
+[*, *] -> call lib::mark(t = w with map lib::wideToBits) then done;
+graft lib::seek(t = d, found = done) as walk;
 ```
+
+A graph named this way is spliced, body and all, exactly as a local one
+is — see "Grafting a graph from another unit" for what that means for
+the names inside it.
 
 An exported alphabet imported this way is the honest alternative to
 re-declaring the callee's glyphs by position for a transparent call
@@ -1446,8 +1467,9 @@ text, and it remains available as an ordinary identifier.
   ("Declarations and headers"). With them in hand: a `call`/`bind` may
   bind tapes into a routine defined in another unit ("Calls across
   units"), an alphabet, a named map or a graph may be named across a unit
-  boundary ("Alphabets across units"), and a graph from another unit may
-  be grafted. New grammar: `state` parameters on a `routine` signature
+  boundary ("Alphabets, maps and graphs across units"), and a graph from
+  another unit may be grafted. New grammar: `state` parameters on a
+  `routine` signature
   ("`state` parameters"), the `noreturn` clause and the optional `then`
   it licenses ("Routines"), and `map NAME: SRC -> DST { … }` declarations
   with `with map NAME` sites ("Named maps"). Two acceptance changes go

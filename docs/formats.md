@@ -712,7 +712,7 @@ two escapes, `'\''` for the quote and `'\\'` for the backslash; any
 other backslash sequence, an empty `''`, or a literal that reaches
 end-of-line unclosed is a lex error — the identical rule `.tmc` source
 states for its own glyph literal (`docs/tmt/language.md (glyph
-literal)`). The literal itself rides the interface capability: a
+literals)`). The literal itself rides the interface capability: a
 dialect without it never sees a quote as anything but junk. A glyph
 **list** — the `(…)` group of a `.param` line — is the notation `tmt
 tape-block` uses (`docs/formats.md (glyph tables)`): comma-separated

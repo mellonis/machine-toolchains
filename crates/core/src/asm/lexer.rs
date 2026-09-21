@@ -317,7 +317,7 @@ pub(crate) fn lex_line(text: &str, line_no: u32, caps: AsmCaps) -> Vec<AsmToken>
         if c == '\'' && caps.interface {
             // Any non-empty content up to the closing quote, decoding the
             // two escapes `\'` and `\\` — matching the `.tmc` glyph
-            // literal's own rule (docs/tmt/language.md (glyph literal))
+            // literal's own rule (docs/tmt/language.md (glyph literals))
             // and `formats::glyphs`' scanner. An empty literal (`''`) or
             // an unterminated one (no closing quote before EOL) both fall
             // through to Junk('\''), exactly as before this content was
@@ -997,7 +997,7 @@ mod tests {
     fn glyph_accepts_multi_char_content() {
         // Mutation: restoring the single-character guard — a `.tma` glyph
         // literal is any non-empty content in single quotes, matching
-        // `.tmc`'s own rule (docs/tmt/language.md (glyph literal)).
+        // `.tmc`'s own rule (docs/tmt/language.md (glyph literals)).
         let caps = AsmCaps {
             interface: true,
             ..AsmCaps::default()

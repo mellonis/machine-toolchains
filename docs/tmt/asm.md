@@ -149,9 +149,19 @@ L000C:  stp
 
 That listing is a fixed point: assembling it and disassembling the object
 reproduces it character for character, and reassembling the result
-reproduces the object's bytes. Three details of it are worth naming,
+reproduces the object's bytes. Four details of it are worth naming,
 because each is a rule rather than a choice:
 
+- **A pair destination is told apart by its quoting.** In
+  `[num: 1{3->'0',4=>'1'}]` the left side of each pair is always a symbol
+  index in the CALLER's alphabet; the right side is a **glyph label**
+  when it is quoted and a **callee alphabet index** when it is a bare
+  number. The two are not interchangeable — `4=>'1'` maps the caller's
+  index 4 to whatever the callee spells `'1'`, while `4=>1` maps it to
+  the callee's index 1, whatever that spells. The compiler always quotes:
+  a destination it emits for a callee in another unit is a label, because
+  the callee's index space belongs to the linker. A bare number appears
+  only where a human wrote one, or where the callee was in the same unit.
 - **The exit label is synthesized.** `exits=(L000C)` and the `L000C:`
   line are both the disassembler's own name for that code offset. A
   written name does not come back — `-g` does not restore it — unless
@@ -190,16 +200,20 @@ compiled object always reaches the
 link stage as ordinary code plus bound-call records, and the choice of
 call mechanism stays a link-time decision independent of the source.
 
-The interface surface above is not part of that output yet. Today's
-compiler emits the **numeric** binding form — positional entries and
-index destinations — and no interface directives at all: `.param`,
-`.graph`, `.grafted`, the `.routine` tail and the symbolic binding
-spellings are hand-written, or emitted by a later compiler round. The
-dialect accepts them regardless of who wrote them, which is what lets
-the format and the front end land in separate steps. The link stage is
-in the same position: it does not resolve the symbolic binding spellings
-yet, and refuses a reached bound call that uses one rather than link it
-on a reading it cannot check (`docs/formats.md (bound calls)`).
+The interface surface above is part of that output too. Every compiled
+object describes its interface: a `.routine` signature with its `exits=`
+and `noreturn` fields, one `.param` line per tape carrying the tape's
+glyph list and its published write set, `.graph` and `.grafted` digest
+lines for the graphs it exports and splices, and a comment block for the
+alphabets it exports and imports. A call into a routine in the SAME unit
+still lowers to the numeric binding form — positional entries, index
+destinations — because the callee's tape order and index space are known
+here. A call into another unit lowers to the symbolic form instead,
+naming the callee's parameter and quoting its glyph labels, and the link
+stage resolves it against the callee's real signature
+(`docs/formats.md (bound calls)`). The dialect accepts either spelling
+regardless of who wrote it, which is what keeps a hand-written `.tma`
+file a first-class input.
 
 ## Dialect version history
 
