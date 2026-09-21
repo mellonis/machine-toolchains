@@ -1202,9 +1202,14 @@ use lib::wideToBits;    // a named map, the same way
 …
 tape d: bits;           // …and the qualified form
 tape w: lib::wide;
-[*, *] -> call lib::mark(t = w with map lib::wideToBits) then done;
+[*, *] -> call lib::mark(t = w with map wideToBits) then done;
 graft lib::seek(t = d, found = done) as walk;
 ```
+
+The two forms are alternatives, not layers: a `use` binds the SHORT name,
+and writing the qualified path anyway does not go through it — an import
+nothing names in its short form is the `unused-import` finding even when
+the qualified path to the same declaration appears everywhere.
 
 A graph named this way is spliced, body and all, exactly as a local one
 is — see "Grafting a graph from another unit" for what that means for

@@ -576,3 +576,179 @@ machine {
         "{err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// An import a named map reaches is USED.
+//
+// `compiler::mark_reference_imports` decides which `use` bindings anything
+// references. A map is reachable two ways — a `with map NAME` argument at a
+// `call` / `bind` / `graft` site, and a `map NAME: SRC -> DST`
+// declaration's own two alphabet references — and neither used to be
+// walked, so an import whose only use was one of them was reported dead.
+// Both surfaces read one detection (`lint::rules::unused_import` re-emits
+// analyze's own diagnostics), so `-Werror` failed a build whose import was
+// load-bearing.
+//
+// Each must-stop-firing test below carries its own discriminator: deleting
+// the import from the very same source must fail with the undefined-name
+// error, which is what proves the fixture's import is load-bearing rather
+// than decorative. The must-keep-firing test at the end is the other half
+// — the fix must not silence a genuinely unused import.
+// ---------------------------------------------------------------------------
+
+/// The namespace every fixture below imports from: two alphabets, an
+/// exported map between them, and a routine to bind into.
+const REF_LIB: &str = "\
+namespace inner {
+  export alphabet wide { '_', '^', '$', '0', '1' }
+  export alphabet bits { '_', '0', '1' }
+  export map w2n: wide -> bits { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+  export routine mark(tape t: bits) {
+    entry state s { [*] -> write ['1'] return; }
+  }
+  export graph seek(tape t: bits, state found) {
+    entry state s {
+      ['_'] -> goto found;
+      [*]   -> move [>] goto s;
+    }
+  }
+}
+";
+
+/// Compile `src` and return its `unused-import` findings' messages.
+fn unused_imports(src: &str) -> Vec<String> {
+    compile(src, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("must compile: {e:?}"))
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "unused-import")
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+/// Compile `src`, which must FAIL, and return the failure's code.
+fn fatal_code(src: &str) -> &'static str {
+    let err = compile(src, CompileOptions::default())
+        .expect_err("deleting the import must break this source");
+    err.kind.code()
+}
+
+/// `use inner::w2n;` whose only reference is a `with map NAME` on a
+/// `call` site.
+#[test]
+fn an_import_used_only_by_a_call_sites_named_map_is_used() {
+    let src = format!(
+        "{REF_LIB}
+use inner::w2n;
+
+machine {{
+  tape w: inner::wide;
+  entry state s {{ [*] -> call inner::mark(t = w with map w2n) then done; }}
+  state done {{ [*] -> stop; }}
+}}
+"
+    );
+    assert_eq!(unused_imports(&src), Vec::<String>::new());
+    // The discriminator: without the import the source does not compile,
+    // so the import this test calls used really is load-bearing.
+    assert_eq!(
+        fatal_code(&src.replace("use inner::w2n;\n", "")),
+        "undefined-map"
+    );
+}
+
+/// The same, on a `bind` declaration's argument list.
+#[test]
+fn an_import_used_only_by_a_bind_sites_named_map_is_used() {
+    let src = format!(
+        "{REF_LIB}
+use inner::w2n;
+
+machine {{
+  tape w: inner::wide;
+  bind inner::mark(t = w with map w2n) as m;
+  entry state s {{ [*] -> call m() then done; }}
+  state done {{ [*] -> stop; }}
+}}
+"
+    );
+    assert_eq!(unused_imports(&src), Vec::<String>::new());
+    assert_eq!(
+        fatal_code(&src.replace("use inner::w2n;\n", "")),
+        "undefined-map"
+    );
+}
+
+/// The same, on a `graft` site — the shape the closure missed even for
+/// the targets it did walk, since it read a graft's target and never its
+/// arguments.
+#[test]
+fn an_import_used_only_by_a_graft_sites_named_map_is_used() {
+    let src = format!(
+        "{REF_LIB}
+use inner::w2n;
+
+machine {{
+  tape w: inner::wide;
+  entry graft inner::seek(t = w with map w2n, found = done) as walk;
+  state done {{ [*] -> stop; }}
+}}
+"
+    );
+    assert_eq!(unused_imports(&src), Vec::<String>::new());
+    assert_eq!(
+        fatal_code(&src.replace("use inner::w2n;\n", "")),
+        "undefined-map"
+    );
+}
+
+/// The second reference shape: an imported ALPHABET whose only use is a
+/// local `map` declaration's source side.
+#[test]
+fn an_import_used_only_by_a_map_declarations_alphabet_is_used() {
+    let src = format!(
+        "{REF_LIB}
+use inner::wide;
+
+alphabet bits2 {{ '_', '0', '1' }}
+
+map local: wide -> bits2 {{ '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }}
+
+routine take(tape t: bits2) {{
+  entry state s {{ [*] -> write ['1'] return; }}
+}}
+
+machine {{
+  tape w: inner::wide;
+  entry state s {{ [*] -> call take(t = w with map local) then done; }}
+  state done {{ [*] -> stop; }}
+}}
+"
+    );
+    assert_eq!(unused_imports(&src), Vec::<String>::new());
+    assert_eq!(
+        fatal_code(&src.replace("use inner::wide;\n", "")),
+        "unresolved-alphabet"
+    );
+}
+
+/// The other half: an import the fix must NOT silence. The same map is
+/// imported and referenced nowhere at all.
+#[test]
+fn an_imported_map_referenced_nowhere_is_still_unused() {
+    let src = format!(
+        "{REF_LIB}
+use inner::w2n;
+
+machine {{
+  tape t: inner::bits;
+  entry state s {{ [*] -> call inner::mark(t = t) then done; }}
+  state done {{ [*] -> stop; }}
+}}
+"
+    );
+    let found = unused_imports(&src);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("inner::w2n"), "{found:?}");
+}

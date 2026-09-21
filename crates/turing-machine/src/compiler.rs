@@ -3353,6 +3353,22 @@ impl WorldCtx<'_> {
                 ctx.imports_used[idx] = true;
             }
         };
+        // A `with map NAME` argument is a reference to a declared map, and
+        // the only one a binding argument can carry. It reads exactly like
+        // a call/graft/bind target: without this, an import whose sole use
+        // is `with map NAME` is reported dead by BOTH surfaces that read
+        // `imports_used` — the compile-time `unused-import` warning and the
+        // lint rule — and `-Werror` then fails a build whose import is
+        // load-bearing (deleting it is `undefined-map`).
+        let mark_args = |args: &[BindingArg], ns: &[String], ctx: &mut Self| {
+            for a in args {
+                if let BindingValue::Named { map: Some(m), .. } = &a.value
+                    && let Some((name, _)) = &m.named
+                {
+                    mark(name, ns, ctx);
+                }
+            }
+        };
         // World-body references share one shape across routine/graph/machine.
         let mark_world = |sig_alphas: &[&str],
                           states: &[State],
@@ -3365,18 +3381,29 @@ impl WorldCtx<'_> {
             }
             for s in states {
                 for rule in &s.rules {
-                    if let Transition::Call { target, .. } = &rule.transition {
+                    if let Transition::Call { target, args, .. } = &rule.transition {
                         mark(&target.joined(), ns, ctx);
+                        mark_args(args, ns, ctx);
                     }
                 }
             }
             for g in grafts {
                 mark(&g.target.joined(), ns, ctx);
+                mark_args(&g.args, ns, ctx);
             }
             for b in binds {
                 mark(&b.target.joined(), ns, ctx);
+                mark_args(&b.args, ns, ctx);
             }
         };
+        // A `map NAME: SRC -> DST` declaration's two alphabet references are
+        // resolved exactly like a tape's, so they mark their imports the
+        // same way; nothing else reaches them, since a map declaration is
+        // not inside any world.
+        for m in &program.maps {
+            mark(&m.src, &m.ns, self);
+            mark(&m.dst, &m.ns, self);
+        }
         for r in &program.routines {
             let alphas: Vec<&str> = tape_alphabet_refs(&r.sig);
             mark_world(&alphas, &r.states, &r.grafts, &r.binds, &r.ns, self);
