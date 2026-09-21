@@ -100,8 +100,13 @@ enum Term {
     /// exit labels stay a list rather than text folded into `operand`: the
     /// label printer needs the names, since a state reached only through an
     /// exits operand has no other reference to print its label for.
-    /// `then: None` is TAIL POSITION — the callee is known `noreturn`, so no
-    /// instruction follows the `call` at all (docs/tmt/language.md (reuse)).
+    /// `then: None` is TAIL POSITION — the callee is known `noreturn`
+    /// (docs/tmt/language.md (reuse)) — and prints a synthesized `trap #0`
+    /// rather than nothing: an honest program never reaches it (the callee
+    /// never returns), but a LYING one — a declared-`noreturn` header whose
+    /// linked definition actually returns — turns what would otherwise be
+    /// silent fall-through into a controlled stop (docs/tmt/isa.md
+    /// (explicit traps)).
     Call {
         operand: String,
         exits: Vec<String>,
@@ -978,8 +983,25 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                     format!("{operand} exits=({})", exits.join(", "))
                 };
                 e.push(grid(None, "call", &operand), b.term_line);
-                // `None` is TAIL POSITION: the call is the block's own last
-                // instruction, nothing prints after it (`Term::Call`'s doc).
+                // `None` is TAIL POSITION: the source omitted `then` against
+                // a callee KNOWN to be `noreturn`. Control is never meant to
+                // come back here, but a LYING declaration (a header that
+                // claims `noreturn` while the linked definition returns
+                // anyway, or a first-wins shadowed definition) would let a
+                // stray `ret` fall through into whatever the linker placed
+                // next and run silently on. `trap #0` closes that hole: on
+                // an honest program it never fires (nothing reaches it), and
+                // on a lying one it turns silent fall-through into a
+                // controlled stop instead of arbitrary execution
+                // (docs/tmt/isa.md (explicit traps)). Kind 0 (unmapped-read)
+                // rather than 1: the ONLY two kinds the dialect's `trap`
+                // instruction can name are the map-hole pair, neither a
+                // literal fit for "control reached code the program declared
+                // unreachable" — `#0` is chosen for the same reason
+                // `zero_row`'s own synthesized stop is (below): the failure
+                // is on the read/match side, nothing the head reads here
+                // leads anywhere. `synthesized` marks it exactly like that
+                // other compiler-built trap row, never user-written.
                 match then {
                     Some(Then::Goto(t)) => emit_goto(e, t),
                     Some(Then::Ret) => e.push(grid(None, "ret", ""), b.term_line),
@@ -988,7 +1010,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                     }
                     Some(Then::Stop) => e.push(grid(None, "stp", ""), b.term_line),
                     Some(Then::Halt) => e.push(grid(None, "hlt", ""), b.term_line),
-                    None => {}
+                    None => e.push(grid(None, "trap", "#0"), b.term_line),
                 }
             }
             Term::Ret => e.push(grid(None, "ret", ""), b.term_line),

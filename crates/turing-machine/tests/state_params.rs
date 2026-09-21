@@ -14,7 +14,7 @@ use mtc_core::formats::executable::Executable;
 use mtc_core::formats::object::{ObjectFile, SymbolDef};
 use mtc_core::formats::tapeblock::TapeSnapshot;
 use mtc_core::linker::{CallMech, LinkOptions};
-use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, WideTape};
+use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, Trap, WideTape};
 use mtc_turing_machine::arch::Tm1;
 use mtc_turing_machine::asm::{assemble, disassemble_object, link};
 use mtc_turing_machine::cli::execute;
@@ -1132,6 +1132,93 @@ machine {
     compile(src, CompileOptions::default()).unwrap_or_else(|e| panic!("compile: {e}"));
 }
 
+/// A routine whose ONLY way out is handing `return` to a callee as a
+/// `state` ARGUMENT — never its own `return`, never a `then return` —
+/// still counts as a way to return. `outer` calls `inner` with
+/// `hit = return`; `inner` itself leaves only through its own exit
+/// (`goto hit`), so `inner` is separately inferred `noreturn`, and the
+/// call's own `then` is deliberately `stop`, a DIFFERENT terminator, and
+/// therefore dead code (`inner` never returns normally to reach it) — so
+/// the `then`-side check (`matches!(then, Some(Continuation::Return))`)
+/// cannot be what makes this pass; only `args_return` scanning the
+/// call's own arguments can.
+///
+/// Mutation: neutralize `args_return` (`ir.rs`) to `return false;`
+/// unconditionally — `outer` would then be wrongly inferred `noreturn`,
+/// and BOTH assertions below would fail: the interface bit would read
+/// `false`, and declaring `outer` `noreturn` would compile clean instead
+/// of failing `noreturn-violated`. Verified by hand: applying that exact
+/// mutation reds this test while leaving `--test state_params` otherwise
+/// green (`crates/turing-machine/src/ir.rs::args_return`).
+#[test]
+fn return_as_a_state_argument_on_a_direct_call_counts_as_a_way_out() {
+    let src = "\
+alphabet ab { '_', 'a' }
+
+routine inner(tape t: ab, state hit) {
+  entry state s { [*] -> goto hit; }
+}
+
+export routine outer(tape t: ab) {
+  entry state s { [*] -> call inner(t = t, hit = return) then stop; }
+}
+";
+    let object = compile(src, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile: {e}"))
+        .object;
+    assert!(
+        returns_bit(&object, "outer"),
+        "handing `return` to a callee as a state argument must count as a way to return"
+    );
+
+    let lying = "\
+alphabet ab { '_', 'a' }
+
+routine inner(tape t: ab, state hit) {
+  entry state s { [*] -> goto hit; }
+}
+
+export routine outer(tape t: ab) noreturn {
+  entry state s { [*] -> call inner(t = t, hit = return) then stop; }
+}
+";
+    let err = compile(lying, CompileOptions::default()).unwrap_err();
+    assert!(err.to_string().contains("[noreturn-violated]"), "{err}");
+}
+
+/// The same arm, through a `bind` declaration's FIXED arguments instead of
+/// a direct call's own — the other half of `args_return`'s two callers
+/// (a bind's own args are looked up once, by the bind's declaration, not
+/// re-read per call site). `outer` here calls the bind `b()` with no
+/// arguments of its own at all; every argument, `hit = return` included,
+/// comes from `bind inner(...) as b;`.
+///
+/// Mutation: the same `args_return` neutralization; the assertion on
+/// `outer`'s `returns` bit fails identically, through the OTHER call
+/// site `args_return` is reached from (`ir.rs`'s `BindCall` arm).
+#[test]
+fn return_as_a_state_argument_fixed_in_a_bind_counts_as_a_way_out() {
+    let src = "\
+alphabet ab { '_', 'a' }
+
+routine inner(tape t: ab, state hit) {
+  entry state s { [*] -> goto hit; }
+}
+
+export routine outer(tape t: ab) {
+  bind inner(t = t, hit = return) as b;
+  entry state s { [*] -> call b() then stop; }
+}
+";
+    let object = compile(src, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("compile: {e}"))
+        .object;
+    assert!(
+        returns_bit(&object, "outer"),
+        "a bind's own return-bound state argument must count as a way to return"
+    );
+}
+
 /// The compiled object's interface carries the inferred fact as its
 /// `returns` bit — `false` for a genuinely `noreturn` routine.
 #[test]
@@ -1269,15 +1356,19 @@ machine {
 }
 ";
 
-/// Codegen prints NOTHING after a tail-position call: no `ret`, `retx`,
-/// `stp`, `hlt`, or `jmp` — the very next line is a fresh state label, not
-/// a resume instruction belonging to this call.
+/// A tail-position call prints a synthesized `trap #0` right after it,
+/// never `ret`, `retx`, `stp`, `hlt`, or `jmp` — the resume shapes a
+/// WRITTEN `then` would print. An honest program never reaches this
+/// trap (the callee never returns), but it turns a LYING `noreturn`
+/// (a callee that returns anyway) into a controlled stop instead of
+/// falling through into whatever the linker placed next
+/// (docs/tmt/isa.md (explicit traps)).
 ///
-/// Mutation: falling back to some default `Then` (e.g. always synthesizing
-/// `stp`) when `IrTransition::CallThen.then` is `None`; the line right
-/// after `call` would then be `stp` instead of `won:`.
+/// Mutation: falling back to some default resume `Then` (e.g. always
+/// synthesizing `stp`) when `IrTransition::CallThen.then` is `None`;
+/// the line right after `call` would then be `stp` instead of `trap #0`.
 #[test]
-fn an_exit_bearing_tail_call_prints_no_resume_instruction() {
+fn an_exit_bearing_tail_call_prints_a_trap() {
     let tma = assembly(NORETURN_TAIL, OptLevel::O0);
     let after_call: &str = tma
         .lines()
@@ -1286,8 +1377,8 @@ fn an_exit_bearing_tail_call_prints_no_resume_instruction() {
         .map(|l| l.trim())
         .unwrap_or_else(|| panic!("no line after the call:\n{tma}"));
     assert_eq!(
-        after_call, "won:",
-        "an instruction follows the tail call:\n{tma}"
+        after_call, "trap    #0",
+        "the tail call carries no safety trap:\n{tma}"
     );
 }
 
@@ -1339,4 +1430,102 @@ machine {
 ";
     let err = compile(src, CompileOptions::default()).unwrap_err();
     assert!(err.to_string().contains("[then-required]"), "{err}");
+}
+
+// ── a lying `noreturn` traps instead of falling through ────────────────────
+
+/// `liar`'s header — the only declaration the CALLER ever sees.
+const LIAR_HEADER: &str = "\
+alphabet ab { '_', 'a' }
+
+export routine liar(tape t: ab writes {}) noreturn;
+";
+
+/// The real definition: the header LIED. `liar` returns.
+const LIAR_LIB: &str = "\
+alphabet ab { '_', 'a' }
+
+export routine liar(tape t: ab writes {}) {
+  entry state s { [*] -> return; }
+}
+";
+
+/// The caller trusts the header and omits `then` — legally, as far as it
+/// can tell.
+const LIAR_CALLER: &str = "\
+alphabet ab { '_', 'a' }
+
+use liar;
+
+machine {
+  tape t: ab;
+  entry state go { [*] -> call liar(t = t); }
+}
+";
+
+/// A `noreturn` declaration that LIES — the header says `noreturn`, the
+/// LINKED definition actually `return`s — is a run-time TRAP under every
+/// call mechanism, never a silent `Stopped` with execution wandering into
+/// whatever the linker placed after the call. This is the whole point of
+/// the synthesized `trap #0` codegen now emits for a tail-position call:
+/// without it, the callee's `ret` lands on the caller's own next
+/// instruction (or, with no instruction of its own to fall into, whatever
+/// code the linker placed physically next) and runs on silently.
+///
+/// Mutation: reverting `codegen.rs`'s `Term::Call { then: None, .. }`
+/// emission from `trap #0` back to nothing — the run ends `Stopped` with
+/// exit code 0 instead of trapping, under every mechanism.
+#[test]
+fn a_lying_noreturn_header_traps_instead_of_falling_through() {
+    let dir = scratch("lying_noreturn");
+    let header = write_file(&dir, "liar.tmh", LIAR_HEADER);
+    let caller = write_file(&dir, "caller.tmc", LIAR_CALLER);
+
+    // The caller compiles only against the LYING header — `--extern` is
+    // the one route an integration test has to build a `Declarations`
+    // table at all (`Declarations`'s own constructors besides `stdlib()`
+    // are crate-private).
+    let out = execute(&args(&[
+        "compile",
+        caller.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        dir.join("caller.tmo").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile caller: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let caller_object =
+        ObjectFile::from_bytes(&std::fs::read(dir.join("caller.tmo")).unwrap()).unwrap();
+
+    // The library compiles on its own — it IS the declared unit, and its
+    // own body has nothing to do with the lying header.
+    let lib_object = compile(
+        LIAR_LIB,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile lib: {e}"))
+    .object;
+
+    for mech in MECHS {
+        let exe = link(
+            &[caller_object.clone(), lib_object.clone()],
+            &[],
+            LinkOptions {
+                call_mech: mech,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("the {mech} link failed: {e}"))
+        .executable;
+        let (outcome, _) = run_image(&exe, &[2]);
+        assert!(
+            matches!(outcome, Outcome::Trapped(Trap::UnmappedRead { .. })),
+            "under {mech} a lying `noreturn` must trap with UnmappedRead, not {outcome:?}"
+        );
+    }
 }
