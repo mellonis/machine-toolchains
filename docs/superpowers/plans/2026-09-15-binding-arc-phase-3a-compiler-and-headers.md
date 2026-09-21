@@ -2315,63 +2315,107 @@ version by a test, and the crate version does NOT move in 3a (R-3a-2), so
 
 ## Behaviour changes in phase 3a
 
-*Written by Task 17 with Task 3's measured numbers substituted for the priors
-below. What follows is the plan's prediction, in the prose a release note can
-quote.*
+*Written by Task 17, against the landed branch and the measured numbers. The
+prose is what a release note can quote.*
 
 **One. Every compiled object now describes its interface.** A `.tmo` built by
 `tmt compile` or `tmt build` carries parameter names, per-tape glyph lists,
 `writes` contracts and exported alphabets where it carried only arities and
-cardinalities. Two consequences:
+cardinalities. Three consequences:
 
 - The object grows, and `tmt dis` prints `.param` lines and `; alphabet`
   comments it did not print before. The CODE is byte-identical; Task 3 asserts
   that separately, because "the object was supposed to change" is otherwise a
-  place a codegen regression can hide.
+  place a codegen regression can hide. Measured on the embedded standard
+  library, end to end across the phase: **-O0 6103 → 7825 B, -O1 6043 →
+  7765 B** (Task 3's interface section took it to 7243/7183; Task 13's graft
+  digests and their string table added the rest). Task 17 re-measured the
+  final figures with `stdlib_golden.rs::stdlib_object_sizes_are_reported`.
+- An uncontracted tape publishes the compiler's own INFERRED write set rather
+  than nothing, so "no clause declared" never reaches the wire as "may write
+  anything". The entry world is the one exception — a `machine` is never a
+  callee, so its `.param` lines carry glyph lists only.
 - **The glyph-level link checks phase 2 landed become live.** A call site
   binding by index into a callee whose alphabet is the same size but spells
   different glyphs is now the warning `glyph-mismatch`; a narrower callee
   alphabet is `narrow-alphabet`; a wider one was already the error `CalleeWider`.
-  Nothing in the shipped corpus trips any of them — `rpn.tmc`'s `bin` is
-  position-identical to `std::binaryNumbers::symbols` — but **a user program
-  that re-declared a stdlib alphabet in a different order has been silently
-  re-labelling symbols and now says so.** That is the hazard the arc exists to
-  close, and it arrives as a warning precisely so that working programs keep
-  building.
+  Measured over the shipped corpus at Task 3 (the `plain_site_sweep`
+  instrument plus `tmt build -v` over `docs/examples/tmt.json`'s six targets):
+  **zero occurrences of any of the three**, before or after the change —
+  `rpn.tmc`'s four plain call sites are the only graded ones in the corpus,
+  and `bin` is position-identical to `std::binaryNumbers::symbols`. But **a
+  user program that re-declared a stdlib alphabet in a different order has
+  been silently re-labelling symbols and now says so.** That is the hazard the
+  arc exists to close, and it arrives as a warning precisely so that working
+  programs keep building. `with map { }` — a written empty map — is the
+  deliberate opt-out at a site where the re-labelling is the intent.
 
 **Two. Two error codes are retired, because what they stood in for was built.**
 `external-binding-unsupported` — a `call`/`bind` binding tapes into a routine
 defined outside the unit — now compiles, emitting a symbolic site the linker
 resolves. `state-param-continuation-unsupported` — a routine handing control to
 its own `state` parameter — now lowers to `retx`. Programs that previously
-failed to compile now compile; no program that compiled before fails.
+failed to compile now compile.
 
-**Three. Declarations reach the compiler, and three diagnostics gain a second
-message.** `unresolved-alphabet` and `undefined-graph` each now distinguish "no
-such name" from "declared, but its declarations were not given — pass `--extern`
-or declare it locally". `graft-call-unsupported` keeps its code and drops "it
-awaits binding composition" for actionable advice: write it as a routine, with
-`state` parameters if it needs several exits. The codes do not change; the texts
-do, so a script matching on message text will see the difference.
+**Two source shapes that used to compile now do not**, and both are language
+0.2 acceptance changes rather than diagnostics: `noreturn` is the
+twenty-eighth reserved word, so a 0.1 program using it as a name is now
+`reserved-name`; and `main` is reserved for the entry world in EVERY unit, so
+a library declaring a top-level `routine main` / `graph main` is now
+`duplicate-name` (it was legal in a `machine`-less file before, and could
+never have been linked beside any program). `TMC_LANG_VERSION` moves 0.1 →
+0.2 for these, not for the additive grammar.
+
+**Three. Declarations reach the compiler, and the diagnostics say so.**
+`unresolved-alphabet`, `undefined-graph` and the new `undefined-map` each
+distinguish "no such name" from "declared, but its declarations were not
+given — declare it locally, or supply its declarations to this compile".
+`graft-call-unsupported` keeps its code and drops "it awaits binding
+composition" for actionable advice: write it as a routine, with `state`
+parameters if it needs several exits. Those codes do not change; the texts do,
+so a script matching on message text will see the difference. New codes:
+`machine-in-declarations`, `routine-body-in-declarations`, `undefined-map`,
+`map-not-closed`, `named-map-source-mismatch`, `named-map-target-mismatch`,
+`too-many-state-params`, `state-args-need-declarations`, `noreturn-violated`,
+`then-required`.
 
 **Four. New surfaces.** `tmt interface INPUT [-o OUT.tmh]` is a fifteenth
-subcommand. `tmt compile` gains `--extern FILE` (repeatable) and `--nostdlib`.
-`tmt build` derives declarations from sibling sources and from libraries with no
-manifest key, and honours `stdlib: false` at the compile stage as well as the
-link stage — **that last one is a behaviour change to an existing manifest
-setting**, and a project relying on `stdlib: false` to affect only linking will
-see `std::` names become external at compile time too.
+subcommand, and it takes `--extern`/`--nostdlib` itself on a text input (a
+usage error on an object, which has nothing left to resolve). `tmt compile`
+gains `--extern FILE` (repeatable) and `--nostdlib`. `tmt build` takes NO
+`--extern` — it derives declarations from sibling sources and from libraries,
+through a fixpoint, with no manifest key of its own — and honours `stdlib:
+false` at the compile stage as well as the link stage; **that last one is a
+behaviour change to an existing manifest setting**, and a project relying on
+`stdlib: false` to affect only linking will see `std::` names become external
+at compile time too. `tmt build`'s `-L`/`-l` now feed compile-time
+declarations as well as the link; `tmt link`'s `-l` still does not, and still
+cannot use a header-only library.
 
 **Five. Three new lints, all default-on.** `duplicate-graft-instance`,
 `unreachable-continuation` and `unused-map`. `dead-map-pair` extends to named
 maps. A `tmt lint` that was clean can now report; `--allow` and `lint.allow`
 suppress them through the namespace that already exists.
 
-**Six. One new link warning.** `tail-call-no-continuation`: a call as the last
-instruction of its function, into a callee that can return. It was previously
-silent and trapped `StackUnderflow` at run time. Warning, not error — the
-behaviour is consistent across all three mechanisms and is the same class as any
-call whose continuation falls off the blob. Promotable by `-Werror`.
+**Six. One new link warning.** `tail-call-no-continuation`: a call into a
+callee that can return, where the call is either the last instruction of its
+function or is immediately followed by the dialect's own trap — the shape the
+compiler emits for a call written without `then`, whatever code follows that
+trap. It fires on the hand-written `.tma` equivalents too, and it is how a
+header that LIES about `noreturn` is caught: the callee "can return" by its
+interface bit OR by a body scan, so the linked body has the last word. A
+`call` an author followed by a deliberate trap for some other reason reads the
+same way and warns — the accepted false positive `--allow` silences. Warning,
+not error, consistent across all three mechanisms and promotable by `-Werror`.
+PM-1 links never run the check: no routine signatures, nothing to grade.
+
+**Six-and-a-half. A new lint reaches the graft expander's own dedup.**
+`duplicate-graft-instance` is keyed exactly as the expander keys a graft site
+(target graph by owning unit and name, the tape composite, the continuation —
+never the `as` name), so it reports what the compiler already treats as one
+splice. Its quickfix is withheld on three shapes: the duplicate carries
+`entry`, the removed name is referenced by anything other than a bare `goto`,
+or the surviving instance is an anonymous `entry graft`.
 
 **Seven. A glyph literal in assembly is now any non-empty content, as it
 already was in source.** `docs/tmt/language.md` has always defined a `.tmc`
@@ -2396,11 +2440,34 @@ land in phase 4 with `.tmh`'s editor and LSP routing. A header is *produced* by
 `tmt interface` and *consumed* by `compile --extern` and `build` in 3a; it is
 not yet a file the other tools open.
 
+**Nine. Library graphs cross the unit boundary, and the link verifies the
+splice.** A graph declared by a header grafts exactly like a local one, with
+every name in the spliced body resolving in the DECLARING unit — a same-named
+consumer alphabet is a different alphabet, and an identity graft between them
+is `identity-glyph-mismatch`. Both sides record a CRC-32 of the graph's
+canonical signature and body as the header printer renders them (doc lines,
+comments, whitespace and unrelated declarations never move it) and the linker
+refuses a drifted pair (`GraftDrift`); an imported alphabet is checked the
+same way (`AlphabetDrift`). A header-only library is not checked — the one
+place a header is trusted outright. A graft cycle through declared graphs is
+`graft-cycle`. Known limitation, recorded rather than fixed: a diagnostic
+about a declaration read from a header is rendered against the primary
+input's path with the header's line:col.
+
+**Ten. Version spaces that moved.** `.tmc` language 0.1 → **0.2**; TM IR 3 →
+**4** (glyph tables, declared contracts, exits, the `returns` bit, symbolic
+binding entries). Both are reflected in `CLAUDE.md`'s version table.
+
 **What does not change.** PM-1 byte identity, core neutrality, `-O0` bit
 identity, the `brk` barrier, the everything-matrix, the three-mechanism matrix,
 `mode_equivalence`'s relink byte identity, and the derivation-first stdlib
 goldens. The crate version stays 0.5.x; the `tmt.json` `project` schema stays
-0.2; `pmt` is untouched end to end.
+0.2; `pmt` is untouched end to end. **One version space is arguably owed a
+bump and did not get one** — see the Task 17 report: `TM1_TMA_DIALECT_VERSION`
+stayed at 0.4 while Task 2b widened the `.tma` glyph-literal rule, which is an
+acceptance change by the repo's own "N bumps on ANY grammar change"
+discipline. Task 17 reported it rather than moving a version constant; it is
+the user's call, and the natural moment is the version cut.
 
 ---
 
