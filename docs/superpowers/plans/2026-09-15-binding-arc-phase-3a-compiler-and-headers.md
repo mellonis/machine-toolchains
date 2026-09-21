@@ -2456,18 +2456,27 @@ input's path with the header's line:col.
 
 **Ten. Version spaces that moved.** `.tmc` language 0.1 → **0.2**; TM IR 3 →
 **4** (glyph tables, declared contracts, exits, the `returns` bit, symbolic
-binding entries). Both are reflected in `CLAUDE.md`'s version table.
+binding entries); TM-1 `.tma` dialect 0.4 → **0.5**, for the widened glyph
+literal — additive, and a bump rather than a fold-in because 0.4 had already
+shipped, which is the rule `docs/tmt/asm.md`'s own history section argues
+from. All three are reflected in `CLAUDE.md`'s version table.
+
+**Eleven. One defect the phase introduced, found in review and fixed.** An
+import whose only use was a named map — a `with map NAME` argument at a
+`call`, `bind` or `graft` site, or a `map NAME: SRC -> DST` declaration's own
+alphabet references — was reported `unused-import` on both surfaces that read
+one detection, and `-Werror` failed the build of a program whose import was
+load-bearing. `mark_reference_imports` predated named maps and walked only
+reuse TARGETS and signature alphabets; it now walks binding arguments' maps
+and the map declarations too.
 
 **What does not change.** PM-1 byte identity, core neutrality, `-O0` bit
 identity, the `brk` barrier, the everything-matrix, the three-mechanism matrix,
 `mode_equivalence`'s relink byte identity, and the derivation-first stdlib
 goldens. The crate version stays 0.5.x; the `tmt.json` `project` schema stays
-0.2; `pmt` is untouched end to end. **One version space is arguably owed a
-bump and did not get one** — see the Task 17 report: `TM1_TMA_DIALECT_VERSION`
-stayed at 0.4 while Task 2b widened the `.tma` glyph-literal rule, which is an
-acceptance change by the repo's own "N bumps on ANY grammar change"
-discipline. Task 17 reported it rather than moving a version constant; it is
-the user's call, and the natural moment is the version cut.
+0.2; `pmt` is untouched end to end. (`TM1_TMA_DIALECT_VERSION` was the one
+version space left behind — Task 17 reported it rather than moving a constant
+its brief froze, and the fix round bumped it; see item Ten.)
 
 ---
 
