@@ -1,6 +1,6 @@
 # `.tma` — the TM-1 assembly dialect
 
-The TM-1 `.tma` dialect version is **0.4** (`TM1_TMA_DIALECT_VERSION`;
+The TM-1 `.tma` dialect version is **0.5** (`TM1_TMA_DIALECT_VERSION`;
 pre-1.0: the version is `0.N` and `N` bumps on any grammar change — the
 same acceptance-contract shape as the `.pma` dialect,
 `docs/pmt/asm.md`). Where PM-1 drives one two-symbol tape, TM-1 drives
@@ -9,9 +9,11 @@ match/dispatch tables rather than the mark register alone. The dialect
 turns on four grammar features the classic `.pma` grammar leaves off —
 a **tables** section, the `.rept` macro, `[..]` **vector** operands, and
 the **interface** surface — plus a per-routine signature directive.
-Version 0.4 adds that interface surface: the routine-interface
-directives and the symbolic forms of the binding-call operand. Its full
-version history is at the end of this page.
+Version 0.4 added that interface surface: the routine-interface
+directives and the symbolic forms of the binding-call operand. Version
+0.5 widens the glyph literal riding it to any non-empty content, the
+rule `.tmc` source already states (`docs/formats.md (glyph literals and
+glyph lists)`). The full version history is at the end of this page.
 
 This page is the dialect's own surface: how a `.tma` file looks, what
 `tmt asm` and `tmt dis` guarantee about the round trip, how the twenty
@@ -230,14 +232,25 @@ file a first-class input.
   no earlier program changes meaning.
 - **0.4** — the **interface** family: the `.param` / `.graph` /
   `.grafted` directives, the `exits=` and `noreturn` fields on
-  `.routine`, quoted glyph literals (`'x'`), and the binding-call
-  operand's interface extensions — named entries, glyph-labelled pair
-  destinations, a written-empty map `{}` (distinct from omitting the
-  braces), the open marker `*`, and an `exits=(…)` vector. Together they
-  let a routine publish its interface contract and let a call site bind
-  against it by name, which is what the link-time composition engine
-  reads. Additive: a program that assembled at 0.3 still assembles, to
-  the same bytes.
+  `.routine`, the single-quoted glyph literal (one character, `'x'`),
+  and the binding-call operand's interface extensions — named entries,
+  glyph-labelled pair destinations, a written-empty map `{}` (distinct
+  from omitting the braces), the open marker `*`, and an `exits=(…)`
+  vector. Together they let a routine publish its interface contract and
+  let a call site bind against it by name, which is what the link-time
+  composition engine reads. Additive: a program that assembled at 0.3
+  still assembles, to the same bytes.
+- **0.5** — the glyph literal widens: its content is any **non-empty**
+  string, not one character, so `'ab'`, `'->'`, an emoji and a
+  multi-scalar cluster are each one glyph. Its two escapes are unchanged
+  (`'\''`, `'\\'`), an empty `''` and an unterminated literal are still
+  lex errors, and a `..` range endpoint still takes a single character or
+  a bare number. This is exactly the rule `.tmc` source has always stated
+  for its own glyph literal (`docs/tmt/language.md (glyph literals)`,
+  `docs/formats.md (glyph literals and glyph lists)`), so every glyph a
+  `.tmc` alphabet can hold now survives into assembly text and back —
+  which is what a compiler emitting `.param` glyph lists needs. Additive:
+  a program that assembled at 0.4 still assembles, to the same bytes.
 
 0.3 also gained the trailing-comma list continuation on `.targets`,
 `.exits`, and `.map` (`docs/formats.md`, "match and dispatch tables" and
@@ -246,4 +259,5 @@ is that `N` bumps on *any* grammar change once a version has shipped and
 so become a contract to preserve; this addition landed during 0.3's own
 development, before its first release, so it folded into 0.3 rather than
 opening 0.4. The interface family above is the change that did open 0.4,
-in the ordinary way.
+in the ordinary way — and by the same reasoning the glyph-literal
+widening opened 0.5 rather than folding in, because 0.4 had shipped.

@@ -30,8 +30,15 @@ use crate::arch::opcodes::*;
 /// glyph-labelled pair destinations, a written-empty map `{}` (distinct
 /// from omitting the braces), the open marker `*`, and an `exits=(…)`
 /// vector — for routine interface contracts and the link-time
-/// composition engine.
-pub const TM1_TMA_DIALECT_VERSION: &str = "0.4";
+/// composition engine. 0.5: a glyph literal is any non-empty content in
+/// single quotes, not one character — the identical rule `.tmc` source
+/// has always stated for its own glyph literal, so every glyph a `.tmc`
+/// alphabet can hold survives into assembly text (docs/formats.md (glyph
+/// literals and glyph lists)). A `..` range endpoint is unchanged and
+/// still takes a single character or a bare number. Additive: 0.4 shipped
+/// as a released contract, so widening what lexes opens 0.5 rather than
+/// folding in.
+pub const TM1_TMA_DIALECT_VERSION: &str = "0.5";
 
 /// The TM-1 mnemonic table (the `.tma` dialect). Opcode/operand shapes
 /// mirror the TM-1 arch module (`crate::arch`); flows follow the same

@@ -93,8 +93,8 @@ other:  hlt
 ";
 
 #[test]
-fn dialect_version_is_0_4() {
-    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.4");
+fn dialect_version_is_0_5() {
+    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.5");
 }
 
 /// Every interface form the TM-1 dialect spells, round-tripped at the
