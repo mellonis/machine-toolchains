@@ -398,7 +398,13 @@ b.tmc:15:14: lint: call to deprecated `oldHelper`: use newHelper instead
 ```
 
 Only locally-defined targets are checked — an imported target's doc map
-is not this module's, so its deprecation cannot be seen from here.
+is not this module's, so its deprecation cannot be seen from here. That
+holds even when the other unit's declarations ARE available: a `.tmh`
+header carries `?` doc lines but not `!` attention lines
+(`docs/tmt/language.md (headers)`), so the attribute a deprecation is
+written as does not survive the trip. A library routine marked
+`[deprecated]` in its own source is therefore not reported at a consumer's
+call site; say it in the `?` prose as well if consumers need to see it.
 
 `fix: None` — "stop using this" has no single mechanical rewrite; the
 replacement is the author's call.

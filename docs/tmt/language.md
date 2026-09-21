@@ -1298,8 +1298,13 @@ What it carries follows from that:
   declaration that clause is the whole of the fact.
 - **A graph appears in full**, body included, because a graft splices
   source.
-- **Doc lines ride along**; attention lines and ordinary comments do not
-  survive, and neither does any private declaration.
+- **`?` doc lines ride along.** `!` attention lines and ordinary comments
+  do not, and neither does any declaration a printed one does not reach.
+  One consequence is worth knowing: `[deprecated]` is written on an
+  attention line, so a library's deprecation does not travel through its
+  header and a consumer's call site is not flagged for it
+  (`docs/tmt/lint.md`). A deprecation consumers must see belongs in the
+  `?` prose too.
 - **`use` lines are printed where the declarations need them** — a header
   is a self-contained unit, and a name it references either is declared
   in the header itself or is imported by a `use` line the header carries.
