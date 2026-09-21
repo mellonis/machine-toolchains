@@ -1579,10 +1579,20 @@ fn expand_named_maps(
             .collect();
         let ns = world_ns_of(&world.name);
         for graft in &mut world.grafts {
+            // A graft target absent from this unit's own worlds was
+            // resolved through the declarations table (`resolve_world_
+            // reuse`'s own check already proved it is present one place or
+            // the other) — a library graph read from a header. `external`
+            // routes `expand_named_maps_in_args`'s site check 2 through
+            // `externals.routine`, the SAME lookup a `call`/`bind`'s own
+            // external target already gets, so a `with map NAME` binding
+            // into a library graph's tape parameter is checked against
+            // that graph's KNOWN alphabet instead of silently skipped.
+            let external = !callee_tapes.contains_key(graft.target.as_str());
             expand_named_maps_in_args(
                 &mut graft.args,
                 &graft.target,
-                false,
+                external,
                 &host_tapes,
                 &callee_tapes,
                 &maps,
