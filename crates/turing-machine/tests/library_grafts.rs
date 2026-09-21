@@ -1422,3 +1422,141 @@ fn a_diamond_shaped_shared_target_is_not_a_cycle() {
     );
     assert_eq!(consumer.grafts[0].graph, "diamond_a");
 }
+
+// ── the write footprint across a library graft ───────────────────────────
+
+/// A library graph that declares — and keeps — an EMPTY write set.
+const WRITELESS_LIB_TMC: &str = "\
+namespace lib {
+  export alphabet bits { '_', '0', '1' }
+
+  ? Walks right to the first blank, writing nothing.
+  export graph seek(tape t: bits writes {}, state found) {
+    entry state s {
+      ['_'] -> goto found;
+      [*]   -> move [>] goto s;
+    }
+  }
+}
+";
+
+/// Two hosts for that graph: one declaring the same empty set, one
+/// declaring no clause at all so the header publishes the inferred one.
+const CONSUMER_TIGHT_CONTRACT: &str = "\
+use lib::bits;
+
+? Declares the same empty write set the library graph declares.
+export routine facade(tape t: bits writes {}, state out) {
+  entry state s { [*] -> goto walk; }
+  graft lib::seek(t = t, found = out) as walk;
+}
+
+? No clause at all, so the header publishes the INFERRED set.
+export routine facadeBare(tape t: bits, state out) {
+  entry state s { [*] -> goto step; }
+  graft lib::seek(t = t, found = out) as step;
+}
+";
+
+/// A library graph whose DECLARED write set is wider than the host below
+/// allows — the near miss for the test above.
+const PAINTING_LIB_TMC: &str = "\
+namespace lib {
+  export alphabet bits { '_', '0', '1' }
+
+  ? Declares both symbols writable; its body writes only '1'.
+  export graph paint(tape t: bits writes { '0', '1' }, state done) {
+    entry state s {
+      ['_'] -> goto done;
+      [*]   -> write ['1'] move [>] goto s;
+    }
+  }
+}
+";
+
+const CONSUMER_TOO_TIGHT: &str = "\
+use lib::bits;
+
+export routine facade(tape t: bits writes { '1' }, state out) {
+  entry state s { [*] -> goto walk; }
+  graft lib::paint(t = t, done = out) as walk;
+}
+";
+
+/// `tmt interface SRC --nostdlib --extern HEADER` — [`interface`]'s
+/// declarations-bearing twin, for a source whose own shape needs another
+/// unit's declarations to print at all.
+fn interface_extern(dir: &Path, src: &Path, header: &Path, out_name: &str) -> String {
+    let out = dir.join(out_name);
+    let result = execute(&args(&[
+        "interface",
+        src.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("interface {}: {e}", src.display()));
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    std::fs::read_to_string(&out).unwrap()
+}
+
+/// Inference believes a grafted LIBRARY graph's declared write clause,
+/// the same way it already believes an external routine's. A graft is a
+/// splice, so the host's writes physically are the grafted body's — but
+/// that body is held to its declaration on both paths that can reach one
+/// (the recorded digest at link time for a library that ships an object,
+/// the header's own contract check for a header-only one), so the clause
+/// bounds it (docs/tmt/language.md (contract clauses)).
+///
+/// Two consequences in one fixture, both of which the old
+/// whole-alphabet answer got wrong: a host declaring the same empty set
+/// COMPILES, and a host declaring no clause at all publishes that empty
+/// set in its own header instead of the whole alphabet — a declared fact
+/// every consumer of it then inherits.
+///
+/// Mutation: drop the new belief (give a graft edge `external: None`
+/// again in `footprint::edges_of`) — the compile below fails
+/// `writes-outside-contract` naming all three symbols, and `facadeBare`
+/// publishes `writes { '_', '0', '1' }`.
+#[test]
+fn a_library_grafts_declared_write_set_is_believed() {
+    let dir = scratch("lib_graft_writes");
+    let lib_src = write_file(&dir, "seeklib.tmc", WRITELESS_LIB_TMC);
+    let header = interface(&dir, &lib_src, "seeklib.tmh");
+
+    // Compiles at all: the host's own `writes {}` is not contradicted.
+    compile_extern(&dir, "tight", CONSUMER_TIGHT_CONTRACT, &header);
+
+    let consumer_src = write_file(&dir, "tightsrc.tmc", CONSUMER_TIGHT_CONTRACT);
+    let printed = interface_extern(&dir, &consumer_src, &header, "tightsrc.tmh");
+    assert!(
+        printed.contains("export routine facadeBare(tape t: bits writes {}, state out)"),
+        "the clause-less host published an over-wide set:\n{printed}"
+    );
+}
+
+/// The near miss: when the library graph's DECLARED set is wider than
+/// the host's own clause, `writes-outside-contract` still fires — and
+/// names exactly the symbol the declaration adds, not the whole
+/// alphabet, which is what shows the clause is being read rather than
+/// the check merely surviving.
+///
+/// Mutation: hand an external callee an EMPTY set instead of its
+/// declared one (`footprint::declared_sets` returning
+/// `SymSet::empty()` per tape) — the host is then believed to write
+/// nothing through the graft and the compile wrongly succeeds.
+#[test]
+fn a_library_graft_wider_than_the_hosts_clause_is_still_refused() {
+    let dir = scratch("lib_graft_writes_wide");
+    let lib_src = write_file(&dir, "paintlib.tmc", PAINTING_LIB_TMC);
+    let header = interface(&dir, &lib_src, "paintlib.tmh");
+
+    let err = compile_extern_err(&dir, "tootight", CONSUMER_TOO_TIGHT, &header);
+    assert!(err.contains("[writes-outside-contract]"), "{err}");
+    assert!(
+        err.contains("may write '0' on tape `t`"),
+        "the diagnostic did not name the declared set minus the contract: {err}"
+    );
+}

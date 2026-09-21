@@ -388,6 +388,18 @@ signature is not visible at all — a library object at the link boundary,
 whose signature section carries tapes and cardinalities but no clauses —
 still adds the whole alphabet.
 
+Grafting a graph declared by another unit reads the same way: the host
+takes the grafted graph's declared effective set, projected through the
+graft's own binding, in place of the body it cannot walk — so a library
+graph declaring `writes {}` costs its host nothing and a host under a
+narrow contract may graft it. A graft is a splice, so this is a promise
+about a body the host physically contains, and it is kept on both paths
+that can deliver one: a library that ships an object has the splice held
+to the published body by the recorded graph digest, and a header-only
+library is itself checked against its declared clauses when it is read.
+A graft of a LOCAL graph needs none of this — that body is present, and
+the host's footprint is taken from it directly.
+
 Declaring either clause is checked in two independent steps, at two
 different spans. First, while a clause resolves, each glyph it names
 must be a symbol of the parameter's own alphabet — a glyph that is not

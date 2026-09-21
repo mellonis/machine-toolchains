@@ -615,21 +615,35 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
             }
         }
     }
-    // A graft target may now be a library graph reached through the
+    // A graft target may be a library graph reached through the
     // declarations table (`docs/tmt/language.md (headers)`), not only a
-    // locally defined one — but `target: Some(...)`/`external: None` here
-    // is still sound either way: `by_name.get(t)` at the call site misses
-    // for an external target (it is not in `resolved.worlds`), which falls
-    // through to `unresolved_contribution` rather than `find_external`'s
-    // declared-contract lookup. That is the SAFE, merely IMPRECISE answer
-    // footprint inference already gives any external reference it cannot
-    // resolve more specifically — never unsound, just a missed precision
-    // opportunity a library graft's own declared writes could in principle
-    // sharpen.
+    // locally defined one, so a graft names itself BOTH ways and the
+    // lookup order at the call site decides which applies: a local target
+    // is in `resolved.worlds`, so `by_name` finds it and its own body is
+    // walked; one that is not falls through to `find_external` and its
+    // DECLARED write clause, exactly as a call into another unit already
+    // does.
+    //
+    // Believing a declaration rather than a body needs its own argument
+    // here, because a graft is a SPLICE — the host's writes physically
+    // ARE the grafted body's, which is why this walk reads source form
+    // and follows a local graph's body instead of trusting its clause.
+    // What licenses the shortcut across a unit boundary is that the
+    // splice is held to the declaration on both of the paths that can
+    // reach one. A library that also ships an object records a digest of
+    // the graph's canonical text on the exporting side and of the body
+    // actually spliced on the consuming side, and a mismatch stops the
+    // link (docs/core.md (graft drift)). A header-only library has no
+    // such object, and there the header IS the definition: reading it
+    // runs the same contract check over the very body a graft of it will
+    // splice. Either way the clause bounds what the spliced body can
+    // write. Without this, a `writes` contract and a library graft are
+    // mutually exclusive — the host collapses to its whole alphabet — and
+    // `tmt interface` publishes that over-wide set as a declared fact.
     for graft in &world.grafts {
         edges.push(Edge {
             target: Some(graft.target.as_str()),
-            external: None,
+            external: Some(graft.target.as_str()),
             args: &graft.args,
         });
     }
