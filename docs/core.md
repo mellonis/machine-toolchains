@@ -934,6 +934,14 @@ A graph no input exports is not checked. That is a header-only library,
 and it is the one place a header is trusted; the trust is deliberate and
 recorded here rather than discovered.
 
+Both sides of that comparison are ordinary compiler output: the TM-1
+compiler records a graph it exports and a graph it spliced on every
+object it writes, so the check runs on any link of compiled units, not
+only on hand-written assembly that opted into the directives. The same
+holds for the index-binding grading above — a compiled object carries its
+routines' glyph lists, so a transparent call into another unit is graded
+without anyone hand-authoring a signature.
+
 An imported alphabet is verified the same way: a unit that imports an
 alphabet by name records the glyph list it compiled against, the link
 stage compares it against the exporting object's own declaration, and a

@@ -654,7 +654,15 @@ as an empty one. What each says:
 - `writes=(…)` lists the glyphs the routine may write on the tape, each
   one of the tape's own. A *written* `writes=()` and an absent `writes=`
   both mean "writes nothing", so the two are indistinguishable once
-  decoded and a disassembly prints neither;
+  decoded and a disassembly prints neither. A compiled routine always
+  carries the list: the `.tmc` compiler fills it with the tape's declared
+  EFFECTIVE set when the source declared a contract (`writes` minus
+  `preserves`, `docs/tmt/language.md (contract clauses)`), and with its
+  own inferred write set for that tape when the source declared none —
+  so "no clause declared" never reaches the wire as "writes anything".
+  The entry world is the one exception: a `machine` compiles to `main`,
+  which is never a callee, so its `.param` lines carry glyph lists only
+  and an absent `writes=` there says nothing about what it writes;
 - `enters=(…)` and `leaves=(…)` are the head contracts: the glyphs the
   head may stand on when the routine is entered, and when it leaves. A
   written-but-empty `enters=()`/`leaves=()` is **rejected** — a clause
@@ -725,17 +733,22 @@ list with its ranges expanded — the elements are data by then, not text
 hand-written range and the disassembler's expansion of the same object
 are both canonical, each for its own input.
 
-**Text-expressibility caveats.** Two things the interface section can
-hold do not survive a full text round trip, and it is better to know
-which:
+**Text-expressibility caveats.** Everything an object can hold is
+expressible in hand-written assembly, with exactly **three** declared
+exceptions — two of them in this section, and the whole list is here:
 
+- **`-g` debug side-tables have no directive.** The label and line
+  tables an object carries under a `-g` build (the debug section, above)
+  are built by the assembler from the text it is given, not written in
+  it, so they are not part of what a round trip through assembly
+  reproduces.
 - **Exported and imported alphabets have no directive.** Both are
   compiler facts with no assembly spelling, so a disassembly prints an
   exported alphabet as `; alphabet <name>: (<glyphs>)` and an imported
   one right after it as `; import alphabet <name>: (<glyphs>)`, and
   reassembling that text produces an object without either list. They
-  are the only parts of the section a listing can show but not put
-  back.
+  are the only parts of the interface section a listing can show but not
+  put back.
 - **An object with grafts but no interface has no text form.** That
   combination — graft records *and* functions, with the interface section
   absent — is representable on the wire, but its disassembly is text the

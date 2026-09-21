@@ -325,6 +325,18 @@ routine knows at link time that a symbol has no image and can branch
 straight to a `trap` stub — and both raise the same kind, which is what
 keeps the mechanisms below interchangeable.
 
+The `.tmc` compiler emits one more `trap`, for a reason that has nothing
+to do with maps: a `call` written without a continuation — legal only
+against a callee the source believed could never return
+(`docs/tmt/language.md (routines)`) — is followed by `trap #0`. An honest
+program never reaches it. A program whose belief was wrong, because the
+declaration it trusted did not match the linked body, stops there in a
+controlled way instead of falling through into whatever the linker placed
+next. `#0` is not a claim that a read failed: the dialect's `trap` can
+name only the map-hole pair, neither of which fits "control reached code
+the program declared unreachable", and `#0` is the one used for every
+such synthesized stop.
+
 ## Call mechanisms
 
 A TM-1 program does not normally hand-author frames. It writes a

@@ -1,12 +1,12 @@
 # The `.tmc` language reference
 
-The `.tmc` language version is **0.1** (pre-1.0: the version is `0.N` and
+The `.tmc` language version is **0.2** (pre-1.0: the version is `0.N` and
 `N` bumps on any grammar change; at a declared 1.0 the axes activate —
 major = breaking acceptance change, minor = additive syntax; no patch
 digit — spec-text corrections are errata, implementation-conformance
-fixes live in the crate changelog). This is the language's first cut, so
-every statement on this page describes 0.1. See "Grammar version
-history" at the end for the version scheme's own record.
+fixes live in the crate changelog). Every statement on this page
+describes 0.2 unless it says otherwise. See "Grammar version history" at
+the end for what each version added.
 
 `.tmc` is the source language for the TM-1 toolchain. A program is a set
 of **states**, each a list of **rules**; a rule matches what the heads
@@ -53,9 +53,12 @@ a compile error.
 A machine compiles to the symbol `main`, which is the linker's default
 entry point. Two machines across one link are a duplicate-symbol error
 and none at all is an unresolved-entry error (`tmt link --entry` can
-name a different entry; see `docs/tmt/cli.md`). Because the machine
-claims that name, a program may not also declare a top-level `main`
-routine or graph.
+name a different entry; see `docs/tmt/cli.md`). **The name `main` is
+reserved for the entry world in every unit**, whether or not that unit
+has a `machine` block: a top-level `routine main` or `graph main` is the
+`duplicate-name` error even in a library, because a library that
+declared one could never be linked beside any program. The reservation
+is top-level only — `ns::main`, inside a namespace, is an ordinary name.
 
 Identifiers are Unicode: the first character must be alphabetic (Unicode
 `Alphabetic`) or `_`, every following character alphanumeric or `_`.
@@ -69,13 +72,19 @@ non-whitespace character is `?` or `!` is not a comment but a doc or
 attention line — real grammar, described under "Doc lines and attention
 lines".
 
+### Glyph literals and numeric literals
+
 Two literal forms name symbols. A **glyph literal** is single-quoted:
 `'a'`, `'_'`, `'^'`. Its content is any non-empty UTF-8 string, so one
 grapheme, an emoji, or a multi-scalar sequence are each a single glyph;
 `\'` and `\\` are the only escapes, and any other backslash sequence, an
 empty `''`, or a literal that reaches end-of-line unclosed is a lex
 error. A **numeric literal** is a bare decimal: `0`, `126`. The two forms
-share one label space — see "Alphabets".
+share one label space — see "Alphabets". The generated assembly's own
+glyph literal follows this identical rule, so every glyph a `.tmc`
+alphabet can hold survives the trip through assembly text
+(`docs/formats.md (glyph literals and glyph lists)`); only a `..` range
+endpoint is narrower there, needing a single character or a bare number.
 
 ### Worlds
 
@@ -91,18 +100,27 @@ differ in how they are entered and how they leave.
 The `machine` block is the program: it declares the physical tapes, and
 its entry is where execution begins.
 
+#### Routines
+
 A `routine` is a callable subprogram. It compiles to one shared body that
 every call site jumps into, and `return` hands control back to whichever
 site called it. `return` is legal only inside a routine; writing it in a
 `graph` or `machine` body is a compile error.
 
+A routine may also declare **`state` parameters** — named exits its
+caller wires to states of its own, the same shape a graph's exits have.
+They are covered under "`state` parameters" below; leaving through one is
+not returning, which is what the next paragraph's inference turns on.
+
 Whether a routine can return at all is a fact of its body: any `return`
-transition, any `then return` on a call it makes, or `return` handed to a
-callee as a `state` argument (that callee's own exit then returns from
-THIS routine) all count, counted conservatively over the WHOLE body —
-dead states included — so the fact never depends on the optimization
-level. A routine with none of those is `noreturn`, and its signature may
-say so explicitly:
+transition, any `then return` on a call it makes, a graph exit bound to
+`return` at a graft site, or `return` handed to a callee as a `state`
+argument (that callee's own exit then returns from THIS routine) all
+count, counted conservatively over the WHOLE body — dead states included
+— so the fact never depends on the optimization level. **Leaving through
+a `state` parameter is not returning**: control goes to a caller-supplied
+state, not back to the instruction after the call. A routine with no way
+to return is `noreturn`, and its signature may say so explicitly:
 
 ```
 routine loop(tape t: ab) noreturn {
@@ -111,15 +129,36 @@ routine loop(tape t: ab) noreturn {
 ```
 
 The clause is an optional ASSERTION: the compiler checks it against the
-inferred fact and refuses a mismatch, but the inferred fact — carried on
-every compiled object and printed by `tmt interface` either way — never
-depends on whether the author wrote it. `then` becomes OPTIONAL at a
-`call`/`bind` site whose callee is KNOWN to be `noreturn` (its
-declarations are visible to this unit, in-unit or through `--extern`/the
-standard library); against an unknown callee, or one that can return,
-`then` stays mandatory, since the linker never checks it either way. A
-`then` written anyway against a known `noreturn` callee is the
+inferred fact and refuses a mismatch (`noreturn-violated`), but the
+inferred fact — carried on every compiled object and printed by `tmt
+interface` either way — never depends on whether the author wrote it. A
+routine read from a header has no body to infer from, so there its
+declared clause *is* the fact.
+
+`then` becomes OPTIONAL at a `call`/`bind` site whose callee is KNOWN to
+be `noreturn`. "Known" means this unit can see the fact: for a routine
+defined here, the inference above, written clause or not; for one defined
+elsewhere, the `noreturn` clause of a declaration this compile was given
+(a sibling source, a header, or the embedded standard library). That
+second case is why the clause is worth writing even when the compiler
+would infer it: a declarations reading never walks a body, so a routine
+in another unit that does not SAY `noreturn` is read as able to return,
+and its callers there must keep writing `then`. Against
+an unknown callee, or one that can return, `then` stays mandatory
+(`then-required`), since the linker never checks a continuation either
+way. A `then` written anyway against a known `noreturn` callee is the
 `unreachable-continuation` lint finding (`docs/tmt/lint.md`).
+
+A call written without `then` compiles to the call followed by an
+explicit trap (`docs/tmt/isa.md (explicit traps)`). An honest program
+never reaches it — the callee never returns. A declaration that *lied*
+turns what would otherwise be a silent fall-through into whatever the
+linker placed next into a controlled stop, and the linker reports the lie
+where it becomes observable: the `tail-call-no-continuation` warning
+(`docs/tmt/cli.md (link warnings)`), raised when the linked callee can
+return after all.
+
+#### Graphs
 
 A `graph` is a reusable *pattern* of behaviour rather than a callable
 body. It has no return: it names its exits as `state` parameters, and
@@ -238,8 +277,9 @@ sixteen tapes, matching the architecture's width
 unique within their world.
 
 Signature parameters come in two kinds, `tape NAME: ALPHABET` and `state
-NAME`; the latter are exit parameters, covered under "`graft`". Parameter
-names must be unique within a signature.
+NAME`; the latter are exit parameters — on a graph they are what a graft
+site wires ("`graft`"), on a routine what a call site wires ("`state`
+parameters"). Parameter names must be unique within a signature.
 
 ### Volatile tapes
 
@@ -579,7 +619,10 @@ tapes by parameter name, optionally through a symbol map (see "Symbol
 maps"). When the callee is defined in this compilation unit its
 signature is known, and **every** parameter must be bound: a missing,
 duplicate, or unrecognized argument name is a compile error naming the
-parameter.
+parameter. An argument list is all-or-nothing in that sense — there is no
+partial binding, no leaving one parameter for a later site to supply.
+Either a call names no arguments at all (the transparent form, "Calls
+across units" below) or it names them all.
 
 Within one argument list, two tape parameters may not bind the same
 caller tape — a binding places callee tapes **injectively**, one caller
@@ -590,28 +633,135 @@ can never declare more tapes than the caller has to bind them to
 (`callee_arity ≤ caller_arity`) — a routine wider than its caller is
 unrepresentable, not merely unwritten.
 
-A call whose target lives in *another* compilation unit may still bind
-tapes: the compiler emits a SYMBOLIC binding — the callee's parameter name
-in place of a caller-tape position, and a bound map's destination as a
-glyph in place of an index — because the callee's own tape order and index
-space belong to the LINKER to resolve, not this unit (see "Bound calls"
-in `docs/formats.md`). When the callee's declarations are known (a
-sibling source, `--extern`, or the embedded standard library), the
-argument list is checked against them here, exactly as a local signature's
-is: a missing, duplicate, or unrecognized argument name is still a compile
-error naming the parameter. When they are not known, the call still
-compiles — every entry is written by name, in source order — and the same
-checks run at LINK time instead, against the callee's real object.
+### Calls across units
+
+A call whose target lives in *another* compilation unit comes in two
+shapes, and they differ in what the caller has to know.
+
+**The transparent call** names no arguments at all. The callee then runs
+on the caller's own tapes, in the caller's own index space, with the
+heads wherever the caller left them:
+
+```
+alphabet a { '_', '0', '1' }
+
+machine {
+  tape num: a;
+  entry state s { [*] -> call std::binaryNumbersBare::plusOne() then done; }
+  state done    { [*] -> stop; }
+}
+```
+
+Because there is no binding, the correspondence is **by index**: the
+caller's symbol at index *k* is whatever the callee's own alphabet spells
+at index *k*. A transparent call is therefore correct only when the
+caller's alphabet lists **the same glyphs in the same order** as the
+callee's. The linker checks exactly that and says so when it does not
+hold: a same-width alphabet spelling different glyphs is the
+`glyph-mismatch` warning, naming the first position that differs; a
+narrower callee alphabet is `narrow-alphabet`; a wider one is an error
+(`docs/tmt/cli.md (link warnings)`). The two ways to stop re-declaring an
+alphabet by position are to **import** the callee's own alphabet
+("Alphabets across units") or to **bind and map explicitly** — the form
+below.
+
+**The bound call** names arguments, exactly as an in-unit call does. The
+compiler emits a SYMBOLIC binding — the callee's parameter name in place
+of a caller-tape position, and a bound map's destination as a glyph in
+place of an index — because the callee's own tape order and index space
+belong to the LINKER to resolve, not to this unit (`docs/formats.md
+(bound calls)`). What gets checked, and when, depends on whether this
+compile was given the callee's declarations:
+
+- **With declarations** (a sibling source, a `--extern` file, a library,
+  or the embedded standard library), the argument list is checked here,
+  exactly as a local signature's is: a missing, duplicate, or
+  unrecognized argument name is a compile error naming the parameter, and
+  the emitted entries follow the callee's own tape order.
+- **Without them**, the call still compiles: every entry is written by
+  name, in source order, and the same checks run at LINK time instead,
+  against the callee's real object — where a parameter the callee does
+  not declare, or one the site never named, is a link error.
 
 ```
 use hidden;
 …
-[*] -> call hidden() then done;          // fine — resolved at link
-[*] -> call hidden(t = main) then done;  // fine — a symbolic binding,
-                                          // checked when `hidden`'s
+[*] -> call hidden() then done;          // transparent — resolved at link
+[*] -> call hidden(t = main) then done;  // a symbolic binding, checked
+                                          // here when `hidden`'s
                                           // declarations are known,
                                           // otherwise at link
 ```
+
+A bound call with an OMITTED map emits no pairs, which leaves the
+linker's glyph check standing guard over that tape. Writing an empty map
+instead — `with map { }` — is the way to say "bind by index, and I mean
+it"; see "The written empty map".
+
+### `state` parameters
+
+A routine's signature may declare `state` parameters after its tapes.
+Each one is an **exit**: a way out of the routine other than `return`,
+wired by the call site to a state of the caller's own world.
+
+```
+alphabet ab { '_', '0', '1' }
+
+routine pick(tape t: ab, state hit, state miss) {
+  entry state s {
+    ['_'] -> goto hit;
+    [*]   -> goto miss;
+  }
+}
+
+machine {
+  tape d: ab;
+  entry state go { [*] -> call pick(t = d, hit = won, miss = lost); }
+  state won  { [*] -> stop; }
+  state lost { [*] -> halt; }
+}
+```
+
+The rules:
+
+- Inside the routine, `goto <state parameter>` leaves through that exit.
+  The exit's identity is its **position** among the signature's `state`
+  parameters, and both ends read that one list — which is why a call site
+  must know the callee's parameter order.
+- At the site, each `state` argument is given **by name**, in any order,
+  like a tape argument. Its value is a state of the calling world, or a
+  terminator — `stop`, `halt`, or, inside a routine, `return`. A
+  terminator argument means the callee's exit ends the program (or
+  returns from the *caller*) directly.
+- A routine's own `state` parameter may be **forwarded** to an inner
+  call, which is how a facade delegates its exits without knowing what
+  they lead to. It may equally be a `then` continuation — `then <state
+  parameter>` leaves the enclosing routine through that exit once the
+  callee returns.
+- Every exit must be bound; the argument list is complete, as any other
+  is.
+- A routine that only ever leaves through its exits never returns, so it
+  is `noreturn` ("Routines") and `then` is optional at its call sites.
+- A signature may declare at most **255** `state` parameters; the 256th
+  is `too-many-state-params`, since the published exit count is one byte
+  wide.
+- An exit-bearing call into a routine defined in ANOTHER unit needs that
+  unit's declarations, because an exits vector is positional and only the
+  callee's own parameter order says which exit is which. Without them the
+  site is `state-args-need-declarations`, not a deferred link check.
+- Under the copy-based call mechanisms a RECURSIVE exit-bearing call
+  chain cannot be stamped out and the link refuses it; the same program
+  links under `tmt link --call-mech=frames` (`docs/tmt/isa.md (call
+  mechanisms)`).
+
+Two consequences of how exits lower are worth knowing before leaning on
+them. A site that passes a terminator, or that forwards an exit onward,
+resolves through one shared resume state per resume point per world — one
+extra step on that path, and under `-g` that shared state carries the
+first site that asked for it, so a debugger may show a neighbouring call
+site's line there. And an exit-bearing site is never tail-called, nor is
+an exit-bearing callee inlined: the optimizer leaves both shapes alone
+(`docs/tmt/optimizer.md`).
 
 ### `graft`
 
@@ -641,24 +791,41 @@ A graft instance is named with `as NAME`, and the name is what other
 rules `goto` to enter the spliced copy. Only an `entry graft` may omit
 the name, since an unnamed non-entry instance would be unreachable.
 
-Grafts nest: a graph may graft another graph, and splicing recurses.
-0.1 rejects a graft whose graph body contains a `call`, reporting it at
-the graft site — whether the grafted graph is defined in this unit or
-reached through `use`/a qualified path into another unit's declarations
-(a library graph, whose exported body a header carries in full). Either
-way the splice is identical: a graft needs the graph's source, never just
-its signature, so a cross-unit graft resolves against the declarations
-table the same way an unresolved alphabet reference does. The object
-records the digest of the body it spliced, checked at link time against
-the exporting object's own digest for the same graph — a header with no
-compiled object in the link is not checked. A library graph's own body
-may only reach the library's own declarations and the embedded standard
-library's — a library graph whose body names a THIRD unit's alphabet or
-map cannot currently be printed as a header or consumed from one. A
-hand-written header must spell an alphabet reference exactly the way the
-printer does (a bare name where the printer would use one, a qualified
-path where it would); a differently-spelled but equivalent reference
-digests differently and trips the drift check at link.
+Two graft sites of the same world that splice the same graph with the
+same tape arguments and the same exit wiring are ONE splice, not two: the
+identity of a graft is its target, its tape composite and its
+continuation, and the second site aliases the first rather than
+duplicating the graph's states. The `as` name plays no part in that
+identity, which is why a second site that differs only in what it is
+called still earns nothing but its own name — the
+`duplicate-graft-instance` lint finding (`docs/tmt/lint.md`).
+
+Grafts nest: a graph may graft another graph, and splicing recurses. A
+graph that graft-depends on itself, directly or around a cycle of
+definitions, is `graft-cycle` — across units as within one.
+
+A graft whose graph body contains a `call` is rejected at the graft site
+(`graft-call-unsupported`): the call's binding arguments name the
+graph's own signature tapes and its `then` continuation is a graph-space
+state, neither of which the splice rewrites into host space. Write such
+behaviour as a routine instead, with `state` parameters if it needs
+several exits. The check fires at the SITE, not at the definition: a
+graph whose body carries a call compiles happily as long as nothing
+grafts it.
+
+A graph defined in another unit grafts exactly like a local one, since a
+graft needs the graph's source rather than its signature — see "Grafting
+a graph from another unit" for what that means for name resolution, and
+for the digest the linker checks. A graft target the declarations do not
+supply is `undefined-graph`, the same two-case split an unresolved
+alphabet reference has.
+
+One consequence of the digest deserves its own line, for anyone editing a
+header by hand: a graph's digest covers the body **as the header printer
+renders it**, so a reference spelled differently but equivalently — a
+qualified path where the printer would print a bare name — digests
+differently and trips the drift check at link. Doc lines, comments,
+whitespace and unrelated declarations do not move it.
 
 ### `bind`
 
@@ -780,7 +947,32 @@ differently-glyphed alphabets by index is therefore intended semantics,
 not a gap. When that index re-labelling is a surprise rather than the
 intent — the same glyphs listed in a different order, say — the opt-in
 `index-identity-map` lint (`tmt lint --warn index-identity-map`;
-`docs/tmt/lint.md`) is the audit tool that flags it.
+`docs/tmt/lint.md`) is the audit tool that flags it within one unit, and
+the linker's own `glyph-mismatch` warning is what catches it across the
+link boundary, where the callee's alphabet is not visible to the
+compiler at all.
+
+### The written empty map
+
+`with map { }` — a map written with no pairs — is not the same thing as
+no map at all, even though both bind by index and both complete to the
+identity on equal-cardinality alphabets. The difference is what it tells
+the linker. An OMITTED map leaves the glyph checks standing: binding into
+a callee whose alphabet spells its glyphs differently is
+`glyph-mismatch`. A WRITTEN map — empty included — is the author saying
+what they meant, so it is never graded, and the warning goes quiet:
+
+```
+// the caller's tape is `{ '_', '1', '0' }`, the callee's `{ '_', '0', '1' }`
+call mark(t = d)                // warns: glyph-mismatch at position 1
+call mark(t = d with map { })   // silent: bind by index, deliberately
+```
+
+Use it when the index re-labelling is the intent — a tape whose glyph
+names differ from the callee's by design, where the positions are what
+carry the meaning. Everywhere else, prefer naming the pairs: an explicit
+map says which glyph becomes which, and survives a later reordering of
+either alphabet.
 
 ### Unequal alphabets: closed maps and holes
 
@@ -958,6 +1150,8 @@ namespace std {
 }
 ```
 
+### Qualified names
+
 Within one compilation unit every declaration is reachable by its
 qualified name — `std::binaryNumbers::plusOne` — whether or not it is
 exported. **`export` controls link-time visibility**: an exported world
@@ -976,9 +1170,190 @@ use outer::inner::touch as poke;
 
 A single `use` may list several paths: `use a, mylib::b as c;`. An alias
 rebinds only the local name; the declared symbol is unchanged. `use` also
-declares a name defined in another compilation unit — that is how an
-unbound cross-unit call names its callee. An import nothing references is
-a lint finding.
+declares a name defined in another compilation unit — that is how a
+transparent cross-unit call names its callee. An import nothing
+references is a lint finding.
+
+### Alphabets across units
+
+An alphabet, a named map and a graph are **source-level** declarations:
+none of them is a linkable symbol, so naming one that lives in another
+unit means having that unit's declarations at hand ("Declarations and
+headers", below). Given them, all three are named exactly like a routine
+— by a qualified path, or by a `use` that binds the short name:
+
+```
+use lib::bits;          // the import form
+…
+tape d: bits;           // …and the qualified form
+tape w: lib::wide;
+```
+
+An exported alphabet imported this way is the honest alternative to
+re-declaring the callee's glyphs by position for a transparent call
+("Calls across units"): there is then one declaration, and the caller's
+indices are the callee's by construction rather than by agreement. The
+compiled object records which alphabets it imported and the glyph lists
+it compiled against, and the linker compares each against the exporting
+object's own declaration, so an alphabet that changed under a consumer
+stops the link instead of silently re-labelling its symbols
+(`docs/core.md (graft drift)`).
+
+`unresolved-alphabet` therefore covers two different situations, and its
+message says which one it found:
+
+- **nothing declares that name anywhere** — a typo, or a declaration
+  never written;
+- **something does, in another unit, but this compile was not given that
+  unit's declarations** — reached through a `use` or a qualified path,
+  with no sibling source, header, library or standard library supplying
+  it. The remedy is to declare the alphabet locally or to give the
+  compile those declarations.
+
+`undefined-graph` and `undefined-map` split the same two ways, for the
+same reason.
+
+## Declarations and headers
+
+A compilation unit can be read for its **declarations** alone — what it
+exports and what those exports promise — without compiling it. That
+reading is what lets one unit check a call into another at compile time
+instead of leaving every such check to the linker, and what lets a graft
+reach a graph defined elsewhere.
+
+### Declarations
+
+A declarations reading yields: exported alphabets, exported named maps,
+exported graphs *with their bodies*, and exported routine signatures —
+each routine's tapes with their glyph lists and published write set, its
+`state` parameter count, and whether it can return. Routine bodies and
+the `machine` block contribute nothing and are not needed.
+
+What a compile is given to read is a matter for the tools rather than the
+language: `tmt compile --extern FILE`, the sibling sources and libraries
+`tmt build` derives from a manifest, and the embedded standard library
+which is read unless switched off (`docs/tmt/cli.md (--extern and
+--nostdlib)`, `docs/tmt/project.md (Declaration derivation)`).
+
+**Strictness is decided by the file's extension**, not by guesswork:
+
+- a **`.tmh`** is read STRICTLY, as declarations and nothing else. A
+  `machine` block is `machine-in-declarations`; a routine carrying a body
+  is `routine-body-in-declarations`. A graph, by contrast, MUST carry its
+  body — a graph's only form is its source.
+- a **`.tmc`** used as a declarations source is read LENIENTLY: it is an
+  ordinary program, and the bodies and the `machine` block it happens to
+  carry are simply not used. A graph's body is kept, so a sibling's
+  exported graph is graftable exactly as a header's is.
+
+Both readings run the one `.tmc` grammar. There is no separate header
+language, and no second front end to drift from the first.
+
+### Headers
+
+A **header** is a `.tmh` file: declarations in `.tmc` syntax, written out
+by `tmt interface` (`docs/tmt/cli.md (interface)`). It is the form a
+library ships beside its compiled object so that consumers can check
+their calls, import its alphabets and graft its graphs.
+
+```
+namespace lib {
+  export alphabet bits { '_', '0', '1' }
+  ? Leave through `hit` on a blank, through `miss` otherwise.
+  export routine pick(tape t: bits writes {}, state hit, state miss) noreturn;
+  export routine mark(tape t: bits writes { '1' });
+  ? Walk right to the first blank.
+  export graph seek(tape t: bits writes {}, state found) {
+    entry state s {
+      ['_'] -> goto found;
+      [*] -> move [>] goto s;
+    }
+  }
+}
+```
+
+`pick` is `noreturn` because it only ever leaves through its exits, and
+`mark`'s `writes { '1' }` is the clause its source declared; `pick`'s and
+`seek`'s `writes {}` were inferred, neither having been declared.
+
+A header is **generated, not hand-maintained**: it is regenerated from
+the source whenever that source changes, and editing one by hand is how a
+consumer ends up compiled against a promise the object does not keep.
+What it carries follows from that:
+
+- **A routine appears as a signature terminated by `;`** — no body. Its
+  tapes carry their glyph lists and one contract clause, `writes { … }`,
+  which is the tape's PUBLISHED write set: the declared effective set
+  (`writes` minus `preserves`) when the source declared either clause,
+  and the compiler's own inferred write set when it declared neither.
+  **Every tape carries one**, `writes {}` included: a header states what
+  a tape writes, and there is no spelling for "nothing declared". A
+  `preserves` clause never appears; it has no independent meaning once
+  the effective set is published, and could not be reconstructed from a
+  compiled object anyway.
+- **`volatile` never appears.** The modifier shapes how a routine's own
+  body is compiled and is never checked at a call site, so it is not part
+  of what a caller may rely on ("Volatile tapes").
+- **`noreturn` appears when the routine cannot return**, and on a bodiless
+  declaration that clause is the whole of the fact.
+- **A graph appears in full**, body included, because a graft splices
+  source.
+- **Doc lines ride along**; attention lines and ordinary comments do not
+  survive, and neither does any private declaration.
+- **`use` lines are printed where the declarations need them** — a header
+  is a self-contained unit, and a name it references either is declared
+  in the header itself or is imported by a `use` line the header carries.
+- **Private alphabets are still named.** A routine over an alphabet that
+  is not itself exported is legal; the header prints that alphabet as a
+  plain `alphabet` declaration (no `export`) so the signature can name
+  it.
+
+A header printed from a compiled OBJECT rather than from source is
+narrower, because an object carries less: routine signatures and
+alphabets, but no graph body, no named map and no doc line, since none of
+those exist on the wire. Two further consequences of reading an object:
+its `state` parameters have no names on the wire, so they print
+positionally as `exit0`, `exit1`, …; and the entry world is skipped
+entirely, since a `machine` is never a callee.
+
+### What a header is trusted for
+
+A header is a **declaration**; the object beside it is the truth. The
+link stage re-checks what it can:
+
+- A grafted graph's body is digested on both sides — the exporting unit
+  records the digest of the body it published, the consuming unit the
+  digest of the body it spliced — and a mismatch stops the link
+  (`docs/core.md (graft drift)`). An imported alphabet is verified the
+  same way.
+- A routine's declared `noreturn` is re-read from the linked body, so a
+  header that claims it falsely is reported where it matters — at a call
+  site written without a continuation ("Routines").
+
+Two things are NOT re-checked, and are worth knowing:
+
+- **A header-only library** — declarations with no compiled object in the
+  link — is trusted outright. There is nothing to compare against.
+- **A write contract** that a rebuilt object no longer keeps is not
+  caught. Regenerate a library's header whenever you rebuild its object.
+
+### Grafting a graph from another unit
+
+A graph declared by another unit is grafted exactly like a local one, and
+the splice is identical. Names inside the spliced body resolve in the
+**declaring** unit, never in the consumer's: a consumer alphabet that
+happens to share a name with one the graph uses is a different alphabet,
+and an omitted map between the two is `identity-glyph-mismatch` rather
+than a silent identity. A named map given at such a site is checked
+against the library graph's own parameter alphabets, for the same reason.
+
+Two limits are current, not permanent. A library graph's body may reach
+only its own unit's declarations and the standard library's — a graph
+whose body names a THIRD unit's alphabet, map or graph cannot be printed
+into a header or consumed from one. And a diagnostic about a declaration
+read from a header is rendered against the primary input's path, carrying
+the header's line and column; the position is the header's, the filename
+is not.
 
 ## Doc lines and attention lines
 
@@ -1022,14 +1397,14 @@ machine {
 
 Consecutive `?` lines join into one paragraph in order. One leading space
 directly after the sigil is canonical and stripped, so `? foo` and `?foo`
-store identical text. The text is plain prose — 0.1 interprets no markup
+store identical text. The text is plain prose — 0.2 interprets no markup
 inside it.
 
 ### The `[deprecated]` attribute
 
 An attention line may open with a bracketed identifier, `! [ident] rest
 of the line`; without one the whole line is free prose. `deprecated` is
-the only attribute 0.1 recognizes — any other bracketed identifier is a
+the only attribute 0.2 recognizes — any other bracketed identifier is a
 compile error at the identifier's own span. Everything after the closing
 `]` is the attribute's message, trimmed. At most one `[deprecated]` may
 appear in a run; a second is an error at the second occurrence.
@@ -1060,4 +1435,19 @@ text, and it remains available as an ordinary identifier.
 ## Grammar version history
 
 - **0.1** — the language's first cut, and the baseline the version
-  scheme measures from. Everything on this page is 0.1.
+  scheme measures from.
+- **0.2** — declarations and headers. A unit can be read for its
+  declarations alone, and `.tmh` is the file that carries them
+  ("Declarations and headers"). With them in hand: a `call`/`bind` may
+  bind tapes into a routine defined in another unit ("Calls across
+  units"), an alphabet, a named map or a graph may be named across a unit
+  boundary ("Alphabets across units"), and a graph from another unit may
+  be grafted. New grammar: `state` parameters on a `routine` signature
+  ("`state` parameters"), the `noreturn` clause and the optional `then`
+  it licenses ("Routines"), and `map NAME: SRC -> DST { … }` declarations
+  with `with map NAME` sites ("Named maps"). Two acceptance changes go
+  the other way: `noreturn` joins the reserved words as the
+  twenty-eighth, so a 0.1 program using it as a name no longer compiles;
+  and `main` is reserved for the entry world in a library as well as in a
+  program ("Program structure"). Everything else 0.1 accepted, 0.2
+  accepts.

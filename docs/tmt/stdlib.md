@@ -39,9 +39,26 @@ single state.
 
 Each namespace exports its alphabet as `symbols`, which is the normative
 statement of the representation. An exported alphabet is a **source-level**
-declaration: it contributes no linkable symbol, so a caller in another
-compilation unit cannot name it. Declare a local alphabet with the same
-glyphs in the same order instead — see below.
+declaration: it contributes no linkable symbol. A consumer names it the way
+it names any other declaration from another unit — by a qualified path, or
+through a `use` that binds the short name — which works here without any
+flag, because the library's declarations are read by default:
+
+```
+use std::binaryNumbers::symbols;
+
+machine {
+  tape num: symbols;
+  entry state s { [*] -> call std::binaryNumbers::plusOne(num = num) then done; }
+  state done { [*] -> stop; }
+}
+```
+
+Importing it is the recommended form, since it leaves one declaration of the
+representation rather than two that have to be kept in step. Re-declaring a
+local alphabet with the same glyphs in the same order still works — it is
+what a transparent call has always relied on — and the next section says
+what the linker checks when the two spellings drift apart.
 
 ## Calling a library routine
 
@@ -68,7 +85,9 @@ machine {
 ```
 
 Because a transparent call binds by index, **the local alphabet must list the
-same glyphs in the same order** as the namespace's `symbols`. The indices are:
+same glyphs in the same order** as the namespace's `symbols` — the rule, and
+what the linker does when it is broken, are
+`docs/tmt/language.md (calls across units)`. The indices are:
 
 ```
 std::binaryNumbers::symbols        '_'=0  '^'=1  '$'=2  '0'=3  '1'=4
@@ -368,6 +387,29 @@ the mark working.
 In every other respect a twin is an ordinary exported routine: it links, it
 is reachable or dropped, and it is shadowed by a same-named definition of
 your own on exactly the same terms as the routine it mirrors.
+
+## The shipped header
+
+The library ships a header of its own, `std.tmh`, embedded in the toolchain
+binary beside the source. It is the declarations form of the same library
+(`docs/tmt/language.md (headers)`): every exported alphabet, every exported
+routine's signature with its published write set and its `?` doc lines, and
+every exported graph's body in full.
+
+It is **generated, not maintained**: `tmt interface` prints it from
+`std.tmc`, a test holds the committed file byte-for-byte against what the
+printer produces today, and a second, `#[ignore]`d test regenerates it. A
+hand edit is therefore caught by the first and overwritten by the second —
+the file's own opening notice says so. That arrangement is what makes the
+header a fact about the library rather than a second description of it that
+could drift.
+
+Consumers meet it indirectly. A compile reads the library's declarations
+from this header unless `--nostdlib` switches it off, which is how a call
+into `std::` is checked in the callee's own parameter order, how a `use
+std::…::symbols` resolves, and how one of the library's exported graphs can
+be grafted at all — a graft needs the graph's source, and the header is
+where that source comes from.
 
 ## Linking and embedding
 

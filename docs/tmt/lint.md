@@ -682,10 +682,12 @@ h.tmc:3:54: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so 
 
 A `then` written on a `call`/`bind` site whose callee is KNOWN to be
 `noreturn` — the continuation can never run, since the callee never hands
-control back (docs/tmt/language.md (reuse)). "Known" means the callee's
-own `noreturn` clause is visible to this unit: an in-unit routine's own
-declaration, or an out-of-unit one's entry in the declarations this
-compile was given (`--extern`, the embedded standard library). A callee
+control back (docs/tmt/language.md (reuse)). "Known" means this unit can
+see the fact, and it reaches it two ways: for a routine defined HERE, the
+inference over its own body — whether the author wrote the `noreturn`
+clause or not; for one defined ELSEWHERE, the declared clause of an entry
+in the declarations this compile was given (`--extern`, a sibling source,
+a library, the embedded standard library). A callee
 this unit cannot see at all is left alone even when it happens to be
 `noreturn` in reality — the linker never checks a `then` either way, so
 nothing here can tell "unreachable" from "merely unproven", and `then`
@@ -743,12 +745,22 @@ b.tmc:8:34: lint: call maps by index across differently-glyphed alphabets ('a' v
 
 Only `call` and `bind` — a graft's omitted map means glyph identity and
 either matches or errors at compile time, so it never reaches this rule.
-Silent when a map is written (the author is explicit), when the two
-alphabets are glyph-for-glyph equal over their shared indices, or when the
-callee's alphabet is not visible in this compilation (an external routine
-resolved at link). `fix: None`: writing the intended map needs the
-author's intent — which glyph should become which — that the tool cannot
-guess.
+Silent when a map is written (the author is explicit — `with map { }`
+included, which is the deliberate spelling for binding by index,
+`docs/tmt/language.md (the written empty map)`), and when the two
+alphabets are glyph-for-glyph equal over their shared indices.
+`fix: None`: writing the intended map needs the author's intent — which
+glyph should become which — that the tool cannot guess.
+
+**This rule covers the IN-UNIT case; the linker covers the cross-unit
+one.** Lint sees only the alphabets this compilation resolves, so a
+callee whose alphabet it cannot see is left alone here. That is not a
+gap: the same hazard across a link boundary is the linker's own
+`glyph-mismatch` warning, raised against the callee's real object
+(`docs/tmt/cli.md (link warnings)`). The two differ in more than where
+they run — `glyph-mismatch` is default-ON, because at the link boundary a
+re-labelling is far likelier to be an accident than an intention, while
+this rule stays opt-in for exactly the opposite reason inside one unit.
 
 ## The `.tma` additions
 

@@ -1629,10 +1629,10 @@ export routine pick(tape exit0: bits, state hit) {
     assert_eq!(run_interface(&header_path).stdout, out.stdout);
 }
 
-/// `TMC_LANG_VERSION` moved `0.1` → `0.2` in this task — the first task
-/// in the binding arc's phase 3a to change the `.tmc` grammar (the
-/// bodiless-signature alternative). Pre-1.0, `N` bumps on ANY grammar
-/// change; there is no patch digit. Mutation: leaving it at `0.1`.
+/// `TMC_LANG_VERSION` moved `0.1` → `0.2` when the grammar gained the
+/// bodiless-signature alternative a header is written in. Pre-1.0, `N`
+/// bumps on ANY grammar change; there is no patch digit. Mutation:
+/// leaving it at `0.1`.
 #[test]
 fn the_language_version_is_two() {
     assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.2");

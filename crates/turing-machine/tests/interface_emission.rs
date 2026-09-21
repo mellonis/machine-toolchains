@@ -421,9 +421,10 @@ machine {
 /// numeric label (`10`, `11`, `12` from a numeric range) and an escaped
 /// quote glyph. No alphabet here is `export`ed, for the same reason as
 /// above. Mutation: re-narrowing the `.tma` glyph literal back to one
-/// character (Task 2b's change); this test goes red at the reassemble
-/// step, which is exactly where the old plan would have written a fourth
-/// text-expressibility exception instead of widening the notation.
+/// character; this test goes red at the reassemble step, which is exactly
+/// where a fourth text-expressibility exception would otherwise have been
+/// declared instead of widening the notation
+/// (`docs/formats.md (text-expressibility caveats)`).
 #[test]
 fn every_glyph_a_tmc_alphabet_can_hold_round_trips() {
     let zwj = "👨\u{200d}👩\u{200d}👧";

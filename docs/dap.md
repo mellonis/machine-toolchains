@@ -339,7 +339,17 @@ A frame's `line` follows the native-debugger prologue convention: an
 address inside a function but *before* its first line-mapped
 instruction — the linker-synthesized prelude at a program's entry, for
 one — renders at the function's opening line, so the frame stays
-sourced and focusable. Only a function with provenance but *no* line
+sourced and focusable.
+
+One `.tmc` shape puts a compiler-synthesized state on a real source
+line rather than on none. A call site that hands a callee a terminator,
+or that forwards one of its own exits onward, resumes through a one-row
+state the compiler mints per resume point per world and shares across
+every site that asks for it (`docs/tmt/language.md (state parameters)`).
+Under `-g` that shared row carries the line of the FIRST site that asked,
+so stepping through a later site may briefly show a neighbouring call
+site's line. The row is real code on the shared path, not a mapping
+error. Only a function with provenance but *no* line
 entries at all (a composition-engine mono stamp's shape) reports
 `line: 0`, and such a frame deliberately omits its `source` object too:
 DAP permits line 0 solely on a sourceless frame — lines are 1-based

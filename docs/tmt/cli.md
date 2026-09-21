@@ -229,6 +229,8 @@ symbol-map family (graft, call/bind, and a named map's own declaration
 checks) in `docs/tmt/language.md (symbol maps)` and its "Named maps"
 subsection.
 
+**Error codes.** The whole catalog, in one table:
+
 | Code | Meaning |
 |---|---|
 | `lex-error` | The source failed to tokenize: an unexpected character, an unterminated block comment, or a malformed glyph literal. |
@@ -255,7 +257,7 @@ subsection.
 | `alphabet-too-large` | An alphabet resolves to more than 127 symbols. |
 | `range-endpoint-not-scalar` | A glyph range endpoint that is not a single Unicode scalar. |
 | `range-descending` | A range whose low endpoint exceeds its high endpoint — ranges are inclusive and ascending. |
-| `duplicate-name` | Two entities (alphabet, routine, graph, or namespace) share one name in one scope. |
+| `duplicate-name` | Two entities (alphabet, map, routine, graph, or namespace) share one name in one scope — including a top-level `main`, which is reserved for the entry world in every unit, library or program (`docs/tmt/language.md (program structure)`). |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
 | `too-many-tapes` | A world declares more than 16 tapes. |
 | `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). |
@@ -784,6 +786,26 @@ BODILESS routine (declarations-only reading, below) has no body to infer
 from, so its `noreturn` is whatever its own signature declares, echoed
 back verbatim — the round-trip this whole page promises.
 
+One exception, and it is the reason to read a printed `noreturn` as a
+report rather than a proof. `tmt interface` prints a unit whose bodies do
+not survive expansion — a fold that cannot be evaluated, say — because
+declarations do not need expansion and refusing would make a header
+unobtainable exactly when a consumer needs one. The inference has nothing
+to work from there, so it falls back to **"can return"** for every
+routine that does not declare the clause itself; a routine that declares
+`noreturn` still prints it, since that is its own statement. A header
+taken from a unit that does not compile can therefore be missing a
+`noreturn` the same unit would publish once it does.
+
+**Named maps print on the source arm only.** Every EXPORTED `map` prints,
+as `export map`; a private one prints, as a plain `map`, when a printed
+graph body reaches it — the same transitive closure that pulls in a
+private graph or a private alphabet, since a graph's body is the one
+thing a header carries whole. Both follow the same `use` rule alphabets
+do. The object arm prints no map at all: the wire records none, a named
+map having expanded to its pairs long before codegen
+(docs/tmt/language.md (named maps)).
+
 **A `.tmh` extension selects declarations-only reading of a text INPUT**
 (docs/tmt/language.md (headers)): the identical `.tmc` grammar, read in a
 mode that rejects a `machine` block and a routine WITH a body, and
@@ -1223,6 +1245,14 @@ languages. The rule catalog is `docs/tmt/lint.md`. An explicitly listed file
 with neither extension is a per-file error and the batch continues; the
 directory walk itself never collects any other extension, so this only fires
 for a file named directly on the command line.
+
+**A `.tmh` header is one of those files.** `tmt lint` and `tmt fmt` both
+refuse it — `error: unknown source extension (expected .tmc or .tma)`,
+exit 1 — and that is deliberate rather than an oversight. A header is
+*produced* by `tmt interface` and *consumed* by `tmt compile --extern`
+and `tmt build`; it is not a file the other tools open, since linting one
+would need every rule to say whether it applies to a bodiless declaration
+and formatting one would compete with the generator that writes it.
 
 Files lint independently: one that fails to parse is reported on stderr as a
 fatal error line with its bracketed code, and the batch keeps going.
