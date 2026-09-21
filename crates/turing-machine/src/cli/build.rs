@@ -20,7 +20,7 @@ use mtc_core::formats::object::ObjectFile;
 use mtc_core::linker::{CallMech, LinkOptions, LinkReport};
 
 use crate::compiler::{
-    CompileOptions, CompileReport, Declarations, Origin, compile as compile_source,
+    CompileOptions, CompileReport, Declarations, Origin, Resolved, compile as compile_source,
 };
 use crate::optimizer::OptLevel;
 
@@ -510,10 +510,199 @@ pub(crate) fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, St
     Err(format!("library `{name}` not found on the -L search path"))
 }
 
+/// `tmt build`'s own library resolution (docs/tmt/project.md
+/// (libraries)): whatever of `<name>.tmo` (its interface section) and
+/// `<name>.tmh` (graphs, maps, doc lines) exists in the first search
+/// directory that has either. When the header exists it is the
+/// declaration source — it carries graphs, maps and doc lines the object
+/// cannot — and the object, if it also exists, is what gets LINKED (the
+/// returned `Option<ObjectFile>`). A header-only library (no `.tmo` next
+/// to it) contributes declarations and no object at all — the caller
+/// never hands it to the linker. Neither file present, in any searched
+/// directory, is an error naming the library, matching [`find_library`]'s
+/// own wording.
+///
+/// Deliberately a SEPARATE function from [`find_library`]: `tmt link`'s
+/// own `-l` and the LSP overlay's own fixture (`lsp/overlay.rs`) both need
+/// exactly an object or a "not found" error — widening `find_library`'s
+/// return shape would force those two callers to unwrap a declarations
+/// field they have no use for. Both functions share the same directory
+/// search and the same `<name>.tmo` candidate path.
+pub(crate) fn find_library_for_build(
+    name: &str,
+    dirs: &[String],
+) -> Result<(Option<ObjectFile>, Resolved), String> {
+    for dir in dirs {
+        let tmo = Path::new(dir).join(format!("{name}.tmo"));
+        let tmh = Path::new(dir).join(format!("{name}.tmh"));
+        let has_tmo = tmo.exists();
+        let has_tmh = tmh.exists();
+        if !has_tmo && !has_tmh {
+            continue;
+        }
+        let object = if has_tmo {
+            Some(read_object(&tmo)?)
+        } else {
+            None
+        };
+        let declarations = if has_tmh {
+            let source = fs::read_to_string(&tmh)
+                .map_err(|e| format!("cannot read {}: {e}", tmh.display()))?;
+            crate::header::read_extern(&tmh, &source).map_err(|e| {
+                format!(
+                    "{}:{}:{}: error: {} [{}]",
+                    tmh.display(),
+                    e.span.start.line,
+                    e.span.start.col,
+                    e.kind,
+                    e.kind.code()
+                )
+            })?
+        } else {
+            // `has_tmo` alone, checked above: derive declarations from the
+            // object's own interface — the ONE object→declarations path
+            // (`crate::header::declarations_from_object`).
+            let obj = object.as_ref().expect("has_tmo checked above");
+            crate::header::declarations_from_object(obj)
+                .map_err(|e| format!("{}: {e}", tmo.display()))?
+        };
+        return Ok((object, declarations));
+    }
+    Err(format!("library `{name}` not found on the -L search path"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mtc_core::linker::LinkDiagnostic;
+
+    // ---- find_library_for_build -------------------------------------------
+    //
+    // The resolver's own decision point for `tmt build`'s library handling
+    // (docs/tmt/project.md (libraries)): white-box tests here pin exactly
+    // what `find_library_for_build` returns for each of the four
+    // presence combinations, since a `LinkReport` carries no per-object
+    // list an end-to-end test could assert on directly — this IS the
+    // check whose `Option<ObjectFile>` decides whether a library's object
+    // ever reaches `build_one_target`'s own `libraries` list.
+
+    /// A fresh, per-call scratch directory under the OS temp dir, unique
+    /// by process id + an atomic counter — mirrors `cli/driver.rs`'s own
+    /// `unique_tmp_dir` test helper of the same shape (this crate has no
+    /// shared test-support module).
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "tmt-find-library-test-{label}-{}-{n}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    const FIND_LIBRARY_FIXTURE: &str = "\
+namespace lib {
+  export alphabet ab { '_', '0', '1' }
+  export routine flip(tape t: ab writes { '0', '1' }) {
+    entry state s { [*] -> return; }
+  }
+}
+";
+
+    fn write_fixture_object(dir: &Path) {
+        let out = compile_source(
+            FIND_LIBRARY_FIXTURE,
+            CompileOptions {
+                externals: Declarations::none(),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("compile: {e}"));
+        fs::write(dir.join("lib.tmo"), out.object.to_bytes()).unwrap();
+    }
+
+    fn write_fixture_header(dir: &Path) {
+        let text = crate::header::from_source(FIND_LIBRARY_FIXTURE)
+            .unwrap_or_else(|e| panic!("interface: {e}"));
+        fs::write(dir.join("lib.tmh"), text).unwrap();
+    }
+
+    fn declares_flip(resolved: &Resolved) -> bool {
+        resolved.worlds.iter().any(|w| w.name == "lib::flip")
+    }
+
+    /// Mutation: preferring the object's own (reduced) declarations even
+    /// when a header also exists — this pins that the HEADER wins as the
+    /// declaration source when both are present, per the requirement
+    /// ("when both files exist the header is the declaration source"),
+    /// while the object is STILL what gets returned to link.
+    #[test]
+    fn find_library_for_build_returns_both_when_both_files_exist() {
+        let dir = unique_tmp_dir("both");
+        write_fixture_object(&dir);
+        write_fixture_header(&dir);
+        let dirs = vec![dir.to_string_lossy().into_owned()];
+
+        let (object, declarations) = find_library_for_build("lib", &dirs).unwrap();
+        assert!(
+            object.is_some(),
+            "the object must still be returned to link"
+        );
+        assert!(declares_flip(&declarations));
+    }
+
+    /// Mutation: `find_library_for_build` requiring a `.tmh` unconditionally
+    /// (today's `find_library` behavior, inverted) — an object-only
+    /// library would then error instead of deriving declarations from its
+    /// interface section.
+    #[test]
+    fn find_library_for_build_object_only_derives_declarations_from_the_object() {
+        let dir = unique_tmp_dir("object-only");
+        write_fixture_object(&dir);
+        let dirs = vec![dir.to_string_lossy().into_owned()];
+
+        let (object, declarations) = find_library_for_build("lib", &dirs).unwrap();
+        assert!(object.is_some());
+        assert!(declares_flip(&declarations));
+    }
+
+    /// The structural half of "a header-only library is never linked":
+    /// with no `.tmo` on the search path at all, the resolver returns
+    /// `None` for the object — the value `build_one_target`'s `if let
+    /// Some(obj) = object { libraries.push(obj); }` guard reads to decide
+    /// whether the library ever reaches the linker's own input list.
+    ///
+    /// Mutation: fabricating a placeholder `ObjectFile` instead of
+    /// returning `None` when no `.tmo` exists — a header-only library
+    /// would then be silently handed to the linker.
+    #[test]
+    fn find_library_for_build_header_only_returns_no_object() {
+        let dir = unique_tmp_dir("header-only");
+        write_fixture_header(&dir);
+        let dirs = vec![dir.to_string_lossy().into_owned()];
+
+        let (object, declarations) = find_library_for_build("lib", &dirs).unwrap();
+        assert!(
+            object.is_none(),
+            "no .tmo exists for this library — nothing to hand the linker"
+        );
+        assert!(declares_flip(&declarations));
+    }
+
+    /// Mutation: falling back to an empty, silent `Declarations` instead
+    /// of erroring when neither file exists — the library would then
+    /// look declared-but-empty rather than visibly missing, and the
+    /// message would no longer name it.
+    #[test]
+    fn find_library_for_build_errors_when_neither_exists() {
+        let dir = unique_tmp_dir("neither");
+        let dirs = vec![dir.to_string_lossy().into_owned()];
+
+        let err = find_library_for_build("lib", &dirs).unwrap_err();
+        assert!(err.contains("lib"), "{err}");
+    }
 
     /// A `LinkReport` carrying only `diagnostics`, every other counter at
     /// its zero/empty value — the renderer under test reads only

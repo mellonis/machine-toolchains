@@ -93,7 +93,7 @@ overriding the project-level `call-mech`.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `stdlib` | bool | `true` | `false` is the manifest form of `--nostdlib`: every target in this file links without the standard library. Project-level only — there is no per-target override. |
+| `stdlib` | bool | `true` | `false` is the manifest form of `--nostdlib`, covering BOTH stages: every target in this file compiles believing no embedded-stdlib declarations and links without the standard library. Project-level only — there is no per-target override. |
 | `sources` | array of strings | `[]` | Source paths prepended to every target's own `sources`, in order. |
 | `libraries` | object | `{}` | `dirs` (search directories) and `link` (library names), each prepended to every target's own list, in order. |
 | `call-mech` | `"mono"` \| `"frames"` \| `"hybrid"` | absent | Default bound-call lowering for every target in this file — see Call mechanism below. |
@@ -122,6 +122,40 @@ definition of the same exported symbol silently shadows a library's — no
 warning is emitted (`docs/core.md (linking)`). Linking is lazy by
 reachability, so a declared library that no effective source references
 contributes nothing to the output.
+
+### Declaration derivation
+
+`tmt build` derives the declarations every unit it compiles believes —
+what `tmt compile`'s own `--extern`/`--nostdlib` supply by hand
+(`docs/tmt/cli.md (--extern and --nostdlib)`) — entirely from what the
+manifest already declares: the target's effective source set and its
+effective libraries. There is no manifest key for this; `build` derives
+it, and never accepts `--extern` itself in either mode (argv mode's flag
+parser rejects it as an unknown flag, the same refusal any unrecognized
+dashed token gets).
+
+Each source in a target's effective set is compiled knowing every OTHER
+source's declarations — read leniently for a `.tmc` sibling (bodies
+dropped, `--extern`'s own rule for a non-`.tmh` file), or from an
+assembled/loaded object's own interface for a `.tma`/`.tmo` sibling —
+then each declared library's declarations, then the embedded standard
+library unless `stdlib: false`: the same objects-then-libraries-then-
+stdlib order the linker itself resolves names in. A sibling with a
+later-stage (expansion) error still yields its declarations; only one
+that fails to read at all is excluded, and its own turn in the build
+still reports that failure naming its file.
+
+For each declared library, **whatever exists of `<name>.tmo` (its
+interface section) and `<name>.tmh` (graphs, named maps, doc lines) on
+the search path** feeds this table. Either may be absent; both absent is
+an error naming the library and the search path. When both exist, the
+header is the declaration source — it carries graph bodies, named maps
+and doc lines an object cannot — and the object is what gets LINKED. A
+**header-only library** (no `<name>.tmo` on the search path at all)
+contributes declarations and is never handed to the linker: nothing to
+link means nothing for the graft-drift check to compare a spliced body
+against either, which is by design — a header-only library is the one
+place a header is trusted outright (`docs/core.md (graft drift)`).
 
 ### Entry
 
@@ -342,10 +376,13 @@ Full flag reference, argv-mode-vs-manifest-mode dispatch, `--run`,
 to the manifest itself.
 
 For each target it builds, `tmt build` compiles/assembles/loads that
-target's effective sources, links them against its effective libraries
-(plus the standard library unless `stdlib: false`) with its resolved
-profile, its `entry`, and its resolved lowering, and writes its `output`
-(plus the `.tmx.map` sidecar) next to the manifest. The ordinary per-file
+target's effective sources — each knowing every other's declarations,
+plus its effective libraries' and (unless `stdlib: false`) the embedded
+standard library's, per Declaration derivation above — links them
+against its effective libraries (plus the standard library unless
+`stdlib: false`) with its resolved profile, its `entry`, and its resolved
+lowering, and writes its `output` (plus the `.tmx.map` sidecar) next to
+the manifest. The ordinary per-file
 "undeclared external" compile warning — which fires on a bare call a
 given file doesn't import — is refined the same way it is in argv mode:
 once a target's whole effective source set is known, a bare call resolved

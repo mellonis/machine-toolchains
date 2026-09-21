@@ -260,7 +260,33 @@ fn render_from_source(source: &str, mode: ReadMode) -> Result<String, CompileErr
 /// `--extern` file's own declarations against another is cross-unit name
 /// resolution, not this task's — docs/tmt/cli.md (compile)).
 pub(crate) fn read_extern(path: &Path, source: &str) -> Result<Resolved, CompileError> {
-    let mode = if path
+    read_declarations_with_mode(source, header_mode_for(path), &Declarations::stdlib())
+}
+
+/// [`read_extern`]'s twin for `tmt build`'s own sibling-declarations pre-
+/// pass (`cli/driver.rs`): the SAME extension-driven mode dispatch and the
+/// SAME reader, but resolved against a CALLER-SUPPLIED declarations
+/// context rather than the bare embedded stdlib [`read_extern`] always
+/// uses. Needed because the compiler's own module-resolution stage —
+/// cross-unit alphabet resolution AND the write-contract check — runs
+/// during declarations-only extraction exactly as it does during a real
+/// compile, so a sibling `.tmc` that itself references a declared library
+/// or another sibling needs that context in hand to extract cleanly, not
+/// just the embedded stdlib (docs/tmt/project.md (declared source set)).
+pub(crate) fn read_extern_with(
+    path: &Path,
+    source: &str,
+    externals: &Declarations,
+) -> Result<Resolved, CompileError> {
+    read_declarations_with_mode(source, header_mode_for(path), externals)
+}
+
+/// `.tmh` (case-insensitive) selects STRICT [`ReadMode::DeclarationsOnly`]
+/// reading; anything else (a `.tmc`) reads LENIENTLY as [`ReadMode::
+/// Program`] — shared by [`read_extern`] and [`read_extern_with`] so the
+/// two never drift on which extension means what.
+fn header_mode_for(path: &Path) -> ReadMode {
+    if path
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("tmh"))
@@ -268,9 +294,28 @@ pub(crate) fn read_extern(path: &Path, source: &str) -> Result<Resolved, Compile
         ReadMode::DeclarationsOnly
     } else {
         ReadMode::Program
-    };
-    let externals = Declarations::stdlib();
-    let analysis = compiler::analyze_with_mode(source, &externals, mode)?;
+    }
+}
+
+/// [`read_extern`]'s STRICT half taken alone, with no path to dispatch a
+/// mode from (docs/tmt/project.md (libraries)): a rendered object-arm
+/// header ([`declarations_from_object`]) and any other in-memory
+/// declarations-only text share this ONE reader with a real `.tmh` file,
+/// rather than each inventing its own strict-mode call.
+pub(crate) fn read_declarations_text(source: &str) -> Result<Resolved, CompileError> {
+    read_declarations_with_mode(source, ReadMode::DeclarationsOnly, &Declarations::stdlib())
+}
+
+/// The shared body of [`read_extern`]/[`read_extern_with`]/
+/// [`read_declarations_text`]: mode AND the declarations context are both
+/// flags on this ONE reader, exactly as [`render_from_source`] shares one
+/// reader between [`from_source`]/[`from_declarations`].
+fn read_declarations_with_mode(
+    source: &str,
+    mode: ReadMode,
+    externals: &Declarations,
+) -> Result<Resolved, CompileError> {
+    let analysis = compiler::analyze_with_mode(source, externals, mode)?;
     // Every graph world DOES carry its body (see the mode doc above), so
     // this is exactly where a later graft of one needs its digest to come
     // from — this module's own AST is about to be dropped, and `Resolved`
@@ -279,6 +324,53 @@ pub(crate) fn read_extern(path: &Path, source: &str) -> Result<Resolved, Compile
     let mut resolved = analysis.resolved;
     stamp_graph_digests(&analysis.program, &mut resolved, &footprint);
     Ok(resolved)
+}
+
+/// The ONE path from a compiled object to a [`Declarations`] module
+/// (docs/tmt/project.md (libraries)): render the object's header text
+/// through [`from_object`] — the identical rendering `tmt interface`
+/// prints for a `.tmo` input — and read it back through
+/// [`read_declarations_text`], the same strict reader a real `.tmh` file
+/// goes through. Never a second, hand-rolled object→declarations
+/// converter: an object's declared routine signatures and exported
+/// alphabets reach the table exactly as they would if a human had copied
+/// `tmt interface`'s own output into a `.tmh` by hand.
+///
+/// An object carrying NO interface section at all (an `an_object_without_
+/// interface_content_carries_none`-shaped `.tma`/`.tmo` with no `.routine`/
+/// `.graph` directives — the ordinary shape of a sibling or library that
+/// exports nothing) yields an EMPTY declarations module rather than
+/// [`from_object`]'s own "carries no interface section" refusal: that
+/// refusal answers a user's DIRECT `tmt interface` request, where an
+/// object with nothing to show is worth naming; here, feeding an object
+/// with nothing to declare to another unit is not a mistake at all — it
+/// declares nothing because it exports nothing.
+pub(crate) fn declarations_from_object(obj: &ObjectFile) -> Result<Resolved, String> {
+    if obj.interface.is_none() {
+        return Ok(empty_resolved());
+    }
+    let text = from_object(obj)?;
+    read_declarations_text(&text).map_err(|e| {
+        format!(
+            "{}:{}: error: {} [{}]",
+            e.span.start.line,
+            e.span.start.col,
+            e.kind,
+            e.kind.code()
+        )
+    })
+}
+
+/// A [`Resolved`] declaring nothing — [`declarations_from_object`]'s
+/// answer for an object with no interface section at all.
+fn empty_resolved() -> Resolved {
+    Resolved {
+        alphabets: HashMap::new(),
+        maps: HashMap::new(),
+        worlds: Vec::new(),
+        entry_world: None,
+        docs: HashMap::new(),
+    }
 }
 
 /// Render the exported declarations a compiled object still carries — the
