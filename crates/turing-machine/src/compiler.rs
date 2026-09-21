@@ -5685,6 +5685,83 @@ machine {
         assert_eq!(staged_program, &a.program);
     }
 
+    /// The same agreement over the declaration forms `0.2` added, which
+    /// the fixture above predates: a named map declared with `export map`
+    /// and BOTH pair arrows, a `with map NAME` argument naming it through
+    /// an ALIASED import, `state` parameters, `noreturn`, a tape naming
+    /// its alphabet by a QUALIFIED path, a graft of a graph declared in
+    /// another namespace, and doc runs and a comment among them. Neither
+    /// entry may lose or reshape one of these on its way to `Program`.
+    /// Verified clean against the real CLI (`tmt lint`, `tmt compile`)
+    /// before being trusted here.
+    ///
+    /// Mutation: have `analyze_staged_with` lose one of these forms on
+    /// its way to `Program` while the batch entry keeps it — clearing
+    /// `noreturn` on every extracted routine is enough — and the two
+    /// programs stop comparing equal here. The fixture above carries none
+    /// of the 0.2 forms, so it stays green under that same mutation,
+    /// which is what this test adds.
+    #[test]
+    fn analyze_staged_and_analyze_agree_on_the_0_2_declaration_forms() {
+        let src = "\
+export alphabet bits { '_', '0', '1' }
+
+namespace mylib {
+  export alphabet wide { '_', 'a'..'c' }
+
+  // a named map between the two representations
+  ? widens the bare alphabet onto the richer one
+  export map widen: bits -> wide { '_' => '_', '0' => 'a', '1' -> 'b' }
+
+  export graph walk(tape t: wide writes {}, state found) {
+    entry state s {
+      ['_'] -> goto found;
+      [*]   -> move [>] goto s;
+    }
+  }
+
+  ? never comes back — leaves through its exits only
+  export routine pick(tape t: wide writes { 'b' }, state hit, state miss) noreturn {
+    entry state s {
+      ['a'] -> write ['b'] goto hit;
+      [*]   -> goto miss;
+    }
+  }
+}
+
+use mylib::wide;
+use mylib::widen as fold;
+
+export routine host(tape t: wide writes {}, state out) {
+  entry state s { [*] -> goto step; }
+  graft mylib::walk(t = t, found = out) as step;
+}
+
+? names its alphabet by a qualified path rather than through the import
+export routine qualified(tape q: mylib::wide writes {}) {
+  entry state s { [*] -> return; }
+}
+
+machine {
+  tape m: bits;
+  entry state go { [*] -> call mylib::pick(t = m with map fold, hit = won, miss = lost); }
+  state won { [*] -> stop; }
+  state lost { [*] -> halt; }
+}
+";
+        let staged = analyze_staged(src);
+        assert!(staged.fatal.is_none(), "{:?}", staged.fatal);
+        let staged_program = staged.program.as_ref().expect("program survives");
+
+        let a = analyze(src).expect("analyzes clean");
+
+        assert_eq!(staged_program, &a.program);
+        assert_eq!(staged.resolved.as_ref(), Some(&a.resolved));
+        assert_eq!(staged.diagnostics, a.diagnostics);
+
+        assert!(compile(src, CompileOptions::default()).is_ok());
+    }
+
     #[test]
     fn analyze_staged_agrees_with_analyze_at_every_broken_stage() {
         // Each source breaks at exactly one stage; the fatal `analyze_staged`
@@ -5707,6 +5784,22 @@ machine {
             (
                 "resolve",
                 "alphabet b { '_' }\nmachine { tape t: b; entry state s { [*] -> goto missing; } }",
+            ),
+            // A bodiless signature — legal only in a declarations reading
+            // (docs/tmt/language.md (headers)); read as a program, as both
+            // entries here read it, the world has no entry at all. Tool-
+            // verified before being pinned: `tmt compile` reports
+            // `entry-count` at the routine's own name.
+            (
+                "resolve, bodiless signature",
+                "alphabet bits { '_', '0', '1' }\nexport routine plusOne(tape num: bits writes { '0', '1' });\n",
+            ),
+            // A named map at a site whose two alphabets do not match the
+            // declaration's — a 0.2 form whose fatal is raised after the
+            // structural argument checks, later than every case above.
+            (
+                "resolve, named map",
+                "alphabet bits { '_', '0', '1' }\nalphabet wide { '_', 'a', 'b' }\nmap widen: bits -> wide { '_' => '_', '0' => 'a', '1' => 'b' }\nroutine take(tape t: wide writes {}) {\n  entry state s { [*] -> return; }\n}\nmachine {\n  tape m: wide;\n  entry state go { [*] -> call take(t = m with map widen) then stop; }\n}\n",
             ),
         ];
         for (stage, src) in cases {
