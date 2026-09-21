@@ -62,13 +62,29 @@ impl Declarations {
     /// dropping something, not a defect here.
     pub fn stdlib() -> Self {
         let mut decls = Self::none();
-        decls.push(Origin::Stdlib, crate::stdlib::header().clone());
+        decls.push_stdlib();
         decls
     }
 
     /// Add one declaration module.
     pub(crate) fn push(&mut self, origin: Origin, resolved: Resolved) {
         self.modules.push((origin, resolved));
+    }
+
+    /// Push the embedded standard library's declarations onto an
+    /// otherwise-built table — the ONE way `crate::stdlib::header()`
+    /// (digest-stamped, `docs/formats.md` (routine interfaces)) reaches a
+    /// `Declarations`, so every producer of one (this constructor's own
+    /// [`stdlib`](Self::stdlib), and a caller that must interleave the
+    /// stdlib with other modules in a specific order, such as `tmt
+    /// compile`'s `--extern`-files-then-stdlib rule) pushes the IDENTICAL
+    /// module. `crate::stdlib::resolved()` — the analysis of `std.tmc`
+    /// itself, bodies and all — is a different thing entirely and must
+    /// never reach a `Declarations` table this way: it carries no stamped
+    /// graph digest, so a program grafting a stdlib graph through a table
+    /// built from it would have no digest to record.
+    pub(crate) fn push_stdlib(&mut self) {
+        self.push(Origin::Stdlib, crate::stdlib::header().clone());
     }
 
     /// The borrowed view every consumer reads — the exact shape

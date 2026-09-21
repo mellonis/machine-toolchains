@@ -76,7 +76,7 @@ fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declarations, Stri
         externals.push(Origin::Extern(path.to_path_buf()), resolved);
     }
     if !nostdlib {
-        externals.push(Origin::Stdlib, crate::stdlib::resolved().clone());
+        externals.push_stdlib();
     }
     Ok(externals)
 }
