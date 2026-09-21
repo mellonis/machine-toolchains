@@ -28,8 +28,8 @@ full and every `?` doc line. From an object it carries signatures and
 alphabets only — no graph body, no map, no doc line, since none of those
 exist on the wire. Without -o the header goes to stdout.
 
-FLAGS (text INPUT only — a .tmo object carries no external references of
-its own left to resolve):
+FLAGS (text INPUT only — rejected on a .tmo object, which carries no
+external references of its own left to resolve):
   --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
                      repeatable, in command-line order)
   --nostdlib         do not read the embedded standard library's declarations
@@ -57,6 +57,19 @@ pub(super) fn interface(raw: &[String]) -> Result<CliOutput, String> {
 
     let text = match sniff(&bytes) {
         Some(ContainerKind::Object) => {
+            // An object's own header is read straight off its interface
+            // section — nothing left to resolve against another unit's
+            // declarations, so `--extern`/`--nostdlib` are a usage error
+            // here rather than silently ignored (docs/tmt/cli.md
+            // (interface)).
+            if !extern_paths.is_empty() || nostdlib {
+                return Err(format!(
+                    "{}: --extern/--nostdlib apply only to a text INPUT — a .tmo object's \
+                     header is read straight off its own interface section, with no \
+                     declarations left to resolve",
+                    path.display()
+                ));
+            }
             let obj = ObjectFile::from_bytes(&bytes).map_err(|e| e.to_string())?;
             if obj.arch != ARCH_TM1 {
                 return Err(LoadError::UnknownArch(obj.arch).to_string());

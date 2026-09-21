@@ -2124,3 +2124,55 @@ routine caller(tape n: bin writes {}) {
         .expect_err("goToNumbersStart's declarations were excluded by --nostdlib");
     assert!(err.contains("writes-outside-contract"), "{err}");
 }
+
+/// `--extern`/`--nostdlib` on an OBJECT input is a USAGE ERROR, not
+/// silently ignored: an object's header is read straight off its own
+/// interface section, with no external references left to resolve
+/// against them, so a flag that would matter on a `.tmc`/`.tmh` input
+/// simply cannot apply here.
+///
+/// Mutation: building `externals` inside the object arm too (or leaving
+/// the object arm not to look at `extern_paths`/`nostdlib` at all, the
+/// pre-task shape) — this call would then silently print the header
+/// (exit 0) instead of refusing it.
+#[test]
+fn interface_extern_on_an_object_input_is_a_usage_error() {
+    let dir = scratch("interface_extern_object");
+    let object = compile(
+        "alphabet ab { '_', '0', '1' }\nexport routine touch(tape t: ab) {\n  entry state s { [*] -> return; }\n}\n",
+        CompileOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("compile: {e}"))
+    .object;
+    let obj_path = dir.join("obj.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+
+    let with_extern = execute(&args(&[
+        "interface",
+        obj_path.to_str().unwrap(),
+        "--extern",
+        "/nonexistent/nope.tmh",
+    ]))
+    .expect_err("--extern must be refused on an object input, not silently ignored");
+    assert!(
+        with_extern.contains(obj_path.to_str().unwrap()),
+        "{with_extern}"
+    );
+
+    let with_nostdlib = execute(&args(&[
+        "interface",
+        obj_path.to_str().unwrap(),
+        "--nostdlib",
+    ]))
+    .expect_err("--nostdlib must be refused on an object input, not silently ignored");
+    assert!(
+        with_nostdlib.contains(obj_path.to_str().unwrap()),
+        "{with_nostdlib}"
+    );
+
+    // The negative control: with neither flag, the SAME object still
+    // renders normally.
+    let plain = execute(&args(&["interface", obj_path.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface: {e}"));
+    assert_eq!(plain.code, 0, "{}", plain.stderr);
+}

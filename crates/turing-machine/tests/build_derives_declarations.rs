@@ -1,5 +1,5 @@
 //! `tmt build` derives declarations from a target's sibling sources and
-//! declared libraries (docs/tmt/project.md (declared source set)),
+//! declared libraries (docs/tmt/project.md (Declaration derivation)),
 //! instead of every unit believing only the embedded standard library the
 //! way it did before this file's tests were added. Manifest-mode fixtures
 //! spawn the real `tmt` binary with `current_dir` set to the fixture
@@ -311,51 +311,150 @@ fn a_library_object_alone_cannot_supply_a_graph_body() {
     assert!(stderr.contains("undefined-graph"), "{stderr}");
 }
 
-/// A header-only library's object is never handed to the linker
-/// (docs/tmt/project.md (libraries)): the SAME fixture as
-/// `a_library_header_supplies_its_graphs`, asserted from the resolver's
-/// own decision point rather than a `LinkReport` field — `LinkReport`
-/// carries no per-object list, so the thing that actually decides
-/// whether a library's object reaches the linker is `find_library_for_
-/// build`'s returned `Option<ObjectFile>`: `None` for a header-only
-/// library is what keeps `build_one_target`'s own `if let Some(obj) =
-/// object { libraries.push(obj); }` guard from ever adding one. Proven
-/// end to end here by using `--keep-objects`-free `-v` build output and
-/// confirming it succeeds with NO `.tmo` on disk for this library at
-/// all — the precondition already asserted above makes plain there was
-/// nothing to hand the linker; `crates/turing-machine/src/cli/build.rs`'s
-/// own unit tests pin the `Option` directly.
+/// The header is the declaration source when BOTH `<name>.tmh` and
+/// `<name>.tmo` exist, at the BUILD level: `glib::mark`'s full graph body
+/// exists only on the header — if the object's (graph-less) declarations
+/// were preferred instead, the graft would be unreachable and the build
+/// would fail with `undefined-graph`, exactly as the object-alone
+/// negative control above does. Both files sit in the same directory
+/// here; the routine-signature case (`find_library_for_build_returns_
+/// both_when_both_files_exist`, `crates/turing-machine/src/cli/build.rs`)
+/// cannot discriminate this preference by itself, since a plain
+/// signature is content BOTH arms can carry identically.
 ///
-/// Mutation: dropping the `has_tmo` guard in `find_library_for_build` and
-/// unconditionally trying to `read_object` the `.tmo` candidate — the
-/// build fails with a "cannot read" error, since no such file exists for
-/// a header-only library, rather than succeeding.
+/// Mutation, applied by hand and verified, then reverted: in
+/// `find_library_for_build` (`crates/turing-machine/src/cli/build.rs`),
+/// swapping the header/object preference so `has_tmo` is tried FIRST
+/// when both exist — the object's declarations then win, `glib::mark`'s
+/// body never reaches the table, and this build fails with
+/// `undefined-graph` instead of succeeding.
 #[test]
-fn a_header_only_library_builds_and_is_never_linked() {
-    let dir = scratch("header_only_never_linked");
+fn a_library_header_wins_over_its_object_when_both_exist() {
+    let dir = scratch("library_header_wins_over_object");
     write(&dir, "app.tmc", GRAFTS_GLIB_MARK);
     write(&dir, "tmt.json", TMT_JSON_LIBGLIB);
     std::fs::create_dir_all(dir.join("libs")).unwrap();
     let glib_src = write(&dir, "glib.tmc", GLIB);
-    let header = dir.join("libs/glib.tmh");
-    let out = execute(&args(&[
+    let header_out = execute(&args(&[
         "interface",
         glib_src.to_str().unwrap(),
         "-o",
-        header.to_str().unwrap(),
+        dir.join("libs/glib.tmh").to_str().unwrap(),
     ]))
     .unwrap_or_else(|e| panic!("interface glib.tmc: {e}"));
-    assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(
-        !dir.join("libs/glib.tmo").exists(),
-        "nothing on disk could have been linked for this library"
-    );
+    assert_eq!(header_out.code, 0, "{}", header_out.stderr);
+    let object_out = execute(&args(&[
+        "compile",
+        glib_src.to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        dir.join("libs/glib.tmo").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile glib.tmc: {e}"));
+    assert_eq!(object_out.code, 0, "{}", object_out.stderr);
+    assert!(dir.join("libs/glib.tmh").exists());
+    assert!(dir.join("libs/glib.tmo").exists());
 
-    let built = build_in(&dir, &["-v"]);
+    let built = build_in(&dir, &[]);
     assert!(
         built.status.success(),
-        "{}",
+        "the header must win over the object beside it: {}",
         String::from_utf8_lossy(&built.stderr)
+    );
+}
+
+/// A header-only library declaring a ROUTINE (not a graph) `app.tmc`
+/// calls transparently — no object exists anywhere on the search path.
+const LIBCALL: &str = "\
+namespace libcall {
+  export alphabet ab { '_', '0', '1' }
+
+  export routine touch(tape t: ab writes { '0' }) {
+    entry state s { [*] -> write ['0'] return; }
+  }
+}
+";
+
+const CALLS_LIBCALL_TOUCH: &str = "\
+alphabet ab { '_', '0', '1' }
+
+machine {
+  tape d: ab;
+  entry state go { [*] -> call libcall::touch() then done; }
+  state done { [*] -> halt; }
+}
+";
+
+const TMT_JSON_LIBCALL: &str = "\
+{ \"project\": { \"targets\": { \"app\": {
+    \"sources\": [\"app.tmc\"],
+    \"libraries\": { \"dirs\": [\"libs\"], \"link\": [\"libcall\"] }
+} } } }
+";
+
+/// A header-only library's object is never handed to the linker
+/// (docs/tmt/project.md (Declaration derivation)): `app.tmc` calls
+/// `libcall::touch`, whose declarations reach the compiler from the
+/// header alone (no "declarations were not given" — the compile stage
+/// succeeds), but no `.tmo` exists anywhere on the search path, so the
+/// LINK stage must fail with `unresolved symbols` naming
+/// `libcall::touch` specifically — proof that nothing was actually
+/// linked to satisfy the call, not merely that the build "still
+/// succeeds" (an assertion a redundant or unrelated object handed to the
+/// linker would not move, since the earlier `--keep-objects`-free
+/// `-v` version of this test showed: `LinkReport` carries no per-object
+/// list, and a duplicate/irrelevant object reaching the linker changes
+/// neither the exit code nor the rendered warnings).
+///
+/// Mutation, applied by hand and verified, then reverted: replacing the
+/// `if let Some(obj) = object { libraries.push(obj); }` guard in
+/// `build_one_target`/`argv_mode` with an unconditional push of a
+/// zeroed, empty placeholder `ObjectFile` (arch `0`) when `object` is
+/// `None` — the shape of forgetting the guard, with the simplest
+/// placeholder available. The linker's own arch-consistency check
+/// (`resolve()`, `crates/core/src/linker/resolve.rs`) then refuses the
+/// WHOLE link with `architecture mismatch`, not `unresolved symbols:
+/// libcall::touch` — this exact assertion goes RED. A same-arch
+/// placeholder that still does not define `libcall::touch` would still
+/// be caught (a different symbol name resolves nothing), and one
+/// fabricated specifically TO define it would require compiling the
+/// header back into an object — the second converter this design
+/// forbids — so it is not a realistic accidental mistake to guard
+/// against here.
+#[test]
+fn a_header_only_library_is_never_handed_to_the_linker() {
+    let dir = scratch("header_only_never_linked");
+    write(&dir, "app.tmc", CALLS_LIBCALL_TOUCH);
+    write(&dir, "tmt.json", TMT_JSON_LIBCALL);
+    std::fs::create_dir_all(dir.join("libs")).unwrap();
+    let lib_src = write(&dir, "libcall.tmc", LIBCALL);
+    let header = dir.join("libs/libcall.tmh");
+    let out = execute(&args(&[
+        "interface",
+        lib_src.to_str().unwrap(),
+        "-o",
+        header.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("interface libcall.tmc: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        !dir.join("libs/libcall.tmo").exists(),
+        "precondition: nothing on disk could have been linked for this library"
+    );
+
+    let built = build_in(&dir, &[]);
+    assert!(
+        !built.status.success(),
+        "the call must reach link with nothing to satisfy it"
+    );
+    let stderr = String::from_utf8_lossy(&built.stderr);
+    assert!(
+        !stderr.contains("declarations were not given"),
+        "the header's own declarations must have reached the compile stage: {stderr}"
+    );
+    assert!(
+        stderr.contains("unresolved symbols") && stderr.contains("libcall::touch"),
+        "{stderr}"
     );
 }
 
@@ -396,6 +495,359 @@ machine {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("nosuch"), "{stderr}");
+}
+
+// ── libraries: one depends on another ────────────────────────────────────
+
+const PRODUCER: &str = "\
+namespace producer {
+  export alphabet bits { '_', '0', '1' }
+}
+";
+
+/// `consumer`'s own header (built below with `tmt interface --extern`)
+/// keeps a `use producer::bits;` line — the printed header is a
+/// text file that ITSELF still depends on `producer`'s declarations
+/// to be read back, exactly like a hand-written one would.
+const CONSUMER: &str = "\
+namespace consumer {
+  use producer::bits;
+
+  export routine widen(tape n: bits writes { '0' }) {
+    entry state s { [*] -> write ['0'] return; }
+  }
+}
+";
+
+const TRIVIAL_APP: &str = "\
+alphabet ab { '_', 'a' }
+
+machine {
+  tape t: ab;
+  entry state s { [*] -> stop; }
+}
+";
+
+/// Builds `producer.tmh` (plain) and `consumer.tmh` (via `tmt interface
+/// --extern`, so its own `use producer::bits;` line survives the
+/// round-trip) into `dir/libs`, and a trivial `app.tmc` + manifest
+/// naming both libraries in `order`.
+fn write_producer_consumer_fixture(dir: &Path, order: [&str; 2]) {
+    write(dir, "app.tmc", TRIVIAL_APP);
+    std::fs::create_dir_all(dir.join("libs")).unwrap();
+    let producer_src = write(dir, "producer.tmc", PRODUCER);
+    let producer_header = dir.join("libs/producer.tmh");
+    let out = execute(&args(&[
+        "interface",
+        producer_src.to_str().unwrap(),
+        "-o",
+        producer_header.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("interface producer.tmc: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let consumer_src = write(dir, "consumer.tmc", CONSUMER);
+    let out = execute(&args(&[
+        "interface",
+        consumer_src.to_str().unwrap(),
+        "--extern",
+        producer_header.to_str().unwrap(),
+        "-o",
+        dir.join("libs/consumer.tmh").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("interface consumer.tmc: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    write(
+        dir,
+        "tmt.json",
+        &format!(
+            "{{ \"project\": {{ \"targets\": {{ \"app\": {{
+                \"sources\": [\"app.tmc\"],
+                \"libraries\": {{ \"dirs\": [\"libs\"], \"link\": [\"{}\", \"{}\"] }}
+            }} }} }} }}",
+            order[0], order[1]
+        ),
+    );
+}
+
+/// A library header that itself depends on ANOTHER library's declarations
+/// (the shape `tmt interface --extern` produces): `consumer.tmh` carries
+/// a `use producer::bits;` line, so reading it clean needs `producer`'s
+/// declarations in hand — the same shared fixpoint every OTHER
+/// declaration source in the build goes through, closing this dependency
+/// regardless of `-l` order.
+///
+/// Mutation: reading a library's own `.tmh` against the embedded stdlib
+/// alone (this task's own pre-fix shape) — `consumer.tmh`'s `use
+/// producer::bits;` would then be unresolvable regardless of order, and
+/// BOTH variants below would fail with "declarations were not given".
+#[test]
+fn a_library_header_depends_on_another_library_producer_first() {
+    let dir = scratch("lib_depends_on_lib_producer_first");
+    write_producer_consumer_fixture(&dir, ["producer", "consumer"]);
+
+    let out = build_in(&dir, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The other `-l` order — the ORIGINAL finding (a library header
+/// depending on another library) reproduced with `producer` declared
+/// AFTER `consumer`: order must not matter for READABILITY (only for
+/// final first-match precedence, irrelevant here since the two libraries
+/// declare disjoint names).
+#[test]
+fn a_library_header_depends_on_another_library_consumer_first() {
+    let dir = scratch("lib_depends_on_lib_consumer_first");
+    write_producer_consumer_fixture(&dir, ["consumer", "producer"]);
+
+    let out = build_in(&dir, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ── a sibling dependency chain of depth 3, listed worst-first ───────────
+
+const CHAIN_A: &str = "\
+namespace a {
+  export alphabet aa { '_', '0', '1' }
+
+  export routine leaf(tape t: aa writes { '0' }) {
+    entry state s { [*] -> write ['0'] return; }
+  }
+}
+";
+
+/// Needs `a`'s declarations for both its tape's alphabet (`a::aa`) and
+/// its own write-contract check (`a::leaf`'s declared `writes { '0' }`,
+/// believed transparently).
+const CHAIN_B: &str = "\
+namespace b {
+  export routine mid(tape t: a::aa writes { '0' }) {
+    entry state s { [*] -> call a::leaf() then done; }
+    state done { [*] -> return; }
+  }
+}
+";
+
+/// Needs `b`'s declarations the same way `b` needs `a`'s — one level
+/// removed — plus its own machine entry, calling `c::top` by a named
+/// (in-unit) binding.
+const CHAIN_C: &str = "\
+namespace c {
+  export routine top(tape t: a::aa writes { '0' }) {
+    entry state s { [*] -> call b::mid() then done; }
+    state done { [*] -> return; }
+  }
+}
+
+machine {
+  tape t: a::aa;
+  entry state go { [*] -> call c::top(t = t) then done; }
+  state done { [*] -> halt; }
+}
+";
+
+/// A three-deep sibling chain (C needs B needs A), sources declared in
+/// the WORST possible order — the dependent listed before each of its
+/// dependencies, in turn. Two passes close a depth-2 chain (B needs A
+/// alone) but leave C unresolved after pass 2, since C's own
+/// declarations depend on B's, which pass 2 has only JUST supplied;
+/// closing C needs a third attempt at C specifically — which is exactly
+/// what "iterate until no pass makes progress" gives for free and a
+/// fixed pass count does not.
+///
+/// Mutation: capping the fixpoint at two passes (this task's own
+/// discarded first design) — verified by hand: `header::
+/// resolve_declarations`'s loop, capped at 2 iterations, makes this
+/// EXACT build fail with `c.tmc`'s own `writes-outside-contract` (C never
+/// gets B's declarations in time), then reverted.
+#[test]
+fn a_depth_three_sibling_chain_in_worst_order_still_resolves() {
+    let dir = scratch("depth_three_worst_order");
+    write(&dir, "c.tmc", CHAIN_C);
+    write(&dir, "b.tmc", CHAIN_B);
+    write(&dir, "a.tmc", CHAIN_A);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["c.tmc", "b.tmc", "a.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// ── a sibling broken at expansion still supplies its declarations ───────
+
+/// `lib::pick` is genuinely usable (needs only resolution-stage
+/// declarations); `lib::bad`'s fold goes negative only once EXPANDED —
+/// declarations-only reading never expands, so `lib.tmc`'s own
+/// extraction still succeeds despite `bad` being broken.
+const EXPANSION_BROKEN_LIB: &str = "\
+namespace lib {
+  export alphabet a6 { 0..5 }
+
+  export routine pick(tape t: a6, state hit, state miss) {
+    entry state s { [0]  -> goto hit;
+                    [*]  -> goto miss; }
+  }
+
+  export routine bad(tape t: a6) {
+    entry state s { [0..5 as v] -> write [{(v-1)%6}] return; }
+  }
+}
+";
+
+const CALLS_LIB_PICK_OVER_A6: &str = "\
+use lib::a6;
+
+machine {
+  tape d: a6;
+  entry state go { [*] -> call lib::pick(t = d, hit = won, miss = lost) then done; }
+  state won  { [*] -> write [0] stop; }
+  state lost { [*] -> write [1] stop; }
+  state done { [*] -> halt; }
+}
+";
+
+/// A sibling whose declarations-only read succeeds (`lib::pick`'s
+/// signature and `lib::a6`'s alphabet both resolve cleanly) but whose
+/// REAL compile fails at EXPANSION (`lib::bad`'s fold goes negative) must
+/// still supply its declarations to a dependent — `app.tmc`, listed
+/// FIRST, must itself actually COMPILE (not merely avoid one particular
+/// error message: `lib.tmc`'s own real compile fails with the SAME
+/// `negative-remainder` text whether declarations-only reading expanded
+/// it or not, so asserting on `stderr` content alone cannot tell the two
+/// apart — see the mutation note). `--keep-objects` makes the compiled
+/// unit observable directly: `app.tmo` existing on disk is proof
+/// `app.tmc` was compiled — reached, actually run through the compiler
+/// — before the build failed at `lib.tmc`'s own later turn.
+///
+/// Mutation, applied by hand and verified, then reverted: making
+/// `header::read_declarations_with_mode` also call `expand::expand` (the
+/// shape declarations-only reading must NOT take). `lib.tmc`'s
+/// declarations-only read then fails too — the identical
+/// `negative-remainder` text `stderr` already shows from the real
+/// compile, so that assertion alone stays green — but decision "a source
+/// unresolved after the fixpoint is reported before compiling any
+/// dependent" then bails out of the WHOLE build before compiling
+/// anything at all: `app.tmo` is never written.
+#[test]
+fn a_sibling_broken_at_expansion_still_supplies_declarations() {
+    let dir = scratch("expansion_broken_sibling");
+    write(&dir, "app.tmc", CALLS_LIB_PICK_OVER_A6);
+    write(&dir, "lib.tmc", EXPANSION_BROKEN_LIB);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["app.tmc", "lib.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &["--keep-objects"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("negative-remainder"), "{stderr}");
+    assert!(stderr.contains("lib.tmc"), "{stderr}");
+    assert!(
+        dir.join("app.tmo").exists(),
+        "app.tmc must have been compiled before lib.tmc's own later turn failed"
+    );
+}
+
+// ── the root cause is shown, not a symptom ───────────────────────────────
+
+/// The same shape as `CHAIN_B`->`CHAIN_A`'s own dependency but with a
+/// PARSE error (a missing `;`) instead of a resolvable one — genuinely
+/// unreadable regardless of context.
+const UNPARSEABLE_LIB: &str = "\
+namespace lib {
+  export alphabet a6 { 0..5 }
+  export routine pick(tape t: a6, state hit, state miss) {
+    entry state s { [0]  -> goto hit
+                    [*]  -> goto miss; }
+  }
+}
+";
+
+/// A sibling with a genuine PARSE error must be named in the build's own
+/// error, regardless of where it sits in the declared source list — a
+/// dependent listed BEFORE it (`app.tmc`, which itself cannot read
+/// without `lib`'s declarations either) must not steal the report with
+/// its own derived "declarations were not given" complaint.
+///
+/// Mutation: reporting the FIRST source the fixpoint left unresolved, in
+/// declared order, rather than preferring a non-"declarations were not
+/// given"-shaped failure (`looks_like_a_missing_declarations_error`,
+/// `cli/driver.rs`) — verified by hand: with `app.tmc` listed first, the
+/// error becomes `app.tmc`'s own "declarations were not given" for
+/// `lib::a6` instead of `lib.tmc`'s own parse error, and `lib.tmc` is
+/// never mentioned at all.
+#[test]
+fn a_sibling_parse_error_is_the_root_cause_shown_dependent_listed_first() {
+    let dir = scratch("root_cause_dependent_first");
+    write(&dir, "app.tmc", CALLS_LIB_PICK_OVER_A6);
+    write(&dir, "lib.tmc", UNPARSEABLE_LIB);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["app.tmc", "lib.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("lib.tmc") && stderr.contains("unexpected-token"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("declarations were not given"),
+        "the derived failure must not be what's reported: {stderr}"
+    );
+}
+
+/// The other declared order, for the identical fixture: `lib.tmc` listed
+/// first already names itself correctly under the OLD (order-dependent)
+/// design too — kept as the positive control this file's own mutation
+/// note above describes.
+#[test]
+fn a_sibling_parse_error_is_the_root_cause_shown_dependency_listed_first() {
+    let dir = scratch("root_cause_dependency_first");
+    write(&dir, "app.tmc", CALLS_LIB_PICK_OVER_A6);
+    write(&dir, "lib.tmc", UNPARSEABLE_LIB);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["lib.tmc", "app.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("lib.tmc") && stderr.contains("unexpected-token"),
+        "{stderr}"
+    );
 }
 
 // ── stdlib: false reaches the compile stage too ──────────────────────────
@@ -441,6 +893,57 @@ machine {
     assert!(!out.status.success(), "stdlib: false must reach compile");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("declarations were not given"), "{stderr}");
+}
+
+/// `stdlib: false` must ALSO reach a LIBRARY's own declarations read, not
+/// only a sibling's: `sl.tmh` declares a routine whose tape is
+/// `std::binaryNumbers::symbols` — under `stdlib: false` that name is
+/// external and unresolvable from WITHIN the library header's own
+/// reading, the same "declarations were not given" refusal. Without
+/// `stdlib: false`, the identical header resolves clean (the header
+/// itself was generated with the real stdlib present, via `tmt
+/// interface`, which is unrelated to what `tmt build` is later given).
+#[test]
+fn stdlib_false_reaches_a_library_headers_own_read() {
+    let dir = scratch("stdlib_false_library");
+    write(&dir, "app.tmc", TRIVIAL_APP);
+    std::fs::create_dir_all(dir.join("libs")).unwrap();
+    let sl_src = write(
+        &dir,
+        "sl.tmc",
+        "\
+namespace sl {
+  export routine touch(tape n: std::binaryNumbers::symbols writes { '^' }) {
+    entry state s { [*] -> return; }
+  }
+}
+",
+    );
+    let out = execute(&args(&[
+        "interface",
+        sl_src.to_str().unwrap(),
+        "-o",
+        dir.join("libs/sl.tmh").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("interface sl.tmc: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "stdlib": false, "targets": { "app": {
+            "sources": ["app.tmc"],
+            "libraries": { "dirs": ["libs"], "link": ["sl"] }
+        } } } }"#,
+    );
+
+    let built = build_in(&dir, &[]);
+    assert!(
+        !built.status.success(),
+        "stdlib: false must reach the library's own read"
+    );
+    let stderr = String::from_utf8_lossy(&built.stderr);
+    assert!(stderr.contains("declarations were not given"), "{stderr}");
+    assert!(stderr.contains("sl.tmh"), "{stderr}");
 }
 
 /// The positive control for the test above: the SAME source, WITHOUT

@@ -134,28 +134,85 @@ it, and never accepts `--extern` itself in either mode (argv mode's flag
 parser rejects it as an unknown flag, the same refusal any unrecognized
 dashed token gets).
 
-Each source in a target's effective set is compiled knowing every OTHER
-source's declarations — read leniently for a `.tmc` sibling (bodies
-dropped, `--extern`'s own rule for a non-`.tmh` file), or from an
-assembled/loaded object's own interface for a `.tma`/`.tmo` sibling —
-then each declared library's declarations, then the embedded standard
-library unless `stdlib: false`: the same objects-then-libraries-then-
-stdlib order the linker itself resolves names in. A sibling with a
-later-stage (expansion) error still yields its declarations; only one
-that fails to read at all is excluded, and its own turn in the build
-still reports that failure naming its file.
+**Every declaration source in a target — its effective sources and its
+effective libraries — is read together, through one shared fixpoint.**
+Each one is read against a context that starts as just the embedded
+standard library (unless `stdlib: false`, which reaches every read here
+just as it reaches the link stage — a library header depending on
+`std::` resolves exactly as a sibling would) and grows to include every
+OTHER source's declarations the moment IT reads clean, iterated pass
+after pass until a whole pass makes no further progress. This is what
+lets a library header depend on another library, a sibling depend on
+another sibling, or a library depend on a sibling, of any dependency
+depth and regardless of declared order — a library authored with `tmt
+interface --extern` (below) commonly ships a header that itself still
+`use`s another unit's declarations, and this is what lets `tmt build`
+read it back. Only the FINAL table's precedence is fixed: every OTHER
+source of the same target, in its declared order, then each declared
+library, in `-l`/manifest order, then the embedded standard library
+unless opted out — the same objects-then-libraries-then-stdlib order the
+linker itself resolves names in.
+
+A `.tmc` sibling is read LENIENTLY: a routine's body is parsed and
+simply unused (a routine's declared shape is its signature, not its
+body), but a GRAPH's body is kept in full — a graph's only form is its
+source, so this is what makes a sibling's exported graph graftable by
+another sibling, exactly as a library's own header does. A `.tma`/`.tmo`
+sibling is assembled/loaded and its OBJECT's own interface feeds the
+table instead (`declarations_from_object` — the SAME object→declarations
+path a header-less library uses); this is lossy in ONE way worth
+knowing: an exported ALPHABET is a compiler fact with no assembly
+directive (one of the three declared text-expressibility exceptions,
+`docs/formats.md (text-expressibility caveats)`), so a `.tma`/`.tmo`
+sibling can contribute a routine's signature but never an alphabet name.
+Concretely, `tmt compile a.tmc -S -o a.tma` is NOT a drop-in replacement
+for `a.tmc` as a sibling in the same target if anything else needs to
+`use` an alphabet `a.tmc` exports — only the compiled `.tmo`, or the
+`.tmc` source itself, carries that.
+
+A source with a later-stage (expansion) error still yields its
+declarations from this read — declarations-only reading never expands;
+only a source that fails to READ at all (a parse error, a shape
+violation such as a body where a strict `.tmh` read requires none) is
+excluded from the fixpoint, and it is reported as the build's own error,
+by its own path, before any unit is compiled — never silently dropped
+and left for a dependent's derived failure to (mis)report instead.
+
+**Mutually dependent units are not supported**: if two sources need EACH
+OTHER's declarations to read clean (most commonly two mutually recursive
+routines split across files, each under a narrow write contract that can
+only be validated once the other's declared contract is known), neither
+ever resolves, and the build fails naming one of them. The escape is to
+break the cycle by hand: write a header for one of the two units, edit
+it to state the fact the other side needs without the routine bodies
+that create the cycle, and give it to the build as a library instead of
+a sibling.
 
 For each declared library, **whatever exists of `<name>.tmo` (its
 interface section) and `<name>.tmh` (graphs, named maps, doc lines) on
 the search path** feeds this table. Either may be absent; both absent is
 an error naming the library and the search path. When both exist, the
 header is the declaration source — it carries graph bodies, named maps
-and doc lines an object cannot — and the object is what gets LINKED. A
+and doc lines an object cannot — and the object is what gets LINKED. The
+header is TRUSTED here, not verified against the object beside it: if a
+library routine's declared write contract no longer matches what its
+rebuilt object actually does (a stale header next to a freshly rebuilt
+`.tmo`), the mismatch is not caught, unlike an exported GRAPH's body,
+which the linker's own graft-drift check DOES verify digest-for-digest
+against every consumer that spliced it (`docs/core.md (graft drift)`).
+Regenerating a library's header from its current source (`tmt interface`)
+alongside rebuilding its object is the way to keep the two honest. A
 **header-only library** (no `<name>.tmo` on the search path at all)
 contributes declarations and is never handed to the linker: nothing to
 link means nothing for the graft-drift check to compare a spliced body
 against either, which is by design — a header-only library is the one
 place a header is trusted outright (`docs/core.md (graft drift)`).
+
+Argv mode's own `-L`/`-l` (`docs/tmt/cli.md (build)`) select compile-time
+declarations too, exactly like a manifest's `libraries` — `tmt link`'s
+own `-l` does NOT: it links an object and nothing else, with no
+declarations table to populate and no use for a header-only library
+(`docs/tmt/cli.md (link)`).
 
 ### Entry
 

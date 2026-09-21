@@ -493,33 +493,17 @@ fn build_one_target(
         .iter()
         .map(|d| resolve(d).map(|p| p.to_string_lossy().into_owned()))
         .collect::<Result<_, _>>()?;
-    let mut libraries = Vec::new();
-    let mut library_declarations: Vec<(String, Resolved)> = Vec::new();
-    for lib in &libs.link {
-        let (object, declarations) =
-            find_library_for_build(lib, &dirs).map_err(|e| format!("{read_err_prefix}{e}"))?;
-        // A header-only library (no `.tmo` next to it) contributes
-        // declarations only — its object is never handed to the linker
-        // (docs/tmt/project.md (libraries)).
-        if let Some(obj) = object {
-            libraries.push(obj);
-        }
-        library_declarations.push((lib.clone(), declarations));
-    }
+
+    // Every declaration source this target needs — its sources and its
+    // libraries — resolved together through the one shared fixpoint
+    // (docs/tmt/project.md (Declaration derivation)); a header-only
+    // library's absent object is never in `libraries` to begin with.
+    let (sibling_declarations, library_declarations, mut libraries) =
+        resolve_target_declarations(&source_paths, &libs.link, &dirs, manifest.stdlib)
+            .map_err(|e| format!("{read_err_prefix}{e}"))?;
     if manifest.stdlib {
         libraries.push(stdlib::object().clone());
     }
-
-    // Every source's own declarations-only view, independent of this
-    // target's OWN compile options — feeds every OTHER unit of the same
-    // target as `Origin::Sibling` (docs/tmt/project.md (declared source
-    // set)). The unit each one came from is recompiled for real below,
-    // with its own declared siblings; this pass never feeds a source its
-    // own declarations back. `library_context` (libraries + stdlib, no
-    // siblings) is [`unit_declarations`] itself, called with no sources at
-    // all — the exact tail every unit's own table ends with.
-    let library_context = unit_declarations(0, &[], &[], &library_declarations, manifest.stdlib);
-    let sibling_declarations = sibling_declarations_for(&source_paths, &library_context);
 
     let mut objects: Vec<ObjectFile> = Vec::new();
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
@@ -794,28 +778,20 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     let options = argv_compile_options(flags);
     let source_paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
 
-    let mut libraries = Vec::new();
-    let mut library_declarations: Vec<(String, Resolved)> = Vec::new();
-    for name in &flags.lib_names {
-        let (object, declarations) = find_library_for_build(name, &flags.search_dirs)?;
-        // A header-only library (no `.tmo` next to it) contributes
-        // declarations only — its object is never handed to the linker
-        // (docs/tmt/project.md (libraries)).
-        if let Some(obj) = object {
-            libraries.push(obj);
-        }
-        library_declarations.push((name.clone(), declarations));
-    }
+    // Every declaration source this build needs — its inputs and its
+    // libraries — resolved together through the one shared fixpoint,
+    // the same rule manifest mode's `build_one_target` applies
+    // (docs/tmt/project.md (Declaration derivation)); a header-only
+    // library's absent object is never in `libraries` to begin with.
+    let (sibling_declarations, library_declarations, mut libraries) = resolve_target_declarations(
+        &source_paths,
+        &flags.lib_names,
+        &flags.search_dirs,
+        !flags.nostdlib,
+    )?;
     if !flags.nostdlib {
         libraries.push(stdlib::object().clone());
     }
-
-    // Every source's own declarations-only view, feeding every OTHER
-    // input as `Origin::Sibling` — the same rule manifest mode's
-    // `build_one_target` applies (docs/tmt/project.md (declared source
-    // set)).
-    let library_context = unit_declarations(0, &[], &[], &library_declarations, !flags.nostdlib);
-    let sibling_declarations = sibling_declarations_for(&source_paths, &library_context);
 
     let mut objects: Vec<ObjectFile> = Vec::new();
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
@@ -957,42 +933,30 @@ fn sidecar_sources(map_path: &Path, unit_sources: &[Option<PathBuf>]) -> Vec<Opt
 }
 
 /// One source's own declarations, read the same way this build feeds it
-/// to every OTHER unit of the same target as `Origin::Sibling`
-/// (docs/tmt/project.md (declared source set)): a `.tmc` reads LENIENTLY
-/// through `header::read_extern_with`'s non-`.tmh` rule — bodies dropped,
-/// and no expansion is ever attempted, so a source with a later-stage
-/// (expansion) error still yields its declarations here. `externals` is
-/// the context this read resolves against — the compiler's own module-
-/// resolution stage (cross-unit alphabet resolution, the write-contract
-/// check) runs during declarations-only extraction exactly as it does
-/// during a real compile, so a `.tmc` that itself references a declared
-/// library or another sibling needs that context to extract cleanly; the
-/// caller ([`sibling_declarations_for`]) supplies libraries+stdlib on the
-/// first pass and folds in already-extracted siblings on the second. A
-/// `.tma` assembles first (debug info off — a declared interface never
-/// depends on it, and the real, debug-info-aware object for this same
-/// path is produced again, independently, when its own turn in the
-/// caller's compile loop assembles it for real) and a `.tmo` loads as
-/// bytes; either object's declared interface reaches the table through
-/// `header::declarations_from_object` — the SAME object→declarations
-/// path a header-less library uses, so a hand-written-assembly or
-/// prebuilt-object sibling is not a second converter. Neither `.tma` nor
-/// `.tmo` reads `externals` at all: an already-assembled object carries no
-/// unresolved cross-unit reference left for one to help with.
-fn read_source_declarations(path: &Path, externals: &Declarations) -> Result<Resolved, String> {
+/// Builds the declaration TEXT one source contributes to the shared
+/// fixpoint (`crate::header::resolve_declarations`, docs/tmt/project.md
+/// (Declaration derivation)): a `.tmc` becomes TEXT — its own reading
+/// (lenient, a graph's body kept) happens later, inside the fixpoint,
+/// since it may need context this function does not have. A `.tma`
+/// assembles NOW (debug info off — a declared interface never depends on
+/// it, and the real, debug-info-aware object for this same path is
+/// produced again, independently, when its own turn in the caller's
+/// compile loop assembles it for real) and a `.tmo` loads NOW, either
+/// becoming an object-derived source (`crate::header::
+/// declarations_from_object`, ALSO read later in the fixpoint — an
+/// object's own rendered header can itself carry a `use` line into
+/// another unit). Assembling/loading needs no context at all, so a
+/// `.tma`/`.tmo` failure here is reported immediately, by its own path —
+/// a genuinely different error path from a `.tmc`'s own (possible) read
+/// failure, which the fixpoint reports later, from its own last attempt.
+fn source_declaration_text(path: &Path) -> Result<crate::header::DeclarationText, String> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("tmc") => {
-            let source = fs::read_to_string(path)
+            let text = fs::read_to_string(path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            crate::header::read_extern_with(path, &source, externals).map_err(|e| {
-                format!(
-                    "{}:{}:{}: error: {} [{}]",
-                    path.display(),
-                    e.span.start.line,
-                    e.span.start.col,
-                    e.kind,
-                    e.kind.code()
-                )
+            Ok(crate::header::DeclarationText::Source {
+                path: path.to_path_buf(),
+                text,
             })
         }
         Some("tma") => {
@@ -1008,94 +972,142 @@ fn read_source_declarations(path: &Path, externals: &Declarations) -> Result<Res
                     e.kind.code()
                 )
             })?;
-            crate::header::declarations_from_object(&object)
-                .map_err(|e| format!("{}: {e}", path.display()))
+            Ok(crate::header::DeclarationText::Object {
+                path: path.to_path_buf(),
+                object: Box::new(object),
+            })
         }
         _ => {
             let object = read_object(path)?;
-            crate::header::declarations_from_object(&object)
-                .map_err(|e| format!("{}: {e}", path.display()))
+            Ok(crate::header::DeclarationText::Object {
+                path: path.to_path_buf(),
+                object: Box::new(object),
+            })
         }
     }
 }
 
-/// Every source's own declarations-only view, TOLERANT of extraction
-/// failures (docs/tmt/project.md (declared source set)): a source that
-/// fails to extract contributes `None` rather than aborting the build
-/// here — its own later compile turn (`load_one_source`) still reports
-/// ITS OWN error naming the same path if it genuinely cannot be resolved,
-/// so a build with a truly broken sibling still fails naming that file,
-/// just from a different call site than this pre-pass.
+/// Whether `err` is shaped like one of the compiler's four "declarations
+/// were/are not given" diagnostics (`compiler.rs`'s own stable wording,
+/// deliberately kept — docs/tmt/cli.md's matching error-code rows use the
+/// identical phrase) — the signature of a source whose OWN read failed
+/// only because some OTHER source's declarations never resolved, as
+/// opposed to a genuine defect in the source itself (a parse error, a
+/// shape violation, …). [`resolve_target_declarations`] uses this to
+/// prefer reporting a genuine defect over one of its own symptoms when
+/// several sources fail the shared fixpoint together.
+fn looks_like_a_missing_declarations_error(err: &str) -> bool {
+    err.contains("declarations were not given") || err.contains("declarations are not given")
+}
+
+/// Resolves every declaration source a target needs, in one call: its
+/// effective sources (`Origin::Sibling`) and its effective libraries
+/// (`Origin::Library`), through the ONE shared fixpoint
+/// (`crate::header::resolve_declarations`, docs/tmt/project.md
+/// (Declaration derivation)). Returns each source's own final `Resolved`
+/// — siblings in `source_paths`' own order, libraries in `library_names`'
+/// own order, ready for [`unit_declarations`] to assemble a target's
+/// per-unit table from — plus the library OBJECTS (a header-only
+/// library contributes none) the caller hands the linker.
 ///
-/// A target with at most one source is returned as all-`None` without
-/// reading anything: no OTHER unit of the target could ever need a lone
-/// source's declarations, so the read (and any risk of it needing more
-/// context than it has) is skipped entirely — the structural reason a
-/// single-unit target compiles exactly as it did before this pass existed.
-///
-/// TWO PASSES, never three. Pass 1 reads every source against
-/// `library_context` alone (the target's declared libraries + stdlib, no
-/// siblings yet — computing every source in isolation first avoids one
-/// source's read needing a SECOND source's not-yet-computed
-/// declarations). Pass 2 retries only the sources pass 1 could not read,
-/// this time with pass 1's SUCCESSFUL siblings folded in too — closing an
-/// acyclic sibling→sibling dependency (a caller needing a callee
-/// sibling's write contract or alphabet, in either declared order). A
-/// source still unreadable after pass 2 stays `None`; the target's real
-/// compile loop is the backstop for a genuinely unreadable source either
-/// way, so a third pass would only help a longer dependency chain pass 2
-/// already resolves in the common two-or-three-sibling case.
-fn sibling_declarations_for(
-    paths: &[PathBuf],
-    library_context: &Declarations,
-) -> Vec<Option<Resolved>> {
-    if paths.len() <= 1 {
-        return vec![None; paths.len()];
+/// Building each source's own `DeclarationText` (assembling a `.tma`,
+/// loading a `.tmo`, locating a library's `.tmo`/`.tmh` pair on the
+/// search path) needs no context and is NOT part of the fixpoint: a
+/// failure there — a missing file, a library nowhere on the search path,
+/// a `.tma` that will not even assemble — is reported immediately, by
+/// its own path, before the fixpoint runs at all. Once every source has
+/// TEXT, `stdlib` reaches every one of their reads alike, siblings and
+/// libraries both (a library header depending on `std::` resolves
+/// exactly as a sibling would). A source that never reads clean once the
+/// fixpoint stops making progress is THE build's error, reported here,
+/// before any unit is compiled, never swallowed and left for a
+/// dependent's own compile to misreport (docs/tmt/project.md
+/// (Declaration derivation) — including the case where two sources
+/// genuinely need EACH OTHER and neither ever resolves). When several
+/// sources fail together — a genuinely broken one, plus every OTHER
+/// source that depended on it — the one reported is chosen by
+/// [`looks_like_a_missing_declarations_error`], not by declared order:
+/// declared order alone would make WHICH of the two errors surfaces a
+/// coin flip on where the broken file happens to sit in the source list.
+#[allow(clippy::type_complexity)]
+fn resolve_target_declarations(
+    source_paths: &[PathBuf],
+    library_names: &[String],
+    library_dirs: &[String],
+    stdlib: bool,
+) -> Result<(Vec<Resolved>, Vec<(String, Resolved)>, Vec<ObjectFile>), String> {
+    let mut sources = Vec::with_capacity(source_paths.len() + library_names.len());
+    for path in source_paths {
+        sources.push(crate::header::DeclarationSource {
+            origin: Origin::Sibling(path.clone()),
+            text: source_declaration_text(path)?,
+        });
     }
-    let mut declared: Vec<Option<Resolved>> = paths
+    let mut library_objects: Vec<Option<ObjectFile>> = Vec::with_capacity(library_names.len());
+    for name in library_names {
+        let (object, text) = find_library_for_build(name, library_dirs)?;
+        library_objects.push(object);
+        sources.push(crate::header::DeclarationSource {
+            origin: Origin::Library(name.clone()),
+            text,
+        });
+    }
+
+    let mut results = crate::header::resolve_declarations(&sources, stdlib);
+    if results.iter().any(Result::is_err) {
+        // Two or more sources can fail the fixpoint together: a source
+        // that genuinely cannot be read (a parse error, a shape
+        // violation) leaves every OTHER source that depended on it
+        // failing too, each with its OWN "declarations were not given"-
+        // shaped complaint about a name that source never supplied.
+        // Reporting the first failure in declared order would then be a
+        // coin flip between the genuine defect and one of its own
+        // symptoms, decided purely by which file happened to be listed
+        // first — prefer a failure that does NOT look like a symptom.
+        let err = results
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .find(|e| !looks_like_a_missing_declarations_error(e))
+            .or_else(|| results.iter().filter_map(|r| r.as_ref().err()).next())
+            .expect("at least one Err, checked above")
+            .clone();
+        return Err(err);
+    }
+    let library_results = results.split_off(source_paths.len());
+    let sibling_declarations: Vec<Resolved> = results.into_iter().map(|r| r.unwrap()).collect();
+    let library_declarations: Vec<(String, Resolved)> = library_names
         .iter()
-        .map(|path| read_source_declarations(path, library_context).ok())
+        .cloned()
+        .zip(library_results.into_iter().map(|r| r.unwrap()))
         .collect();
-
-    for i in 0..paths.len() {
-        if declared[i].is_some() {
-            continue;
-        }
-        let mut context = library_context.clone();
-        for (j, resolved) in declared.iter().enumerate() {
-            if i != j
-                && let Some(r) = resolved
-            {
-                context.push(Origin::Sibling(paths[j].clone()), r.clone());
-            }
-        }
-        declared[i] = read_source_declarations(&paths[i], &context).ok();
-    }
-    declared
+    Ok((
+        sibling_declarations,
+        library_declarations,
+        library_objects.into_iter().flatten().collect(),
+    ))
 }
 
-/// The declarations table for compiling unit `i` of `paths`, in the order
-/// this task fixes (docs/tmt/project.md (declared source set)): every
-/// OTHER source of the same build that itself yielded declarations
-/// (`Origin::Sibling` — a `None` entry, from a source
-/// [`sibling_declarations_for`] could not extract, contributes nothing
-/// here); then each declared library, in `-l`/manifest order
-/// (`Origin::Library`); then the embedded standard library unless opted
-/// out (`Origin::Stdlib`) — the same objects-then-libraries-then-stdlib
-/// order the linker itself resolves names in.
+/// The declarations table for compiling unit `i` of `paths`, in the
+/// fixed precedence order this task defines (docs/tmt/project.md
+/// (Declaration derivation)): every OTHER source of the same build
+/// (`Origin::Sibling`), then each declared library, in `-l`/manifest
+/// order (`Origin::Library`), then the embedded standard library unless
+/// opted out (`Origin::Stdlib`) — the same objects-then-libraries-then-
+/// stdlib order the linker itself resolves names in. Every entry here is
+/// already fully resolved: [`resolve_target_declarations`] bails out
+/// before its caller ever reaches this function if the shared fixpoint
+/// left anything unread.
 fn unit_declarations(
     i: usize,
     paths: &[PathBuf],
-    sibling_declarations: &[Option<Resolved>],
+    sibling_declarations: &[Resolved],
     library_declarations: &[(String, Resolved)],
     stdlib: bool,
 ) -> Declarations {
     let mut decls = Declarations::none();
     for (j, resolved) in sibling_declarations.iter().enumerate() {
-        if i != j
-            && let Some(r) = resolved
-        {
-            decls.push(Origin::Sibling(paths[j].clone()), r.clone());
+        if i != j {
+            decls.push(Origin::Sibling(paths[j].clone()), resolved.clone());
         }
     }
     for (name, resolved) in library_declarations {

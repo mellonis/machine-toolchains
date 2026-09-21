@@ -20,7 +20,7 @@ use mtc_core::formats::object::ObjectFile;
 use mtc_core::linker::{CallMech, LinkOptions, LinkReport};
 
 use crate::compiler::{
-    CompileOptions, CompileReport, Declarations, Origin, Resolved, compile as compile_source,
+    CompileOptions, CompileReport, Declarations, Origin, compile as compile_source,
 };
 use crate::optimizer::OptLevel;
 
@@ -49,36 +49,42 @@ FLAGS:
   -v                 render the compile report (passes, rounds)
 ";
 
-/// `--extern` files in command-line order, then the embedded standard
-/// library last unless `nostdlib` (docs/tmt/cli.md (compile)) — the exact
-/// push order [`crate::footprint::find_external`]'s first-match lookup
-/// relies on, so a user's own `--extern std.tmh` shadows the built-in
-/// `std` when both are given. Each file's own declarations-only read is
-/// [`crate::header::read_extern`] (STRICT on a `.tmh`, LENIENT on
-/// anything else); a file that fails to read or parse is reported by ITS
-/// OWN path, never the primary compile's input. Shared with `tmt
-/// interface`'s own `--extern`/`--nostdlib` (`cli/interface.rs`), which
-/// takes exactly this same meaning for a library that itself depends on
-/// another unit's declarations — `tmt build` derives its own siblings'
-/// and libraries' declarations independently (`cli/driver.rs`) and does
-/// NOT call this function.
+/// `--extern` files, read through the SAME shared fixpoint `tmt build`
+/// uses for its own siblings and libraries
+/// (`crate::header::resolve_declarations`, docs/tmt/project.md
+/// (Declaration derivation)): each file is read against the embedded
+/// standard library (unless `nostdlib`) plus every OTHER `--extern` file
+/// already read clean, iterated until no more progress is made — so one
+/// `--extern` file may itself depend on another, in either command-line
+/// order. The FINAL table is still assembled in command-line order, then
+/// the embedded standard library last unless `nostdlib` — the exact push
+/// order [`crate::footprint::find_external`]'s first-match lookup relies
+/// on, so a user's own `--extern std.tmh` shadows the built-in `std` when
+/// both are given. A file that never reads clean is reported by ITS OWN
+/// path, never the primary compile's input. Shared with `tmt interface`'s
+/// own `--extern`/`--nostdlib` (`cli/interface.rs`), which takes exactly
+/// this same meaning — `tmt build` derives its own siblings' and
+/// libraries' declarations independently (`cli/driver.rs`) and does NOT
+/// call this function.
 pub(super) fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declarations, String> {
-    let mut externals = Declarations::none();
+    let mut sources = Vec::with_capacity(paths.len());
     for raw in paths {
         let path = Path::new(raw);
-        let source =
+        let text =
             fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let resolved = crate::header::read_extern(path, &source).map_err(|e| {
-            format!(
-                "{}:{}:{}: error: {} [{}]",
-                path.display(),
-                e.span.start.line,
-                e.span.start.col,
-                e.kind,
-                e.kind.code()
-            )
-        })?;
-        externals.push(Origin::Extern(path.to_path_buf()), resolved);
+        sources.push(crate::header::DeclarationSource {
+            origin: Origin::Extern(path.to_path_buf()),
+            text: crate::header::DeclarationText::Source {
+                path: path.to_path_buf(),
+                text,
+            },
+        });
+    }
+    let results = crate::header::resolve_declarations(&sources, !nostdlib);
+
+    let mut externals = Declarations::none();
+    for (raw, result) in paths.iter().zip(results) {
+        externals.push(Origin::Extern(PathBuf::from(raw)), result?);
     }
     if !nostdlib {
         externals.push_stdlib();
@@ -516,27 +522,33 @@ pub(crate) fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, St
 }
 
 /// `tmt build`'s own library resolution (docs/tmt/project.md
-/// (libraries)): whatever of `<name>.tmo` (its interface section) and
-/// `<name>.tmh` (graphs, maps, doc lines) exists in the first search
-/// directory that has either. When the header exists it is the
-/// declaration source — it carries graphs, maps and doc lines the object
-/// cannot — and the object, if it also exists, is what gets LINKED (the
-/// returned `Option<ObjectFile>`). A header-only library (no `.tmo` next
-/// to it) contributes declarations and no object at all — the caller
-/// never hands it to the linker. Neither file present, in any searched
-/// directory, is an error naming the library, matching [`find_library`]'s
-/// own wording.
+/// (Declaration derivation)): whatever of `<name>.tmo` (its interface
+/// section) and `<name>.tmh` (graphs, maps, doc lines) exists in the
+/// first search directory that has either. Returns the object to hand
+/// the linker (`.tmo`, when present — `None` for a header-only library,
+/// never handed to the linker) and the declaration TEXT this library's
+/// own reading needs: the header, when one exists — it is the
+/// declaration source whether or not an object exists beside it, since
+/// it carries graphs, maps and doc lines an object cannot, and it is
+/// trusted outright over the object rather than checked against it
+/// (docs/tmt/project.md (Declaration derivation)) — or the object's own
+/// rendered interface otherwise. The text is NOT read yet: that happens
+/// in the shared fixpoint every declaration source in the build goes
+/// through together (`crate::header::resolve_declarations`), since a
+/// header can itself depend on another library or unit. Neither file
+/// present, in any searched directory, is an error naming the library.
 ///
-/// Deliberately a SEPARATE function from [`find_library`]: `tmt link`'s
-/// own `-l` and the LSP overlay's own fixture (`lsp/overlay.rs`) both need
-/// exactly an object or a "not found" error — widening `find_library`'s
-/// return shape would force those two callers to unwrap a declarations
-/// field they have no use for. Both functions share the same directory
-/// search and the same `<name>.tmo` candidate path.
+/// A SEPARATE function from [`find_library`], because the two now mean
+/// different things: `tmt link`'s own `-l` (and the LSP overlay's own
+/// fixture, `lsp/overlay.rs`) links an OBJECT and nothing else — it has
+/// no declarations table to populate and no use for a header-only
+/// library, which carries no object to link at all — while `tmt build`'s
+/// `-l`/`-L` ALSO select compile-time declarations. Both functions share
+/// the same directory search and the same `<name>.tmo` candidate path.
 pub(crate) fn find_library_for_build(
     name: &str,
     dirs: &[String],
-) -> Result<(Option<ObjectFile>, Resolved), String> {
+) -> Result<(Option<ObjectFile>, crate::header::DeclarationText), String> {
     for dir in dirs {
         let tmo = Path::new(dir).join(format!("{name}.tmo"));
         let tmh = Path::new(dir).join(format!("{name}.tmh"));
@@ -550,28 +562,22 @@ pub(crate) fn find_library_for_build(
         } else {
             None
         };
-        let declarations = if has_tmh {
+        let text = if has_tmh {
             let source = fs::read_to_string(&tmh)
                 .map_err(|e| format!("cannot read {}: {e}", tmh.display()))?;
-            crate::header::read_extern(&tmh, &source).map_err(|e| {
-                format!(
-                    "{}:{}:{}: error: {} [{}]",
-                    tmh.display(),
-                    e.span.start.line,
-                    e.span.start.col,
-                    e.kind,
-                    e.kind.code()
-                )
-            })?
+            crate::header::DeclarationText::Source {
+                path: tmh,
+                text: source,
+            }
         } else {
-            // `has_tmo` alone, checked above: derive declarations from the
-            // object's own interface — the ONE object→declarations path
-            // (`crate::header::declarations_from_object`).
-            let obj = object.as_ref().expect("has_tmo checked above");
-            crate::header::declarations_from_object(obj)
-                .map_err(|e| format!("{}: {e}", tmo.display()))?
+            // `has_tmo` alone, checked above.
+            let obj = object.clone().expect("has_tmo checked above");
+            crate::header::DeclarationText::Object {
+                path: tmo,
+                object: Box::new(obj),
+            }
         };
-        return Ok((object, declarations));
+        return Ok((object, text));
     }
     Err(format!("library `{name}` not found on the -L search path"))
 }
@@ -579,12 +585,13 @@ pub(crate) fn find_library_for_build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::Resolved;
     use mtc_core::linker::LinkDiagnostic;
 
     // ---- find_library_for_build -------------------------------------------
     //
     // The resolver's own decision point for `tmt build`'s library handling
-    // (docs/tmt/project.md (libraries)): white-box tests here pin exactly
+    // (docs/tmt/project.md (Declaration derivation)): white-box tests here pin exactly
     // what `find_library_for_build` returns for each of the four
     // presence combinations, since a `LinkReport` carries no per-object
     // list an end-to-end test could assert on directly — this IS the
@@ -634,15 +641,30 @@ namespace lib {
         fs::write(dir.join("lib.tmh"), text).unwrap();
     }
 
+    /// Runs the ONE reader (`crate::header::resolve_declarations`) over a
+    /// single, already-located `DeclarationText` — the same read
+    /// `find_library_for_build`'s own caller performs as part of the
+    /// shared fixpoint, done here alone so a unit test can inspect what a
+    /// given text actually declares.
+    fn read_alone(text: crate::header::DeclarationText) -> Resolved {
+        let source = crate::header::DeclarationSource {
+            origin: Origin::Library("lib".to_string()),
+            text,
+        };
+        crate::header::resolve_declarations(&[source], true)
+            .into_iter()
+            .next()
+            .expect("one source in, one result out")
+            .unwrap_or_else(|e| panic!("read: {e}"))
+    }
+
     fn declares_flip(resolved: &Resolved) -> bool {
         resolved.worlds.iter().any(|w| w.name == "lib::flip")
     }
 
     /// Mutation: preferring the object's own (reduced) declarations even
-    /// when a header also exists — this pins that the HEADER wins as the
-    /// declaration source when both are present, per the requirement
-    /// ("when both files exist the header is the declaration source"),
-    /// while the object is STILL what gets returned to link.
+    /// when a header also exists — the returned TEXT would then be the
+    /// object's, not the header's.
     #[test]
     fn find_library_for_build_returns_both_when_both_files_exist() {
         let dir = unique_tmp_dir("both");
@@ -650,12 +672,16 @@ namespace lib {
         write_fixture_header(&dir);
         let dirs = vec![dir.to_string_lossy().into_owned()];
 
-        let (object, declarations) = find_library_for_build("lib", &dirs).unwrap();
+        let (object, text) = find_library_for_build("lib", &dirs).unwrap();
         assert!(
             object.is_some(),
             "the object must still be returned to link"
         );
-        assert!(declares_flip(&declarations));
+        assert!(
+            matches!(text, crate::header::DeclarationText::Source { .. }),
+            "the header wins as the declaration source when both exist"
+        );
+        assert!(declares_flip(&read_alone(text)));
     }
 
     /// Mutation: `find_library_for_build` requiring a `.tmh` unconditionally
@@ -668,9 +694,13 @@ namespace lib {
         write_fixture_object(&dir);
         let dirs = vec![dir.to_string_lossy().into_owned()];
 
-        let (object, declarations) = find_library_for_build("lib", &dirs).unwrap();
+        let (object, text) = find_library_for_build("lib", &dirs).unwrap();
         assert!(object.is_some());
-        assert!(declares_flip(&declarations));
+        assert!(matches!(
+            text,
+            crate::header::DeclarationText::Object { .. }
+        ));
+        assert!(declares_flip(&read_alone(text)));
     }
 
     /// The structural half of "a header-only library is never linked":
@@ -688,12 +718,16 @@ namespace lib {
         write_fixture_header(&dir);
         let dirs = vec![dir.to_string_lossy().into_owned()];
 
-        let (object, declarations) = find_library_for_build("lib", &dirs).unwrap();
+        let (object, text) = find_library_for_build("lib", &dirs).unwrap();
         assert!(
             object.is_none(),
             "no .tmo exists for this library — nothing to hand the linker"
         );
-        assert!(declares_flip(&declarations));
+        assert!(matches!(
+            text,
+            crate::header::DeclarationText::Source { .. }
+        ));
+        assert!(declares_flip(&read_alone(text)));
     }
 
     /// Mutation: falling back to an empty, silent `Declarations` instead
@@ -707,6 +741,66 @@ namespace lib {
 
         let err = find_library_for_build("lib", &dirs).unwrap_err();
         assert!(err.contains("lib"), "{err}");
+    }
+
+    const GRAPH_LIBRARY_FIXTURE: &str = "\
+namespace glib {
+  export alphabet marks { '_', '0', '1' }
+  export graph mark(tape t: marks) {
+    entry state s { [*] -> write ['1'] stop; }
+  }
+}
+";
+
+    fn write_graph_fixture_object(dir: &Path) {
+        let out = compile_source(
+            GRAPH_LIBRARY_FIXTURE,
+            CompileOptions {
+                externals: Declarations::none(),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("compile: {e}"));
+        fs::write(dir.join("glib.tmo"), out.object.to_bytes()).unwrap();
+    }
+
+    fn write_graph_fixture_header(dir: &Path) {
+        let text = crate::header::from_source(GRAPH_LIBRARY_FIXTURE, &Declarations::stdlib())
+            .unwrap_or_else(|e| panic!("interface: {e}"));
+        fs::write(dir.join("glib.tmh"), text).unwrap();
+    }
+
+    /// The discriminating half of "the header wins when both exist": a
+    /// routine signature (`find_library_for_build_returns_both_when_
+    /// both_files_exist`, above) is content BOTH arms can carry, so that
+    /// test alone would stay green even if the preference were inverted,
+    /// as long as the same routine happens to be declared identically on
+    /// both. An exported GRAPH is not — the object arm carries no graph
+    /// body at all (docs/formats.md (routine interfaces)), so its
+    /// presence in the read-back table is proof the HEADER, not the
+    /// object, was the source.
+    ///
+    /// Mutation: preferring the object's declarations even when a header
+    /// exists — `glib::mark` would then be MISSING from the table
+    /// entirely, not merely narrower, which this assertion catches
+    /// directly.
+    #[test]
+    fn find_library_for_build_prefers_the_header_for_a_graph_body_the_object_cannot_supply() {
+        let dir = unique_tmp_dir("header-wins-graph");
+        write_graph_fixture_object(&dir);
+        write_graph_fixture_header(&dir);
+        let dirs = vec![dir.to_string_lossy().into_owned()];
+
+        let (object, text) = find_library_for_build("glib", &dirs).unwrap();
+        assert!(
+            object.is_some(),
+            "the object must still be returned to link"
+        );
+        let resolved = read_alone(text);
+        assert!(
+            resolved.worlds.iter().any(|w| w.name == "glib::mark"),
+            "the header's graph body must be what this table reads when both exist"
+        );
     }
 
     /// A `LinkReport` carrying only `diagnostics`, every other counter at

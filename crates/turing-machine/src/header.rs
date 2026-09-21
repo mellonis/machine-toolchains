@@ -143,7 +143,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mtc_core::formats::crc32::crc32;
 use mtc_core::formats::object::{
@@ -155,7 +155,7 @@ use crate::compiler::{
     self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, WorldKind,
     full_name, published_writes,
 };
-use crate::declarations::Declarations;
+use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
 use crate::parser::{
     Bind, BindingArg, BindingValue, Doc, FoldExprKind, FoldExprNode, FoldOp, Graft, Graph, Import,
@@ -248,42 +248,31 @@ fn render_from_source(
     ))
 }
 
-/// Read one `--extern FILE`'s declarations for `tmt compile`
-/// (docs/tmt/cli.md (compile)) — not a render, [`Resolved`] itself, the
-/// same shape [`Declarations`] pushes for the embedded stdlib. A `.tmh`
-/// extension (case-insensitive, matching `cli/interface.rs`'s identical
-/// rule for a `.tmh` on `tmt interface`) selects STRICT reading —
-/// [`ReadMode::DeclarationsOnly`], which rejects a routine body or a
-/// `machine` block outright — and anything else (a `.tmc`) is read
-/// LENIENTLY as [`ReadMode::Program`]: bodies and a `machine` block are
-/// accepted and simply unused, since [`Resolved`] retains no body content
-/// for [`Declarations`] to keep either way. Text has no container magic to
-/// tell a header from a full source by, so — exactly as in
-/// `cli/interface.rs` — the extension is the one place it IS the signal,
-/// never a second front end.
+/// Read one text declaration source's own shape — a `.tmc`/`.tmh` file
+/// given to `tmt compile --extern`, `tmt interface --extern`, or one of
+/// `tmt build`'s own sibling sources — against a CALLER-SUPPLIED
+/// declarations context (docs/tmt/project.md (Declaration derivation)).
+/// A `.tmh` extension (case-insensitive, matching `cli/interface.rs`'s
+/// identical rule) selects STRICT reading — [`ReadMode::DeclarationsOnly`],
+/// which rejects a routine body or a `machine` block outright, but KEEPS
+/// every graph's body (a graph's only form is its source, so a header
+/// cannot omit it — this is what makes a sibling's or a library's
+/// exported graph graftable); anything else (a `.tmc`) is read LENIENTLY
+/// as [`ReadMode::Program`]: bodies and a `machine` block are accepted
+/// and simply unused for routines (a routine's body contributes nothing
+/// [`Resolved`] keeps), while a graph's body is read and kept exactly as
+/// the strict arm keeps it. Text has no container magic to tell a header
+/// from a full source by, so — exactly as in `cli/interface.rs` — the
+/// extension is the one place it IS the signal, never a second front end.
 ///
-/// Resolved against the embedded standard library as its OWN external
-/// context, unconditionally — the same choice [`render_from_source`]
-/// makes for `tmt interface`, independent of whatever `--nostdlib`/
-/// `--extern` set the PRIMARY compile this file feeds was itself given
-/// (this function has no visibility into that set, and reading one
-/// `--extern` file's own declarations against another is cross-unit name
-/// resolution, not this task's — docs/tmt/cli.md (compile)).
-pub(crate) fn read_extern(path: &Path, source: &str) -> Result<Resolved, CompileError> {
-    read_declarations_with_mode(source, header_mode_for(path), &Declarations::stdlib())
-}
-
-/// [`read_extern`]'s twin for `tmt build`'s own sibling-declarations pre-
-/// pass (`cli/driver.rs`): the SAME extension-driven mode dispatch and the
-/// SAME reader, but resolved against a CALLER-SUPPLIED declarations
-/// context rather than the bare embedded stdlib [`read_extern`] always
-/// uses. Needed because the compiler's own module-resolution stage —
-/// cross-unit alphabet resolution AND the write-contract check — runs
-/// during declarations-only extraction exactly as it does during a real
-/// compile, so a sibling `.tmc` that itself references a declared library
-/// or another sibling needs that context in hand to extract cleanly, not
-/// just the embedded stdlib (docs/tmt/project.md (declared source set)).
-pub(crate) fn read_extern_with(
+/// `externals` is never a fixed default: the compiler's own module-
+/// resolution stage — cross-unit alphabet resolution AND the write-
+/// contract check — runs during declarations-only extraction exactly as
+/// it does during a real compile, so a source that itself references
+/// another declared unit needs that unit's declarations in hand just to
+/// extract its OWN shape. [`resolve_declarations`] is what builds this
+/// context, growing it as more sources resolve.
+pub(crate) fn read_extern(
     path: &Path,
     source: &str,
     externals: &Declarations,
@@ -293,8 +282,7 @@ pub(crate) fn read_extern_with(
 
 /// `.tmh` (case-insensitive) selects STRICT [`ReadMode::DeclarationsOnly`]
 /// reading; anything else (a `.tmc`) reads LENIENTLY as [`ReadMode::
-/// Program`] — shared by [`read_extern`] and [`read_extern_with`] so the
-/// two never drift on which extension means what.
+/// Program`] — the one place [`read_extern`] decides which.
 fn header_mode_for(path: &Path) -> ReadMode {
     if path
         .extension()
@@ -307,19 +295,10 @@ fn header_mode_for(path: &Path) -> ReadMode {
     }
 }
 
-/// [`read_extern`]'s STRICT half taken alone, with no path to dispatch a
-/// mode from (docs/tmt/project.md (libraries)): a rendered object-arm
-/// header ([`declarations_from_object`]) and any other in-memory
-/// declarations-only text share this ONE reader with a real `.tmh` file,
-/// rather than each inventing its own strict-mode call.
-pub(crate) fn read_declarations_text(source: &str) -> Result<Resolved, CompileError> {
-    read_declarations_with_mode(source, ReadMode::DeclarationsOnly, &Declarations::stdlib())
-}
-
-/// The shared body of [`read_extern`]/[`read_extern_with`]/
-/// [`read_declarations_text`]: mode AND the declarations context are both
-/// flags on this ONE reader, exactly as [`render_from_source`] shares one
-/// reader between [`from_source`]/[`from_declarations`].
+/// The shared body of [`read_extern`] and [`declarations_from_object`]'s
+/// own strict read: mode AND the declarations context are both flags on
+/// this ONE reader, exactly as [`render_from_source`] shares one reader
+/// between [`from_source`]/[`from_declarations`].
 fn read_declarations_with_mode(
     source: &str,
     mode: ReadMode,
@@ -337,14 +316,20 @@ fn read_declarations_with_mode(
 }
 
 /// The ONE path from a compiled object to a [`Declarations`] module
-/// (docs/tmt/project.md (libraries)): render the object's header text
-/// through [`from_object`] — the identical rendering `tmt interface`
-/// prints for a `.tmo` input — and read it back through
-/// [`read_declarations_text`], the same strict reader a real `.tmh` file
-/// goes through. Never a second, hand-rolled object→declarations
-/// converter: an object's declared routine signatures and exported
-/// alphabets reach the table exactly as they would if a human had copied
-/// `tmt interface`'s own output into a `.tmh` by hand.
+/// (docs/tmt/project.md (Declaration derivation)): render the object's
+/// header text through [`from_object`] — the identical rendering `tmt
+/// interface` prints for a `.tmo` input — and read it back through the
+/// SAME strict reader (`read_declarations_with_mode`, [`ReadMode::
+/// DeclarationsOnly`]) a real `.tmh` file goes through, against the SAME
+/// caller-supplied context [`read_extern`] takes. Never a second,
+/// hand-rolled object→declarations converter: an object's declared
+/// routine signatures and exported alphabets reach the table exactly as
+/// they would if a human had copied `tmt interface`'s own output into a
+/// `.tmh` by hand — and, like a real header, this object-derived one
+/// carries no graph body of its own, since the wire has none to read
+/// back (`docs/formats.md (routine interfaces)`); a library shipping
+/// both a header and an object is trusted on the header for exactly this
+/// reason.
 ///
 /// An object carrying NO interface section at all (an `an_object_without_
 /// interface_content_carries_none`-shaped `.tma`/`.tmo` with no `.routine`/
@@ -355,12 +340,15 @@ fn read_declarations_with_mode(
 /// object with nothing to show is worth naming; here, feeding an object
 /// with nothing to declare to another unit is not a mistake at all — it
 /// declares nothing because it exports nothing.
-pub(crate) fn declarations_from_object(obj: &ObjectFile) -> Result<Resolved, String> {
+pub(crate) fn declarations_from_object(
+    obj: &ObjectFile,
+    externals: &Declarations,
+) -> Result<Resolved, String> {
     if obj.interface.is_none() {
         return Ok(empty_resolved());
     }
     let text = from_object(obj)?;
-    read_declarations_text(&text).map_err(|e| {
+    read_declarations_with_mode(&text, ReadMode::DeclarationsOnly, externals).map_err(|e| {
         format!(
             "{}:{}: error: {} [{}]",
             e.span.start.line,
@@ -369,6 +357,134 @@ pub(crate) fn declarations_from_object(obj: &ObjectFile) -> Result<Resolved, Str
             e.kind.code()
         )
     })
+}
+
+/// One member of the shared fixpoint [`resolve_declarations`] runs: text
+/// (a `.tmc`/`.tmh` file, read through [`read_extern`]) or an already-
+/// built object (its own interface section, through
+/// [`declarations_from_object`]). Reading is deferred — a
+/// `DeclarationSource` only carries what it needs to read itself once a
+/// context is available, never a `Resolved` up front.
+#[derive(Debug)]
+pub(crate) enum DeclarationText {
+    Source {
+        path: PathBuf,
+        text: String,
+    },
+    // Boxed: an `ObjectFile` dwarfs the `Source` variant, and this enum
+    // travels in `Vec<DeclarationSource>` — one per build source — so an
+    // unboxed object would inflate every entry to the largest variant's
+    // size regardless of which one it actually holds.
+    Object {
+        path: PathBuf,
+        object: Box<ObjectFile>,
+    },
+}
+
+/// One declaration source taking part in [`resolve_declarations`]'s
+/// shared fixpoint, tagged with the [`Origin`] its declarations are
+/// pushed under — both while it is a PEER another source reads against
+/// during the fixpoint, and in the final table the caller assembles
+/// afterward from the same results.
+pub(crate) struct DeclarationSource {
+    pub origin: Origin,
+    pub text: DeclarationText,
+}
+
+impl DeclarationSource {
+    fn read(&self, externals: &Declarations) -> Result<Resolved, String> {
+        match &self.text {
+            DeclarationText::Source { path, text } => {
+                read_extern(path, text, externals).map_err(|e| {
+                    format!(
+                        "{}:{}:{}: error: {} [{}]",
+                        path.display(),
+                        e.span.start.line,
+                        e.span.start.col,
+                        e.kind,
+                        e.kind.code()
+                    )
+                })
+            }
+            DeclarationText::Object { path, object } => declarations_from_object(object, externals)
+                .map_err(|e| format!("{}: {e}", path.display())),
+        }
+    }
+}
+
+/// Read every source in `sources` against a shared, GROWING context
+/// (docs/tmt/project.md (Declaration derivation)): it starts as just the
+/// embedded standard library (unless `stdlib` is false — a switch that
+/// therefore reaches EVERY read here, siblings, libraries and `--extern`
+/// files alike) and gains each source's own declarations the moment it
+/// reads clean, one pass at a time, until a WHOLE pass makes no further
+/// progress. This is what lets a library header depend on another
+/// library, a sibling on another sibling, or an `--extern` file on
+/// another `--extern` file, of any dependency depth and regardless of
+/// the order they were given in — only the FINAL table's precedence
+/// order (siblings, then libraries in `-l` order, then stdlib; or
+/// `--extern` files in command-line order, then stdlib) is fixed, and
+/// that assembly happens separately, in the caller, from these same
+/// results.
+///
+/// Returns one outcome per input source, same order, same length: `Ok`
+/// from the pass that first read it clean, `Err` (its own error, from
+/// its own LAST read attempt — the richest context it ever saw — naming
+/// its own path) once the fixpoint stops making progress with it still
+/// unread. Two sources that genuinely need EACH OTHER's declarations
+/// never converge; both come back `Err` (docs/tmt/project.md
+/// (Declaration derivation) — mutual dependency is not supported; give
+/// one of them a hand-written header instead).
+///
+/// Cost: in the ordinary case (no source needs more than one or two
+/// peers) parse work stays close to one read per source. The worst case
+/// — a source that resolves only on the LAST pass — re-reads it once per
+/// pass, `O(sources)` passes of `O(sources)` reads; accepted as the price
+/// of never depending on declared order for correctness, not a cost this
+/// function tries to hide.
+pub(crate) fn resolve_declarations(
+    sources: &[DeclarationSource],
+    stdlib: bool,
+) -> Vec<Result<Resolved, String>> {
+    let n = sources.len();
+    let mut resolved: Vec<Option<Resolved>> = vec![None; n];
+    let mut last_err: Vec<Option<String>> = vec![None; n];
+    loop {
+        let mut progress = false;
+        for i in 0..n {
+            if resolved[i].is_some() {
+                continue;
+            }
+            let mut context = Declarations::none();
+            if stdlib {
+                context.push_stdlib();
+            }
+            for (j, entry) in resolved.iter().enumerate() {
+                if i != j
+                    && let Some(r) = entry
+                {
+                    context.push(sources[j].origin.clone(), r.clone());
+                }
+            }
+            match sources[i].read(&context) {
+                Ok(r) => {
+                    resolved[i] = Some(r);
+                    progress = true;
+                }
+                Err(e) => last_err[i] = Some(e),
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+    resolved
+        .into_iter()
+        .zip(last_err)
+        .map(|(r, e)| {
+            r.ok_or_else(|| e.expect("every still-unresolved source was attempted at least once"))
+        })
+        .collect()
 }
 
 /// A [`Resolved`] declaring nothing — [`declarations_from_object`]'s

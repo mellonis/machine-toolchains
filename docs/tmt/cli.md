@@ -403,6 +403,14 @@ order given, and errors if it is not found on any of them. There is no
 on-disk library directory to fall back to: the standard library is embedded
 in the toolchain binary itself.
 
+`tmt link`'s `-l` requires an actual `NAME.tmo` on the search path — it
+links an object and nothing else, with no declarations table to
+populate. This is narrower than `tmt build`'s own `-l`/`-L`
+(`docs/tmt/project.md (Declaration derivation)`), which ALSO derives
+compile-time declarations from a library and accepts a header-only one
+(`NAME.tmh` with no matching `.tmo`) that `tmt link` cannot use at all —
+a header-only library is a `tmt build` concept only.
+
 ### Link warnings
 
 A link warning names a site the linker can see is suspect but will not
@@ -511,7 +519,13 @@ a build is either fully argv-driven or fully manifest-driven.
   step: the declarations base the footprint/contract check believes
   (`tmt compile`'s own `--nostdlib`, above) drops the embedded standard
   library as well — argv mode has no `--extern` of its own, so this is
-  its one opt-out.
+  its one opt-out. `-L`/`-l` reach the compile step too: a library's own
+  declarations (whatever of its `.tmo`/`.tmh` exist,
+  `docs/tmt/project.md` (Declaration derivation)) are read into the SAME
+  table every source in the build shares, not only linked in — this is
+  what lets a bare (transparent) call into a declared library be believed
+  at its narrower write contract instead of treated as opaque, in argv
+  mode exactly as in manifest mode.
 - **Common to both modes** (`--allow`, `--no-relax`, `--call-mech`,
   `--keep-objects`, `-v`). `--call-mech` is the one link-side flag
   manifest mode does *not* reject: it is accepted there as a
@@ -646,8 +660,8 @@ full and every `?` doc line. From an object it carries signatures and
 alphabets only — no graph body, no map, no doc line, since none of those
 exist on the wire. Without -o the header goes to stdout.
 
-FLAGS (text INPUT only — a .tmo object carries no external references of
-its own left to resolve):
+FLAGS (text INPUT only — rejected on a .tmo object, which carries no
+external references of its own left to resolve):
   --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
                      repeatable, in command-line order)
   --nostdlib         do not read the embedded standard library's declarations
@@ -664,13 +678,16 @@ rather than its extension (`docs/formats.md`): a `.tmc` renamed to
 another unit's alphabet, named map or graph — through a `use` or a
 qualified path — cannot be headered without that other unit's
 declarations in hand, the same "declarations were not given" refusal a
-compile hits. `--extern FILE` (repeatable, in command-line order; `.tmh`
-strict, anything else lenient) and `--nostdlib` (do not read the embedded
-standard library's declarations) populate the SAME declarations table
-`tmt compile` builds, resolved independently of whatever the eventual
-`tmt build` of this unit is itself given. Both flags apply to a text
-`INPUT` only — a `.tmo` object carries no external references left
-unresolved to need them.
+compile hits. `--extern FILE` (repeatable; `.tmh` strict, anything else
+lenient) and `--nostdlib` (do not read the embedded standard library's
+declarations) populate the SAME shared declarations fixpoint `tmt
+compile` and `tmt build` both read through (docs/tmt/project.md
+(Declaration derivation)), resolved independently of whatever the
+eventual `tmt build` of this unit is itself given. Both flags apply to a
+text `INPUT` only: given alongside a `.tmo` object, they are a USAGE
+ERROR, not silently ignored — an object's header is read straight off
+its own interface section, with no external references left to resolve
+against them.
 
 **Two arms, one printer.** From a `.tmc` source the header is complete:
 every exported alphabet, every exported routine's signature with its `?`

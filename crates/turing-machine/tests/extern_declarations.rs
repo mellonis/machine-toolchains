@@ -312,3 +312,81 @@ fn extern_order_is_command_line_order_then_stdlib() {
     let err = b_first.unwrap_err();
     assert!(err.contains("writes-outside-contract"), "{err}");
 }
+
+const CHAIN_OTHER: &str = "\
+namespace other {
+  export alphabet bits { '_', '0', '1' }
+}
+";
+
+/// `lib.tmc`'s own `use other::bits;` line means READING `lib.tmc` itself
+/// (as an `--extern` file, LENIENT — its declarations are all this reads,
+/// the body along for the ride) needs `other.tmc`'s declarations —
+/// `--extern` files may depend on EACH OTHER, closed by the same shared
+/// fixpoint every declaration source in the crate goes through
+/// (docs/tmt/cli.md (--extern and --nostdlib)), regardless of which one
+/// is given first.
+const CHAIN_LIB: &str = "\
+use other::bits;
+
+namespace lib {
+  export routine widen(tape n: bits writes { '0' }) {
+    entry state s { [*] -> write ['0'] return; }
+  }
+}
+";
+
+const CHAIN_CALLER: &str = "\
+alphabet ab { '_', '0', '1' }
+
+routine caller(tape n: ab writes { '0' }) {
+  entry state s { [*] -> call lib::widen() then done; }
+  state done { [*] -> return; }
+}
+";
+
+/// Mutation: reading each `--extern` file against the embedded stdlib
+/// alone (this crate's own pre-fix shape for library/sibling reading) —
+/// `lib.tmc`'s `use other::bits;` would then be unresolvable regardless
+/// of order, and BOTH variants below would fail with "declarations were
+/// not given" naming `other::bits`.
+#[test]
+fn an_extern_file_may_depend_on_another_extern_file_other_first() {
+    let dir = scratch("extern_chain_other_first");
+    let other = write(&dir, "other.tmc", CHAIN_OTHER);
+    let lib = write(&dir, "lib.tmc", CHAIN_LIB);
+    let caller = write(&dir, "caller.tmc", CHAIN_CALLER);
+
+    let out = compile(
+        &dir,
+        &caller,
+        &[
+            "--extern",
+            other.to_str().unwrap(),
+            "--extern",
+            lib.to_str().unwrap(),
+        ],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+}
+
+/// The other `--extern` order, for the identical fixture.
+#[test]
+fn an_extern_file_may_depend_on_another_extern_file_lib_first() {
+    let dir = scratch("extern_chain_lib_first");
+    let other = write(&dir, "other.tmc", CHAIN_OTHER);
+    let lib = write(&dir, "lib.tmc", CHAIN_LIB);
+    let caller = write(&dir, "caller.tmc", CHAIN_CALLER);
+
+    let out = compile(
+        &dir,
+        &caller,
+        &[
+            "--extern",
+            lib.to_str().unwrap(),
+            "--extern",
+            other.to_str().unwrap(),
+        ],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+}
