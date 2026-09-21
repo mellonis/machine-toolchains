@@ -264,7 +264,7 @@ subsection.
 | `goto-not-a-state` | `goto` targeting a routine or graph — a reuse target, not a state. |
 | `undefined-state` | `goto`, a continuation, or a state argument names no state (or graft instance) in the world. |
 | `wrong-target-kind` | A `call`/`graft`/`bind` target resolves to the wrong entity kind. |
-| `undefined-graph` | A `graft` target names no graph in scope. |
+| `undefined-graph` | A `graft` target names no graph — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose unit's declarations were not given (pass `--extern` or declare it locally). |
 | `unknown-arg` | A binding argument names a parameter the signature does not declare. |
 | `duplicate-arg` | Two binding arguments share one parameter name. |
 | `missing-arg` | A signature parameter has no binding argument. |
@@ -275,7 +275,7 @@ subsection.
 | `contract-symbol-unknown` | A `writes`/`preserves` clause names a glyph that is not a symbol of the parameter's alphabet. |
 | `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `preserves`). |
 | `graft-cycle` | A graph definition graft-depends on itself, directly or through a cycle of definitions. |
-| `graft-call-unsupported` | A grafted graph's body contains a `call` — splicing a calling graph into the host is not supported. |
+| `graft-call-unsupported` | A grafted graph's body contains a `call` — a call-bearing graph is not spliced; write it as a routine, with `state` parameters if it needs several exits. |
 | `map-symbol-not-in-alphabet` | A symbol map (a graft binding's, or a named map declaration's own pairs) references a glyph that is not in the alphabet it maps. |
 | `map-blank-pin` | A symbol map maps the blank off itself — blank must read as blank, and a write-back must not un-pin it. |
 | `map-conflict` | A symbol map maps one symbol to two different images in one direction. |

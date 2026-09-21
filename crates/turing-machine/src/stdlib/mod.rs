@@ -108,16 +108,23 @@ pub fn object() -> &'static ObjectFile {
 /// the same cycle [`object`] and [`analysis`] avoid above. It costs
 /// nothing to avoid here either: [`HEADER_SOURCE`] declares only itself,
 /// with no external name of its own to resolve.
+///
+/// Also stamps every exported graph's digest (`header::stamp_graph_digests`,
+/// `docs/formats.md (routine interfaces)`) — the same computation
+/// [`object`]'s own `compile()` runs to fill its `.graph` lines, so a
+/// program grafting one of these graphs from this header and one grafting
+/// the compiled stdlib's own graph agree by construction.
 pub(crate) fn header() -> &'static Resolved {
     static HEADER: OnceLock<Resolved> = OnceLock::new();
     HEADER.get_or_init(|| {
-        analyze_with_mode(
-            HEADER_SOURCE,
-            &Declarations::none(),
-            ReadMode::DeclarationsOnly,
-        )
-        .expect("the embedded stdlib header parses")
-        .resolved
+        let externals = Declarations::none();
+        let analysis = analyze_with_mode(HEADER_SOURCE, &externals, ReadMode::DeclarationsOnly)
+            .expect("the embedded stdlib header parses");
+        let footprint =
+            crate::footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
+        let mut resolved = analysis.resolved;
+        crate::header::stamp_graph_digests(&analysis.program, &mut resolved, &footprint);
+        resolved
     })
 }
 
@@ -181,7 +188,9 @@ pub(crate) fn resolved() -> &'static Resolved {
 /// The stdlib's exported routines — the linkable `std::` symbols. Graphs
 /// and alphabets are documented (see [`docs`]) but contribute no linkable
 /// symbol, so they are not roster entries: a graph is spliced into whoever
-/// grafts it, and a cross-unit graft is a compile error.
+/// grafts it — including a program grafting one of the stdlib's OWN
+/// exported graphs straight from [`HEADER_SOURCE`], `docs/tmt/language.md
+/// (headers)` — never linked as a callable symbol of its own.
 // consumer: the .tmc language service's navigation and completion surfaces,
 // wired in separately from this module.
 pub(crate) fn roster() -> &'static [RosterEntry] {

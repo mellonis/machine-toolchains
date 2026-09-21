@@ -530,7 +530,8 @@ mod tests {
 
     fn ir_of(src: &str) -> IrProgram {
         let a = analyze(src).unwrap_or_else(|e| panic!("analyze: {e}"));
-        let ex = expand(&a.resolved).unwrap_or_else(|e| panic!("expand: {e}"));
+        let ex = expand(&a.resolved, &crate::declarations::Declarations::stdlib())
+            .unwrap_or_else(|e| panic!("expand: {e}"));
         lower(
             &ex,
             &a.resolved,

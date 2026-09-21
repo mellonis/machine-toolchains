@@ -85,11 +85,13 @@ binding call into it is checked at compile time in the callee's own tape
 order, exactly like a local signature's; a routine with no declarations
 available at all still compiles, in source order with every entry named, and
 the check happens at link time instead. A `graft` of one of the exported
-graphs is a different case — a graft splices the graph's source, so it needs
-that source in the unit and reports `undefined-graph` otherwise. Both a
-binding call and a graft work when the library's source is compiled into the
-consumer's own unit; the transparent call is the simplest way to consume the
-linked object, and a bound call now works against it too.
+graphs needs the graph's SOURCE, not just its signature — the standard
+library's declarations carry it (`docs/tmt/language.md (headers)`), so
+grafting `std::…SomeGraph` works the same way from the default declarations
+as a binding call does, and reports `undefined-graph` only when nothing
+supplies that source at all. The object records the digest of the body it
+spliced, checked against the compiled standard library's own digest for that
+graph when the link includes it (docs/formats.md (routine interfaces)).
 
 ## Roster
 
@@ -215,11 +217,13 @@ byte-identical, because it is source-level and contributes nothing linkable.
 Not every operation fits the shape. `std::binaryNumbers::invertNumber` and
 `std::binaryNumbers::minusOne` are plain routines with no graph behind them,
 because their bodies are compositions of `call`s — and a `call` inside a
-graph body cannot yet be spliced, since the call's binding arguments name the
-graph's own signature tapes and its `then` continuation is a graph-space
-state. That check fires **at the graft site**, not at the graph's
-definition: a graph whose body carries a call compiles without complaint as
-long as nothing grafts it.
+graph body is not spliced: the call's binding arguments name the graph's own
+signature tapes and its `then` continuation is a graph-space state, neither
+of which a graft rewrites into host space, so such a body is written as a
+routine instead. That check fires **at the graft site**, not at the graph's
+definition, and the same way whether the graph's source is local or read
+from a library's header: a graph whose body carries a call compiles without
+complaint as long as nothing grafts it.
 
 Only the routine facades become linkable symbols — **twenty-eight** of
 them: the fourteen across the two representations above, plus fourteen

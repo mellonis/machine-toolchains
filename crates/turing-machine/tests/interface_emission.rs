@@ -97,18 +97,21 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
     );
 }
 
-/// The compiled stdlib object must not move a byte across the
-/// `Declarations` refactor, at either opt level — captured from the
-/// pre-refactor tree (HEAD ae6e58b) before any production code changed.
-/// Mutation this catches: anything in the stdlib's own compile path (opt
-/// pipeline, codegen, the `externals` table it is built with) producing
-/// different bytes than before.
-///
-/// **Re-pinned by Task 3** (docs/formats.md (routine interfaces)): this is
-/// the one task where the whole-object byte identity is EXPECTED to move —
-/// the object now carries an interface section it did not carry before.
-/// The code-blob-only pin above is the negative control proving the CODE
-/// itself did not move alongside it.
+/// The compiled stdlib object's whole-object fingerprint. Re-pinned here a
+/// second time: the stdlib's 12 exported graphs now carry `.graph <name>,
+/// <digest>` lines and reach `Interface.graphs` (docs/formats.md (routine
+/// interfaces)), so the object legitimately GROWS again — -O0 moves 7243 →
+/// 7825 bytes, -O1 (release preset) 7183 → 7765 bytes, both a 582-byte
+/// interface-section addition and nothing else. The code-blob-only pin
+/// above is the negative control proving the CODE itself did not move
+/// alongside it: whole-object byte identity is expected to move whenever
+/// the interface section's own content changes (it moved once already,
+/// when every compiled world first started carrying `.param` lines), and
+/// this is the one place that expected delta is asserted instead of a
+/// straight equality against the pre-change tree. Mutation this catches:
+/// anything in the stdlib's own compile path (opt pipeline, codegen, the
+/// `externals` table it is built with) producing different bytes than
+/// before.
 #[test]
 fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
     let o0 = compile(
@@ -135,12 +138,12 @@ fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
 
     assert_eq!(
         fingerprint(&o0),
-        (7243, 0x317786f4),
+        (7825, 3034593110),
         "the -O0 stdlib object's bytes moved"
     );
     assert_eq!(
         fingerprint(&o1),
-        (7183, 0xc18c0b29),
+        (7765, 1710262935),
         "the -O1 (release preset) stdlib object's bytes moved"
     );
 }

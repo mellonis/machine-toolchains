@@ -615,8 +615,17 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
             }
         }
     }
-    // A graft target is always a locally defined graph — resolution rejects an
-    // external one, because splicing needs the graph's source.
+    // A graft target may now be a library graph reached through the
+    // declarations table (`docs/tmt/language.md (headers)`), not only a
+    // locally defined one — but `target: Some(...)`/`external: None` here
+    // is still sound either way: `by_name.get(t)` at the call site misses
+    // for an external target (it is not in `resolved.worlds`), which falls
+    // through to `unresolved_contribution` rather than `find_external`'s
+    // declared-contract lookup. That is the SAFE, merely IMPRECISE answer
+    // footprint inference already gives any external reference it cannot
+    // resolve more specifically — never unsound, just a missed precision
+    // opportunity a library graft's own declared writes could in principle
+    // sharpen.
     for graft in &world.grafts {
         edges.push(Edge {
             target: Some(graft.target.as_str()),

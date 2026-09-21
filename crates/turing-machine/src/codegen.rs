@@ -39,11 +39,19 @@
 //! **Layout invariant** (mirrors PM-1 codegen): an unconditional transfer to
 //! the physically next block is never emitted — blocks are laid out in order
 //! and fall-through is selected instead.
+//!
+//! Object-level, before any world's `.routine`: `.graph <name>, <digest>` for
+//! every graph this unit exports and `.grafted <name>, <digest>` for every
+//! library graph it spliced (docs/formats.md (routine interfaces)) —
+//! [`emit_program`]'s own two extra arguments, computed by the compiler
+//! rather than by anything IR-level, since a graph is consumed by grafting
+//! and never becomes an `IrWorld` of its own.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use mtc_core::asm::grid_line as grid;
+use mtc_core::formats::object::{ExportedGraph, GraftProvenance};
 
 use crate::ir::{
     IrCell, IrDispatch, IrMapDst, IrMove, IrProgram, IrRule, IrState, IrTape, IrTapeBinding,
@@ -172,7 +180,16 @@ struct WorldPlan {
     blocks: Vec<Block>,
 }
 
-pub fn emit_program(ir: &IrProgram, options: CodegenOptions) -> TmaOutput {
+/// `graphs`/`grafts`: this unit's own exported-graph digests and its
+/// spliced library-graph digests (docs/formats.md (routine interfaces)),
+/// computed by `compiler::compile` — empty when the unit exports or splices
+/// none, in which case neither directive is emitted at all.
+pub fn emit_program(
+    ir: &IrProgram,
+    options: CodegenOptions,
+    graphs: &[ExportedGraph],
+    grafts: &[GraftProvenance],
+) -> TmaOutput {
     let mut e = Emitter {
         lines: Vec::new(),
         line_map: Vec::new(),
@@ -198,6 +215,16 @@ pub fn emit_program(ir: &IrProgram, options: CodegenOptions) -> TmaOutput {
             }
         }
         e.push(".section code".to_string(), 0);
+    }
+
+    // Object-level interface digests, before the first `.func` (docs/formats.md
+    // (routine interfaces)): every exported graph, then every spliced library
+    // graph, each in this unit's own accumulation order.
+    for g in graphs {
+        e.push(format!(".graph {}, {}", g.name, g.digest), 0);
+    }
+    for g in grafts {
+        e.push(format!(".grafted {}, {}", g.graph, g.digest), 0);
     }
 
     for (w, p) in ir.worlds.iter().zip(&plans) {
@@ -1139,18 +1166,14 @@ machine {
 
     fn ir_of(src: &str) -> IrProgram {
         let a = crate::compiler::analyze(src).expect("analyze");
-        let ex = crate::expand::expand(&a.resolved).expect("expand");
-        let (ir, _) = crate::ir::lower(
-            &ex,
-            &a.resolved,
-            &crate::declarations::Declarations::stdlib(),
-        )
-        .expect("lower");
+        let externals = crate::declarations::Declarations::stdlib();
+        let ex = crate::expand::expand(&a.resolved, &externals).expect("expand");
+        let (ir, _) = crate::ir::lower(&ex, &a.resolved, &externals).expect("lower");
         ir
     }
 
     fn emit(src: &str) -> String {
-        emit_program(&ir_of(src), CodegenOptions::default()).text
+        emit_program(&ir_of(src), CodegenOptions::default(), &[], &[]).text
     }
 
     /// Every example program, once emitted, assembles cleanly — the object
@@ -1439,13 +1462,15 @@ machine {
   entry state s { [*] -> debugger move [>] stop; }
 }";
         let ir = ir_of(src);
-        let kept = emit_program(&ir, CodegenOptions::default()).text;
+        let kept = emit_program(&ir, CodegenOptions::default(), &[], &[]).text;
         assert!(kept.contains("        brk"), "{kept}");
         let stripped = emit_program(
             &ir,
             CodegenOptions {
                 strip_debugger: true,
             },
+            &[],
+            &[],
         )
         .text;
         assert!(!stripped.contains("brk"), "{stripped}");
@@ -1476,7 +1501,7 @@ machine {
 }";
         let mut ir = ir_of(src);
         ir.worlds[0].states[0].dispatch = IrDispatch::Branch;
-        let out = emit_program(&ir, CodegenOptions::default()).text;
+        let out = emit_program(&ir, CodegenOptions::default(), &[], &[]).text;
         let expected = "\
 .section tables
 T0:     .row    [1]
@@ -1502,7 +1527,7 @@ scan__m:
         // A1: `.func` ← the `machine {` line (2); the `scan` head's rd/mtc/djmp
         // ← the state decl line (4); each rule's wrmv/jmp/stp ← its rule line
         // (5/6/7).
-        let out = emit_program(&ir_of(A1), CodegenOptions::default());
+        let out = emit_program(&ir_of(A1), CodegenOptions::default(), &[], &[]);
         let map: std::collections::HashMap<u32, u32> = out.line_map.iter().copied().collect();
         // Locate the emitted lines by content and check their tmc source.
         let lines: Vec<&str> = out.text.lines().collect();

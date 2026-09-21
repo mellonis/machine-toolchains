@@ -252,7 +252,11 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 judge_binding(ctx, &footprints, host, c, args, &mut verdicts);
             }
         }
-        // A graft's target is always a locally defined graph.
+        // A graft's target may be a library graph reached through the
+        // declarations table (`docs/tmt/language.md (headers)`), not only a
+        // locally defined one — `callee` misses for one of those (it is not
+        // in `by_name`), so this lint simply has no binding to judge there,
+        // the same graceful skip an external `call`/`bind` already gets.
         for graft in &host.grafts {
             if let Some(c) = callee(&graft.target) {
                 judge_binding(ctx, &footprints, host, c, &graft.args, &mut verdicts);

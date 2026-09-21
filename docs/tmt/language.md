@@ -643,7 +643,15 @@ the name, since an unnamed non-entry instance would be unreachable.
 
 Grafts nest: a graph may graft another graph, and splicing recurses.
 0.1 rejects a graft whose graph body contains a `call`, reporting it at
-the graft site.
+the graft site — whether the grafted graph is defined in this unit or
+reached through `use`/a qualified path into another unit's declarations
+(a library graph, whose exported body a header carries in full). Either
+way the splice is identical: a graft needs the graph's source, never just
+its signature, so a cross-unit graft resolves against the declarations
+table the same way an unresolved alphabet reference does. The object
+records the digest of the body it spliced, checked at link time against
+the exporting object's own digest for the same graph — a header with no
+compiled object in the link is not checked.
 
 ### `bind`
 

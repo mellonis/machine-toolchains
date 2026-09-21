@@ -2054,17 +2054,18 @@ mod tests {
     /// analyze → expand → lower, panicking on any front-end failure.
     fn lower_of(src: &str) -> (IrProgram, Vec<Diagnostic>) {
         let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
-        let ex = expand(&a.resolved).unwrap_or_else(|e| panic!("expand failed: {e}"));
-        lower(&ex, &a.resolved, &Declarations::stdlib())
-            .unwrap_or_else(|e| panic!("lower failed: {e}"))
+        let externals = Declarations::stdlib();
+        let ex = expand(&a.resolved, &externals).unwrap_or_else(|e| panic!("expand failed: {e}"));
+        lower(&ex, &a.resolved, &externals).unwrap_or_else(|e| panic!("lower failed: {e}"))
     }
 
     /// analyze → expand → lower, expecting the front end to pass and lowering
     /// to fail; returns the lowering `CompileError`.
     fn lower_err_of(src: &str) -> CompileError {
         let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
-        let ex = expand(&a.resolved).unwrap_or_else(|e| panic!("expand failed: {e}"));
-        lower(&ex, &a.resolved, &Declarations::stdlib()).expect_err("expected lowering to fail")
+        let externals = Declarations::stdlib();
+        let ex = expand(&a.resolved, &externals).unwrap_or_else(|e| panic!("expand failed: {e}"));
+        lower(&ex, &a.resolved, &externals).expect_err("expected lowering to fail")
     }
 
     const A1: &str = "\

@@ -781,7 +781,7 @@ impl LanguageService for TmcLanguageService {
         let mut fatal = staged.fatal;
         if let Some(resolved) = &staged.resolved
             && fatal.is_none()
-            && let Err(e) = crate::expand::expand(resolved)
+            && let Err(e) = crate::expand::expand(resolved, &Declarations::stdlib())
         {
             fatal = Some(e);
         }

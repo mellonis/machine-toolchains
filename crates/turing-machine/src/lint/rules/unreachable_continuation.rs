@@ -51,7 +51,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     // tell" (`known_noreturn`'s own `can_return.get` misses), never a
     // fatal. `expanded` is bound in this scope, not inside the `.map`
     // closure, so `can_return`'s borrowed keys outlive it.
-    let expanded = crate::expand::expand(ctx.resolved).ok();
+    let expanded = crate::expand::expand(ctx.resolved, ctx.externals).ok();
     let can_return: HashMap<&str, bool> = expanded
         .as_ref()
         .map(|expanded| {

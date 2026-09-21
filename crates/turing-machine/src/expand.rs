@@ -36,6 +36,7 @@ use crate::compiler::{
     CompileError, CompileErrorKind, Resolved, ResolvedAlphabet, ResolvedCallTarget, ResolvedGraft,
     ResolvedWorld, WorldKind,
 };
+use crate::declarations::Declarations;
 use crate::parser::{
     BindingArg, BindingValue, Continuation, FoldExprKind, FoldExprNode, FoldOp, MapArrow, MoveCell,
     MoveDir, MoveVec, PatternCell, PatternCellKind, Rule, SymLit, SymMap as SrcSymMap, TermKind,
@@ -59,6 +60,12 @@ pub(crate) struct Expanded {
     pub entry_world: Option<usize>,
     /// Non-fatal findings (shadowed rules, product-threshold warnings).
     pub diagnostics: Vec<Diagnostic>,
+    /// Every distinct library graph this compile spliced (a graft target the
+    /// LOCAL graph map missed, resolved through the declarations table),
+    /// first-encountered order — `compiler::compile`'s own input for the
+    /// `.grafted <name>, <digest>` lines it writes (docs/formats.md (routine
+    /// interfaces)).
+    pub spliced_external_graphs: Vec<String>,
 }
 
 /// One emitted world — a machine block or a routine, after expansion.
@@ -1127,7 +1134,8 @@ fn build_composite(
     graft: &ResolvedGraft,
     host: &ResolvedWorld,
     graph: &ResolvedWorld,
-    alphabets: &HashMap<String, ResolvedAlphabet>,
+    resolved: &Resolved,
+    ext_modules: &[&Resolved],
 ) -> Result<(Composite, HashMap<String, Transition2>), CompileError> {
     let args: HashMap<&str, &BindingArg> =
         graft.args.iter().map(|a| (a.name.as_str(), a)).collect();
@@ -1145,8 +1153,11 @@ fn build_composite(
             .iter()
             .position(|t| &t.name == target)
             .expect("T4 resolves the tape target to a host tape");
-        let host_glyphs = &alphabets[&host.tapes[phys].alphabet].glyphs;
-        let graph_glyphs = &alphabets[&gt.alphabet].glyphs;
+        let host_glyphs = alphabet_glyphs(&host.tapes[phys].alphabet, resolved, ext_modules);
+        // The graph's OWN tape alphabet — local for an in-unit graph,
+        // resolved through the declarations table for a library graph
+        // grafted from a header (`alphabet_glyphs`'s own doc).
+        let graph_glyphs = alphabet_glyphs(&gt.alphabet, resolved, ext_modules);
         tapes.push(build_tapemap(
             map.as_ref(),
             phys,
@@ -1203,7 +1214,13 @@ fn cont_key(cont: &HashMap<String, Transition2>) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 // Graph-definition acyclicity: the graft-dependency graph of
 // graph DEFINITIONS must be acyclic (a self- or mutual graft is infinite
-// expansion). Instance-level cycles (continuation loops) stay legal.
+// expansion). Instance-level cycles (continuation loops) stay legal. Over
+// this unit's OWN graphs only — a library's own graft-dependency graph was
+// already checked acyclic when the library's source was itself compiled, and
+// a library graph can never graft back into the unit consuming it (a graft
+// target is a name reachable through THIS unit's own scopes, and nothing on
+// the declarations-table path lets a library body name a graph of the
+// consumer's).
 // ---------------------------------------------------------------------------
 
 fn check_graph_acyclicity(graphs: &HashMap<&str, &ResolvedWorld>) -> Result<(), CompileError> {
@@ -1225,8 +1242,10 @@ fn acyclicity_dfs<'a>(
     color.insert(name, 1);
     let world = graphs[name];
     for graft in &world.grafts {
-        // A graft target is always a locally-defined graph (T4's
-        // `undefined-graph`); look up its canonical key in `graphs`.
+        // A graft target absent from this LOCAL map is a library graph
+        // (read from a header's declarations table) — its own definition's
+        // acyclicity was already checked when the library's source was
+        // itself compiled, so it is skipped here, not an error.
         let Some((&target, _)) = graphs.get_key_value(graft.target.as_str()) else {
             continue;
         };
@@ -1292,13 +1311,37 @@ impl NameGen {
 
 fn tape_infos(
     world: &ResolvedWorld,
-    alphabets: &HashMap<String, ResolvedAlphabet>,
+    resolved: &Resolved,
+    ext_modules: &[&Resolved],
 ) -> Vec<TapeInfo> {
     world
         .tapes
         .iter()
-        .map(|t| TapeInfo::new(&alphabets[&t.alphabet].glyphs))
+        .map(|t| TapeInfo::new(alphabet_glyphs(&t.alphabet, resolved, ext_modules)))
         .collect()
+}
+
+/// A tape alphabet's glyph list, resolved the same local/cross-unit way
+/// `compiler::resolve_tape_alphabet` resolves a tape's own reference: this
+/// unit's own `resolved.alphabets` first, then the declarations table. A
+/// HOST world's tapes are always local (`resolve_tape_alphabet` already
+/// inserted an imported entry into `resolved.alphabets` at resolve time),
+/// but a GRAFTED library graph's own tapes name alphabets of the LIBRARY's
+/// own unit — the header prints every alphabet a printed graph body
+/// references (`docs/tmt/language.md (headers)`), so those names resolve
+/// here through the same declarations table the graft target itself came
+/// from.
+fn alphabet_glyphs<'a>(
+    name: &str,
+    resolved: &'a Resolved,
+    ext_modules: &[&'a Resolved],
+) -> &'a [String] {
+    if let Some(a) = resolved.alphabets.get(name) {
+        return &a.glyphs;
+    }
+    crate::compiler::find_external_alphabet(ext_modules, name).expect(
+        "a spliced graph's tape alphabet resolves locally or through the declarations table",
+    )
 }
 
 /// A world's user-visible state-name space (own states, graft instances,
@@ -1379,29 +1422,56 @@ fn expand_grafts_into<'a>(
     host: &ResolvedWorld,
     resolved: &'a Resolved,
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
+    ext_modules: &[&'a Resolved],
     memo: &mut HashMap<String, GraphExpansion>,
     warn: &mut Vec<Diagnostic>,
     namegen: &mut NameGen,
     out: &mut Vec<ExpandedState>,
     alias: &mut HashMap<String, String>,
+    spliced_external: &mut Vec<String>,
 ) -> Result<Option<String>, CompileError> {
     let mut dedup: HashMap<Vec<u8>, String> = HashMap::new();
     let mut graft_entry: Option<String> = None;
 
     for graft in &host.grafts {
-        let graph = graphs[graft.target.as_str()];
-        let gx = expand_graph(graft.target.as_str(), graphs, resolved, memo, warn)?;
-        // A grafted graph body must not contain a call yet — splicing it into
-        // host space needs binding composition (not implemented). Detect
-        // before emitting anything; the graft-site span names the
-        // instantiation that can't be done, the message names the call.
+        // A target absent from THIS unit's own graph map was resolved
+        // through the declarations table (`compiler::resolve_world_reuse`'s
+        // own check already proved it is present one place or the other) —
+        // a library graph read from a header, `docs/tmt/language.md
+        // (headers)`. Record it (deduped) so `compiler::compile` can emit
+        // its `.grafted` digest line.
+        let graph = match graphs.get(graft.target.as_str()) {
+            Some(&g) => g,
+            None => {
+                if !spliced_external.iter().any(|n| n == &graft.target) {
+                    spliced_external.push(graft.target.clone());
+                }
+                crate::compiler::find_external_graph(ext_modules, graft.target.as_str())
+                    .expect("resolve_world_reuse only accepts a target present locally or in the declarations table")
+            }
+        };
+        let gx = expand_graph(
+            graft.target.as_str(),
+            graphs,
+            ext_modules,
+            resolved,
+            memo,
+            warn,
+            spliced_external,
+        )?;
+        // A grafted graph body must not contain a call — splicing a
+        // call-bearing body into host space is not what a graft does.
+        // Detect before emitting anything; the graft-site span names the
+        // instantiation that can't be done, the message names the call. The
+        // same guard fires whether the graph's source is local or read from
+        // a library's header.
         if let Some(call) = first_grafted_call(&gx.states) {
             return Err(CompileError {
                 span: graft.target_span,
                 kind: CompileErrorKind::GraftCallUnsupported(call.to_string()),
             });
         }
-        let (comp, cont) = build_composite(graft, host, graph, &resolved.alphabets)?;
+        let (comp, cont) = build_composite(graft, host, graph, resolved, ext_modules)?;
 
         let mut key = graft.target.clone().into_bytes();
         key.push(0);
@@ -1478,11 +1548,12 @@ fn sanitize(name: &str) -> String {
 
 /// The target of the first `call` in a graph's expanded body (routine call or
 /// bind call), in state-then-rule order, or `None`. A grafted graph body
-/// carrying a call cannot be spliced yet: its binding args still name the
+/// carrying a call cannot be spliced: its binding args still name the
 /// graph's signature tapes and its continuation is a graph-space state, and
-/// the binding composition that would rewrite both into the host is not
-/// implemented. The scan runs at SPLICE time only, so a graph that carries a
-/// call but is never grafted stays legal and dead (it is never expanded).
+/// rewriting both into host space is not what a graft does — such a graph
+/// is written as a routine instead. The scan runs at SPLICE time only, so a
+/// graph that carries a call but is never grafted stays legal and dead (it
+/// is never expanded).
 fn first_grafted_call(states: &[ExpandedState]) -> Option<&str> {
     states
         .iter()
@@ -1496,19 +1567,28 @@ fn first_grafted_call(states: &[ExpandedState]) -> Option<&str> {
 
 /// Expand a graph to its memoized graph-space form: own states range-expanded,
 /// nested grafts spliced, aliases resolved. The graft-dependency DAG being
-/// acyclic, the recursion terminates.
+/// acyclic, the recursion terminates. `name` may be a LOCAL graph (in
+/// `graphs`) or a library graph reached only through `ext_modules` — either
+/// way `graphs` stays the acyclicity check's own local-only map, so a miss
+/// here falls back to the declarations table.
 fn expand_graph<'a>(
     name: &str,
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
+    ext_modules: &[&'a Resolved],
     resolved: &'a Resolved,
     memo: &mut HashMap<String, GraphExpansion>,
     warn: &mut Vec<Diagnostic>,
+    spliced_external: &mut Vec<String>,
 ) -> Result<GraphExpansion, CompileError> {
     if let Some(gx) = memo.get(name) {
         return Ok(gx.clone());
     }
-    let world = graphs[name];
-    let tapes = tape_infos(world, &resolved.alphabets);
+    let world = match graphs.get(name) {
+        Some(&w) => w,
+        None => crate::compiler::find_external_graph(ext_modules, name)
+            .expect("resolve_world_reuse only accepts a target present locally or in the declarations table"),
+    };
+    let tapes = tape_infos(world, resolved, ext_modules);
     let mut states = Vec::new();
     expand_own_states(world, &tapes, warn, &mut states)?;
     let mut namegen = NameGen::new(reserved_names(world));
@@ -1517,11 +1597,13 @@ fn expand_graph<'a>(
         world,
         resolved,
         graphs,
+        ext_modules,
         memo,
         warn,
         &mut namegen,
         &mut states,
         &mut alias,
+        spliced_external,
     )?;
     resolve_aliases(&mut states, &alias);
     let entry = world_entry(world, graft_entry, &alias);
@@ -1642,8 +1724,14 @@ fn check_state_rows(
 
 /// Expand a resolved module: graft splicing then range expansion, producing
 /// worlds whose states carry only concrete, index-resolved rules (IR
-/// lowering input).
-pub(crate) fn expand(resolved: &Resolved) -> Result<Expanded, CompileError> {
+/// lowering input). `externals` is this compile's own declarations table —
+/// a graft whose target this unit's own graph map misses resolves against
+/// it (`docs/tmt/language.md (headers)`), the same way an unresolved tape
+/// alphabet does.
+pub(crate) fn expand(
+    resolved: &Resolved,
+    externals: &Declarations,
+) -> Result<Expanded, CompileError> {
     let graphs: HashMap<&str, &ResolvedWorld> = resolved
         .worlds
         .iter()
@@ -1651,11 +1739,18 @@ pub(crate) fn expand(resolved: &Resolved) -> Result<Expanded, CompileError> {
         .map(|w| (w.name.as_str(), w))
         .collect();
     check_graph_acyclicity(&graphs)?;
+    let ext_modules = externals.modules();
 
     let mut memo: HashMap<String, GraphExpansion> = HashMap::new();
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut worlds: Vec<ExpandedWorld> = Vec::new();
     let mut entry_world = None;
+    // Every DISTINCT library graph spliced anywhere in this compile — a
+    // direct graft, or one reached through another library graph's own
+    // nested grafts — recorded once, first-encountered order
+    // (`expand_grafts_into`'s own doc). `compiler::compile` turns this into
+    // the `.grafted` digest lines.
+    let mut spliced_external_graphs: Vec<String> = Vec::new();
 
     for (idx, world) in resolved.worlds.iter().enumerate() {
         if world.kind == WorldKind::Graph {
@@ -1664,7 +1759,7 @@ pub(crate) fn expand(resolved: &Resolved) -> Result<Expanded, CompileError> {
         if Some(idx) == resolved.entry_world {
             entry_world = Some(worlds.len());
         }
-        let tapes = tape_infos(world, &resolved.alphabets);
+        let tapes = tape_infos(world, resolved, &ext_modules);
         let mut states = Vec::new();
         expand_own_states(world, &tapes, &mut diagnostics, &mut states)?;
         let mut namegen = NameGen::new(reserved_names(world));
@@ -1673,11 +1768,13 @@ pub(crate) fn expand(resolved: &Resolved) -> Result<Expanded, CompileError> {
             world,
             resolved,
             &graphs,
+            &ext_modules,
             &mut memo,
             &mut diagnostics,
             &mut namegen,
             &mut states,
             &mut alias,
+            &mut spliced_external_graphs,
         )?;
         resolve_aliases(&mut states, &alias);
         let entry = Some(world_entry(world, graft_entry, &alias));
@@ -1715,6 +1812,7 @@ pub(crate) fn expand(resolved: &Resolved) -> Result<Expanded, CompileError> {
         worlds,
         entry_world,
         diagnostics,
+        spliced_external_graphs,
     })
 }
 
@@ -2227,7 +2325,8 @@ mod expand_tests {
 
     fn expand_ok(src: &str) -> Expanded {
         let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
-        expand(&a.resolved).unwrap_or_else(|e| panic!("expand failed: {e}"))
+        expand(&a.resolved, &Declarations::stdlib())
+            .unwrap_or_else(|e| panic!("expand failed: {e}"))
     }
 
     fn machine(ex: &Expanded) -> &ExpandedWorld {
@@ -2452,15 +2551,15 @@ graph loop(tape t: marks) {
 machine { tape w: marks; entry state s { [*] -> stop; } }
 ";
         let a = analyze(src).expect("analyze");
-        let err = expand(&a.resolved).unwrap_err();
+        let err = expand(&a.resolved, &Declarations::stdlib()).unwrap_err();
         assert_eq!(err.kind.code(), "graft-cycle");
     }
 
     #[test]
     fn grafting_a_call_bearing_graph_is_a_clear_error() {
-        // A graph whose body calls a routine is legal source (T4 permits it),
-        // but splicing it into a host needs binding composition (not
-        // implemented). Grafting it is a spanned error at the graft site.
+        // A graph whose body calls a routine is legal source, but splicing a
+        // call-bearing body into a host is not what a graft does. Grafting
+        // it is a spanned error at the graft site.
         let src = "\
 alphabet marks { '_', 'x' }
 routine helper(tape t: marks) { entry state h { [*] -> return; } }
@@ -2482,7 +2581,7 @@ machine {
             .expect("machine")
             .grafts[0]
             .target_span;
-        let err = expand(&a.resolved).unwrap_err();
+        let err = expand(&a.resolved, &Declarations::stdlib()).unwrap_err();
         assert_eq!(err.kind.code(), "graft-call-unsupported");
         // The span names the graft instantiation, not the call site inside g.
         assert_eq!(err.span, graft_span);
@@ -2504,7 +2603,8 @@ machine {
 }
 ";
         let a = analyze(src).expect("analyze");
-        expand(&a.resolved).expect("ungrafted call-bearing graph expands clean");
+        expand(&a.resolved, &Declarations::stdlib())
+            .expect("ungrafted call-bearing graph expands clean");
     }
 
     #[test]
@@ -2521,7 +2621,7 @@ machine {
 }
 ";
         let a = analyze(src).expect("analyze");
-        let err = expand(&a.resolved).unwrap_err();
+        let err = expand(&a.resolved, &Declarations::stdlib()).unwrap_err();
         assert_eq!(err.kind.code(), "exact-row-conflict");
     }
 
@@ -2536,7 +2636,10 @@ machine {{ tape w: ha; entry graft g(t = w{map}, done = fin) as x; state fin {{ 
 "
         );
         let a = analyze(&src).expect("analyze");
-        expand(&a.resolved).unwrap_err().kind.code()
+        expand(&a.resolved, &Declarations::stdlib())
+            .unwrap_err()
+            .kind
+            .code()
     }
 
     #[test]

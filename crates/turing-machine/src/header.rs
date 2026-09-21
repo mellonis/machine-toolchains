@@ -145,12 +145,15 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use mtc_core::formats::object::{ExportedAlphabet, Interface, ObjectFile, SymbolDef};
+use mtc_core::formats::crc32::crc32;
+use mtc_core::formats::object::{
+    ExportedAlphabet, ExportedGraph, Interface, ObjectFile, SymbolDef,
+};
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
-    self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, full_name,
-    published_writes,
+    self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, WorldKind,
+    full_name, published_writes,
 };
 use crate::declarations::Declarations;
 use crate::footprint::{self, FootprintTable};
@@ -210,7 +213,7 @@ fn render_from_source(source: &str, mode: ReadMode) -> Result<String, CompileErr
     // fallback a bodiless routine always takes, so the two failure modes
     // share one path rather than needing a second.
     let returns: HashMap<String, bool> = if analysis.program.routines.iter().any(|r| r.has_body) {
-        crate::expand::expand(&analysis.resolved)
+        crate::expand::expand(&analysis.resolved, &externals)
             .map(|expanded| {
                 expanded
                     .worlds
@@ -266,8 +269,16 @@ pub(crate) fn read_extern(path: &Path, source: &str) -> Result<Resolved, Compile
     } else {
         ReadMode::Program
     };
-    let analysis = compiler::analyze_with_mode(source, &Declarations::stdlib(), mode)?;
-    Ok(analysis.resolved)
+    let externals = Declarations::stdlib();
+    let analysis = compiler::analyze_with_mode(source, &externals, mode)?;
+    // Every graph world DOES carry its body (see the mode doc above), so
+    // this is exactly where a later graft of one needs its digest to come
+    // from — this module's own AST is about to be dropped, and `Resolved`
+    // alone carries no way to recompute it (`stamp_graph_digests`).
+    let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
+    let mut resolved = analysis.resolved;
+    stamp_graph_digests(&analysis.program, &mut resolved, &footprint);
+    Ok(resolved)
 }
 
 /// Render the exported declarations a compiled object still carries — the
@@ -1068,15 +1079,18 @@ fn routine_lines(
     lines
 }
 
-fn graph_lines(
+/// A graph's canonical SIGNATURE AND BODY — `export graph NAME(...) { … }`
+/// — without the leading `?` doc-line prefix [`graph_lines`] adds.
+/// [`graph_digest`]'s own input: a graph's documentation is deliberately
+/// left out of what gets hashed, so a doc-only edit never moves the digest.
+fn graph_body_lines(
     graph: &Graph,
     world: &ResolvedWorld,
     resolved: &Resolved,
     footprint: &FootprintTable,
 ) -> Vec<String> {
-    let mut lines = doc_lines(graph.doc.as_ref());
     let sig = signature_text(&graph.sig, world, resolved, footprint);
-    lines.push(format!("export graph {}({}) {{", graph.name, sig));
+    let mut lines = vec![format!("export graph {}({}) {{", graph.name, sig)];
     for state in &graph.states {
         lines.extend(indented(state_lines(state)));
     }
@@ -1088,6 +1102,105 @@ fn graph_lines(
     }
     lines.push("}".to_string());
     lines
+}
+
+fn graph_lines(
+    graph: &Graph,
+    world: &ResolvedWorld,
+    resolved: &Resolved,
+    footprint: &FootprintTable,
+) -> Vec<String> {
+    let mut lines = doc_lines(graph.doc.as_ref());
+    lines.extend(graph_body_lines(graph, world, resolved, footprint));
+    lines
+}
+
+/// The digest a graft records for the body it spliced, and an exporting
+/// unit records for each graph it exports (docs/formats.md (routine
+/// interfaces)): the CRC-32 of [`graph_body_lines`]'s own text — this
+/// module's canonical rendering of a graph's signature and body, proven
+/// insensitive to source whitespace and comments
+/// (`the_printer_is_insensitive_to_comments_and_whitespace`) and
+/// deliberately excluding the graph's own `?` doc lines, so documenting a
+/// graph never raises a graft-drift finding.
+///
+/// ONE function computes it, called from both sides: the exporting unit's
+/// own `compile()`, directly over its own `Program`/`Resolved`/footprint,
+/// and a grafting consumer, indirectly — [`stamp_graph_digests`] runs this
+/// same function once, when a `Resolved` is about to be handed to
+/// [`crate::declarations::Declarations`] (`read_extern`, the embedded
+/// stdlib's own header), and the consumer reads the result straight off
+/// the [`ResolvedWorld`] it spliced. Never a second computation to drift
+/// from this one.
+pub(crate) fn graph_digest(
+    graph: &Graph,
+    world: &ResolvedWorld,
+    resolved: &Resolved,
+    footprint: &FootprintTable,
+) -> u32 {
+    let text = graph_body_lines(graph, world, resolved, footprint).join("\n");
+    crc32(text.as_bytes())
+}
+
+/// Every graph THIS unit exports, with [`graph_digest`] — the exporting
+/// half of the graft-drift check (docs/formats.md (routine interfaces)):
+/// `compiler::compile` writes these as `.graph <name>, <digest>` lines,
+/// which the assembler parses back into `Interface::graphs`.
+pub(crate) fn exported_graph_digests(
+    program: &Program,
+    resolved: &Resolved,
+    footprint: &FootprintTable,
+) -> Vec<ExportedGraph> {
+    let worlds: HashMap<&str, &ResolvedWorld> = resolved
+        .worlds
+        .iter()
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+    program
+        .graphs
+        .iter()
+        .filter(|g| g.exported)
+        .filter_map(|graph| {
+            let full = full_name(&graph.ns, &graph.name);
+            let world = worlds.get(full.as_str())?;
+            Some(ExportedGraph {
+                digest: graph_digest(graph, world, resolved, footprint),
+                name: full,
+            })
+        })
+        .collect()
+}
+
+/// Stamp [`ResolvedWorld::digest`] on every graph world of a just-parsed
+/// declarations module, via [`graph_digest`] — the ONE place outside an
+/// exporting unit's own `compile()` this digest is ever computed. Run right
+/// where `program` (the AST `graph_digest` needs) is still in scope, before
+/// the [`Resolved`] alone is handed off to [`crate::declarations::
+/// Declarations`] (`read_extern`, the embedded stdlib's own header): a
+/// `Declarations` module carries no `Program`, so a consumer reading it
+/// back later has nothing to recompute the digest FROM — it reads this
+/// stamped field instead.
+pub(crate) fn stamp_graph_digests(
+    program: &Program,
+    resolved: &mut Resolved,
+    footprint: &FootprintTable,
+) {
+    let digests: Vec<(usize, u32)> = program
+        .graphs
+        .iter()
+        .filter_map(|graph| {
+            let full = full_name(&graph.ns, &graph.name);
+            let idx = resolved
+                .worlds
+                .iter()
+                .position(|w| w.kind == WorldKind::Graph && w.name == full)?;
+            let digest = graph_digest(graph, &resolved.worlds[idx], resolved, footprint);
+            Some((idx, digest))
+        })
+        .collect();
+    for (idx, digest) in digests {
+        resolved.worlds[idx].digest = Some(digest);
+    }
 }
 
 fn signature_text(

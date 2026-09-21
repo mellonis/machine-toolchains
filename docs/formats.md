@@ -690,6 +690,13 @@ object-level, not per-function, but they still oblige the all-or-none
 rule above — a digest is meaningless without the interface it is checked
 against.
 
+At link, every recorded `.grafted` digest is checked against the matching
+`.graph` digest of the object that exports it, when one is present in the
+link — first-wins in the linker's own namespace order, exactly as a symbol
+resolves. A graph no input to the link exports is **not** checked: that is
+a header-only library, the one place a header's own declaration is
+trusted outright rather than verified against a compiled object.
+
 **Glyph literals and glyph lists.** A glyph literal is any **non-empty**
 content in single quotes — `'x'`, `'ab'`, `'->'` — so one grapheme, an
 emoji, or a multi-scalar sequence are each a single glyph, with exactly

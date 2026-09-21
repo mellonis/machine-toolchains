@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use mtc_core::diagnostics::{Diagnostic, Span};
-use mtc_core::formats::object::{ExportedAlphabet, ImportedAlphabet, ObjectFile};
+use mtc_core::formats::object::{ExportedAlphabet, GraftProvenance, ImportedAlphabet, ObjectFile};
 use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
@@ -174,7 +174,7 @@ pub enum CompileErrorKind {
     },
     /// A `graft` target names no graph in scope. A graft needs the graph's
     /// source, so an unresolved graft target is fatal (unlike a `call`).
-    UndefinedGraph(String),
+    UndefinedGraph(GraphMiss),
     /// A binding argument names a parameter the signature does not declare.
     UnknownArg(String),
     /// Two binding arguments share one parameter name.
@@ -230,15 +230,19 @@ pub enum CompileErrorKind {
     /// cycle. Instance-level cycles (continuation loops) stay legal.
     GraftCycle(String),
     /// A grafted graph's body contains a `call` (a routine call or a bind
-    /// call) — splicing it into the host is not supported yet. The call's
+    /// call) — splicing it into the host is not supported. The call's
     /// binding args still name the GRAPH's signature tapes and its `then`
     /// continuation is a graph-space state; rewriting both into host space
-    /// needs the binding composition that is not implemented, so grafting
-    /// such a graph is a clear error rather than silently-wrong output.
-    /// `name` is the call's target. The check runs at SPLICE time: a graph
-    /// that carries a call but is never grafted stays legal and dead (an
-    /// ungrafted graph is never expanded — the same unreachable-graph
-    /// posture the resolver takes).
+    /// is not what a graft does, so grafting such a graph is a clear error
+    /// rather than silently-wrong output. A call-bearing graph is written
+    /// as a routine instead — `state` parameters give it several exits the
+    /// way a graph's own exit parameters would. `name` is the call's
+    /// target. The check runs at SPLICE time — the same guard fires whether
+    /// the graph's source is local or read from a library's header,
+    /// `docs/tmt/language.md (headers)` — and a graph that carries a call
+    /// but is never grafted stays legal and dead (an ungrafted graph is
+    /// never expanded — the same unreachable-graph posture the resolver
+    /// takes).
     GraftCallUnsupported(String),
     /// A symbol map (a graft binding's, or a named map declaration's own
     /// pairs) references a glyph that is not in the alphabet it maps (the
@@ -365,6 +369,21 @@ pub enum MapMiss {
     /// Nothing in scope resolves the name and nothing declares it anywhere
     /// reachable.
     NoSuchMap(String),
+    /// Reached through `use` or a qualified path, but no declarations
+    /// module given to this compile declares it.
+    DeclarationsNotGiven(String),
+}
+
+/// [`AlphabetMiss`]'s graft-target analog (`CompileErrorKind::UndefinedGraph`)
+/// — same two readings, same split. A graft needs the graph's SOURCE, so the
+/// declarations-not-given reading resolves the same way an alphabet's does:
+/// present in the declarations table (a library graph a header carries with
+/// its full body) or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphMiss {
+    /// Nothing in scope resolves the name and nothing declares it anywhere
+    /// reachable.
+    NoSuchGraph(String),
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
@@ -674,8 +693,15 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::WrongTargetKind { name, expected } => {
                 write!(f, "`{name}` is not {expected}")
             }
-            CompileErrorKind::UndefinedGraph(n) => {
+            CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph(n)) => {
                 write!(f, "unknown graph `{n}` — a graft needs the graph's source")
+            }
+            CompileErrorKind::UndefinedGraph(GraphMiss::DeclarationsNotGiven(n)) => {
+                write!(
+                    f,
+                    "graph `{n}` is declared by `use` (or named by a qualified path), \
+                     but its declarations were not given — pass `--extern` or declare it locally"
+                )
             }
             CompileErrorKind::UnknownArg(n) => {
                 write!(f, "`{n}` is not a parameter of this signature")
@@ -743,7 +769,7 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::GraftCallUnsupported(name) => {
                 write!(
                     f,
-                    "this graft splices a graph whose body calls `{name}` — a call inside a grafted graph body is not supported yet; it awaits binding composition"
+                    "this graft splices a graph whose body calls `{name}` — a call-bearing graph is not spliced; write it as a routine, with `state` parameters if it needs several exits"
                 )
             }
             CompileErrorKind::MapSymbolNotInAlphabet(g) => {
@@ -1110,6 +1136,17 @@ pub(crate) struct ResolvedWorld {
     pub entry: Option<String>,
     /// Resolved `call` transitions in this world's rules, in source order.
     pub calls: Vec<ResolvedCall>,
+    /// A GRAPH world's digest — the CRC-32 of its canonical signature and
+    /// body (`header::graph_digest`), stamped once a `Resolved` is about to
+    /// be handed to [`Declarations`] (`header::read_extern`, the embedded
+    /// stdlib's own header) so a consumer grafting it from the declarations
+    /// table can read the digest straight off the world it spliced, with no
+    /// AST of its own to recompute it from (docs/formats.md (routine
+    /// interfaces)). `None` for a routine or machine world, and for a graph
+    /// world this compile's own `analysis.resolved` carries locally — that
+    /// exporting side calls `header::graph_digest` directly, over its own
+    /// `Program`/`Resolved`/footprint, never through this field.
+    pub digest: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1148,8 +1185,10 @@ pub(crate) struct ResolvedTape {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedGraft {
     pub entry: bool,
-    /// Mangled graph name (always a locally-defined graph — a graft needs
-    /// the source).
+    /// Mangled graph name — a locally-defined graph, or one reached through
+    /// the declarations table (a library graph a header carries with its
+    /// full body, `docs/tmt/language.md (headers)`). Either way a graft
+    /// needs the graph's source, never just its signature.
     pub target: String,
     pub target_span: Span,
     pub as_name: Option<String>,
@@ -2493,7 +2532,7 @@ fn resolve_world(
             kind: CompileErrorKind::TooManyStateParams(state_params.len()),
         }
     })?;
-    let (grafts, binds, entry) = resolve_world_reuse(grafts, binds, states, ns, scopes)?;
+    let (grafts, binds, entry) = resolve_world_reuse(grafts, binds, states, ns, scopes, externals)?;
     let calls = resolve_world_calls(states, &binds, ns, scopes);
     Ok(ResolvedWorld {
         kind,
@@ -2510,6 +2549,7 @@ fn resolve_world(
         binds,
         entry,
         calls,
+        digest: None,
     })
 }
 
@@ -2590,7 +2630,8 @@ fn resolve_machine_world(
             preserves: None,
         });
     }
-    let (grafts, binds, entry) = resolve_world_reuse(&m.grafts, &m.binds, &m.states, &[], scopes)?;
+    let (grafts, binds, entry) =
+        resolve_world_reuse(&m.grafts, &m.binds, &m.states, &[], scopes, externals)?;
     let calls = resolve_world_calls(&m.states, &binds, &[], scopes);
     Ok(ResolvedWorld {
         kind: WorldKind::Machine,
@@ -2609,6 +2650,7 @@ fn resolve_machine_world(
         binds,
         entry,
         calls,
+        digest: None,
     })
 }
 
@@ -2677,8 +2719,13 @@ fn resolve_tape_alphabet(
 /// First-match lookup of a mangled alphabet name among external
 /// declarations modules, in table order — the alphabet analog of
 /// `footprint::find_external`'s routine/graph lookup, over
-/// `Resolved::alphabets` instead of `Resolved::worlds`.
-fn find_external_alphabet<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a [String]> {
+/// `Resolved::alphabets` instead of `Resolved::worlds`. `pub(crate)`: the
+/// graft splice (`expand.rs`) reads a library graph's own tape alphabets
+/// the same local-then-external way a tape declaration's own reference does.
+pub(crate) fn find_external_alphabet<'a>(
+    externals: &[&'a Resolved],
+    name: &str,
+) -> Option<&'a [String]> {
     externals
         .iter()
         .find_map(|module| module.alphabets.get(name).map(|a| a.glyphs.as_slice()))
@@ -2689,6 +2736,28 @@ fn find_external_alphabet<'a>(externals: &[&'a Resolved], name: &str) -> Option<
 /// over `Resolved::maps`.
 fn find_external_map<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a ResolvedMapDecl> {
     externals.iter().find_map(|module| module.maps.get(name))
+}
+
+/// First-match lookup of a mangled GRAPH name among external declarations
+/// modules, in table order — [`find_external_alphabet`]'s graft-target twin,
+/// over `Resolved::worlds` (kind [`WorldKind::Graph`] only, no `exported`
+/// filter — the same no-filter precedent [`Declarations::routine`] sets: a
+/// `.tmh` never carries a non-exported graph at all, since only an exported
+/// graph's body is ever printed, so the filter would be redundant for that
+/// reader and would wrongly refuse a private graph read leniently from a
+/// `--extern .tmc`). `pub(crate)`: both `resolve_world_reuse` (does the
+/// declarations table carry this target at all) and `expand.rs` (the
+/// splice itself, and its recursive nested grafts) call it.
+pub(crate) fn find_external_graph<'a>(
+    externals: &[&'a Resolved],
+    name: &str,
+) -> Option<&'a ResolvedWorld> {
+    externals.iter().find_map(|module| {
+        module
+            .worlds
+            .iter()
+            .find(|w| w.kind == WorldKind::Graph && w.name == name)
+    })
 }
 
 /// Resolve one `writes`/`preserves` clause into a symbol-index set in its
@@ -2740,8 +2809,12 @@ fn resolve_contract_clause(
 /// Resolve a world's graft targets (to mangled graph names) and bind targets
 /// (to mangled routine names), and compute the entry name. Target-KIND and
 /// arg checks run later in `check_worlds` (this pass only wires the
-/// structure); an unresolved graft target is fatal here (a graft needs the
-/// graph's source).
+/// structure); an unresolved graft target is fatal here. A graft needs the
+/// graph's SOURCE, not just its signature — reached either locally (this
+/// unit's own `graph` definition) or through the declarations table (a
+/// library graph a header carries with its full body,
+/// `docs/tmt/language.md (headers)`), the same local/cross-unit split
+/// [`resolve_tape_alphabet`] gives an alphabet reference.
 type WorldReuse = (Vec<ResolvedGraft>, Vec<ResolvedBind>, Option<String>);
 
 fn resolve_world_reuse(
@@ -2750,8 +2823,10 @@ fn resolve_world_reuse(
     states: &[State],
     ns: &[String],
     scopes: &Scopes,
+    externals: &Declarations,
 ) -> Result<WorldReuse, CompileError> {
     let mut rgrafts = Vec::new();
+    let ext_modules = externals.modules();
     for g in grafts {
         let joined = g.target.joined();
         let target = match scopes.resolve(&joined, ns) {
@@ -2767,11 +2842,29 @@ fn resolve_world_reuse(
                     },
                 });
             }
-            // Unresolved or external — a graft needs the graph's source.
+            // Reached only through `use` or a qualified path (no LOCAL
+            // kind): a genuine cross-unit reference. Present in the
+            // declarations table — a library graph, carried with its full
+            // body — resolves; absent there is a unit whose declarations
+            // were never given.
+            Some(r) if r.kind.is_none() => {
+                if find_external_graph(&ext_modules, &r.full).is_some() {
+                    r.full
+                } else {
+                    return Err(CompileError {
+                        span: g.target.span,
+                        kind: CompileErrorKind::UndefinedGraph(GraphMiss::DeclarationsNotGiven(
+                            r.full,
+                        )),
+                    });
+                }
+            }
+            // Nothing in scope resolves the name and nothing declares it
+            // anywhere reachable.
             _ => {
                 return Err(CompileError {
                     span: g.target.span,
-                    kind: CompileErrorKind::UndefinedGraph(joined),
+                    kind: CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph(joined)),
                 });
             }
         };
@@ -2984,7 +3077,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     // instead).
     let mut unreachable_diags = Vec::new();
     drop_unreachable_rules(&mut analysis.resolved, &mut unreachable_diags);
-    let expanded = crate::expand::expand(&analysis.resolved)?;
+    let expanded = crate::expand::expand(&analysis.resolved, &options.externals)?;
     let (mut ir, ir_warnings) = lower(&expanded, &analysis.resolved, &options.externals)?;
 
     // Validate every compiler-produced world before codegen relies on the
@@ -3011,11 +3104,51 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
         ir_snapshots.push(("final".to_string(), ir.clone()));
     }
 
+    // Both interface digests are computed BEFORE codegen: unlike an exported
+    // alphabet, `.graph`/`.grafted` have an assembly spelling
+    // (docs/formats.md (routine interfaces)) and must reach the OBJECT
+    // through that TEXT, so codegen writes the lines and the assembler
+    // parses them back into `Interface::graphs`/`ObjectFile::grafts` — never
+    // a post-assembly field fill, which would leave the `-S` text disagreeing
+    // with the object.
+    //
+    // This unit's own exported graphs: [`header::graph_digest`] over this
+    // compile's own AST/resolved module/footprint — the SAME function a
+    // grafting consumer's digest was stamped with (`header::
+    // stamp_graph_digests`, run once at `read_extern`/the embedded stdlib's
+    // own header read), so the two agree by construction for a
+    // compiler-produced pair.
+    let ext_modules = options.externals.modules();
+    let footprint = crate::footprint::infer_resolved_with(&analysis.resolved, &ext_modules);
+    let exported_graphs =
+        crate::header::exported_graph_digests(&analysis.program, &analysis.resolved, &footprint);
+    // Every DISTINCT library graph this unit spliced anywhere (a direct
+    // graft, or one reached through another library graph's own nested
+    // grafts) — `expand::expand` records the name at the point its target
+    // missed the local graph map; the digest itself was stamped onto that
+    // graph's `ResolvedWorld` when its declarations module was read, since
+    // this unit has no AST of its own to recompute it from.
+    let spliced_grafts: Vec<GraftProvenance> = expanded
+        .spliced_external_graphs
+        .iter()
+        .map(|name| {
+            let digest = find_external_graph(&ext_modules, name)
+                .and_then(|w| w.digest)
+                .expect("a graph reached through the declarations table carries a stamped digest");
+            GraftProvenance {
+                graph: name.clone(),
+                digest,
+            }
+        })
+        .collect();
+
     let tma = emit_program(
         &ir,
         CodegenOptions {
             strip_debugger: options.strip_debugger,
         },
+        &exported_graphs,
+        &spliced_grafts,
     );
     let assemble = |text: &str| {
         crate::asm::assemble(text, options.debug_info).map_err(|e| CompileError {
@@ -3885,7 +4018,7 @@ mod tests {
                 name: "x".into(),
                 expected: "a routine",
             },
-            CompileErrorKind::UndefinedGraph("x".into()),
+            CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph("x".into())),
             CompileErrorKind::UnknownArg("x".into()),
             CompileErrorKind::DuplicateArg("x".into()),
             CompileErrorKind::MissingArg("x".into()),
