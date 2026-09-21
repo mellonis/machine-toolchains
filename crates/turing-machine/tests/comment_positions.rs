@@ -145,6 +145,14 @@ const ALREADY_CORRECT: &[(&str, &str)] = &[
         "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab @C@\n  ) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
     ),
     (
+        "routine/paren-noreturn",
+        "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) @C@\n  noreturn {\n    entry state s { [*] -> goto s; }\n  }\n}\n",
+    ),
+    (
+        "routine/noreturn-brace",
+        "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) noreturn @C@\n  {\n    entry state s { [*] -> goto s; }\n  }\n}\n",
+    ),
+    (
         "machine/open-brace",
         "alphabet ab { '_', 'a' }\nmachine { @C@\n  tape main: ab;\n  state fin { [*] -> stop; }\n}\n",
     ),

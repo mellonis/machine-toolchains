@@ -2505,6 +2505,14 @@ fn render_reuse(
         .iter()
         .rposition(|e| e.kind() == TmcKind::RParen.into())
         .expect("a REUSE signature closes with `)`");
+    // The slice between the signature's `)` and the closing token can hold
+    // exactly one significant token today — a routine's own `noreturn`
+    // clause — alongside whatever comments. The comment-bearing arm below
+    // already reproduces the whole run verbatim (`noreturn` included, so
+    // it must never be printed a second time here); the comment-free arm
+    // used to assume the slice held only trivia and hard-coded the closing
+    // token, silently dropping `noreturn` — fixed by asking the view for
+    // it directly rather than re-deriving its presence from the slice.
     let tail = if slice_has_comment(&elems[rparen_idx + 1..close_idx]) {
         let (t, at_line_start) =
             span_with_comments(&elems[rparen_idx + 1..close_idx], " ", &cont_pad, None);
@@ -2513,10 +2521,16 @@ fn render_reuse(
             (Some(_), false) => format!("{t} {{"),
             (None, _) => format!("{t};"),
         }
-    } else if world.is_some() {
-        " {".to_string()
     } else {
-        ";".to_string()
+        let noreturn = if view.noreturn_token().is_some() {
+            " noreturn"
+        } else {
+            ""
+        };
+        match &world {
+            Some(_) => format!("{noreturn} {{"),
+            None => format!("{noreturn};"),
+        }
     };
     let sig_interior =
         delimited_interior(view.syntax(), TmcKind::LParen, TmcKind::RParen, 0, false);

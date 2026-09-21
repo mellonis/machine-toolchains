@@ -745,13 +745,14 @@ fn a_range_element_inside_a_clause_formats_canonically() {
 /// test once demanded `seen >= 6` against eight files) allows outright.
 /// The list is the floor; the scan below compares against it in both
 /// directions.
-const ADVERSARIAL: [&str; 9] = [
+const ADVERSARIAL: [&str; 10] = [
     "brace_comments",
     "declarations_only",
     "divergence_semicolon_block_comment",
     "doc_run_interior_comment",
     "docs_and_attention",
     "interior_lists",
+    "noreturn_clause",
     "quirk_bracket_space",
     "quirk_keyword_name",
     "trailing_and_blanks",
@@ -838,6 +839,47 @@ fn a_bodiless_signature_formats_without_panicking_and_is_idempotent() {
         once, twice,
         "fmt is not idempotent over a bodiless signature"
     );
+    assert_eq!(
+        token_signature(&src),
+        token_signature(&once),
+        "the formatted text does not lex to the same token stream as the source"
+    );
+}
+
+/// The `noreturn` clause — new grammar that sits between the signature's
+/// `)` and the body's `{` (or the bodiless `;`), the exact slot
+/// `render_reuse`'s comment-free arm used to hard-code past, silently
+/// dropping any significant token there. Covers a BODIED routine with a
+/// `writes`/`preserves` pair ahead of the clause and a BODILESS
+/// (declarations-only) one, both round-tripping through the same fix.
+/// Reads the same fixture `every_adversarial_source_formats_to_its_
+/// committed_sidecar` pins, rather than duplicating the source text.
+///
+/// Mutation: reverting `render_reuse`'s comment-free tail arm to its old
+/// hard-coded `" {"` / `";"` — both signature lines in the sidecar would
+/// lose ` noreturn`, so the sidecar diff (above) already catches it; this
+/// test additionally pins idempotence and token preservation directly,
+/// the same three properties the bodiless-signature fixture pins for its
+/// own shape.
+#[test]
+fn a_noreturn_clause_formats_canonically_with_a_body_and_without_one() {
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fmt_adversarial/noreturn_clause.tmc"
+    ))
+    .expect("the noreturn_clause adversarial fixture is readable");
+
+    let once = format(&src).expect("a noreturn clause must format, not panic or error");
+    assert!(
+        once.contains("routine bodied(tape t: ab writes { '0' } preserves { '1' }) noreturn {"),
+        "the bodied signature lost its noreturn clause:\n{once}"
+    );
+    assert!(
+        once.contains("export routine bodiless(tape t: ab writes { '0' }) noreturn;"),
+        "the bodiless signature lost its noreturn clause:\n{once}"
+    );
+    let twice = format(&once).expect("the second pass must format too");
+    assert_eq!(once, twice, "fmt is not idempotent over a noreturn clause");
     assert_eq!(
         token_signature(&src),
         token_signature(&once),

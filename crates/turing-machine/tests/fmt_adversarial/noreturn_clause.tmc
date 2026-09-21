@@ -1,0 +1,7 @@
+alphabet ab { '_', '0', '1' }
+
+routine bodied(tape t:ab writes{'0'}preserves{'1'}) noreturn {
+  entry state s { [*] -> goto s; }
+}
+
+export routine bodiless(tape t: ab writes { '0' })    noreturn ;
