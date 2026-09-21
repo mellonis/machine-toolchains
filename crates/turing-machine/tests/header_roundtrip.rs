@@ -2176,3 +2176,167 @@ fn interface_extern_on_an_object_input_is_a_usage_error() {
         .unwrap_or_else(|e| panic!("interface: {e}"));
     assert_eq!(plain.code, 0, "{}", plain.stderr);
 }
+
+/// A `use` written at an OUTER scope, whose only reference sits inside a
+/// nested `namespace`: `.tmc` makes an import visible to every scope
+/// inside the one that declares it, so the printer must decide an
+/// import's need by the SAME scope walk the compiler resolves names with
+/// — never by matching a reference's namespace against the import's for
+/// exact equality (docs/tmt/cli.md (interface)). Both spellings the rule
+/// covers are here at once: a file-scope import reached from
+/// `namespace mid`, and an import in `namespace a` reached from
+/// `namespace a::b`, whose own scope prints nothing but the `use` line.
+///
+/// The assertion that discriminates is the STRICT re-read: `tmt
+/// interface` exits 0 either way, and a dropped `use` line leaves a
+/// header whose printed signature names a bare alphabet nothing
+/// declares.
+///
+/// Mutation: narrow the need decision back to exact-namespace matching
+/// (in `header::used_import_indices`, mark an import only when
+/// `program.imports[idx].ns` equals the referencing declaration's own
+/// `ns`) — both re-reads below then fail with `unresolved-alphabet` at
+/// the routine's signature.
+#[test]
+fn a_use_at_an_outer_scope_survives_when_only_a_nested_scope_references_it() {
+    const OUTER_IMPORT_FIXTURE: &str = "\
+namespace ns {
+  export alphabet bits { '_', '0', '1' }
+}
+
+use ns::bits;
+
+namespace mid {
+  ? A sibling namespace's alphabet, reached through a file-scope import.
+  export routine inner(tape t: bits writes {}) {
+    entry state s { [*] -> return; }
+  }
+}
+
+namespace a {
+  use ns::bits as sym;
+
+  namespace b {
+    export routine deeper(tape t: sym writes {}) {
+      entry state s { [*] -> return; }
+    }
+  }
+}
+";
+    let dir = scratch("header_outer_use");
+    let src_path = dir.join("outer_use.tmc");
+    std::fs::write(&src_path, OUTER_IMPORT_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    assert!(
+        source_out.stdout.contains("use ns::bits;"),
+        "the file-scope `use` was dropped: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out.stdout.contains("use ns::bits as sym;"),
+        "the namespace-scope `use` was dropped: {}",
+        source_out.stdout
+    );
+
+    let header_path = dir.join("outer_use.tmh");
+    std::fs::write(&header_path, &source_out.stdout).unwrap();
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, source_out.stdout,
+        "the printed header did not reparse to itself"
+    );
+}
+
+/// Every `.tmc` the crate ships that `tmt interface` accepts — golden
+/// programs, the embedded standard library, and the worked doc examples
+/// — prints a header that READS BACK through the strict
+/// declarations-only reader and prints itself again byte for byte. The
+/// round trip, not the text: `tmt interface` exits 0 on a header it
+/// cannot itself read, so nothing but reading the print back catches a
+/// header that names something it does not declare.
+///
+/// A source `tmt interface` rejects (one needing declarations this walk
+/// does not supply) is skipped rather than failed, so the accepted count
+/// is asserted against a floor: without it a defect that made the
+/// printer reject EVERYTHING would leave this test green.
+///
+/// Mutation: make `header::needed_imports` return an empty vector (print
+/// no `use` line at all) — the embedded standard library's volatile-twin
+/// namespaces import their representation alphabet from a sibling
+/// namespace, so `std.tmc`'s own header stops reading back, with
+/// `unresolved-alphabet`.
+#[test]
+fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader() {
+    // The same three directories `tests/syntax_green.rs::corpus` walks
+    // (`docs/examples/` one level deep, each worked example being a
+    // directory of its own), so a future fixture is picked up here too.
+    let mut sources: Vec<std::path::PathBuf> = Vec::new();
+    for dir in ["tests/golden", "src/stdlib", "../../docs/examples"] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        for entry in entries {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                for sub in std::fs::read_dir(&path).expect("readable example directory") {
+                    paths.push(sub.expect("entry").path());
+                }
+            } else {
+                paths.push(path);
+            }
+        }
+        for path in paths {
+            if path.extension().and_then(|e| e.to_str()) == Some("tmc") {
+                sources.push(path);
+            }
+        }
+    }
+    sources.sort();
+
+    let dir = scratch("header_corpus_roundtrip");
+    let mut accepted = 0usize;
+    for (i, path) in sources.iter().enumerate() {
+        // A source `tmt interface` cannot render — one needing
+        // declarations this walk does not supply — comes back as the
+        // rendered `Err` string, never a non-zero `CliOutput`; either
+        // shape is a skip, not a failure.
+        let Ok(printed) = execute(&args(&["interface", path.to_str().unwrap()])) else {
+            continue;
+        };
+        if printed.code != 0 {
+            continue;
+        }
+        accepted += 1;
+        let header_path = dir.join(format!("corpus{i}.tmh"));
+        std::fs::write(&header_path, &printed.stdout).unwrap();
+        let reread =
+            execute(&args(&["interface", header_path.to_str().unwrap()])).unwrap_or_else(|e| {
+                panic!(
+                    "{}: the printed header did not read back: {e}",
+                    path.display()
+                )
+            });
+        assert_eq!(
+            reread.code,
+            0,
+            "{}: the printed header did not read back: {}",
+            path.display(),
+            reread.stderr
+        );
+        assert_eq!(
+            reread.stdout,
+            printed.stdout,
+            "{}: the header did not reprint to itself",
+            path.display()
+        );
+    }
+    // The floor: every shipped source is accepted today, so a drop means
+    // the printer started refusing them rather than that the corpus
+    // shrank.
+    assert!(
+        accepted >= 14,
+        "only {accepted} shipped sources were accepted — the printer may be rejecting them"
+    );
+}

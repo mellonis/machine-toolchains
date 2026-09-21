@@ -66,11 +66,13 @@
 //! arms reach that decision from different data.
 //!
 //! On the SOURCE arm: an import from `Program::imports`, declared exactly
-//! at that namespace, reprints as `use path[ as alias];` iff its bound
-//! short name is referenced, unqualified, by something this render
-//! prints in that same scope — a tape signature's alphabet name, or
-//! (inside a printed `export graph` body) a bare `graft`/`bind` target or
-//! a bare `call` target in a rule's transition — AND EITHER the header
+//! at that namespace, reprints as `use path[ as alias];` iff something
+//! this render prints RESOLVES THROUGH IT — a tape signature's alphabet
+//! name, or (inside a printed `export graph` body) a bare `graft`/`bind`
+//! target or a bare `call` target in a rule's transition, each resolved
+//! from its own declaration's namespace through the compiler's own scope
+//! walk, so that an import written at an OUTER scope and referenced only
+//! from a nested one is kept (`used_import_indices`) — AND EITHER the header
 //! prints the import's target itself (a non-exported routine or graph,
 //! or an alphabet nothing exported reaches, drops the `use` alongside
 //! it — printing either would be text that cannot resolve when the
@@ -240,9 +242,18 @@ fn render_from_source(
     } else {
         HashMap::new()
     };
+    // The same scope substrate `resolve_program` built while analyzing this
+    // very source — rebuilt here from the same `Program` rather than
+    // threaded out of the analysis, so nothing on the compile path grows a
+    // field for the printer's sake. It is a pure function of the AST, so
+    // building it twice is one implementation run twice; the `?` is
+    // unreachable in practice, `analyze_with_mode` having just succeeded
+    // through the identical call.
+    let scopes = compiler::Scopes::build(&analysis.program)?;
     Ok(render_source(
         &analysis.program,
         &analysis.resolved,
+        &scopes,
         &footprint,
         &returns,
     ))
@@ -923,6 +934,7 @@ fn doc_lines(doc: Option<&Doc>) -> Vec<String> {
 fn render_source(
     program: &Program,
     resolved: &Resolved,
+    scopes: &compiler::Scopes,
     footprint: &FootprintTable,
     returns: &HashMap<String, bool>,
 ) -> String {
@@ -1145,14 +1157,9 @@ fn render_source(
         .chain(program.routines.iter().map(|r| full_name(&r.ns, &r.name)))
         .chain(program.graphs.iter().map(|g| full_name(&g.ns, &g.name)))
         .collect();
+    let used = used_import_indices(program, scopes, &referenced_graphs, &referenced_maps);
     for ns in &import_scopes {
-        let needed = needed_imports(
-            ns,
-            program,
-            &referenced_graphs,
-            &printed_full_names,
-            &local_names,
-        );
+        let needed = needed_imports(ns, program, &used, &printed_full_names, &local_names);
         if needed.is_empty() {
             continue;
         }
@@ -1176,24 +1183,96 @@ fn use_line_text(import: &Import) -> String {
     format!("use {path};")
 }
 
+/// Every `use` line this render's own printed declarations resolve
+/// THROUGH, as indices into `Program::imports` — the "referenced" half of
+/// the `use`-line rule (docs/tmt/cli.md (interface)).
+///
+/// The reference set is gathered per PRINTED declaration — an exported
+/// map, an exported routine's signature, a printed graph's signature and
+/// body — and each bare name is handed to the compiler's own scope
+/// resolver FROM THAT DECLARATION'S OWN NAMESPACE. That is what makes an
+/// outer-scope `use` reprint: in `.tmc` a `use` written at file scope is
+/// visible to every namespace inside it, so a name referenced from a
+/// nested namespace may well resolve through an import declared several
+/// scopes out, and a scan keyed on the import's own namespace alone would
+/// call that import unreferenced and drop it — leaving a header whose
+/// printed signature names an alphabet nothing declares. Asking the
+/// resolver also settles shadowing for free and for the same reason: it
+/// walks innermost-out and takes a declaration over an import, so a
+/// nested redeclaration of the short name claims the reference and the
+/// outer import does not.
+///
+/// A map is scanned when this render PRINTS it — exported, or reached
+/// from a printed graph body — matching `render_source`'s own printing
+/// rule; a printed-but-unexported map's two alphabet names need the
+/// identical `use` line an exported map's would.
+fn used_import_indices(
+    program: &Program,
+    scopes: &compiler::Scopes,
+    referenced_graphs: &HashSet<&str>,
+    referenced_maps: &HashSet<&str>,
+) -> HashSet<usize> {
+    let mut used: HashSet<usize> = HashSet::new();
+    let mark = |names: HashSet<&str>, ns: &[String], used: &mut HashSet<usize>| {
+        for name in names {
+            if let Some(idx) = scopes.import_index(name, ns) {
+                used.insert(idx);
+            }
+        }
+    };
+    for map in &program.maps {
+        let full = full_name(&map.ns, &map.name);
+        if !map.exported && !referenced_maps.contains(full.as_str()) {
+            continue;
+        }
+        let mut names: HashSet<&str> = HashSet::new();
+        names.insert(map.src.as_str());
+        names.insert(map.dst.as_str());
+        mark(names, &map.ns, &mut used);
+    }
+    for routine in &program.routines {
+        if !routine.exported {
+            continue;
+        }
+        let mut names: HashSet<&str> = HashSet::new();
+        collect_sig_refs(&routine.sig, &mut names);
+        mark(names, &routine.ns, &mut used);
+    }
+    // A graph PRINTED here — exported, or reached from a printed graph's
+    // own body (`render_source`'s own `is_printed_graph`) — contributes
+    // its own references too: a non-exported-but-printed graph's own
+    // `with map NAME` or nested graft target needs the identical `use`
+    // line an exported graph's own body would.
+    for graph in &program.graphs {
+        let printed = graph.exported
+            || referenced_graphs.contains(full_name(&graph.ns, &graph.name).as_str());
+        if !printed {
+            continue;
+        }
+        let mut names: HashSet<&str> = HashSet::new();
+        collect_sig_refs(&graph.sig, &mut names);
+        collect_graph_body_refs(graph, &mut names);
+        mark(names, &graph.ns, &mut used);
+    }
+    used
+}
+
 /// The imports declared exactly at `ns` that this render both NEEDS and
 /// CAN reprint — two independent conditions, both required
-/// (docs/tmt/cli.md (interface)): a `use` line is printed only when this
-/// scope's printed content references its name AND EITHER the header
+/// (docs/tmt/cli.md (interface)): a `use` line is printed only when
+/// something this render prints resolves through it AND EITHER the header
 /// prints its target OR the target lives in ANOTHER unit — reached
 /// through the declarations table, never through this unit's own
 /// declarations (`local_names`), which is exactly how a genuinely
 /// cross-unit alphabet reference (`use std::binaryNumbers::symbols;`
 /// against the embedded stdlib, say) resolves.
 ///
-/// - referenced: the bound short name (`Import::binding`) is used,
-///   unqualified, by a PRINTED declaration in that same scope — a tape
-///   signature's alphabet name, or, inside a printed `export graph`
-///   body, a bare `graft`/`bind` target or a bare `call` target in a
-///   rule's transition. Only EXPORTED routines/graphs are scanned: those
-///   are the only ones this printer ever renders a signature or body
-///   for, so a reference from something the header drops (a
-///   non-exported world, or a routine's own dropped body) does not count.
+/// - referenced: this import's index is in `used`, the set
+///   [`used_import_indices`] built by resolving every printed
+///   declaration's bare references from that declaration's own scope.
+///   Only declarations this render actually prints are scanned there, so
+///   a reference from something the header drops (a non-exported world,
+///   or a routine's own dropped body) does not count.
 /// - printed-or-external: the import's TARGET (`Import::full_path`) is
 ///   either one of `printed_full_names` — an exported alphabet, an
 ///   alphabet this same render prints because something exported
@@ -1208,53 +1287,30 @@ fn use_line_text(import: &Import) -> String {
 ///   is not a loophole for the "private target, same import" case the
 ///   printed-here rule alone already drops.
 ///
+/// The line prints at the import's OWN namespace, exactly where it was
+/// written, which is what keeps it visible to the nested scopes that may
+/// have been the only things referencing it.
+///
 /// Source order preserved: `imports` is walked in its own (already
 /// source-ordered) sequence, filtered rather than resorted.
 fn needed_imports<'a>(
     ns: &[String],
     program: &'a Program,
-    referenced_graphs: &HashSet<&str>,
+    used: &HashSet<usize>,
     printed_full_names: &HashSet<String>,
     local_names: &HashSet<String>,
 ) -> Vec<&'a Import> {
-    let mut referenced: HashSet<&str> = HashSet::new();
-    for map in &program.maps {
-        if map.exported && map.ns.as_slice() == ns {
-            if !map.src.contains("::") {
-                referenced.insert(map.src.as_str());
-            }
-            if !map.dst.contains("::") {
-                referenced.insert(map.dst.as_str());
-            }
-        }
-    }
-    for routine in &program.routines {
-        if routine.exported && routine.ns.as_slice() == ns {
-            collect_sig_refs(&routine.sig, &mut referenced);
-        }
-    }
-    // A graph PRINTED here — exported, or reached from a printed graph's
-    // own body (`render_source`'s own `is_printed_graph`) — contributes
-    // its own references too: a non-exported-but-printed graph's own
-    // `with map NAME` or nested graft target needs the identical `use`
-    // line an exported graph's own body would.
-    for graph in &program.graphs {
-        let printed = graph.exported
-            || referenced_graphs.contains(full_name(&graph.ns, &graph.name).as_str());
-        if printed && graph.ns.as_slice() == ns {
-            collect_sig_refs(&graph.sig, &mut referenced);
-            collect_graph_body_refs(graph, &mut referenced);
-        }
-    }
     program
         .imports
         .iter()
-        .filter(|imp| {
+        .enumerate()
+        .filter(|(idx, imp)| {
             imp.ns.as_slice() == ns
-                && referenced.contains(imp.binding())
+                && used.contains(idx)
                 && (printed_full_names.contains(&imp.full_path())
                     || !local_names.contains(&imp.full_path()))
         })
+        .map(|(_, imp)| imp)
         .collect()
 }
 

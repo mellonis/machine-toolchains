@@ -2095,7 +2095,16 @@ struct SigInfo {
 /// Per-scope definition + import maps, the mangled-name index, and the
 /// signature table — the immutable resolution substrate, plus the
 /// duplicate-name check done while building it.
-struct Scopes {
+///
+/// Visible to the crate (rather than private to this module) for ONE
+/// reason: the header printer decides which `use` lines a rendered
+/// namespace still needs, and that decision IS scope resolution — a `use`
+/// written at an outer scope is visible to every scope inside it. The
+/// printer therefore builds this same substrate from the same `Program`
+/// and asks [`Scopes::import_index`], rather than carrying a second,
+/// approximate notion of which declarations an import can reach
+/// (docs/tmt/cli.md (interface)).
+pub(crate) struct Scopes {
     /// ns-path → (bare name → def entry).
     defs: HashMap<Vec<String>, HashMap<String, DefEntry>>,
     /// ns-path → (bare name → (import index, full `::` path)).
@@ -2112,7 +2121,7 @@ struct DefEntry {
 }
 
 impl Scopes {
-    fn build(program: &Program) -> Result<Scopes, CompileError> {
+    pub(crate) fn build(program: &Program) -> Result<Scopes, CompileError> {
         // Collect every top-level entity as (ns, name, kind, name_span).
         struct Ent<'a> {
             ns: &'a [String],
@@ -2331,6 +2340,21 @@ impl Scopes {
             }
         }
         None
+    }
+
+    /// The index into `Program::imports` of the `use` line a reference
+    /// written as `name` from namespace context `ns` resolves THROUGH, or
+    /// `None` when it resolves without one — a declaration in scope
+    /// (including an inner one shadowing the import's short name), or an
+    /// absolute `::` path, or nothing at all.
+    ///
+    /// This is [`Scopes::resolve`]'s own answer, narrowed to the one field
+    /// a caller outside this module needs, so that "which `use` line does
+    /// this reference need" has exactly one implementation: the scope walk
+    /// above. `mark_reference_imports` reads the same field to decide
+    /// which imports are used at all.
+    pub(crate) fn import_index(&self, name: &str, ns: &[String]) -> Option<usize> {
+        self.resolve(name, ns)?.via_import
     }
 }
 
