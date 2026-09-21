@@ -33,8 +33,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use mtc_core::diagnostics::{Diagnostic, Span};
 
 use crate::compiler::{
-    CompileError, CompileErrorKind, Resolved, ResolvedAlphabet, ResolvedCallTarget, ResolvedGraft,
-    ResolvedWorld, WorldKind,
+    CompileError, CompileErrorKind, GraphMiss, Resolved, ResolvedAlphabet, ResolvedCallTarget,
+    ResolvedGraft, ResolvedWorld, WorldKind,
 };
 use crate::declarations::Declarations;
 use crate::parser::{
@@ -1159,11 +1159,11 @@ fn build_composite(
             .iter()
             .position(|t| &t.name == target)
             .expect("T4 resolves the tape target to a host tape");
-        let host_glyphs = alphabet_glyphs(&host.tapes[phys].alphabet, host_owner);
+        let host_glyphs = alphabet_glyphs(&host.tapes[phys].alphabet, host_owner)?;
         // The graph's OWN tape alphabet resolves in the GRAPH's own owner —
         // local for an in-unit graph (where `graph_owner` IS `host_owner`),
         // or the library's own module for one grafted from a header.
-        let graph_glyphs = alphabet_glyphs(&gt.alphabet, graph_owner);
+        let graph_glyphs = alphabet_glyphs(&gt.alphabet, graph_owner)?;
         tapes.push(build_tapemap(
             map.as_ref(),
             phys,
@@ -1319,11 +1319,11 @@ impl NameGen {
 /// `Resolved` for a host world or a local graph; the declaring library's
 /// `Resolved` for one reached through the declarations table) — NEVER the
 /// consumer's, once `world` is foreign (`alphabet_glyphs`'s own doc).
-fn tape_infos(world: &ResolvedWorld, owner: &Resolved) -> Vec<TapeInfo> {
+fn tape_infos(world: &ResolvedWorld, owner: &Resolved) -> Result<Vec<TapeInfo>, CompileError> {
     world
         .tapes
         .iter()
-        .map(|t| TapeInfo::new(alphabet_glyphs(&t.alphabet, owner)))
+        .map(|t| Ok(TapeInfo::new(alphabet_glyphs(&t.alphabet, owner)?)))
         .collect()
 }
 
@@ -1341,12 +1341,23 @@ fn tape_infos(world: &ResolvedWorld, owner: &Resolved) -> Vec<TapeInfo> {
 /// silently re-index or refuse an otherwise-valid graft, while the object
 /// still recorded the library's own digest (docs/tmt/language.md
 /// (headers)).
-fn alphabet_glyphs<'a>(name: &str, owner: &'a Resolved) -> &'a [String] {
-    &owner
-        .alphabets
-        .get(name)
-        .unwrap_or_else(|| panic!("`{name}` is not in its own declaring module's alphabets"))
-        .glyphs
+///
+/// A miss here would mean `owner`'s own tapes name an alphabet its own
+/// `resolved.alphabets` does not carry — an invariant `resolve_tape_
+/// alphabet` already guarantees for every module this compiler ever
+/// resolves, declarations-table ones included, so this is reported the
+/// same defensive way every other broken invariant on this path is
+/// (`CompileErrorKind::Internal`), never a panic.
+fn alphabet_glyphs<'a>(name: &str, owner: &'a Resolved) -> Result<&'a [String], CompileError> {
+    match owner.alphabets.get(name) {
+        Some(a) => Ok(&a.glyphs),
+        None => Err(CompileError {
+            span: Span::point(0, 0),
+            kind: CompileErrorKind::Internal(format!(
+                "`{name}` is not in its own declaring module's alphabets"
+            )),
+        }),
+    }
 }
 
 /// A world's user-visible state-name space (own states, graft instances,
@@ -1428,7 +1439,7 @@ fn expand_grafts_into<'a>(
     resolved: &'a Resolved,
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
     ext_modules: &[&'a Resolved],
-    memo: &mut HashMap<String, GraphExpansion>,
+    memo: &mut HashMap<(usize, String), GraphExpansion>,
     warn: &mut Vec<Diagnostic>,
     namegen: &mut NameGen,
     out: &mut Vec<ExpandedState>,
@@ -1449,15 +1460,34 @@ fn expand_grafts_into<'a>(
         // HOST's owner) for a local target, the declaring library's module
         // for an external one — never assumed to be `resolved` once the
         // target is foreign (`alphabet_glyphs`'s own doc).
+        //
+        // A target `resolve_world_reuse` accepted locally or in the
+        // declarations table when THIS unit's own graft sites were checked
+        // can still miss HERE: a nested target inside a SPLICED library
+        // graph's own body was validated against the library's own
+        // declarations when the header was read (always including the
+        // embedded stdlib), not against what THIS compile's own
+        // `--nostdlib`/`--extern` set actually carries. That gap surfaces
+        // as an ordinary `undefined-graph` — the exact reading a directly
+        // written, unreachable qualified target already gets — never a
+        // panic: a hand-written header is documented, ordinary input.
         let (graph, graph_owner) = match graphs.get(graft.target.as_str()) {
             Some(&g) => (g, resolved),
             None => {
                 if !spliced_external.iter().any(|n| n == &graft.target) {
                     spliced_external.push(graft.target.clone());
                 }
-                let (owner, g) = crate::compiler::find_external_graph(ext_modules, graft.target.as_str())
-                    .expect("resolve_world_reuse only accepts a target present locally or in the declarations table");
-                (g, owner)
+                match crate::compiler::find_external_graph(ext_modules, graft.target.as_str()) {
+                    Some((owner, g)) => (g, owner),
+                    None => {
+                        return Err(CompileError {
+                            span: graft.target_span,
+                            kind: CompileErrorKind::UndefinedGraph(
+                                GraphMiss::DeclarationsNotGiven(graft.target.clone()),
+                            ),
+                        });
+                    }
+                }
             }
         };
         let gx = expand_graph(
@@ -1575,6 +1605,19 @@ fn first_grafted_call(states: &[ExpandedState]) -> Option<&str> {
         })
 }
 
+/// A stable identity for the module `owner` borrows from, for the whole
+/// duration of one [`expand`] call — the pointer address of the `Resolved`
+/// itself, the same by-identity (never by-value) comparison
+/// `Declarations::origin_of` already uses. Two DIFFERENT modules — this
+/// unit's own, and any declarations-table one — may carry a graph under
+/// the identical mangled name (a consumer declaring its own `namespace lib
+/// { graph walker … }` alongside `use`-ing the library's own), so a bare
+/// name is not enough to key a cache across them: see [`expand_graph`]'s
+/// own memo.
+fn module_id(owner: &Resolved) -> usize {
+    std::ptr::from_ref(owner) as usize
+}
+
 /// Expand a graph to its memoized graph-space form: own states range-expanded,
 /// nested grafts spliced, aliases resolved. The graft-dependency DAG being
 /// acyclic, the recursion terminates. `name` may be a LOCAL graph (in
@@ -1586,13 +1629,10 @@ fn expand_graph<'a>(
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
     ext_modules: &[&'a Resolved],
     resolved: &'a Resolved,
-    memo: &mut HashMap<String, GraphExpansion>,
+    memo: &mut HashMap<(usize, String), GraphExpansion>,
     warn: &mut Vec<Diagnostic>,
     spliced_external: &mut Vec<String>,
 ) -> Result<GraphExpansion, CompileError> {
-    if let Some(gx) = memo.get(name) {
-        return Ok(gx.clone());
-    }
     // `owner`: the module `world` itself belongs to — `resolved` (this
     // call's own host scope) for a local target, or the declaring
     // library's own module for one reached through the declarations
@@ -1601,16 +1641,41 @@ fn expand_graph<'a>(
     // (`owner_graphs` below) — resolves in `owner`'s scope, never the
     // caller's: a consumer that happens to declare a same-mangled-name
     // alphabet or graph must not be able to re-target or refuse a body
-    // that is not its own (`alphabet_glyphs`'s own doc).
+    // that is not its own (`alphabet_glyphs`'s own doc). Computed BEFORE
+    // the memo check — not after, as an earlier shape of this function
+    // had it — because the memo key itself needs `owner`'s own identity:
+    // a consumer's own `lib::walker` and the library's `lib::walker` are
+    // two DIFFERENT graphs sharing one mangled name, and a name-only key
+    // let whichever expanded first win the slot for both (a false PASS of
+    // the link-time drift check — the object recorded the library's own
+    // digest while the spliced body was, in fact, the consumer's).
+    //
+    // This lookup is the SAME one `expand_grafts_into`'s own loop just ran
+    // to find `graph_owner` for the graft that is calling this function —
+    // it cannot miss here: that caller already returned a clean
+    // `undefined-graph` on any miss, before ever reaching this call. A
+    // miss here is therefore a broken invariant in THIS function's own
+    // caller, not a user error.
     let (world, owner): (&'a ResolvedWorld, &'a Resolved) = match graphs.get(name) {
         Some(&w) => (w, resolved),
-        None => {
-            let (owner, w) = crate::compiler::find_external_graph(ext_modules, name)
-                .expect("resolve_world_reuse only accepts a target present locally or in the declarations table");
-            (w, owner)
-        }
+        None => match crate::compiler::find_external_graph(ext_modules, name) {
+            Some((owner, w)) => (w, owner),
+            None => {
+                return Err(CompileError {
+                    span: Span::point(0, 0),
+                    kind: CompileErrorKind::Internal(format!(
+                        "graph `{name}` was reached through the declarations table by its \
+                         own caller but is not there on this lookup"
+                    )),
+                });
+            }
+        },
     };
-    let tapes = tape_infos(world, owner);
+    let key = (module_id(owner), name.to_string());
+    if let Some(gx) = memo.get(&key) {
+        return Ok(gx.clone());
+    }
+    let tapes = tape_infos(world, owner)?;
     let mut states = Vec::new();
     expand_own_states(world, &tapes, warn, &mut states)?;
     let mut namegen = NameGen::new(reserved_names(world));
@@ -1636,7 +1701,7 @@ fn expand_graph<'a>(
     resolve_aliases(&mut states, &alias);
     let entry = world_entry(world, graft_entry, &alias);
     let gx = GraphExpansion { states, entry };
-    memo.insert(name.to_string(), gx.clone());
+    memo.insert(key, gx.clone());
     Ok(gx)
 }
 
@@ -1769,7 +1834,7 @@ pub(crate) fn expand(
     check_graph_acyclicity(&graphs)?;
     let ext_modules = externals.modules();
 
-    let mut memo: HashMap<String, GraphExpansion> = HashMap::new();
+    let mut memo: HashMap<(usize, String), GraphExpansion> = HashMap::new();
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut worlds: Vec<ExpandedWorld> = Vec::new();
     let mut entry_world = None;
@@ -1787,7 +1852,7 @@ pub(crate) fn expand(
         if Some(idx) == resolved.entry_world {
             entry_world = Some(worlds.len());
         }
-        let tapes = tape_infos(world, resolved);
+        let tapes = tape_infos(world, resolved)?;
         let mut states = Vec::new();
         expand_own_states(world, &tapes, &mut diagnostics, &mut states)?;
         let mut namegen = NameGen::new(reserved_names(world));
@@ -1809,14 +1874,14 @@ pub(crate) fn expand(
 
         // A HOST world's own tapes, never foreign — the same direct lookup
         // `alphabet_glyphs` makes, inlined here since `per_tape_glyphs`
-        // wants owned `Vec<String>`s rather than borrowed slices (M3: this
-        // line and `tape_infos`'s own lookup, three lines above, now agree
-        // on how an alphabet is resolved).
+        // wants owned `Vec<String>`s rather than borrowed slices: this line
+        // and `tape_infos`'s own lookup, three lines above, now agree on
+        // how an alphabet is resolved.
         let per_tape_glyphs: Vec<Vec<String>> = world
             .tapes
             .iter()
-            .map(|t| alphabet_glyphs(&t.alphabet, resolved).to_vec())
-            .collect();
+            .map(|t| Ok(alphabet_glyphs(&t.alphabet, resolved)?.to_vec()))
+            .collect::<Result<_, CompileError>>()?;
         for st in &states {
             check_state_rows(st, &per_tape_glyphs, &mut diagnostics)?;
         }
