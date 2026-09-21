@@ -666,8 +666,45 @@ fn render_source(
         .map(|w| (w.name.as_str(), w))
         .collect();
 
-    // Every named map an EXPORTED graph body's binding args reach — the
-    // only place a `with map NAME` reference can print at all, since a
+    // Every graph reached from an EXPORTED graph's own body (transitively —
+    // a referenced graph's own body may itself graft another non-exported
+    // one), by mangled name — `resolved`'s own copies (`ResolvedGraft::
+    // target`, already the fully mangled identity `resolve_world_reuse`
+    // resolved it to, local or declarations-table alike). Printed as a
+    // PLAIN `graph` (`graph_body_lines`'s own doc), the same "referenced,
+    // printed even though not exported" rule local alphabets and local
+    // maps already get — otherwise the header cannot re-parse a graft
+    // reaching a non-exported sibling. An EXTERNAL target (one this unit
+    // does not itself declare — e.g. a nested `std::…` graft) is left out:
+    // that is the `use`-line rule's own job, exactly as an external
+    // alphabet/map reference already is, and there is no local declaration
+    // for this render to print for it regardless.
+    let mut referenced_graphs: HashSet<&str> = HashSet::new();
+    let mut graph_frontier: Vec<&ResolvedWorld> = program
+        .graphs
+        .iter()
+        .filter(|g| g.exported)
+        .filter_map(|g| worlds.get(full_name(&g.ns, &g.name).as_str()).copied())
+        .collect();
+    while let Some(world) = graph_frontier.pop() {
+        for graft in &world.grafts {
+            let target = graft.target.as_str();
+            if let Some(&target_world) = worlds.get(target)
+                && target_world.kind == WorldKind::Graph
+                && referenced_graphs.insert(target)
+            {
+                graph_frontier.push(target_world);
+            }
+        }
+    }
+    // A graph this render will PRINT (exported, or reached from a printed
+    // graph's own body) — the same test the alphabet/map/`use`-line rules
+    // below extend to cover it with.
+    let is_printed_graph =
+        |g: &Graph| g.exported || referenced_graphs.contains(full_name(&g.ns, &g.name).as_str());
+
+    // Every named map a PRINTED graph body's binding args reach — the only
+    // place a `with map NAME` reference can print at all, since a
     // routine's own body never prints (only its signature does). Reads
     // `resolved`'s own copies: `compiler::expand_named_maps` already
     // rewrote a resolved site's `SymMap::named` to the DECLARATION'S OWN
@@ -677,18 +714,18 @@ fn render_source(
     // that rewrite).
     let mut referenced_maps: HashSet<&str> = HashSet::new();
     for graph in &program.graphs {
-        if graph.exported {
+        if is_printed_graph(graph) {
             let full = full_name(&graph.ns, &graph.name);
             resolved_map_refs(worlds[full.as_str()], &mut referenced_maps);
         }
     }
 
-    // Every alphabet an EXPORTED routine or graph's tape parameter draws
-    // from, by its mangled name — printed even when the alphabet itself is
-    // not exported (a plain `alphabet`, not `export alphabet`; see the
-    // module doc). A purely local routine's own alphabet never lands in
-    // this set, so it still prints nothing, same as before this rule
-    // existed.
+    // Every alphabet an EXPORTED routine or a PRINTED graph's tape
+    // parameter draws from, by its mangled name — printed even when the
+    // alphabet itself is not exported (a plain `alphabet`, not `export
+    // alphabet`; see the module doc). A purely local routine's own
+    // alphabet never lands in this set, so it still prints nothing, same
+    // as before this rule existed.
     let mut referenced_alphabets: HashSet<&str> = HashSet::new();
     for routine in &program.routines {
         if routine.exported {
@@ -699,7 +736,7 @@ fn render_source(
         }
     }
     for graph in &program.graphs {
-        if graph.exported {
+        if is_printed_graph(graph) {
             let full = full_name(&graph.ns, &graph.name);
             for tape in &worlds[full.as_str()].tapes {
                 referenced_alphabets.insert(tape.alphabet.as_str());
@@ -747,7 +784,7 @@ fn render_source(
         }
     }
     for graph in &program.graphs {
-        if graph.exported {
+        if is_printed_graph(graph) {
             printed_full_names.insert(full_name(&graph.ns, &graph.name));
         }
     }
@@ -805,7 +842,7 @@ fn render_source(
         );
     }
     for graph in &program.graphs {
-        if !graph.exported {
+        if !is_printed_graph(graph) {
             continue;
         }
         let full = full_name(&graph.ns, &graph.name);
@@ -845,10 +882,8 @@ fn render_source(
     for ns in &import_scopes {
         let needed = needed_imports(
             ns,
-            &program.imports,
-            &program.maps,
-            &program.routines,
-            &program.graphs,
+            program,
+            &referenced_graphs,
             &printed_full_names,
             &local_names,
         );
@@ -911,15 +946,13 @@ fn use_line_text(import: &Import) -> String {
 /// source-ordered) sequence, filtered rather than resorted.
 fn needed_imports<'a>(
     ns: &[String],
-    imports: &'a [Import],
-    maps: &'a [MapDecl],
-    routines: &[Routine],
-    graphs: &[Graph],
+    program: &'a Program,
+    referenced_graphs: &HashSet<&str>,
     printed_full_names: &HashSet<String>,
     local_names: &HashSet<String>,
 ) -> Vec<&'a Import> {
     let mut referenced: HashSet<&str> = HashSet::new();
-    for map in maps {
+    for map in &program.maps {
         if map.exported && map.ns.as_slice() == ns {
             if !map.src.contains("::") {
                 referenced.insert(map.src.as_str());
@@ -929,18 +962,26 @@ fn needed_imports<'a>(
             }
         }
     }
-    for routine in routines {
+    for routine in &program.routines {
         if routine.exported && routine.ns.as_slice() == ns {
             collect_sig_refs(&routine.sig, &mut referenced);
         }
     }
-    for graph in graphs {
-        if graph.exported && graph.ns.as_slice() == ns {
+    // A graph PRINTED here — exported, or reached from a printed graph's
+    // own body (`render_source`'s own `is_printed_graph`) — contributes
+    // its own references too: a non-exported-but-printed graph's own
+    // `with map NAME` or nested graft target needs the identical `use`
+    // line an exported graph's own body would.
+    for graph in &program.graphs {
+        let printed = graph.exported
+            || referenced_graphs.contains(full_name(&graph.ns, &graph.name).as_str());
+        if printed && graph.ns.as_slice() == ns {
             collect_sig_refs(&graph.sig, &mut referenced);
             collect_graph_body_refs(graph, &mut referenced);
         }
     }
-    imports
+    program
+        .imports
         .iter()
         .filter(|imp| {
             imp.ns.as_slice() == ns
@@ -1080,9 +1121,13 @@ fn routine_lines(
 }
 
 /// A graph's canonical SIGNATURE AND BODY — `export graph NAME(...) { … }`
-/// — without the leading `?` doc-line prefix [`graph_lines`] adds.
-/// [`graph_digest`]'s own input: a graph's documentation is deliberately
-/// left out of what gets hashed, so a doc-only edit never moves the digest.
+/// for an exported graph, `graph NAME(...) { … }` for one printed only
+/// because a printed graph's own body reaches it (the same "referenced,
+/// printed even though not exported" spelling `alphabet_lines`/
+/// `map_lines` already give their own local declarations) — without the
+/// leading `?` doc-line prefix [`graph_lines`] adds. [`graph_digest`]'s
+/// own input: a graph's documentation is deliberately left out of what
+/// gets hashed, so a doc-only edit never moves the digest.
 fn graph_body_lines(
     graph: &Graph,
     world: &ResolvedWorld,
@@ -1090,7 +1135,12 @@ fn graph_body_lines(
     footprint: &FootprintTable,
 ) -> Vec<String> {
     let sig = signature_text(&graph.sig, world, resolved, footprint);
-    let mut lines = vec![format!("export graph {}({}) {{", graph.name, sig)];
+    let keyword = if graph.exported {
+        "export graph"
+    } else {
+        "graph"
+    };
+    let mut lines = vec![format!("{keyword} {}({}) {{", graph.name, sig)];
     for state in &graph.states {
         lines.extend(indented(state_lines(state)));
     }

@@ -6,8 +6,9 @@
 
 use std::collections::BTreeMap;
 
+use mtc_core::formats::object::ObjectFile;
 use mtc_turing_machine::cli::execute;
-use mtc_turing_machine::compiler::{CompileOptions, compile};
+use mtc_turing_machine::compiler::{CompileOptions, Declarations, compile};
 use mtc_turing_machine::optimizer::OptLevel;
 use mtc_turing_machine::stdlib;
 
@@ -61,6 +62,63 @@ fn run_interface(path: &std::path::Path) -> mtc_turing_machine::cli::CliOutput {
         .unwrap_or_else(|e| panic!("interface {}: {e}", path.display()));
     assert_eq!(out.code, 0, "interface {}: {}", path.display(), out.stderr);
     out
+}
+
+/// `tmt compile SRC --nostdlib`, in-process via `compile()` — the in-unit
+/// control side of a splice byte-identity comparison (`tests/library_
+/// grafts.rs::compile_alone`'s own precedent).
+fn compile_alone(src: &str) -> ObjectFile {
+    compile(
+        src,
+        CompileOptions {
+            externals: Declarations::none(),
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile: {e}"))
+    .object
+}
+
+/// `tmt compile SRC --nostdlib --extern HEADER -o OUT`, through the CLI —
+/// the header-grafted side of a splice byte-identity comparison
+/// (`tests/library_grafts.rs::compile_extern`'s own precedent).
+fn compile_extern(
+    dir: &std::path::Path,
+    name: &str,
+    src: &str,
+    header: &std::path::Path,
+) -> ObjectFile {
+    let input = dir.join(format!("{name}.tmc"));
+    std::fs::write(&input, src).unwrap();
+    let out = dir.join(format!("{name}.tmo"));
+    let result = execute(&args(&[
+        "compile",
+        input.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile {name}: {e}"));
+    assert_eq!(result.code, 0, "{}: {}", name, result.stderr);
+    ObjectFile::from_bytes(&std::fs::read(&out).unwrap()).unwrap()
+}
+
+/// The blob bytes of the symbol named `name` (`main`, or a mangled
+/// routine/graph name) — `tests/library_grafts.rs::blob_of`'s own
+/// precedent.
+fn blob_of<'a>(object: &'a ObjectFile, name: &str) -> &'a [u8] {
+    use mtc_core::formats::object::SymbolDef;
+    let symbol = object
+        .symbols
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no symbol named `{name}` in {:?}", object.symbols));
+    match symbol.def {
+        SymbolDef::Defined { blob } | SymbolDef::Local { blob } => &object.blobs[blob as usize],
+        SymbolDef::External => panic!("`{name}` is external, not defined in this object"),
+    }
 }
 
 /// Mutation: printing local declarations too (dropping the `exported`
@@ -1622,5 +1680,255 @@ export routine honest(tape t: nb writes {}) noreturn {
         "a declared `noreturn` must still print even though inference \
          could not run: {}",
         out.stdout
+    );
+}
+
+/// A NON-exported graph named only inside an EXPORTED graph's OWN BODY (a
+/// nested `graft`, not a signature reference) needs its own declaration
+/// in the header too, or the printed `graft mid(...)` reference cannot
+/// resolve when the header is read back — the same "referenced, printed
+/// even if not itself exported" rule an alphabet or a `with map` target
+/// already get. It prints as a plain `graph`, never `export graph`, since
+/// it is not itself part of the unit's exported surface. `mid` itself
+/// grafts a SECOND non-exported graph, `inner` — reached only through
+/// `mid`'s own body, never named directly by any exported graph — proving
+/// the walk that decides what to print is TRANSITIVE, not one level deep.
+/// The consumer's splice through the header must also be byte-identical
+/// to the SAME shape defined and grafted in one unit, the central claim
+/// `tests/library_grafts.rs::the_spliced_body_is_identical_to_the_in_unit_
+/// splice` already pins for a purely local library.
+///
+/// Mutation: dropping the referenced-graph path (printing only EXPORTED
+/// graphs) — the header would then carry `outer`'s printed body grafting
+/// `mid` with no `mid` declaration anywhere in it, and the reparse below
+/// would fail `unknown graph \`mid\` [undefined-graph]`.
+#[test]
+fn a_locally_referenced_graph_prints_unexported_and_the_header_reparses() {
+    const LOCAL_GRAPH_TARGET_FIXTURE: &str = "\
+export alphabet marks { '_', 'x', 'y' }
+
+graph inner(tape t: marks, state done) {
+  entry state w {
+    ['x'] -> write ['y'] goto done;
+    [*]   -> goto done;
+  }
+}
+
+graph mid(tape t: marks, state done) {
+  entry graft inner(t = t, done = done) as inner_step;
+}
+
+export graph outer(tape t: marks, state done) {
+  entry graft mid(t = t, done = done) as wrapped;
+}
+";
+    let dir = scratch("header_private_graph_referenced");
+    let src_path = dir.join("privgraph.tmc");
+    std::fs::write(&src_path, LOCAL_GRAPH_TARGET_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    assert!(
+        source_out
+            .stdout
+            .contains("graph inner(tape t: marks writes { 'y' }, state done) {"),
+        "the private but TRANSITIVELY referenced graph's own declaration is missing: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out
+            .stdout
+            .contains("graph mid(tape t: marks writes { 'y' }, state done) {"),
+        "the private but directly referenced graph's own declaration is missing: {}",
+        source_out.stdout
+    );
+    assert!(
+        !source_out.stdout.contains("export graph inner")
+            && !source_out.stdout.contains("export graph mid"),
+        "a non-exported graph must not print `export`: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out
+            .stdout
+            .contains("graft inner(t = t, done = done)"),
+        "{}",
+        source_out.stdout
+    );
+    assert!(
+        source_out.stdout.contains("graft mid(t = t, done = done)"),
+        "{}",
+        source_out.stdout
+    );
+
+    let header_path = dir.join("privgraph.tmh");
+    std::fs::write(&header_path, &source_out.stdout).unwrap();
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, source_out.stdout,
+        "the printed header did not reparse to itself"
+    );
+
+    // The consumer's splice through the header must be byte-identical to
+    // the same shape defined and grafted in one unit.
+    const CONSUMER_VIA_HEADER: &str = "\
+use marks;
+use outer;
+machine {
+  tape t: marks;
+  entry graft outer(t = t, done = fin) as w;
+  state fin { [*] -> stop; }
+}
+";
+    const CONSUMER_LOCAL_CONTROL: &str = "\
+export alphabet marks { '_', 'x', 'y' }
+
+graph inner(tape t: marks, state done) {
+  entry state w {
+    ['x'] -> write ['y'] goto done;
+    [*]   -> goto done;
+  }
+}
+
+graph mid(tape t: marks, state done) {
+  entry graft inner(t = t, done = done) as inner_step;
+}
+
+export graph outer(tape t: marks, state done) {
+  entry graft mid(t = t, done = done) as wrapped;
+}
+
+machine {
+  tape t: marks;
+  entry graft outer(t = t, done = fin) as w;
+  state fin { [*] -> stop; }
+}
+";
+    let header_side = compile_extern(&dir, "header_app", CONSUMER_VIA_HEADER, &header_path);
+    let local_side = compile_alone(CONSUMER_LOCAL_CONTROL);
+    assert_eq!(
+        blob_of(&header_side, "main"),
+        blob_of(&local_side, "main"),
+        "the header-grafted machine's code differs from the in-unit splice"
+    );
+}
+
+/// A graph reached only via a `use` import from ANOTHER NAMESPACE of the
+/// SAME unit, named inside an EXPORTED graph body's nested `graft` — the
+/// `use`-line half of the same rule
+/// `a_locally_referenced_graph_prints_unexported_and_the_header_reparses`
+/// pins for a purely local target: the imported graph is itself exported
+/// at its OWN declaration site, so it also prints under its own
+/// namespace (the "printed" half of the printed-or-external `use`-line
+/// rule, `an_imported_map_referenced_in_a_graph_body_keeps_its_use_line`'s
+/// own precedent for a map). The consumer's splice through the header
+/// must again be byte-identical to the in-unit control.
+///
+/// Mutation: dropping `collect_graph_body_refs`'s own collection of a
+/// graft's target name (leaving only its `with map` binding refs) — the
+/// `use inner_ns::core;` line goes missing since `needed_imports` no
+/// longer sees `core` referenced from `outer`'s body, and the printer
+/// assertion below catches it directly (verified live: RED on this
+/// mutation, GREEN on `a_locally_referenced_graph_prints_unexported_and_
+/// the_header_reparses`, which never needs a `use` line for its own
+/// LOCAL target).
+#[test]
+fn an_imported_graph_referenced_in_a_graph_body_keeps_its_use_line() {
+    const IMPORTED_GRAPH_FIXTURE: &str = "\
+namespace inner_ns {
+  export alphabet marks { '_', 'x', 'y' }
+  export graph core(tape t: marks, state done) {
+    entry state w {
+      ['x'] -> write ['y'] goto done;
+      [*]   -> goto done;
+    }
+  }
+}
+
+namespace lib6 {
+  use inner_ns::marks;
+  use inner_ns::core;
+
+  export graph outer(tape t: marks, state done) {
+    entry graft core(t = t, done = done) as wrapped;
+  }
+}
+";
+    let dir = scratch("header_imported_graph_referenced");
+    let src_path = dir.join("impgraph.tmc");
+    std::fs::write(&src_path, IMPORTED_GRAPH_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    assert!(
+        source_out.stdout.contains("use inner_ns::core;"),
+        "the printer dropped the needed `use` line for the imported graph: {}",
+        source_out.stdout
+    );
+    // `inner_ns::core` is itself exported IN THIS SAME UNIT, so its own
+    // declaration prints too, under `inner_ns` — the "printed" half of
+    // the printed-or-external rule.
+    assert!(
+        source_out
+            .stdout
+            .contains("export graph core(tape t: marks writes { 'y' }, state done) {"),
+        "{}",
+        source_out.stdout
+    );
+
+    let header_path = dir.join("impgraph.tmh");
+    std::fs::write(&header_path, &source_out.stdout).unwrap();
+    let reparsed = run_interface(&header_path);
+    assert_eq!(
+        reparsed.stdout, source_out.stdout,
+        "the printed header did not reparse to itself"
+    );
+
+    // The consumer's splice through the header must be byte-identical to
+    // the same shape defined and grafted in one unit. `marks` is imported
+    // straight from its OWN declaring namespace (`inner_ns`) — `lib6`'s
+    // own `use inner_ns::marks;` is a local alias inside `lib6`'s scope,
+    // not a re-export under the name `lib6::marks`.
+    const CONSUMER_VIA_HEADER: &str = "\
+use inner_ns::marks;
+use lib6::outer;
+machine {
+  tape t: marks;
+  entry graft outer(t = t, done = fin) as w;
+  state fin { [*] -> stop; }
+}
+";
+    const CONSUMER_LOCAL_CONTROL: &str = "\
+namespace inner_ns {
+  export alphabet marks { '_', 'x', 'y' }
+  export graph core(tape t: marks, state done) {
+    entry state w {
+      ['x'] -> write ['y'] goto done;
+      [*]   -> goto done;
+    }
+  }
+}
+
+namespace lib6 {
+  use inner_ns::marks;
+  use inner_ns::core;
+
+  export graph outer(tape t: marks, state done) {
+    entry graft core(t = t, done = done) as wrapped;
+  }
+}
+
+use inner_ns::marks;
+use lib6::outer;
+machine {
+  tape t: marks;
+  entry graft outer(t = t, done = fin) as w;
+  state fin { [*] -> stop; }
+}
+";
+    let header_side = compile_extern(&dir, "header_app", CONSUMER_VIA_HEADER, &header_path);
+    let local_side = compile_alone(CONSUMER_LOCAL_CONTROL);
+    assert_eq!(
+        blob_of(&header_side, "main"),
+        blob_of(&local_side, "main"),
+        "the header-grafted machine's code differs from the in-unit splice"
     );
 }
