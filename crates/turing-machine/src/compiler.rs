@@ -647,7 +647,9 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "alphabet `{n}` is declared by `use` (or named by a qualified path), \
-                     but its declarations were not given — pass `--extern` or declare it locally"
+                     but its declarations were not given — declare it locally, or supply its \
+                     declarations to this compile (an `--extern` file, a sibling source, or a \
+                     library, whichever this command reads)"
                 )
             }
             CompileErrorKind::DuplicateTape(n) => {
@@ -700,7 +702,9 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "graph `{n}` is declared by `use` (or named by a qualified path), \
-                     but its declarations were not given — pass `--extern` or declare it locally"
+                     but its declarations were not given — declare it locally, or supply its \
+                     declarations to this compile (an `--extern` file, a sibling source, or a \
+                     library, whichever this command reads)"
                 )
             }
             CompileErrorKind::UnknownArg(n) => {
@@ -835,7 +839,9 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "map `{n}` is declared by `use` (or named by a qualified path), \
-                     but its declarations were not given — pass `--extern` or declare it locally"
+                     but its declarations were not given — declare it locally, or supply its \
+                     declarations to this compile (an `--extern` file, a sibling source, or a \
+                     library, whichever this command reads)"
                 )
             }
             CompileErrorKind::FoldOutOfAlphabet(m) => {
@@ -874,7 +880,7 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::StateArgsNeedDeclarations(name) => {
                 write!(
                     f,
-                    "this call hands `state` arguments to `{name}`, whose declarations are not given — an exits vector is positional, so the callee's own parameter order is needed: give them with `tmt compile --extern <file>.tmh`, or declare the callee in this unit. If the argument meant a tape instead, it names none of this world's"
+                    "this call hands `state` arguments to `{name}`, whose declarations are not given — an exits vector is positional, so the callee's own parameter order is needed: declare the callee in this unit, or supply its declarations to this compile (an `--extern` file, a sibling source, or a library, whichever this command reads). If the argument meant a tape instead, it names none of this world's"
                 )
             }
             CompileErrorKind::NoreturnViolated(name) => {

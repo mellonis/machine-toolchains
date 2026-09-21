@@ -254,7 +254,7 @@ subsection.
 | `duplicate-name` | Two entities (alphabet, routine, graph, or namespace) share one name in one scope. |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
 | `too-many-tapes` | A world declares more than 16 tapes. |
-| `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (pass `--extern` or declare it locally). |
+| `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). |
 | `duplicate-tape` | Two tapes share one name in one world. |
 | `duplicate-state` | Two states (or a state and a graft instance) share one name in one world. |
 | `duplicate-param` | Two signature parameters share one name. |
@@ -264,7 +264,7 @@ subsection.
 | `goto-not-a-state` | `goto` targeting a routine or graph — a reuse target, not a state. |
 | `undefined-state` | `goto`, a continuation, or a state argument names no state (or graft instance) in the world. |
 | `wrong-target-kind` | A `call`/`graft`/`bind` target resolves to the wrong entity kind. |
-| `undefined-graph` | A `graft` target names no graph — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose unit's declarations were not given (pass `--extern` or declare it locally). |
+| `undefined-graph` | A `graft` target names no graph — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose unit's declarations were not given (declare it locally, or supply its declarations to this compile). |
 | `unknown-arg` | A binding argument names a parameter the signature does not declare. |
 | `duplicate-arg` | Two binding arguments share one parameter name. |
 | `missing-arg` | A signature parameter has no binding argument. |
@@ -284,7 +284,7 @@ subsection.
 | `map-not-closed` | A named map declaration's two alphabets differ in size and it leaves a non-blank source symbol unmapped — unlike a graft's inline map (which silently holes an unnamed source), a declaration reused at many sites must name every one explicitly. |
 | `named-map-source-mismatch` | A `with map NAME` site's caller tape alphabet is not the named map's own declared source alphabet. |
 | `named-map-target-mismatch` | A `with map NAME` site's callee parameter alphabet is not the named map's own declared target alphabet. |
-| `undefined-map` | A `with map NAME` site names no map in scope — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (pass `--extern` or declare it locally). An unresolvable `use` import with no site naming it is a separate, non-fatal finding (`unused-import`), not this code. |
+| `undefined-map` | A `with map NAME` site names no map in scope — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). An unresolvable `use` import with no site naming it is a separate, non-fatal finding (`unused-import`), not this code. |
 | `fold-out-of-alphabet` | A write substitution folds to a value with no glyph in the tape's alphabet. |
 | `zero-modulus` | A `%` in a write-cell fold has a zero modulus. |
 | `negative-remainder` | A `%` fold produces a negative remainder — reachable only when subtraction takes the left operand negative. |
@@ -292,7 +292,7 @@ subsection.
 | `exact-row-conflict` | Two rules in one state match the same concrete tuple with neither carrying a wildcard. |
 | `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
 | `too-many-state-params` | A signature declares more than 255 `state` parameters — the published exit count is one byte wide. |
-| `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (pass `--extern`, or declare it locally). |
+| `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (declare it locally, or supply its declarations to this compile). |
 | `noreturn-violated` | A routine's signature declares `noreturn`, but its body has a way to return — a `return` transition, a `then return`, or `return` handed to a callee as a `state` argument, counted conservatively over the whole body. |
 | `then-required` | A `call`/bind site omits `then`, but its callee is not known (declared to this unit) to be `noreturn` — `then` stays mandatory against an unknown callee or one that can return, since the linker never checks it either way. |
 | `internal-error` | The compiler broke its own invariant — generated assembly failed to assemble, or a compiler-built IR world failed validation. A compiler bug, not a source error; please report it. |
