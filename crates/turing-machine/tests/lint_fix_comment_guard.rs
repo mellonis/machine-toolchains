@@ -11,8 +11,8 @@
 //! trigger a fix at all — a fixture that never produced a fix would pass the
 //! withhold assertion vacuously.
 //!
-//! Roster: ten rules emit a `Fix`. Eight are pinned here; the other two are
-//! accounted for rather than skipped. `contract-clause-overlap` — the rule
+//! Roster: eleven rules emit a `Fix`. Nine are pinned here; the other two
+//! are accounted for rather than skipped. `contract-clause-overlap` — the rule
 //! the guard was hoisted out of — keeps its withhold test in its own unit
 //! tests. `dead-map-pair` is exempt BY MECHANISM: its one edit replaces the
 //! pair's `->` arrow token with `=>`, and a span covering a single token can
@@ -214,6 +214,33 @@ machine {
 ",
         "'1' -> '1' }",
         "unused-map",
+    );
+}
+
+// --- duplicate-graft-instance -------------------------------------------------
+// The fix's first edit deletes the duplicate's whole `graft … ;` statement,
+// same node shape as `unused-graft-instance`'s own deletion — a comment in
+// the binding list sits inside that span.
+
+#[test]
+fn duplicate_graft_instance_withholds_the_fix_when_the_declaration_holds_a_comment() {
+    assert_guard_pair(
+        "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  graft findX(t = work, found = win, missing = lose) as one;
+  graft findX(t = work, found = win, missing = lose) as two;
+  entry state go { ['x'] -> goto one; [*] -> goto two; }
+  state win  { [*] -> stop; }
+  state lose { [*] -> halt; }
+}
+",
+        ") as two;",
+        "duplicate-graft-instance",
     );
 }
 

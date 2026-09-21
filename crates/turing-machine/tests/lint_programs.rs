@@ -495,6 +495,92 @@ machine {
     assert_deletion_fix(src, "unused-graft-instance", &["graft findX", "as seek"]);
 }
 
+/// Two graft sites in the same machine, identical target/bindings/
+/// continuation — the expander already dedups them to one spliced
+/// subgraph; only the second site's declaration and its `goto` earn a
+/// finding.
+const DUP_GRAFT: &str = "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  graft findX(t = work, found = win, missing = lose) as one;
+  graft findX(t = work, found = win, missing = lose) as two;
+  entry state go { ['x'] -> goto one; [*] -> goto two; }
+  state win  { [*] -> stop; }
+  state lose { [*] -> halt; }
+}
+";
+
+#[test]
+fn duplicate_graft_instance_fix_deletes_and_redirects_gotos() {
+    let d = findings(DUP_GRAFT)
+        .into_iter()
+        .find(|d| d.code == "duplicate-graft-instance")
+        .expect("a duplicate-graft-instance finding");
+    let fixed = apply_fix(DUP_GRAFT, &d.fix.expect("a fix").edits);
+    assert!(!fixed.contains("as two"), "{fixed}");
+    assert!(!fixed.contains("goto two"), "{fixed}");
+    assert!(
+        fixed.contains("['x'] -> goto one; [*] -> goto one;"),
+        "{fixed}"
+    );
+    assert!(
+        findings(&fixed)
+            .iter()
+            .all(|d| d.code != "duplicate-graft-instance"),
+        "{:?}",
+        findings(&fixed)
+    );
+    compile(&fixed, CompileOptions::default()).expect("fixed source compiles");
+}
+
+#[test]
+fn duplicate_graft_instance_fix_is_object_neutral() {
+    // The strongest form of the soundness claim: the expander already
+    // deduped the two identical sites into one spliced subgraph, so
+    // deleting the duplicate's own declaration and redirecting its goto
+    // leaves the compiled object byte-identical.
+    let d = findings(DUP_GRAFT)
+        .into_iter()
+        .find(|d| d.code == "duplicate-graft-instance")
+        .expect("a duplicate-graft-instance finding");
+    let fixed = apply_fix(DUP_GRAFT, &d.fix.expect("a fix").edits);
+    let before = compile(DUP_GRAFT, CompileOptions::default()).expect("the source compiles");
+    let after = compile(&fixed, CompileOptions::default()).expect("the fixed source compiles");
+    assert_eq!(before.tma, after.tma, "the emitted assembly must not move");
+    assert_eq!(
+        before.object.to_bytes(),
+        after.object.to_bytes(),
+        "removing a duplicate graft instance must be object-neutral"
+    );
+}
+
+#[test]
+fn no_golden_tmc_carries_a_duplicate_graft_instance() {
+    // The corpus gate: every committed `.tmc` teaching fixture is free of
+    // the finding, so a rule that over-reported would fail here rather
+    // than in a user's editor.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let mut seen = 0;
+    for entry in fs::read_dir(&dir).expect("the golden directory") {
+        let path = entry.expect("a directory entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("tmc") {
+            continue;
+        }
+        seen += 1;
+        let src = fs::read_to_string(&path).expect("read the fixture");
+        let dup: Vec<Diagnostic> = findings(&src)
+            .into_iter()
+            .filter(|d| d.code == "duplicate-graft-instance")
+            .collect();
+        assert!(dup.is_empty(), "{}: {dup:#?}", path.display());
+    }
+    assert!(seen >= 7, "the golden corpus is present, got {seen} files");
+}
+
 #[test]
 fn leftover_debugger_fix_removes_just_the_marker() {
     // The marked rule keeps a move + goto, so removing `debugger` leaves a

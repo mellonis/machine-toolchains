@@ -7,6 +7,7 @@ pub(crate) mod contract_clause_overlap;
 pub(crate) mod dead_map_pair;
 pub(crate) mod dead_rule;
 pub(crate) mod deprecated_call;
+pub(crate) mod duplicate_graft_instance;
 pub(crate) mod index_identity_map;
 pub(crate) mod leftover_debugger;
 pub(crate) mod redundant_identity_pairs;

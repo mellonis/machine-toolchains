@@ -157,6 +157,23 @@ pub(crate) fn then_clause_span(ctx: &LintContext, call_span: Span) -> Option<Spa
     })
 }
 
+/// The span of a `goto`/bare-name transition's own target identifier — a
+/// redirect edit's replacement span. The transition node's own LAST
+/// significant token is always the name, whether written `goto NAME`
+/// (keyword then name) or the bare-name sugar (the name alone) — nothing
+/// else ever follows it inside the node. Anchored on the transition's own
+/// span (`Transition::Goto`'s `span` field). `None` for no transition node
+/// at that anchor, which no resolved goto's own span can produce.
+pub(crate) fn goto_target_span(ctx: &LintContext, transition_span: Span) -> Option<Span> {
+    let node = innermost::<TransitionView>(ctx.root, ctx.index.offset(transition_span.start))?;
+    let children: Vec<SyntaxElement> = node.syntax().children_with_tokens().collect();
+    let name_tok = children.into_iter().rev().find_map(|e| match e {
+        SyntaxElement::Token(t) if !is_trivia(t.kind()) => Some(t),
+        _ => None,
+    })?;
+    Some(ctx.index.span(name_tok.text_range()))
+}
+
 /// The `->` token inside one map pair — the span a demotion edit
 /// replaces. Nothing but the arrow can sit between the pair's two
 /// literals, so the search is by range containment between them.

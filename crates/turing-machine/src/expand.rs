@@ -1217,6 +1217,55 @@ fn cont_key(cont: &HashMap<String, Transition2>) -> Vec<u8> {
     out
 }
 
+/// The bytes a graft SITE's dedup key is made of: `target ++ 0 ++
+/// composite.key() ++ 0 ++ cont_key(cont)` — identical bytes decide an
+/// identical splice here and an identical finding in the
+/// `duplicate-graft-instance` lint (`docs/tmt/lint.md` (duplicate graft
+/// instances)). The ONE place these bytes are assembled; both callers
+/// build `comp`/`cont` themselves ([`expand_grafts_into`] already has
+/// them from splicing, [`graft_instance_key`] builds them for the lint)
+/// and hand them here rather than each concatenating its own copy.
+fn graft_site_key_bytes(
+    target: &str,
+    comp: &Composite,
+    cont: &HashMap<String, Transition2>,
+) -> Vec<u8> {
+    let mut key = target.as_bytes().to_vec();
+    key.push(0);
+    key.extend(comp.key());
+    key.push(0);
+    key.extend(cont_key(cont));
+    key
+}
+
+/// The `duplicate-graft-instance` lint's own read of a graft SITE's dedup
+/// key — resolving `graft`'s target exactly as [`expand_grafts_into`]
+/// does ([`resolve_graft_target`], local to `host_owner` first, then the
+/// declarations table) and handing the result to the SAME byte-builder
+/// ([`graft_site_key_bytes`]) that decides the expander's own splice
+/// dedup, so a lint finding can never disagree with what the expander
+/// would actually alias.
+///
+/// `None` when the target does not resolve (an undefined graph — reported
+/// elsewhere, not this function's job) or the composite cannot be built:
+/// `build_composite`'s own map-legality checks (`docs/tmt/language.md`
+/// (headers)) run at EXPAND time, a stage lint never reaches (`crate::
+/// lint`'s own module doc — lint stops at resolution because a later
+/// stage could fatal on input resolution accepted). A site this returns
+/// `None` for is a compile error the expander refuses outright, never a
+/// duplicate-graft finding.
+pub(crate) fn graft_instance_key(
+    graft: &ResolvedGraft,
+    host: &ResolvedWorld,
+    host_owner: &Resolved,
+    ext_modules: &[&Resolved],
+) -> Option<Vec<u8>> {
+    let (graph_owner, graph) =
+        resolve_graft_target(graft.target.as_str(), host_owner, ext_modules)?;
+    let (comp, cont) = build_composite(graft, host, host_owner, graph, graph_owner).ok()?;
+    Some(graft_site_key_bytes(graft.target.as_str(), &comp, &cont))
+}
+
 // ---------------------------------------------------------------------------
 // Graph-definition acyclicity: the graft-dependency graph of graph
 // DEFINITIONS must be acyclic (a self- or mutual graft is infinite
@@ -1554,12 +1603,7 @@ fn expand_grafts_into<'a>(
             });
         }
         let (comp, cont) = build_composite(graft, host, resolved, graph, graph_owner)?;
-
-        let mut key = graft.target.clone().into_bytes();
-        key.push(0);
-        key.extend(comp.key());
-        key.push(0);
-        key.extend(cont_key(&cont));
+        let key = graft_site_key_bytes(graft.target.as_str(), &comp, &cont);
 
         let instance = match &graft.as_name {
             Some(n) => n.clone(),

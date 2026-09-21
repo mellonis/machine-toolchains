@@ -293,6 +293,33 @@ b.tmc:7:3: lint: entry graft instance name `seek` is never used
 The fix removes exactly the ` as NAME` clause, leaving a valid unnamed
 entry graft.
 
+### duplicate-graft-instance
+
+Two `graft` sites in the SAME world that splice the identical graph with
+the identical bindings and the identical continuation. The expander
+already treats them as one subgraph — a graft site's identity is its
+target graph, its tape composite, and its continuation substitution, and
+a second site that agrees on all three aliases to the first splice
+instead of emitting a second copy of the graph's states — so the second
+declaration earns its own name and its own line of source without
+earning its own subgraph. The `as` name plays no part in the identity:
+two sites differing only in what each instance is called still
+duplicate.
+
+```
+b.tmc:8:3: lint: graft instance `two` duplicates an earlier graft of `findX` with the same bindings and continuation
+```
+
+The fix deletes the duplicate's whole `graft … ;` statement and rewrites
+every `goto` in the world that named its instance to name the surviving
+instance instead. It is withheld — never applied partially — when: the
+duplicate carries `entry` (its entry-ness would need to move onto the
+surviving declaration, an edit this fix does not attempt); the removed
+name is referenced by anything other than a bare `goto` (a `call … then`
+continuation or a binding argument, neither of which this stage can tell
+apart from an ordinary tape-target name with certainty); or the surviving
+instance carries no `as` name for a `goto` to redirect onto.
+
 ### unused-alphabet
 
 An `alphabet` declaration no tape draws on — neither a machine `tape`
