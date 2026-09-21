@@ -486,3 +486,54 @@ fn an_extern_files_own_parse_error_is_shown_alongside_its_dependents_symptom_con
     let consumer_at = err.find("consumer.tmh").expect("named above");
     assert!(producer_at < consumer_at, "{err}");
 }
+
+/// A compiled object handed to `--extern` is refused on its own magic,
+/// naming the rule: the flag takes a declaration SOURCE, and an object
+/// reaches the table as a library instead (docs/tmt/cli.md (--extern and
+/// --nostdlib)). Both subcommands that take the flag go through one
+/// reader, so `tmt interface` is held to the same refusal here.
+///
+/// Mutation: drop the magic check and let the UTF-8 decode refuse the
+/// object — the message then reports a malformed text file and never
+/// names `--extern`'s own rule, so both `contains` assertions fail.
+#[test]
+fn an_object_given_to_extern_is_refused_by_its_magic() {
+    let dir = scratch("extern_object");
+    let mylib = write(&dir, "mylib.tmc", MYLIB_TMC);
+    let caller = write(&dir, "caller.tmc", CALLER);
+
+    // Build the object the mistake would hand to `--extern`.
+    let object = dir.join("mylib.tmo");
+    let built = execute(&[
+        "compile".to_string(),
+        mylib.to_str().unwrap().to_string(),
+        "-o".to_string(),
+        object.to_str().unwrap().to_string(),
+    ])
+    .unwrap_or_else(|e| panic!("compile mylib: {e}"));
+    assert_eq!(built.code, 0, "{}", built.stderr);
+
+    let err = compile(&dir, &caller, &["--extern", object.to_str().unwrap()]).unwrap_err();
+    assert!(err.contains("mylib.tmo"), "{err}");
+    assert!(err.contains("--extern takes a declaration SOURCE"), "{err}");
+
+    // The same reader backs `tmt interface`'s own `--extern`.
+    let from_interface = execute(&[
+        "interface".to_string(),
+        caller.to_str().unwrap().to_string(),
+        "--extern".to_string(),
+        object.to_str().unwrap().to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        from_interface.contains("--extern takes a declaration SOURCE"),
+        "{from_interface}"
+    );
+
+    // The near miss: a real header at the same path still reads, so the
+    // refusal keys on the container's magic and not on anything about
+    // the argument's shape or name.
+    let header = write(&dir, "mylib.tmh", MYLIB_HEADER);
+    let ok = compile(&dir, &caller, &["--extern", header.to_str().unwrap()]);
+    assert!(ok.is_ok(), "{:?}", ok.err());
+}

@@ -207,6 +207,13 @@ does not, by itself, resolve a call target or an alphabet reached through
 `use` — an unresolved `use`-imported name fails exactly as it does without
 `--extern`.
 
+`--extern` takes declaration **source** text. A compiled container given
+to it — an object, an executable, a tape block — is refused on its magic,
+by name, with the rule stated: an object's declarations reach a build as
+a LIBRARY (`-l`/`-L`, or a manifest's `libraries`), never through this
+flag. The refusal is the same on `tmt interface`, which shares this
+reader.
+
 A `--extern` file that fails to read or parse is a compile error naming
 that file's own path, never the primary input's — and when several
 `--extern` files fail together (one genuinely broken, plus every other

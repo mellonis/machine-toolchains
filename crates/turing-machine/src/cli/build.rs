@@ -74,8 +74,24 @@ pub(super) fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declara
     let mut sources = Vec::with_capacity(paths.len());
     for raw in paths {
         let path = Path::new(raw);
-        let text =
-            fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        // A container handed to `--extern` is refused on its MAGIC, the
+        // repo's one rule for telling a container from text
+        // (docs/formats.md (shared conventions)) — not left to the UTF-8
+        // decode below, which would report a binary object as malformed
+        // text and say nothing about the real rule. An object IS a
+        // legitimate declarations source, just not through this flag: it
+        // reaches the table as a LIBRARY (docs/tmt/cli.md (build)).
+        if mtc_core::formats::sniff(&bytes).is_some() {
+            return Err(format!(
+                "{}: --extern takes a declaration SOURCE — a .tmh header or a .tmc \
+                 source, not a container; pass a compiled object to `tmt build` as a \
+                 library instead",
+                path.display()
+            ));
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|_| format!("cannot read {}: not UTF-8 source", path.display()))?;
         sources.push(crate::header::DeclarationSource {
             origin: Origin::Extern(path.to_path_buf()),
             text: crate::header::DeclarationText::Source {
