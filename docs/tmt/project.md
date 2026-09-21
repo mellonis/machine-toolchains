@@ -162,7 +162,7 @@ sibling is assembled/loaded and its OBJECT's own interface feeds the
 table instead (`declarations_from_object` — the SAME object→declarations
 path a header-less library uses); this is lossy in ONE way worth
 knowing: an exported ALPHABET is a compiler fact with no assembly
-directive (one of the three declared text-expressibility exceptions,
+directive (one of the declared text-expressibility exceptions,
 `docs/formats.md (text-expressibility caveats)`), so a `.tma`/`.tmo`
 sibling can contribute a routine's signature but never an alphabet name.
 Concretely, `tmt compile a.tmc -S -o a.tma` is NOT a drop-in replacement
@@ -174,16 +174,29 @@ A source with a later-stage (expansion) error still yields its
 declarations from this read — declarations-only reading never expands;
 only a source that fails to READ at all (a parse error, a shape
 violation such as a body where a strict `.tmh` read requires none) is
-excluded from the fixpoint, and it is reported as the build's own error,
-by its own path, before any unit is compiled — never silently dropped
-and left for a dependent's derived failure to (mis)report instead.
+excluded from the fixpoint, and it is reported as part of the build's
+own error, by its own path, before any unit is compiled — never
+silently dropped and left for a dependent's derived failure to
+(mis)report instead. EVERY source the fixpoint could not read is
+reported together, not narrowed down to a single "most likely" one: a
+source whose own diagnostic is not shaped like a missing-declarations
+complaint prints first — a genuine defect, never a symptom of another
+source's failure — followed by the ones that are, both groups in
+declared order, so the actual root cause is never displaced by one of
+its own downstream symptoms regardless of which file happens to be
+listed first.
 
 **Mutually dependent units are not supported**: if two sources need EACH
 OTHER's declarations to read clean (most commonly two mutually recursive
 routines split across files, each under a narrow write contract that can
 only be validated once the other's declared contract is known), neither
-ever resolves, and the build fails naming one of them. The escape is to
-break the cycle by hand: write a header for one of the two units, edit
+source's own read ever sees the other — each treats its absent peer as
+an unconstrained, opaque callee, infers a wider write footprint than its
+OWN declared contract allows, and fails with a contract violation that
+is really a missing-peer symptom wearing a different diagnostic. Both
+sources are named in the build's own error, in either declared order,
+together with a trailing note describing the pattern and its escape:
+break the cycle by hand — write a header for one of the two units, edit
 it to state the fact the other side needs without the routine bodies
 that create the cycle, and give it to the build as a library instead of
 a sibling.

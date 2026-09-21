@@ -390,3 +390,99 @@ fn an_extern_file_may_depend_on_another_extern_file_lib_first() {
     );
     assert!(out.is_ok(), "{:?}", out.err());
 }
+
+// ── a broken --extern is named alongside its dependent's symptom ────────
+
+/// A genuine parse error — a namespace block missing its closing `}`.
+const BROKEN_PRODUCER: &str = "\
+namespace prod {
+  export alphabet bits { '_', '0', '1' }
+";
+
+/// `use`s the (broken) producer's alphabet — read alone this depends on
+/// `producer`'s declarations exactly as `CHAIN_LIB` depends on
+/// `CHAIN_OTHER` above, except here the dependency can never resolve.
+/// Same namespace/routine name as `CHAIN_LIB` so `CHAIN_CALLER` (below)
+/// can call it unchanged.
+const CONSUMER_DEPENDS_ON_PRODUCER: &str = "\
+use prod::bits;
+
+namespace lib {
+  export routine widen(tape n: bits writes { '0' });
+}
+";
+
+/// `tmt compile --extern` shares the SAME rendering `tmt build` uses for
+/// its own siblings and libraries (`cli/build.rs::render_unresolved`):
+/// every unreadable `--extern` file is named, not just the first one in
+/// command-line order. `producer.tmh` carries a genuine parse error;
+/// `consumer.tmh` only fails because it depends on `producer.tmh`'s
+/// declarations — both must be named, `producer.tmh`'s own parse error
+/// FIRST (its code is not one of the four declarations-missing codes),
+/// regardless of which was given first on the command line.
+#[test]
+fn an_extern_files_own_parse_error_is_shown_alongside_its_dependents_symptom_producer_first() {
+    let dir = scratch("extern_broken_chain_producer_first");
+    let producer = write(&dir, "producer.tmh", BROKEN_PRODUCER);
+    let consumer = write(&dir, "consumer.tmh", CONSUMER_DEPENDS_ON_PRODUCER);
+    let caller = write(&dir, "caller.tmc", CHAIN_CALLER);
+
+    let err = compile(
+        &dir,
+        &caller,
+        &[
+            "--extern",
+            producer.to_str().unwrap(),
+            "--extern",
+            consumer.to_str().unwrap(),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("producer.tmh") && err.contains("unexpected-token"),
+        "{err}"
+    );
+    assert!(
+        err.contains("consumer.tmh") && err.contains("declarations were not given"),
+        "{err}"
+    );
+    let producer_at = err.find("producer.tmh").expect("named above");
+    let consumer_at = err.find("consumer.tmh").expect("named above");
+    assert!(
+        producer_at < consumer_at,
+        "the genuine parse error must print before the derived symptom: {err}"
+    );
+}
+
+/// The other `--extern` order, for the identical fixture — byte-identical
+/// output, proving the report no longer depends on command-line order.
+#[test]
+fn an_extern_files_own_parse_error_is_shown_alongside_its_dependents_symptom_consumer_first() {
+    let dir = scratch("extern_broken_chain_consumer_first");
+    let producer = write(&dir, "producer.tmh", BROKEN_PRODUCER);
+    let consumer = write(&dir, "consumer.tmh", CONSUMER_DEPENDS_ON_PRODUCER);
+    let caller = write(&dir, "caller.tmc", CHAIN_CALLER);
+
+    let err = compile(
+        &dir,
+        &caller,
+        &[
+            "--extern",
+            consumer.to_str().unwrap(),
+            "--extern",
+            producer.to_str().unwrap(),
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("producer.tmh") && err.contains("unexpected-token"),
+        "{err}"
+    );
+    assert!(
+        err.contains("consumer.tmh") && err.contains("declarations were not given"),
+        "{err}"
+    );
+    let producer_at = err.find("producer.tmh").expect("named above");
+    let consumer_at = err.find("consumer.tmh").expect("named above");
+    assert!(producer_at < consumer_at, "{err}");
+}

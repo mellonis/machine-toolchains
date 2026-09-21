@@ -343,20 +343,50 @@ fn read_declarations_with_mode(
 pub(crate) fn declarations_from_object(
     obj: &ObjectFile,
     externals: &Declarations,
-) -> Result<Resolved, String> {
+) -> Result<Resolved, UnresolvedSource> {
     if obj.interface.is_none() {
         return Ok(empty_resolved());
     }
-    let text = from_object(obj)?;
+    let text = from_object(obj).map_err(|message| UnresolvedSource {
+        message,
+        code: OBJECT_INTERFACE_UNREADABLE,
+    })?;
     read_declarations_with_mode(&text, ReadMode::DeclarationsOnly, externals).map_err(|e| {
-        format!(
-            "{}:{}: error: {} [{}]",
-            e.span.start.line,
-            e.span.start.col,
-            e.kind,
-            e.kind.code()
-        )
+        UnresolvedSource {
+            message: format!(
+                "{}:{}: error: {} [{}]",
+                e.span.start.line,
+                e.span.start.col,
+                e.kind,
+                e.kind.code()
+            ),
+            code: e.kind.code(),
+        }
     })
+}
+
+/// A sentinel [`UnresolvedSource::code`] for the one `declarations_from_
+/// object` failure that never comes from the compiler's own diagnostics
+/// — an object whose interface section cannot even be rendered back to
+/// text (`from_object`'s defensive "no interface record for its own
+/// blob" refusal, unreachable outside a hand-corrupted object). It
+/// shares none of the four "declarations were/are not given" codes and
+/// is never `writes-outside-contract`, so a caller classifying by code
+/// (`cli/build.rs::render_unresolved`) always treats it as a genuine
+/// defect of its own source, never as a symptom of another source's
+/// failure.
+const OBJECT_INTERFACE_UNREADABLE: &str = "object-interface-unreadable";
+
+/// One source's own failure to resolve inside [`resolve_declarations`]'s
+/// shared fixpoint: a fully rendered `message` — the one a user reads,
+/// already carrying its own path — paired with the diagnostic `code` a
+/// caller classifies and orders by (`cli/build.rs::render_unresolved`,
+/// docs/tmt/project.md (Declaration derivation)), so that classification
+/// never has to parse prose out of `message`.
+#[derive(Debug, Clone)]
+pub(crate) struct UnresolvedSource {
+    pub message: String,
+    pub code: &'static str,
 }
 
 /// One member of the shared fixpoint [`resolve_declarations`] runs: text
@@ -392,40 +422,51 @@ pub(crate) struct DeclarationSource {
 }
 
 impl DeclarationSource {
-    fn read(&self, externals: &Declarations) -> Result<Resolved, String> {
+    fn read(&self, externals: &Declarations) -> Result<Resolved, UnresolvedSource> {
         match &self.text {
             DeclarationText::Source { path, text } => {
-                read_extern(path, text, externals).map_err(|e| {
-                    format!(
+                read_extern(path, text, externals).map_err(|e| UnresolvedSource {
+                    message: format!(
                         "{}:{}:{}: error: {} [{}]",
                         path.display(),
                         e.span.start.line,
                         e.span.start.col,
                         e.kind,
                         e.kind.code()
-                    )
+                    ),
+                    code: e.kind.code(),
                 })
             }
             DeclarationText::Object { path, object } => declarations_from_object(object, externals)
-                .map_err(|e| format!("{}: {e}", path.display())),
+                .map_err(|inner| UnresolvedSource {
+                    message: format!("{}: {}", path.display(), inner.message),
+                    code: inner.code,
+                }),
         }
     }
 }
 
 /// Read every source in `sources` against a shared, GROWING context
-/// (docs/tmt/project.md (Declaration derivation)): it starts as just the
-/// embedded standard library (unless `stdlib` is false — a switch that
-/// therefore reaches EVERY read here, siblings, libraries and `--extern`
-/// files alike) and gains each source's own declarations the moment it
-/// reads clean, one pass at a time, until a WHOLE pass makes no further
-/// progress. This is what lets a library header depend on another
-/// library, a sibling on another sibling, or an `--extern` file on
-/// another `--extern` file, of any dependency depth and regardless of
-/// the order they were given in — only the FINAL table's precedence
+/// (docs/tmt/project.md (Declaration derivation)): it starts empty and
+/// gains each source's own declarations the moment it reads clean, one
+/// pass at a time, until a WHOLE pass makes no further progress — THEN
+/// the embedded standard library is pushed, unless `stdlib` is false (a
+/// switch that therefore reaches EVERY read here, siblings, libraries
+/// and `--extern` files alike). Pushing stdlib last, after every peer,
+/// is deliberate and matches the FINAL table's own precedence below —
+/// `Declarations`' own lookup is first-match, so a read run against
+/// stdlib pushed FIRST would let the built-in library win a name a
+/// peer's own declarations are about to shadow, even though the real
+/// compile (reading the same peer's declarations from the final table)
+/// believes the peer. This is what lets a library header depend on
+/// another library, a sibling on another sibling, or an `--extern` file
+/// on another `--extern` file, of any dependency depth and regardless
+/// of the order they were given in — only the FINAL table's precedence
 /// order (siblings, then libraries in `-l` order, then stdlib; or
 /// `--extern` files in command-line order, then stdlib) is fixed, and
 /// that assembly happens separately, in the caller, from these same
-/// results.
+/// results; this function's own read context now matches it exactly,
+/// peer-then-stdlib either way.
 ///
 /// Returns one outcome per input source, same order, same length: `Ok`
 /// from the pass that first read it clean, `Err` (its own error, from
@@ -434,7 +475,12 @@ impl DeclarationSource {
 /// unread. Two sources that genuinely need EACH OTHER's declarations
 /// never converge; both come back `Err` (docs/tmt/project.md
 /// (Declaration derivation) — mutual dependency is not supported; give
-/// one of them a hand-written header instead).
+/// one of them a hand-written header instead). The caller — never this
+/// function — decides how to render several such `Err`s together
+/// (`cli/build.rs::render_unresolved`): reporting every one of them,
+/// not choosing a single "most likely" cause, is what lets a mutual
+/// pair's two names both reach the user regardless of which was listed
+/// first.
 ///
 /// Cost: in the ordinary case (no source needs more than one or two
 /// peers) parse work stays close to one read per source. The worst case
@@ -445,10 +491,10 @@ impl DeclarationSource {
 pub(crate) fn resolve_declarations(
     sources: &[DeclarationSource],
     stdlib: bool,
-) -> Vec<Result<Resolved, String>> {
+) -> Vec<Result<Resolved, UnresolvedSource>> {
     let n = sources.len();
     let mut resolved: Vec<Option<Resolved>> = vec![None; n];
-    let mut last_err: Vec<Option<String>> = vec![None; n];
+    let mut last_err: Vec<Option<UnresolvedSource>> = vec![None; n];
     loop {
         let mut progress = false;
         for i in 0..n {
@@ -456,15 +502,17 @@ pub(crate) fn resolve_declarations(
                 continue;
             }
             let mut context = Declarations::none();
-            if stdlib {
-                context.push_stdlib();
-            }
             for (j, entry) in resolved.iter().enumerate() {
                 if i != j
                     && let Some(r) = entry
                 {
                     context.push(sources[j].origin.clone(), r.clone());
                 }
+            }
+            // Pushed AFTER every peer — see this function's own doc
+            // comment above for why the order matters.
+            if stdlib {
+                context.push_stdlib();
             }
             match sources[i].read(&context) {
                 Ok(r) => {

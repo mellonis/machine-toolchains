@@ -208,7 +208,11 @@ does not, by itself, resolve a call target or an alphabet reached through
 `--extern`.
 
 A `--extern` file that fails to read or parse is a compile error naming
-that file's own path, never the primary input's.
+that file's own path, never the primary input's — and when several
+`--extern` files fail together (one genuinely broken, plus every other
+one that depended on its declarations), EVERY one of them is named, a
+genuine defect before a downstream symptom, never just the first in
+command-line order (`docs/tmt/project.md (Declaration derivation)`).
 
 ### Compile errors
 

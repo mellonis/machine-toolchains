@@ -52,20 +52,24 @@ FLAGS:
 /// `--extern` files, read through the SAME shared fixpoint `tmt build`
 /// uses for its own siblings and libraries
 /// (`crate::header::resolve_declarations`, docs/tmt/project.md
-/// (Declaration derivation)): each file is read against the embedded
-/// standard library (unless `nostdlib`) plus every OTHER `--extern` file
-/// already read clean, iterated until no more progress is made — so one
-/// `--extern` file may itself depend on another, in either command-line
-/// order. The FINAL table is still assembled in command-line order, then
-/// the embedded standard library last unless `nostdlib` — the exact push
-/// order [`crate::footprint::find_external`]'s first-match lookup relies
-/// on, so a user's own `--extern std.tmh` shadows the built-in `std` when
-/// both are given. A file that never reads clean is reported by ITS OWN
-/// path, never the primary compile's input. Shared with `tmt interface`'s
-/// own `--extern`/`--nostdlib` (`cli/interface.rs`), which takes exactly
-/// this same meaning — `tmt build` derives its own siblings' and
-/// libraries' declarations independently (`cli/driver.rs`) and does NOT
-/// call this function.
+/// (Declaration derivation)): each file is read against every OTHER
+/// `--extern` file already read clean, then the embedded standard
+/// library (unless `nostdlib`), iterated until no more progress is made
+/// — so one `--extern` file may itself depend on another, in either
+/// command-line order. The FINAL table is still assembled in
+/// command-line order, then the embedded standard library last unless
+/// `nostdlib` — the exact push order [`crate::footprint::
+/// find_external`]'s first-match lookup relies on, so a user's own
+/// `--extern std.tmh` shadows the built-in `std` when both are given;
+/// the fixpoint's OWN read context now pushes stdlib last too, for the
+/// identical reason (`crate::header::resolve_declarations`'s own doc
+/// comment). Every file that never reads clean is reported together,
+/// through [`render_unresolved`], never just the first in command-line
+/// order. Shared with `tmt interface`'s own `--extern`/`--nostdlib`
+/// (`cli/interface.rs`), which takes exactly this same meaning —
+/// `tmt build` derives its own siblings' and libraries' declarations
+/// independently (`cli/driver.rs`) and does NOT call this function,
+/// though it does share [`render_unresolved`] with it.
 pub(super) fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declarations, String> {
     let mut sources = Vec::with_capacity(paths.len());
     for raw in paths {
@@ -81,15 +85,97 @@ pub(super) fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declara
         });
     }
     let results = crate::header::resolve_declarations(&sources, !nostdlib);
+    if results.iter().any(Result::is_err) {
+        let failures: Vec<crate::header::UnresolvedSource> =
+            results.into_iter().filter_map(Result::err).collect();
+        return Err(render_unresolved(&failures));
+    }
 
     let mut externals = Declarations::none();
     for (raw, result) in paths.iter().zip(results) {
-        externals.push(Origin::Extern(PathBuf::from(raw)), result?);
+        externals.push(
+            Origin::Extern(PathBuf::from(raw)),
+            result.expect("checked above"),
+        );
     }
     if !nostdlib {
         externals.push_stdlib();
     }
     Ok(externals)
+}
+
+/// Every diagnostic code that means a source's OWN read failed only
+/// because some OTHER source's declarations never resolved, never
+/// because of a defect the source itself owns (`docs/tmt/cli.md`'s
+/// matching error-code rows carry the identical "declarations were/are
+/// not given" wording).
+const DECLARATIONS_MISSING_CODES: [&str; 4] = [
+    "unresolved-alphabet",
+    "undefined-graph",
+    "undefined-map",
+    "state-args-need-declarations",
+];
+
+/// Combines EVERY source [`crate::header::resolve_declarations`] could
+/// not read into one error, rather than choosing a single "most likely"
+/// cause and leaving the rest unreported: `compile --extern`,
+/// `interface --extern`, and `build` all render their fixpoint failures
+/// through this one function (docs/tmt/project.md (Declaration
+/// derivation)), so an unreadable `--extern` file and an unreadable
+/// sibling show identically. A source whose code is NOT one of the four
+/// declarations-missing codes prints first — a genuine defect, never a
+/// symptom of another source's failure — in the order it was given;
+/// the ones that ARE one of those four codes follow, same order.
+/// Classification is by CODE only, never by scanning `message` text, so
+/// a future reword of the rendered prose can never silently defeat it.
+///
+/// When every remaining failure's code is one of those four, or is
+/// `writes-outside-contract`, a trailing note is appended. `writes-
+/// outside-contract` earns the same treatment for one specific reason:
+/// it is the shape two units that each need the OTHER's declarations
+/// fail with when neither's own read ever sees the other — each treats
+/// its absent peer as an unconstrained (opaque) callee, infers a wider
+/// write footprint than its OWN declared contract allows, and reports a
+/// contract violation that is really a missing-peer symptom wearing a
+/// different code. Two independent sources that each carry their own
+/// unrelated writes-outside-contract bug also trigger this note; that
+/// is accepted imprecision, not a claim that every such pair is a real
+/// cycle — the note only ever supplements the individual diagnostics
+/// already printed above it, never replaces them.
+pub(super) fn render_unresolved(failures: &[crate::header::UnresolvedSource]) -> String {
+    let is_declarations_missing = |code: &str| DECLARATIONS_MISSING_CODES.contains(&code);
+    let may_be_a_missing_peer_symptom =
+        |code: &str| is_declarations_missing(code) || code == "writes-outside-contract";
+
+    let mut ordered: Vec<&crate::header::UnresolvedSource> = failures
+        .iter()
+        .filter(|f| !is_declarations_missing(f.code))
+        .collect();
+    ordered.extend(failures.iter().filter(|f| is_declarations_missing(f.code)));
+
+    let mut out = String::new();
+    for (i, f) in ordered.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&f.message);
+    }
+
+    if failures.len() >= 2
+        && failures
+            .iter()
+            .all(|f| may_be_a_missing_peer_symptom(f.code))
+    {
+        out.push_str(
+            "\nnote: every source named above may be failing only because it needs one of \
+             the others' declarations, and none of them ever supplied them to each other — \
+             two units that depend on each other's declarations are not supported; break the \
+             cycle by hand-writing a header for one of them and supplying that header in its \
+             place",
+        );
+    }
+
+    out
 }
 
 pub(super) fn render_warnings(stderr: &mut String, input: &Path, report: &CompileReport) {
@@ -655,7 +741,7 @@ namespace lib {
             .into_iter()
             .next()
             .expect("one source in, one result out")
-            .unwrap_or_else(|e| panic!("read: {e}"))
+            .unwrap_or_else(|e| panic!("read: {}", e.message))
     }
 
     fn declares_flip(resolved: &Resolved) -> bool {

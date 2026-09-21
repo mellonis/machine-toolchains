@@ -987,19 +987,6 @@ fn source_declaration_text(path: &Path) -> Result<crate::header::DeclarationText
     }
 }
 
-/// Whether `err` is shaped like one of the compiler's four "declarations
-/// were/are not given" diagnostics (`compiler.rs`'s own stable wording,
-/// deliberately kept — docs/tmt/cli.md's matching error-code rows use the
-/// identical phrase) — the signature of a source whose OWN read failed
-/// only because some OTHER source's declarations never resolved, as
-/// opposed to a genuine defect in the source itself (a parse error, a
-/// shape violation, …). [`resolve_target_declarations`] uses this to
-/// prefer reporting a genuine defect over one of its own symptoms when
-/// several sources fail the shared fixpoint together.
-fn looks_like_a_missing_declarations_error(err: &str) -> bool {
-    err.contains("declarations were not given") || err.contains("declarations are not given")
-}
-
 /// Resolves every declaration source a target needs, in one call: its
 /// effective sources (`Origin::Sibling`) and its effective libraries
 /// (`Origin::Library`), through the ONE shared fixpoint
@@ -1018,17 +1005,14 @@ fn looks_like_a_missing_declarations_error(err: &str) -> bool {
 /// its own path, before the fixpoint runs at all. Once every source has
 /// TEXT, `stdlib` reaches every one of their reads alike, siblings and
 /// libraries both (a library header depending on `std::` resolves
-/// exactly as a sibling would). A source that never reads clean once the
-/// fixpoint stops making progress is THE build's error, reported here,
-/// before any unit is compiled, never swallowed and left for a
-/// dependent's own compile to misreport (docs/tmt/project.md
-/// (Declaration derivation) — including the case where two sources
-/// genuinely need EACH OTHER and neither ever resolves). When several
-/// sources fail together — a genuinely broken one, plus every OTHER
-/// source that depended on it — the one reported is chosen by
-/// [`looks_like_a_missing_declarations_error`], not by declared order:
-/// declared order alone would make WHICH of the two errors surfaces a
-/// coin flip on where the broken file happens to sit in the source list.
+/// exactly as a sibling would). Every source that never reads clean
+/// once the fixpoint stops making progress is reported here, together,
+/// before any unit is compiled, never swallowed and never narrowed down
+/// to a single "most likely" one and left for a dependent's own compile
+/// to misreport (docs/tmt/project.md (Declaration derivation) —
+/// including the case where two sources genuinely need EACH OTHER and
+/// neither ever resolves: [`super::build::render_unresolved`] names
+/// both, in either declared order).
 #[allow(clippy::type_complexity)]
 fn resolve_target_declarations(
     source_paths: &[PathBuf],
@@ -1055,26 +1039,15 @@ fn resolve_target_declarations(
 
     let mut results = crate::header::resolve_declarations(&sources, stdlib);
     if results.iter().any(Result::is_err) {
-        // Two or more sources can fail the fixpoint together: a source
-        // that genuinely cannot be read (a parse error, a shape
-        // violation) leaves every OTHER source that depended on it
-        // failing too, each with its OWN "declarations were not given"-
-        // shaped complaint about a name that source never supplied.
-        // Reporting the first failure in declared order would then be a
-        // coin flip between the genuine defect and one of its own
-        // symptoms, decided purely by which file happened to be listed
-        // first — prefer a failure that does NOT look like a symptom.
-        let err = results
-            .iter()
-            .filter_map(|r| r.as_ref().err())
-            .find(|e| !looks_like_a_missing_declarations_error(e))
-            .or_else(|| results.iter().filter_map(|r| r.as_ref().err()).next())
-            .expect("at least one Err, checked above")
-            .clone();
-        return Err(err);
+        let failures: Vec<crate::header::UnresolvedSource> =
+            results.into_iter().filter_map(Result::err).collect();
+        return Err(super::build::render_unresolved(&failures));
     }
     let library_results = results.split_off(source_paths.len());
-    let sibling_declarations: Vec<Resolved> = results.into_iter().map(|r| r.unwrap()).collect();
+    let sibling_declarations: Vec<Resolved> = results
+        .into_iter()
+        .map(|r| r.expect("checked above"))
+        .collect();
     let library_declarations: Vec<(String, Resolved)> = library_names
         .iter()
         .cloned()
@@ -1083,8 +1056,22 @@ fn resolve_target_declarations(
     Ok((
         sibling_declarations,
         library_declarations,
-        library_objects.into_iter().flatten().collect(),
+        link_library_objects(library_objects),
     ))
+}
+
+/// The OBJECTS a target's declared libraries hand the linker: one per
+/// entry that found a real `<name>.tmo` on the search path, in the same
+/// order [`find_library_for_build`] resolved them — a header-only
+/// library (`find_library_for_build`'s own `None`) contributes nothing
+/// here, however many declarations it supplied to the compile stage
+/// (docs/tmt/project.md (Declaration derivation)). Factored out of
+/// [`resolve_target_declarations`] so a test can assert on exactly what
+/// a build hands the linker directly, rather than only inferring it
+/// indirectly from link success or failure — `LinkReport` itself names
+/// no per-object list a caller could check instead.
+fn link_library_objects(library_objects: Vec<Option<ObjectFile>>) -> Vec<ObjectFile> {
+    library_objects.into_iter().flatten().collect()
 }
 
 /// The declarations table for compiling unit `i` of `paths`, in the
@@ -1360,5 +1347,49 @@ machine {
         let err = build_target_for_launch(Some(&dir), "app", true).unwrap_err();
         assert!(err.contains("app"), "{err}");
         assert!(err.contains("tape"), "{err}");
+    }
+
+    // ---- link_library_objects (never hands a header-only library's -----
+    // ---- absent object to the linker) -----------------------------------
+
+    /// A minimal, distinguishable placeholder object — only `arch`
+    /// varies between calls, which is enough for `assert_eq!` to tell
+    /// two instances apart without compiling a real one.
+    fn placeholder_object(arch: u8) -> ObjectFile {
+        ObjectFile {
+            arch,
+            symbols: Vec::new(),
+            blobs: Vec::new(),
+            relocations: Vec::new(),
+            debug: None,
+            signatures: None,
+            table_blobs: None,
+            table_fixups: Vec::new(),
+            bound_calls: Vec::new(),
+            variants: None,
+            program_volatile: false,
+            interface: None,
+            grafts: Vec::new(),
+        }
+    }
+
+    /// A header-only library's `None` entry contributes nothing to the
+    /// linker's object list — the direct, mutation-visible counterpart
+    /// of the end-to-end `a_header_only_library_is_never_handed_to_the_
+    /// linker` fixture: this asserts on the exact `Vec<ObjectFile>` a
+    /// build hands the linker, not merely on whether the build as a
+    /// whole succeeded or failed. Mutation (applied by hand and
+    /// verified, then reverted): substituting a clone of some OTHER
+    /// object for the header-only entry's `None` — `assert_eq!` goes
+    /// RED on both length and content, unlike a link-outcome assertion,
+    /// which a same-arch, symbol-disjoint placeholder would not move at
+    /// all (`LinkReport` names no per-object list to check instead —
+    /// `resolve_target_declarations`'s own doc comment).
+    #[test]
+    fn link_library_objects_drops_a_header_only_entry() {
+        let a = placeholder_object(1);
+        let b = placeholder_object(2);
+        let objects = link_library_objects(vec![Some(a.clone()), None, Some(b.clone())]);
+        assert_eq!(objects, vec![a, b]);
     }
 }

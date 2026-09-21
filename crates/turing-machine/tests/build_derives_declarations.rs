@@ -414,13 +414,18 @@ const TMT_JSON_LIBCALL: &str = "\
 /// placeholder available. The linker's own arch-consistency check
 /// (`resolve()`, `crates/core/src/linker/resolve.rs`) then refuses the
 /// WHOLE link with `architecture mismatch`, not `unresolved symbols:
-/// libcall::touch` — this exact assertion goes RED. A same-arch
-/// placeholder that still does not define `libcall::touch` would still
-/// be caught (a different symbol name resolves nothing), and one
-/// fabricated specifically TO define it would require compiling the
-/// header back into an object — the second converter this design
-/// forbids — so it is not a realistic accidental mistake to guard
-/// against here.
+/// libcall::touch` — this exact assertion goes RED, but ONLY because the
+/// placeholder happens to carry a foreign arch byte: a SAME-arch
+/// placeholder with no symbols of its own reaches the linker as inert,
+/// unreachable dead weight that changes neither the exit code nor the
+/// rendered warnings, so it does NOT move this assertion at all — this
+/// end-to-end test's own guard is real against the arch-mismatch shape
+/// above and nothing narrower. The direct guard against ANY
+/// substitution, same arch or not, is
+/// `link_library_objects_drops_a_header_only_entry`
+/// (`crates/turing-machine/src/cli/driver.rs`), which asserts on the
+/// exact `Vec<ObjectFile>` `resolve_target_declarations` hands the
+/// linker rather than inferring it indirectly from link behavior.
 #[test]
 fn a_header_only_library_is_never_handed_to_the_linker() {
     let dir = scratch("header_only_never_linked");
@@ -788,16 +793,25 @@ namespace lib {
 /// A sibling with a genuine PARSE error must be named in the build's own
 /// error, regardless of where it sits in the declared source list — a
 /// dependent listed BEFORE it (`app.tmc`, which itself cannot read
-/// without `lib`'s declarations either) must not steal the report with
-/// its own derived "declarations were not given" complaint.
+/// without `lib`'s declarations either) must not steal the report and
+/// leave `lib.tmc` unmentioned. Every source the shared fixpoint could
+/// not read is now shown, `lib.tmc`'s genuine parse error FIRST — its
+/// code (`unexpected-token`) is not one of the four "declarations
+/// were/are not given" codes, so it sorts ahead of `app.tmc`'s own
+/// derived complaint about `lib::a6` regardless of which was listed
+/// first (`cli/build.rs::render_unresolved`). No trailing
+/// mutual-dependency note: `app.tmc`'s code IS one of the four, but
+/// `lib.tmc`'s genuine parse error is neither one of those four nor
+/// `writes-outside-contract`, so the "every remaining failure might only
+/// be missing its peer" condition does not hold.
 ///
-/// Mutation: reporting the FIRST source the fixpoint left unresolved, in
-/// declared order, rather than preferring a non-"declarations were not
-/// given"-shaped failure (`looks_like_a_missing_declarations_error`,
-/// `cli/driver.rs`) — verified by hand: with `app.tmc` listed first, the
-/// error becomes `app.tmc`'s own "declarations were not given" for
-/// `lib::a6` instead of `lib.tmc`'s own parse error, and `lib.tmc` is
-/// never mentioned at all.
+/// Mutation: collapsing the ordering to the first source the fixpoint
+/// left unresolved, in declared order, rather than sorting non-
+/// declarations-missing codes first (`render_unresolved`'s own `ordered`
+/// construction collapsed to `failures.iter()` unsorted) — verified by
+/// hand: with `app.tmc` listed first, `app.tmc`'s own "declarations were
+/// not given" for `lib::a6` prints BEFORE `lib.tmc`'s parse error
+/// instead of after it, so the position assertion below goes RED.
 #[test]
 fn a_sibling_parse_error_is_the_root_cause_shown_dependent_listed_first() {
     let dir = scratch("root_cause_dependent_first");
@@ -819,15 +833,25 @@ fn a_sibling_parse_error_is_the_root_cause_shown_dependent_listed_first() {
         "{stderr}"
     );
     assert!(
-        !stderr.contains("declarations were not given"),
-        "the derived failure must not be what's reported: {stderr}"
+        stderr.contains("app.tmc") && stderr.contains("declarations were not given"),
+        "the dependent's own derived complaint must ALSO be shown, not swallowed: {stderr}"
+    );
+    let lib_at = stderr.find("lib.tmc").expect("lib.tmc named above");
+    let app_at = stderr.find("app.tmc").expect("app.tmc named above");
+    assert!(
+        lib_at < app_at,
+        "the genuine defect (lib.tmc) must print before the derived symptom (app.tmc): {stderr}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "lib.tmc's own parse error is not shaped like a missing-peer symptom, so no \
+         mutual-dependency note is warranted: {stderr}"
     );
 }
 
-/// The other declared order, for the identical fixture: `lib.tmc` listed
-/// first already names itself correctly under the OLD (order-dependent)
-/// design too — kept as the positive control this file's own mutation
-/// note above describes.
+/// The other declared order, for the identical fixture: byte-identical
+/// output to the dependent-listed-first case above, proving the report
+/// no longer depends on which file was listed first.
 #[test]
 fn a_sibling_parse_error_is_the_root_cause_shown_dependency_listed_first() {
     let dir = scratch("root_cause_dependency_first");
@@ -847,6 +871,343 @@ fn a_sibling_parse_error_is_the_root_cause_shown_dependency_listed_first() {
     assert!(
         stderr.contains("lib.tmc") && stderr.contains("unexpected-token"),
         "{stderr}"
+    );
+    assert!(
+        stderr.contains("app.tmc") && stderr.contains("declarations were not given"),
+        "{stderr}"
+    );
+    let lib_at = stderr.find("lib.tmc").expect("lib.tmc named above");
+    let app_at = stderr.find("app.tmc").expect("app.tmc named above");
+    assert!(lib_at < app_at, "{stderr}");
+}
+
+// ── the root cause's own code is itself declarations-missing ────────────
+
+const LIB_USES_GHOST: &str = "\
+namespace lib {
+  export alphabet ab { '_', '0', '1' }
+
+  use ghost::bits;
+
+  export routine touch(tape t: ab, tape g: bits) {
+    entry state s { [*] -> return; }
+  }
+}
+";
+
+const APP_USES_LIB_AB: &str = "\
+use lib::ab;
+
+machine {
+  tape d: ab;
+  entry state go { [*] -> halt; }
+}
+";
+
+/// The root cause's OWN diagnostic can itself be shaped like one of the
+/// four declarations-missing codes: `lib.tmc` names `ghost::bits`
+/// through `use`, and nothing anywhere declares a `ghost` namespace — a
+/// typo'd name, or a forgotten library, either way a genuine defect in
+/// `lib.tmc` itself. `app.tmc` is correct — it only needs `lib::ab`,
+/// which `lib.tmc` exports perfectly well — but `lib.tmc`'s own failure
+/// means `app.tmc` never sees `lib::ab` supplied either, so `app.tmc`
+/// fails too, with the SAME `unresolved-alphabet` code. Both land in the
+/// declarations-missing group (`render_unresolved` cannot tell "a real
+/// defect that happens to be this code" from "a genuine symptom of a
+/// peer" by code alone), so the trailing mutual-dependency note also
+/// fires here — accepted imprecision (`render_unresolved`'s own doc
+/// comment), not a claim that `app.tmc` and `lib.tmc` need each other.
+/// What matters, and what a chosen-single-cause design could not do, is
+/// that `lib.tmc`'s own message — naming `ghost::bits`, the actual root
+/// cause — is shown at all, regardless of declared order, rather than
+/// being replaced by `app.tmc`'s unrelated-looking complaint about
+/// `lib::ab` (which `lib.tmc` in fact declares just fine).
+#[test]
+fn a_root_cause_whose_own_code_is_declarations_missing_is_still_shown_app_first() {
+    let dir = scratch("root_cause_code_is_declarations_missing_app_first");
+    write(&dir, "app.tmc", APP_USES_LIB_AB);
+    write(&dir, "lib.tmc", LIB_USES_GHOST);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["app.tmc", "lib.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("lib.tmc") && stderr.contains("ghost::bits"),
+        "the actual root cause must be named: {stderr}"
+    );
+    assert!(
+        stderr.contains("app.tmc") && stderr.contains("lib::ab"),
+        "{stderr}"
+    );
+}
+
+/// The other declared order, for the identical fixture.
+#[test]
+fn a_root_cause_whose_own_code_is_declarations_missing_is_still_shown_lib_first() {
+    let dir = scratch("root_cause_code_is_declarations_missing_lib_first");
+    write(&dir, "app.tmc", APP_USES_LIB_AB);
+    write(&dir, "lib.tmc", LIB_USES_GHOST);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["lib.tmc", "app.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("lib.tmc") && stderr.contains("ghost::bits"),
+        "the actual root cause must be named: {stderr}"
+    );
+    assert!(
+        stderr.contains("app.tmc") && stderr.contains("lib::ab"),
+        "{stderr}"
+    );
+}
+
+// ── a genuinely mutual pair of siblings ───────────────────────────────────
+
+/// `aa::ra` and `bb::rb` each transparently call the OTHER, each under a
+/// narrow `writes { '0' }` contract that can only be validated once the
+/// other side's declared contract is known — the shape
+/// `docs/tmt/project.md (Declaration derivation)`'s "mutually dependent
+/// units are not supported" paragraph describes. Neither source's own
+/// declarations-only read ever sees the other (the fixpoint's first pass
+/// tries both against stdlib alone and both fail there, so no further
+/// pass ever makes progress): each treats its absent peer as an
+/// unconstrained, opaque callee, infers a wider write footprint than its
+/// OWN declared contract allows, and fails with `writes-outside-contract`
+/// — a real diagnostic, just not the actual shape of the problem.
+const AA_CALLS_BB: &str = "\
+namespace aa {
+  alphabet t { '_', '0', '1' }
+
+  export routine ra(tape x: t writes { '0' }) {
+    entry state s { [*] -> call bb::rb() then done; }
+    state done { [*] -> return; }
+  }
+}
+";
+
+const BB_CALLS_AA: &str = "\
+namespace bb {
+  alphabet t { '_', '0', '1' }
+
+  export routine rb(tape x: t writes { '0' }) {
+    entry state s { [*] -> call aa::ra() then done; }
+    state done { [*] -> return; }
+  }
+}
+";
+
+/// Both files must be named, and the trailing note must appear, in this
+/// declared order.
+#[test]
+fn a_mutual_pair_of_siblings_names_both_and_notes_the_cycle_a_first() {
+    let dir = scratch("mutual_pair_a_first");
+    write(&dir, "a.tmc", AA_CALLS_BB);
+    write(&dir, "b.tmc", BB_CALLS_AA);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "ab": {
+            "sources": ["a.tmc", "b.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("a.tmc") && stderr.contains("aa::ra"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("b.tmc") && stderr.contains("bb::rb"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("writes-outside-contract"),
+        "both sides fail this way, not a declarations-missing code: {stderr}"
+    );
+    assert!(
+        stderr.contains("note:") && stderr.contains("depend on each other"),
+        "the mutual-dependency note must be appended: {stderr}"
+    );
+}
+
+/// The other declared order, for the identical pair — both names and the
+/// note must appear regardless of which file was listed first.
+#[test]
+fn a_mutual_pair_of_siblings_names_both_and_notes_the_cycle_b_first() {
+    let dir = scratch("mutual_pair_b_first");
+    write(&dir, "a.tmc", AA_CALLS_BB);
+    write(&dir, "b.tmc", BB_CALLS_AA);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "ba": {
+            "sources": ["b.tmc", "a.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("a.tmc") && stderr.contains("aa::ra"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("b.tmc") && stderr.contains("bb::rb"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("note:") && stderr.contains("depend on each other"),
+        "{stderr}"
+    );
+}
+
+// ── a peer shadowing a stdlib name is believed over the built-in ────────
+
+/// `libs/mystd.tmh` declares `std::binaryNumbers::minusOne` itself, under
+/// a NARROWER contract (`writes { '0' }`) than the real embedded one
+/// (`writes { '_', '^', '0', '1' }`); `consumer.tmc` declares its own
+/// `cons::wrap` under that same narrow contract and calls
+/// `std::binaryNumbers::minusOne` transparently. This compiles only when
+/// the fixpoint's OWN read of `consumer.tmc` sees `mystd`'s override
+/// BEFORE it would otherwise fall through to the real embedded stdlib —
+/// the identical precedence the FINAL declarations table already uses
+/// (`unit_declarations`: siblings, then libraries, then stdlib LAST).
+///
+/// Mutation (applied by hand and verified, then reverted): pushing
+/// `stdlib` BEFORE the peer loop inside
+/// `crate::header::resolve_declarations` (the shape this task's own fix
+/// replaces) — `consumer.tmc`'s read then sees the REAL, wider
+/// `minusOne` win the first-match lookup instead of `mystd`'s override,
+/// and `cons::wrap`'s own narrow contract is violated by the wider
+/// footprint: this build, which must succeed, fails instead with
+/// `writes-outside-contract` naming `consumer.tmc`.
+#[test]
+fn a_peer_shadowing_a_stdlib_name_is_believed_over_the_builtin() {
+    let dir = scratch("peer_shadows_stdlib");
+    std::fs::create_dir_all(dir.join("libs")).unwrap();
+    write(
+        &dir,
+        "libs/mystd.tmh",
+        "\
+namespace std {
+  namespace binaryNumbers {
+    alphabet symbols { '_', '^', '$', '0', '1' }
+
+    export routine minusOne(tape num: symbols writes { '0' });
+  }
+}
+",
+    );
+    write(
+        &dir,
+        "consumer.tmc",
+        "\
+namespace cons {
+  alphabet symbols { '_', '^', '$', '0', '1' }
+
+  export routine wrap(tape n: symbols writes { '0' }) {
+    entry state s { [*] -> call std::binaryNumbers::minusOne(num = n) then done; }
+    state done { [*] -> return; }
+  }
+}
+",
+    );
+    write(
+        &dir,
+        "app.tmc",
+        "\
+alphabet symbols { '_', '^', '$', '0', '1' }
+
+machine {
+  tape d: symbols;
+  entry state go { [*] -> call cons::wrap(n = d) then done; }
+  state done { [*] -> halt; }
+}
+",
+    );
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["consumer.tmc", "app.tmc"],
+            "libraries": { "dirs": ["libs"], "link": ["mystd"] }
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(
+        out.status.success(),
+        "the library's override must be believed inside the fixpoint too: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The other direction of the same precedence: with no peer declaring
+/// `std::binaryNumbers::minusOne` at all, the embedded standard
+/// library's OWN item is still found and its real (wider) contract
+/// believed — `consumer.tmc` here declares the WIDE contract that
+/// matches the real `minusOne`, so this build succeeds only if the
+/// fixpoint actually resolves the built-in when nothing shadows it.
+#[test]
+fn with_no_peer_the_builtin_stdlib_item_is_still_found() {
+    let dir = scratch("no_peer_stdlib_found");
+    write(
+        &dir,
+        "consumer.tmc",
+        "\
+namespace cons {
+  alphabet symbols { '_', '^', '$', '0', '1' }
+
+  export routine wrap(tape n: symbols writes { '_', '^', '0', '1' }) {
+    entry state s { [*] -> call std::binaryNumbers::minusOne(num = n) then done; }
+    state done { [*] -> return; }
+  }
+}
+",
+    );
+    write(
+        &dir,
+        "app.tmc",
+        "\
+alphabet symbols { '_', '^', '$', '0', '1' }
+
+machine {
+  tape d: symbols;
+  entry state go { [*] -> call cons::wrap(n = d) then done; }
+  state done { [*] -> halt; }
+}
+",
+    );
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["consumer.tmc", "app.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(
+        out.status.success(),
+        "the embedded stdlib's own item must still be found with no peer shadowing it: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
