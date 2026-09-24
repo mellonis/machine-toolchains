@@ -28,9 +28,10 @@ use crate::lexer::{LexMode, Token, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
-    Graft, Machine, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
-    Transition, parse_green_from_tokens,
+    Graft, Machine, MoveDir, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
+    Transition, WriteCell, WriteCellKind, parse_green_from_tokens,
 };
+use crate::patterns::{accepted_glyphs, cell_labels};
 
 /// Fatal compile error at a real source span (1-based, char-counted,
 /// end-exclusive; see `mtc_core::diagnostics`).
@@ -234,6 +235,26 @@ pub enum CompileErrorKind {
         tape: String,
         glyphs: Vec<String>,
     },
+    /// A declared `enters { … }` clause names a glyph the world's entry
+    /// state has no rule for: entering on that glyph traps rather than
+    /// being handled, so the clause promises a moment the body cannot
+    /// accept. `state` is the entry state; `glyph` is the first unaccepted
+    /// symbol, in the tape's own band order. Never raised when the entry
+    /// state's own coverage cannot be proven (an arity mismatch or an
+    /// unresolvable range cell) or when the entry is an unnamed graft
+    /// instance, which carries no state to examine ahead of expansion.
+    EntersNotAccepted { state: String, glyph: String },
+    /// A declared `leaves { … }` clause is contradicted by an EXIT row whose
+    /// leaving glyph is statically known: a `return` row (a routine) or a
+    /// `goto` onto an exit parameter (a graph) that neither moves this tape
+    /// nor writes it with a `{expr}` substitution — the row's own matched
+    /// cell (an unwritten position) or its literal write names a glyph the
+    /// clause does not list. `state` and `glyph` name the offending row's
+    /// state and the symbol; the span points at the row itself. Never
+    /// raised over a row whose leaving glyph is not statically known (a
+    /// move on this tape, or a `{expr}` write) — the runtime check covers
+    /// that case instead.
+    LeavesOutsideContract { state: String, glyph: String },
 
     // -- graft + range expansion -------------------------------------------
     /// A graph definition graft-depends on itself (directly or through a
@@ -478,6 +499,8 @@ impl CompileErrorKind {
         CompileErrorKind::BindCallArgs(_) => "bind-call-args",
         CompileErrorKind::ContractSymbolUnknown { .. } => "contract-symbol-unknown",
         CompileErrorKind::WritesOutsideContract { .. } => "writes-outside-contract",
+        CompileErrorKind::EntersNotAccepted { .. } => "enters-not-accepted",
+        CompileErrorKind::LeavesOutsideContract { .. } => "leaves-outside-contract",
         CompileErrorKind::GraftCycle(_) => "graft-cycle",
         CompileErrorKind::GraftCallUnsupported(_) => "graft-call-unsupported",
         CompileErrorKind::MapSymbolNotInAlphabet(_) => "map-symbol-not-in-alphabet",
@@ -780,6 +803,18 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "`{world}` may write {named} on tape `{tape}`, which its contract forbids"
+                )
+            }
+            CompileErrorKind::EntersNotAccepted { state, glyph } => {
+                write!(
+                    f,
+                    "entry state `{state}` has no rule for '{glyph}', which its tape's `enters` clause declares"
+                )
+            }
+            CompileErrorKind::LeavesOutsideContract { state, glyph } => {
+                write!(
+                    f,
+                    "this exit row in state `{state}` may leave on '{glyph}', which its tape's `leaves` clause forbids"
                 )
             }
             CompileErrorKind::GraftCycle(n) => {
@@ -1408,6 +1443,7 @@ fn resolve_program(
     // must run first.
     expand_named_maps(&mut resolved, &scopes, externals)?;
     check_contracts(&resolved, externals)?;
+    check_head_contracts(&resolved)?;
     let WorldCtx {
         imports_used,
         mut diagnostics,
@@ -1861,6 +1897,180 @@ fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// Check every declared `enters`/`leaves` head-position clause against what a
+/// world's own body can PROVE, never against what it merely fails to
+/// disprove — the sibling of `check_contracts` for the other kind of
+/// promise a signature tape parameter can make (docs/tmt/language.md (head-
+/// position clauses)). Unlike `writes`/`preserves`, neither check walks a
+/// call graph or a footprint fixpoint: both read one world's own rules only.
+///
+/// `enters` is checked against the world's ENTRY state — the glyphs its own
+/// rules accept on that tape, via [`accepted_glyphs`] (the same coverage
+/// primitive `state-may-trap` and `dead-rule` read off pattern cells). A
+/// declared element that state has no rule for is fatal; a state whose
+/// coverage cannot be proven (an arity mismatch, or an unresolvable range
+/// cell) is left unchecked, and so is a world whose entry is an unnamed
+/// graft instance — there is no state to examine ahead of expansion.
+///
+/// `leaves` is checked against the world's EXIT rows — a ROUTINE leaves
+/// through `return`, a GRAPH through a `goto` onto one of its own exit
+/// (`state`) parameters; the two never overlap, since a graph carries no
+/// `return` and this check never follows a routine's own exit parameters
+/// (docs/tmt/language.md ("state" parameters)). An exit row is checked only
+/// where its leaving glyph is statically exact: no move on the declaring
+/// tape, and a write that is either absent/`Keep` (the row's own matched
+/// cell) or a literal — never a `{expr}` substitution. These are the same
+/// three tiers `footprint.rs`'s source-level seeding distinguishes (Keep
+/// and Lit exact, Subst not); a row this check cannot prove is simply left
+/// to the runtime check instead of being guessed at.
+fn check_head_contracts(resolved: &Resolved) -> Result<(), CompileError> {
+    for world in &resolved.worlds {
+        if world
+            .tapes
+            .iter()
+            .all(|t| t.enters.is_none() && t.leaves.is_none())
+        {
+            continue;
+        }
+        let Some(tape_glyphs) = world
+            .tapes
+            .iter()
+            .map(|t| {
+                resolved
+                    .alphabets
+                    .get(&t.alphabet)
+                    .map(|a| a.glyphs.as_slice())
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        for (k, tape) in world.tapes.iter().enumerate() {
+            if let Some(enters) = tape.enters {
+                check_enters(world, k, tape, enters, &tape_glyphs)?;
+            }
+            if let Some(leaves) = tape.leaves {
+                check_leaves(world, k, leaves, &tape_glyphs)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `enters` half of [`check_head_contracts`]: every glyph tape `k`'s
+/// declared `enters` clause names must be among what the world's entry
+/// state accepts at that same position.
+fn check_enters(
+    world: &ResolvedWorld,
+    k: usize,
+    tape: &ResolvedTape,
+    enters: SymSet,
+    tape_glyphs: &[&[String]],
+) -> Result<(), CompileError> {
+    let Some(entry_state) = world.states.iter().find(|s| s.entry) else {
+        // The entry is an unnamed graft instance — no state to examine ahead
+        // of expansion.
+        return Ok(());
+    };
+    let Some(accepted) = accepted_glyphs(&entry_state.rules, tape_glyphs) else {
+        // The entry state's own coverage cannot be proven.
+        return Ok(());
+    };
+    for glyph in symset_glyphs(enters, tape_glyphs[k]) {
+        if !accepted[k].contains(&glyph) {
+            return Err(CompileError {
+                span: tape.span,
+                kind: CompileErrorKind::EntersNotAccepted {
+                    state: entry_state.name.clone(),
+                    glyph,
+                },
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The `leaves` half of [`check_head_contracts`]: every EXIT row's leaving
+/// glyph on tape `k`, where that glyph is statically exact, must be among
+/// what the declared `leaves` clause lists.
+fn check_leaves(
+    world: &ResolvedWorld,
+    k: usize,
+    leaves: SymSet,
+    tape_glyphs: &[&[String]],
+) -> Result<(), CompileError> {
+    let declared: HashSet<String> = symset_glyphs(leaves, tape_glyphs[k]).into_iter().collect();
+    for state in &world.states {
+        for rule in &state.rules {
+            if !is_exit_row(world, rule) {
+                continue;
+            }
+            let Some(outcome) = exit_glyphs(rule, k, tape_glyphs) else {
+                continue; // the leaving glyph is not statically exact
+            };
+            for glyph in outcome {
+                if !declared.contains(&glyph) {
+                    return Err(CompileError {
+                        span: rule.span,
+                        kind: CompileErrorKind::LeavesOutsideContract {
+                            state: state.name.clone(),
+                            glyph,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `rule` leaves `world` at all — a ROUTINE only through `return`,
+/// a GRAPH only through a `goto` onto one of its own `state` (exit)
+/// parameters, matched by name. A routine's own exit parameters (it may
+/// have some too) are deliberately not exit rows here: this task checks a
+/// routine's `leaves` clause against `return` alone.
+fn is_exit_row(world: &ResolvedWorld, rule: &Rule) -> bool {
+    match world.kind {
+        WorldKind::Routine => matches!(rule.transition, Transition::Return { .. }),
+        WorldKind::Graph => matches!(
+            &rule.transition,
+            Transition::Goto { name, .. } if world.state_params.iter().any(|p| p == name)
+        ),
+        WorldKind::Machine => false,
+    }
+}
+
+/// The glyphs tape `k` may hold when `rule` fires, or `None` when that is
+/// not statically exact: a move on tape `k`, or a `{expr}` substitution
+/// write there. An absent write vector, or a `Keep` cell, leaves the tape
+/// as the rule's own pattern matched it — [`cell_labels`] of that cell,
+/// which may be more than one glyph for a range or wildcard pattern; a
+/// literal write is the one glyph it names.
+fn exit_glyphs(rule: &Rule, k: usize, tape_glyphs: &[&[String]]) -> Option<Vec<String>> {
+    let stayed = match &rule.mov {
+        None => true,
+        Some(mv) => !matches!(mv.cells.get(k), Some(c) if c.dir != MoveDir::Stay),
+    };
+    if !stayed {
+        return None;
+    }
+    match rule.write.as_ref().and_then(|w| w.cells.get(k)) {
+        None
+        | Some(WriteCell {
+            kind: WriteCellKind::Keep,
+            ..
+        }) => cell_labels(rule.pattern.cells.get(k)?, tape_glyphs[k]),
+        Some(WriteCell {
+            kind: WriteCellKind::Lit(lit),
+            ..
+        }) => Some(vec![glyph_label(lit)]),
+        Some(WriteCell {
+            kind: WriteCellKind::Subst { .. },
+            ..
+        }) => None,
+    }
 }
 
 /// True when every match cell of a rule's pattern is a wildcard (`[*, …]`) —
@@ -4200,6 +4410,14 @@ mod tests {
                 tape: "t".into(),
                 glyphs: vec!["x".into()],
             },
+            CompileErrorKind::EntersNotAccepted {
+                state: "s".into(),
+                glyph: "x".into(),
+            },
+            CompileErrorKind::LeavesOutsideContract {
+                state: "s".into(),
+                glyph: "x".into(),
+            },
             CompileErrorKind::GraftCycle("x".into()),
             CompileErrorKind::GraftCallUnsupported("x".into()),
             CompileErrorKind::MapSymbolNotInAlphabet("x".into()),
@@ -5187,6 +5405,136 @@ routine outer(tape t: bits writes {'0'}) {
         );
     }
 
+    // -- head-position contracts: `enters`/`leaves` -------------------------
+
+    /// (1) `enters { 'x' }` on a routine whose entry state has no rule
+    /// matching `'x'` — the entry state traps on the very glyph the
+    /// signature promises a caller may hand it.
+    #[test]
+    fn an_enters_glyph_the_entry_state_does_not_accept_is_rejected() {
+        let e = err("\
+alphabet bits { '_', '0', 'x' }
+routine r(tape t: bits enters { 'x' }) {
+  entry state s { ['0'] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "enters-not-accepted");
+        assert_eq!(
+            e.kind.to_string(),
+            "entry state `s` has no rule for 'x', which its tape's `enters` clause declares"
+        );
+    }
+
+    /// (2) The near miss: the same clause and entry state, now with a `[*]`
+    /// catch-all — every glyph is accepted, `'x'` included, so the same
+    /// declared `enters` clause is satisfied.
+    #[test]
+    fn a_catch_all_entry_state_accepts_every_declared_enters_glyph() {
+        ok("\
+alphabet bits { '_', '0', 'x' }
+routine r(tape t: bits enters { 'x' }) {
+  entry state s { ['0'] -> return; [*] -> return; }
+}
+");
+    }
+
+    /// (3) `leaves { '$' }` on a routine whose `return` row writes a
+    /// literal `'0'` and does not move: the leaving glyph is statically
+    /// `'0'`, which the clause does not list.
+    #[test]
+    fn a_return_row_writing_outside_the_declared_leaves_set_is_rejected() {
+        let e = err("\
+alphabet bits { '_', '0', '$' }
+routine r(tape t: bits leaves { '$' }) {
+  entry state s { [*] -> write ['0'] return; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "this exit row in state `s` may leave on '0', which its tape's `leaves` clause forbids"
+        );
+    }
+
+    /// (4) The near miss: the same row now moves this tape — the leaving
+    /// glyph is no longer statically known, so the check does not fire.
+    /// **Mutation caught:** treating a moved row's post-glyph as the
+    /// written glyph would flag this row too, which is exactly the
+    /// over-approximation the check must not make.
+    #[test]
+    fn a_moved_exit_row_is_not_statically_known_and_stays_clean() {
+        ok("\
+alphabet bits { '_', '0', '$' }
+routine r(tape t: bits leaves { '$' }) {
+  entry state s { [*] -> write ['0'] move [>] return; }
+}
+");
+    }
+
+    /// (5) A world with NEITHER clause is never checked — the absence of a
+    /// promise is not itself a promise. A body that would fail both checks
+    /// above, were either clause declared, still compiles clean.
+    #[test]
+    fn a_world_with_no_head_clause_is_never_checked() {
+        ok("\
+alphabet bits { '_', '0', 'x' }
+routine r(tape t: bits) {
+  entry state s { ['0'] -> write ['0'] return; }
+}
+");
+    }
+
+    /// `leaves` on a GRAPH is checked against its own exit-parameter `goto`
+    /// rows, never `return` (a graph carries none): the matched `'x'` is
+    /// kept (no write, no move) and the clause accepts it.
+    #[test]
+    fn a_graphs_leaves_clause_is_checked_against_its_exit_parameter_rows() {
+        ok("\
+alphabet bits { '_', '0', 'x' }
+graph g(tape t: bits leaves { 'x' }, state done) {
+  entry state s { ['x'] -> done; [*] -> move [>] goto s; }
+}
+");
+        let e = err("\
+alphabet bits { '_', '0', 'x' }
+graph g(tape t: bits leaves { '0' }, state done) {
+  entry state s { ['x'] -> done; [*] -> move [>] goto s; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+    }
+
+    /// `enters` on a GRAPH is checked against its own entry state exactly
+    /// as a routine's is.
+    #[test]
+    fn a_graphs_enters_clause_is_checked_against_its_entry_state() {
+        let e = err("\
+alphabet bits { '_', '0', 'x' }
+graph g(tape t: bits enters { 'x' }, state done) {
+  entry state s { ['0'] -> done; }
+}
+");
+        assert_eq!(e.kind.code(), "enters-not-accepted");
+        assert_eq!(
+            e.kind.to_string(),
+            "entry state `s` has no rule for 'x', which its tape's `enters` clause declares"
+        );
+    }
+
+    /// A routine's OWN exit (`state`) parameters are deliberately not
+    /// `leaves` exit rows: only `return` is. A row that leaves through an
+    /// exit parameter, writing a glyph the clause forbids, stays clean
+    /// because it is never examined.
+    #[test]
+    fn a_routines_own_exit_parameter_rows_are_not_leaves_exit_rows() {
+        ok("\
+alphabet bits { '_', '0', '$' }
+routine r(tape t: bits leaves { '$' }, state done) {
+  entry state s { [*] -> write ['0'] goto done; }
+}
+");
+    }
+
     // -- the canonical examples resolve end-to-end -------------------------
 
     #[test]
@@ -5785,7 +6133,7 @@ namespace mylib {
   ? widens the bare alphabet onto the richer one
   export map widen: bits -> wide { '_' => '_', '0' => 'a', '1' -> 'b' }
 
-  export graph walk(tape t: wide writes {} enters { 'a' } leaves { 'c' }, state found) {
+  export graph walk(tape t: wide writes {} enters { 'a' } leaves { '_' }, state found) {
     entry state s {
       ['_'] -> goto found;
       [*]   -> move [>] goto s;

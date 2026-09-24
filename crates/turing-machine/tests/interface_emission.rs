@@ -692,7 +692,7 @@ export alphabet marks { '_', 'x', 'y' }
 
 export graph g(tape t: marks enters { 'x' } leaves { 'y' }, state found) {
   entry state walk {
-    ['x'] -> found;
+    ['x'] -> write ['y'] found;
     [*]   -> move [>] goto walk;
   }
 }

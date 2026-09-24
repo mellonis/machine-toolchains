@@ -446,11 +446,37 @@ escapes this today; the honest remedy is to drop the clause from a
 parameter whose body writes through a substitution rather than declare a
 promise the checker can never confirm.
 
+A signature tape parameter may also declare a head-position clause —
+`enters { … }` / `leaves { … }`, each the same alphabet-body element list
+`writes`/`preserves` take, in the same canonical order after them
+(`writes` < `preserves` < `enters` < `leaves`; out of order is the same
+`contract-clause-order` error). Unlike `writes {}`, an empty
+`enters {}`/`leaves {}` has no meaning — there is no symbol-less moment
+for the head to be at — so it is its own `empty-head-clause` error; an
+absent clause states nothing, exactly as an absent `writes`/`preserves`
+does. `enters` promises the glyph the head is on when a call transfers
+control INTO the parameter's tape; `leaves` promises the glyph it is on
+when control returns. Both are checked statically against the world's
+own body alone — never a call graph or a footprint fixpoint the way
+`writes`/`preserves` are. `enters` is checked against the world's entry
+state: every glyph the clause names must be one some rule of that state
+matches, or the state traps on exactly the input the clause promises a
+caller may hand it — `enters-not-accepted`, naming the entry state and
+the unaccepted glyph. `leaves` is checked against the world's own EXIT
+rows — a routine leaves through `return`; a graph leaves through a
+`goto` onto one of its own `state` (exit) parameters, and a routine's
+own exit parameters are not `leaves` rows, only `return` is — and only
+where the leaving glyph is statically exact: no move on the declaring
+tape, and a write that is either the row's own matched cell or a
+literal, never a `{expr}` substitution. A row whose leaving glyph is not
+statically exact is left unchecked rather than guessed at —
+`leaves-outside-contract`, naming the row's state and the glyph.
+
 A machine's own `tape` declaration carries no contract grammar at all —
-`writes`/`preserves` are legal only on a signature tape parameter, which
-is what distinguishes a machine's tapes from a routine's or a graph's
-(see "Tapes and heads", above); there is nowhere else in the grammar a
-clause can appear.
+`writes`/`preserves`/`enters`/`leaves` are legal only on a signature
+tape parameter, which is what distinguishes a machine's tapes from a
+routine's or a graph's (see "Tapes and heads", above); there is nowhere
+else in the grammar a clause can appear.
 
 ## Rules
 
@@ -1351,9 +1377,10 @@ What it carries follows from that:
   clauses, since a graph and a routine share one signature grammar; they
   print the identical way on a graph's own header entry, digested along
   with the rest of its printed body. A graph is spliced rather than
-  called, so this release carries and prints the clauses without giving
-  them any checked meaning of their own; whether a later one does is
-  undecided here.
+  called, so `leaves` is checked against its own exit (`state`) parameter
+  rows rather than a `return` a graph never carries; `enters` is checked
+  against its entry state exactly as a routine's is (see "Contract
+  clauses", above).
 - **`volatile` never appears.** The modifier shapes how a routine's own
   body is compiled and is never checked at a call site, so it is not part
   of what a caller may rely on ("Volatile tapes").

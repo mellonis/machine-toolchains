@@ -298,6 +298,8 @@ subsection.
 | `bind-call-args` | A `call` on a world-local bind name carries binding arguments — a bind is already fully bound at its declaration. |
 | `contract-symbol-unknown` | A `writes`/`preserves` clause names a glyph that is not a symbol of the parameter's alphabet. |
 | `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `preserves`). |
+| `enters-not-accepted` | A declared `enters { … }` clause names a glyph the world's entry state has no rule for. |
+| `leaves-outside-contract` | A declared `leaves { … }` clause is contradicted by an exit row whose leaving glyph is statically known. |
 | `graft-cycle` | A graph definition graft-depends on itself, directly or through a cycle of definitions. |
 | `graft-call-unsupported` | A grafted graph's body contains a `call` — a call-bearing graph is not spliced; write it as a routine, with `state` parameters if it needs several exits. |
 | `map-symbol-not-in-alphabet` | A symbol map (a graft binding's, or a named map declaration's own pairs) references a glyph that is not in the alphabet it maps. |
