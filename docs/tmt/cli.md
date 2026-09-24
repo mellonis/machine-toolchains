@@ -267,7 +267,7 @@ subsection.
 | `doc-line-order` | A `?` doc line appears after the run has already entered its `!` block. |
 | `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
 | `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
-| `contract-clause-order` | A `writes { … }` clause on a signature tape parameter written after that parameter's `preserves` clause — the fixed order is `writes` then `preserves`. |
+| `contract-clause-order` | A signature tape parameter's contract clauses written out of the fixed canonical order — `writes` then `preserves` then `enters` then `leaves`. |
 | `duplicate-contract-clause` | A second `writes` or `preserves` clause on one signature tape parameter. |
 | `empty-head-clause` | An `enters { … }` or `leaves { … }` clause with no elements — unlike `writes {}`/`preserves {}` (a meaningful empty set), a head-position clause states no moment at all. |
 | `empty-alphabet` | An alphabet with no elements — a world needs at least one symbol. |

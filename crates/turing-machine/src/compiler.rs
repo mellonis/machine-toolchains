@@ -106,11 +106,16 @@ pub enum CompileErrorKind {
     UnknownAttribute(String),
     /// A second `[deprecated]` attribute inside one run.
     DuplicateAttribute,
-    /// A `writes { … }` clause on a signature tape parameter written after
-    /// that same parameter's `preserves` clause. The fixed order — `writes`
-    /// then `preserves` — is a grammar rule, not an fmt convention: fmt is
-    /// token-preserving and cannot reorder an author's clauses.
-    ContractClauseOrder,
+    /// A signature tape parameter's contract clauses written out of the
+    /// fixed canonical order — `writes` < `preserves` < `enters` <
+    /// `leaves` — a grammar rule, not an fmt convention: fmt is
+    /// token-preserving and cannot reorder an author's clauses. `what`
+    /// names the clause the parser was reading; `before` names the
+    /// already-declared clause `what` needed to precede.
+    ContractClauseOrder {
+        what: &'static str,
+        before: &'static str,
+    },
     /// A second `writes` or `preserves` clause on one signature tape
     /// parameter. `what` names the repeated keyword.
     DuplicateContractClause { what: &'static str },
@@ -442,7 +447,7 @@ impl CompileErrorKind {
         CompileErrorKind::DocLineOrder => "doc-line-order",
         CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
         CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
-        CompileErrorKind::ContractClauseOrder => "contract-clause-order",
+        CompileErrorKind::ContractClauseOrder { .. } => "contract-clause-order",
         CompileErrorKind::DuplicateContractClause { .. } => "duplicate-contract-clause",
         CompileErrorKind::EmptyHeadClause => "empty-head-clause",
         CompileErrorKind::EmptyAlphabet => "empty-alphabet",
@@ -602,8 +607,11 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::DuplicateAttribute => {
                 write!(f, "duplicate `[deprecated]` attribute in the same run")
             }
-            CompileErrorKind::ContractClauseOrder => {
-                write!(f, "`writes` must come before `preserves`")
+            CompileErrorKind::ContractClauseOrder { what, before } => {
+                write!(
+                    f,
+                    "`{what}` must come before `{before}` (canonical order: `writes` < `preserves` < `enters` < `leaves`)"
+                )
             }
             CompileErrorKind::DuplicateContractClause { what } => {
                 write!(f, "duplicate `{what}` clause")
@@ -4096,7 +4104,10 @@ mod tests {
             CompileErrorKind::DocLineOrder,
             CompileErrorKind::UnknownAttribute("x".into()),
             CompileErrorKind::DuplicateAttribute,
-            CompileErrorKind::ContractClauseOrder,
+            CompileErrorKind::ContractClauseOrder {
+                what: "writes",
+                before: "preserves",
+            },
             CompileErrorKind::DuplicateContractClause { what: "writes" },
             CompileErrorKind::EmptyHeadClause,
             CompileErrorKind::EmptyAlphabet,

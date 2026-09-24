@@ -666,9 +666,53 @@ fn preserves_before_writes_is_a_targeted_order_error() {
     )
     .unwrap_err();
     assert_eq!(err.kind.code(), "contract-clause-order");
+    assert!(
+        matches!(
+            &err.kind,
+            CompileErrorKind::ContractClauseOrder { what, before }
+                if *what == "writes" && *before == "preserves"
+        ),
+        "{:?}",
+        err.kind
+    );
     assert_eq!(
         err.kind.to_string(),
-        "`writes` must come before `preserves`"
+        "`writes` must come before `preserves` (canonical order: `writes` < `preserves` < `enters` < `leaves`)"
+    );
+}
+
+/// A violation between the two NEW keywords — `preserves` after `enters`,
+/// with no `writes` clause anywhere in the source — must name the pair
+/// that actually collided (`preserves`, `enters`), never fall back to the
+/// writes/preserves wording from the two-clause era.
+///
+/// Mutation this catches: hard-coding the message to the fixed
+/// `` `writes` must come before `preserves` `` string regardless of which
+/// pair actually violated the order.
+#[test]
+fn enters_before_preserves_names_the_actual_pair() {
+    let err = parse_src(
+        "routine r(tape t: bits enters { 'a' } preserves { 'a' }) \
+         { entry state s { [*] -> stop; } }",
+    )
+    .unwrap_err();
+    assert_eq!(err.kind.code(), "contract-clause-order");
+    assert!(
+        matches!(
+            &err.kind,
+            CompileErrorKind::ContractClauseOrder { what, before }
+                if *what == "preserves" && *before == "enters"
+        ),
+        "{:?}",
+        err.kind
+    );
+    // The message names the pair that actually collided — the canonical
+    // order it also states mentions `writes` too, but only as the fixed
+    // reference line, never as the offending clause.
+    let msg = err.kind.to_string();
+    assert!(
+        msg.starts_with("`preserves` must come before `enters`"),
+        "{msg}"
     );
 }
 

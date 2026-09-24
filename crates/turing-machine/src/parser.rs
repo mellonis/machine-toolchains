@@ -1666,9 +1666,22 @@ impl Parser<'_> {
             loop {
                 if self.at_kw("writes") {
                     if preserves.is_some() || enters.is_some() || leaves.is_some() {
+                        // Name the nearest already-declared clause in
+                        // canonical order — the one `writes` most directly
+                        // needed to precede.
+                        let before = if preserves.is_some() {
+                            "preserves"
+                        } else if enters.is_some() {
+                            "enters"
+                        } else {
+                            "leaves"
+                        };
                         return Err(Self::err_at(
                             self.peek(),
-                            CompileErrorKind::ContractClauseOrder,
+                            CompileErrorKind::ContractClauseOrder {
+                                what: "writes",
+                                before,
+                            },
                         ));
                     }
                     if writes.is_some() {
@@ -1680,9 +1693,13 @@ impl Parser<'_> {
                     writes = Some(self.contract_clause()?);
                 } else if self.at_kw("preserves") {
                     if enters.is_some() || leaves.is_some() {
+                        let before = if enters.is_some() { "enters" } else { "leaves" };
                         return Err(Self::err_at(
                             self.peek(),
-                            CompileErrorKind::ContractClauseOrder,
+                            CompileErrorKind::ContractClauseOrder {
+                                what: "preserves",
+                                before,
+                            },
                         ));
                     }
                     if preserves.is_some() {
@@ -1696,7 +1713,10 @@ impl Parser<'_> {
                     if leaves.is_some() {
                         return Err(Self::err_at(
                             self.peek(),
-                            CompileErrorKind::ContractClauseOrder,
+                            CompileErrorKind::ContractClauseOrder {
+                                what: "enters",
+                                before: "leaves",
+                            },
                         ));
                     }
                     if enters.is_some() {
@@ -1769,8 +1789,9 @@ impl Parser<'_> {
         }
     }
 
-    /// A `writes { … }` or `preserves { … }` clause body, the current token
-    /// already the keyword: mirrors [`Self::parse_alphabet`]'s body loop
+    /// A `writes { … }`, `preserves { … }`, `enters { … }`, or
+    /// `leaves { … }` clause body, the current token already the keyword:
+    /// mirrors [`Self::parse_alphabet`]'s body loop
     /// (comma-separated [`Self::alphabet_elem`], empty allowed). Interior
     /// comments are deliberately not accepted here — unlike an alphabet
     /// body, a clause is a short one-line construct, and a comment splitting
@@ -1784,7 +1805,7 @@ impl Parser<'_> {
         // node opens at the clause keyword for both — its extent is then
         // exactly `kw_span` → the closing `}`, i.e. `ContractClause::span`.
         self.g_flush_start(TmcKind::ContractClause);
-        self.bump(); // `writes` / `preserves`
+        self.bump(); // `writes` / `preserves` / `enters` / `leaves`
         self.expect(&TokenKind::LBrace, "`{` to open the clause body")?;
         let mut elems: Vec<AlphabetElem> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
