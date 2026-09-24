@@ -30,7 +30,6 @@
 //! Not fixed here.
 
 mod docs_drift;
-pub(crate) mod patterns;
 pub mod rules;
 pub mod tma;
 

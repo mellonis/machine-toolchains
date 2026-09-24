@@ -45,8 +45,8 @@ use mtc_core::diagnostics::Diagnostic;
 
 use crate::compiler::{ResolvedCallTarget, ResolvedWorld};
 use crate::lint::LintContext;
-use crate::lint::patterns::glyph_label;
 use crate::parser::{BindingArg, BindingValue, MapArrow, WriteCellKind};
+use crate::patterns::glyph_label;
 
 /// Every `(tape position, glyph)` the callee provably writes as a literal —
 /// the sound "is this symbol written here" oracle (`Subst`/`Keep` excluded).

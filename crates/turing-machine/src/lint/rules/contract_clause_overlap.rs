@@ -58,8 +58,8 @@ use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
 use crate::compiler::full_name;
 use crate::footprint::SymSet;
 use crate::lint::LintContext;
-use crate::lint::patterns::{glyph_label, range_labels};
 use crate::parser::{AlphabetElem, ContractClause, Program, SigParam, SigParamKind};
+use crate::patterns::{glyph_label, range_labels};
 
 /// One alphabet-body element's own source span — a clause body uses the same
 /// element grammar as an alphabet body.

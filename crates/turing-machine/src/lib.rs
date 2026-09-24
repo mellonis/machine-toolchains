@@ -24,6 +24,7 @@ mod lsp;
 pub mod man;
 pub mod optimizer;
 pub mod parser;
+pub(crate) mod patterns;
 mod project;
 pub mod rept_emit;
 pub mod stdlib;

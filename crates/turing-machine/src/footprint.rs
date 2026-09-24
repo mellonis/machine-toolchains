@@ -43,8 +43,8 @@ use std::fmt;
 
 use crate::compiler::{Resolved, ResolvedCallTarget, ResolvedWorld};
 use crate::ir::{IrMapDst, IrMapPair, IrProgram, IrTapeBinding, IrTransition, IrWorld, IrWrite};
-use crate::lint::patterns::glyph_label;
 use crate::parser::{BindingArg, BindingValue, MapArrow, SymLit, SymMap, WriteCellKind};
+use crate::patterns::glyph_label;
 
 /// One past the highest symbol index a [`SymSet`] can hold. The alphabet
 /// ceiling is 127 glyphs (docs/tmt/language.md (alphabets)), so this bound is

@@ -35,7 +35,7 @@ use std::collections::HashSet;
 use mtc_core::diagnostics::Diagnostic;
 
 use crate::lint::LintContext;
-use crate::lint::patterns::{Band, band, cell_labels};
+use crate::patterns::{Band, accepted_glyphs, band};
 
 /// A rule's per-cell match sets plus its band, or `None` when its arity does
 /// not match the world's tapes or a range cell is unresolvable (the lint then
@@ -64,18 +64,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 .rules
                 .iter()
                 .map(|rule| {
-                    if rule.pattern.cells.len() != tape_glyphs.len() {
-                        return None;
-                    }
-                    let cells: Option<Vec<HashSet<String>>> = rule
-                        .pattern
-                        .cells
-                        .iter()
-                        .zip(&tape_glyphs)
-                        .map(|(cell, glyphs)| {
-                            cell_labels(cell, glyphs).map(|v| v.into_iter().collect())
-                        })
-                        .collect();
+                    let cells = accepted_glyphs(std::slice::from_ref(rule), &tape_glyphs);
                     cells.map(|c| (band(&rule.pattern.cells), c))
                 })
                 .collect();

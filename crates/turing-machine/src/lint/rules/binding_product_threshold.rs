@@ -10,8 +10,8 @@ use mtc_core::diagnostics::Diagnostic;
 
 use crate::expand::PRODUCT_THRESHOLD;
 use crate::lint::LintContext;
-use crate::lint::patterns::{glyph_label, range_labels};
 use crate::parser::{PatternCell, PatternCellKind};
+use crate::patterns::{glyph_label, range_labels};
 
 /// How many match rows one cell contributes, mirroring the expander's per-cell
 /// option count: a wildcard stays one row, a concrete single is one (zero when

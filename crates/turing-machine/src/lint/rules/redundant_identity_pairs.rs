@@ -25,8 +25,8 @@ use mtc_core::diagnostics::Diagnostic;
 
 use crate::compiler::{ResolvedCallTarget, ResolvedWorld};
 use crate::lint::LintContext;
-use crate::lint::patterns::glyph_label;
 use crate::parser::{BindingArg, BindingValue, MapArrow};
+use crate::patterns::glyph_label;
 
 /// The glyph vector of `world`'s tape named `tape_name`, if it has one.
 fn tape_glyphs<'a>(

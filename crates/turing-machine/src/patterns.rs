@@ -1,9 +1,16 @@
-//! Shared pattern-cell helpers for the coverage-based rules (`dead-rule`,
-//! `binding-product-threshold`, `state-may-trap`): the glyph labels a pattern
-//! cell matches over its tape's alphabet, and a rule's dispatch band. All
-//! source-level over the resolved worlds — no expansion is run.
+//! Shared pattern-cell helpers, source-level over the resolved worlds — no
+//! expansion is run: the glyph labels a pattern cell matches over its
+//! tape's alphabet, a rule's dispatch band, and the per-tape glyph sets a
+//! slice of rules accepts. Three call sites read this module: the
+//! coverage-based lint rules (`dead-rule`, `state-may-trap`) and the
+//! compiler's static head-contract check (`enters`/`leaves`,
+//! docs/tmt/language.md (head-position clauses)) — one computation shared
+//! by lint and the compiler rather than a copy kept in step with it by
+//! hand.
 
-use crate::parser::{PatternCell, PatternCellKind, SymLit};
+use std::collections::HashSet;
+
+use crate::parser::{PatternCell, PatternCellKind, Rule, SymLit};
 
 /// The glyph label a symbol literal denotes. A numeric literal's identity is
 /// its value's decimal string (`05` and `5` both label `"5"`), matching the
@@ -76,6 +83,37 @@ pub(crate) fn band(cells: &[PatternCell]) -> Band {
     } else {
         Band::Exact
     }
+}
+
+/// The per-tape glyph sets `rules` accepts, one set per tape position: the
+/// UNION, across every rule in the slice, of what [`cell_labels`] returns
+/// for that rule's cell at that position. `None` when any rule's arity does
+/// not match `tape_glyphs`'s width or carries an unresolvable range cell —
+/// the same "cannot prove, so decline" posture `cell_labels` itself takes.
+///
+/// Called with a whole state's rules this is exactly what the state accepts
+/// at each tape position — the coverage question `state-may-trap` and the
+/// compiler's `enters` check both ask. Called with a single rule (a
+/// one-element slice) it degenerates to that rule's own per-tape sets —
+/// `dead-rule`'s and `state-may-trap`'s per-rule question — so one
+/// computation answers both shapes.
+pub(crate) fn accepted_glyphs(
+    rules: &[Rule],
+    tape_glyphs: &[&[String]],
+) -> Option<Vec<HashSet<String>>> {
+    let mut out: Vec<HashSet<String>> = vec![HashSet::new(); tape_glyphs.len()];
+    for rule in rules {
+        if rule.pattern.cells.len() != tape_glyphs.len() {
+            return None;
+        }
+        for (slot, (cell, glyphs)) in out
+            .iter_mut()
+            .zip(rule.pattern.cells.iter().zip(tape_glyphs))
+        {
+            slot.extend(cell_labels(cell, glyphs)?);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
