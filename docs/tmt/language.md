@@ -468,13 +468,16 @@ through a `goto` onto one of its own `state` (exit) parameters, and a
 routine's own exit parameters are not `leaves` rows, only `return` is —
 and only where the leaving glyph is known to be exactly ONE glyph: a
 literal write, or an unwritten (`Keep`) cell whose pattern matches
-exactly one glyph of the tape's own alphabet. A move on the declaring
-tape, a `{expr}` substitution write, and a `Keep` cell that is a
-wildcard or names more than one glyph (a range) are all left unchecked
-rather than guessed at — none of them pins the leaving glyph down to a
-single symbol, so none of them can be compared against the declared
-set — `leaves-outside-contract`, naming the row's state, the tape, and
-the glyph.
+exactly one glyph of the tape's own alphabet. Neither a literal write
+nor a `Keep` cell counts, either, when the row's own pattern cell on
+that tape names no glyph the tape's alphabet actually carries — such a
+row can never fire, so it has no leaving glyph to name. A move on the
+declaring tape, a `{expr}` substitution write, and a `Keep` cell that
+is a wildcard or a range naming more than one glyph are all left
+unchecked rather than guessed at — none of them pins the leaving glyph
+down to a single symbol, so none of them can be compared against the
+declared set — `leaves-outside-contract`, naming the row's state, the
+tape, and the glyph.
 
 A machine's own `tape` declaration carries no contract grammar at all —
 `writes`/`preserves`/`enters`/`leaves` are legal only on a signature

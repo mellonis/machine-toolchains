@@ -2060,16 +2060,18 @@ fn is_exit_row(world: &ResolvedWorld, rule: &Rule) -> bool {
 
 /// The one glyph tape `k` holds when `rule` fires, or `None` when that is
 /// not statically known: a move on tape `k`; a `{expr}` substitution write
-/// there; or — on the unwritten/`Keep` path — a matched pattern cell that
-/// does not resolve to exactly one glyph of the tape's own alphabet. A
-/// wildcard or a multi-member range names a SET, not a single symbol, so
-/// neither pins the leaving glyph down ([`cell_labels`] of either may
-/// answer several labels); a `Single` cell naming a glyph the tape's own
-/// alphabet does not carry can never actually match — the same "drop it,
-/// no valid index to lower" a `Single`/degenerate `Range` cell gets at
-/// expansion (`expand.rs::cell_options`) — so it is declined here too,
-/// rather than named as a false promise the row can never even reach. A
-/// literal write is always the one glyph it names.
+/// there; a row whose pattern cell on this tape is DEAD — names no glyph
+/// the tape's own alphabet actually carries, so the row can never fire at
+/// all (the same "drop it, no valid index to lower" a `Single`/degenerate
+/// `Range` cell gets at expansion, `expand.rs::cell_options` — a row with
+/// no leaving glyph is not a fact this check may state, live or written);
+/// or — on the unwritten/`Keep` path specifically — a matched pattern cell
+/// that does not resolve to exactly one glyph. A wildcard or a
+/// multi-member range names a SET, not a single symbol, so neither pins
+/// the leaving glyph down ([`cell_labels`] of either may answer several
+/// labels). A literal write is the one glyph it names, PROVIDED the row is
+/// live; a live check on the pattern is not optional for this arm either —
+/// a dead row's write never runs regardless of what it names.
 fn exit_glyph(rule: &Rule, k: usize, tape_glyphs: &[&[String]]) -> Option<String> {
     let stayed = match &rule.mov {
         None => true,
@@ -2078,19 +2080,21 @@ fn exit_glyph(rule: &Rule, k: usize, tape_glyphs: &[&[String]]) -> Option<String
     if !stayed {
         return None;
     }
+    let matched = cell_labels(rule.pattern.cells.get(k)?, tape_glyphs[k])?;
+    let live = matched.iter().any(|g| tape_glyphs[k].contains(g));
     match rule.write.as_ref().and_then(|w| w.cells.get(k)) {
         None
         | Some(WriteCell {
             kind: WriteCellKind::Keep,
             ..
-        }) => match cell_labels(rule.pattern.cells.get(k)?, tape_glyphs[k])?.as_slice() {
-            [one] if tape_glyphs[k].contains(one) => Some(one.clone()),
+        }) => match matched.as_slice() {
+            [one] if live => Some(one.clone()),
             _ => None,
         },
         Some(WriteCell {
             kind: WriteCellKind::Lit(lit),
             ..
-        }) => Some(glyph_label(lit)),
+        }) => live.then(|| glyph_label(lit)),
         Some(WriteCell {
             kind: WriteCellKind::Subst { .. },
             ..
@@ -5628,6 +5632,39 @@ routine r(tape t: bits leaves { '_' }) {
 ");
     }
 
+    /// The membership refinement above is not limited to the `Keep` arm: a
+    /// LITERAL write on a DEAD row is exactly as unreachable, so it must
+    /// not be named as a leaving glyph either. This near-dead-row shape
+    /// compiles with only a `never fires` warning when the clause is
+    /// removed — the clause must not turn a merely-inert row into a
+    /// compile error.
+    /// **Mutation caught:** dropping the pattern-liveness check on the
+    /// `Lit` arm would report this row's dead glyph as if the row could
+    /// really leave on it.
+    #[test]
+    fn a_literal_write_on_a_dead_row_is_declined() {
+        ok("\
+alphabet marks { '_', 'x' }
+routine r(tape t: marks leaves { '_' }) {
+  entry state s { ['z'] -> write ['x'] return; }
+}
+");
+    }
+
+    /// The near miss to the dead-row decline above: the same shape, but the
+    /// pattern cell IS live (a member of the tape's alphabet), so the
+    /// literal write's glyph is exactly as exact as ever and still fires.
+    #[test]
+    fn a_literal_write_on_a_live_row_leaving_outside_the_set_still_fires() {
+        let e = err("\
+alphabet marks { '_', 'x', 'y' }
+routine r(tape t: marks leaves { 'x' }) {
+  entry state s { ['x'] -> write ['y'] return; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+    }
+
     /// A `{expr}` substitution write's possible outputs are never evaluated
     /// by this check — left to the runtime check exactly like a move or a
     /// wildcard/range `Keep` cell, never guessed at from the expression's
@@ -5661,6 +5698,23 @@ routine r(tape a: bits leaves { '_' }, tape b: bits leaves { '$' }) {
         assert_eq!(
             e.kind.to_string(),
             "this exit row in state `s` may leave '0' on tape `b`, which its `leaves` clause forbids"
+        );
+    }
+
+    /// The `enters` half of the same property: the declared clause names
+    /// the TAPE it belongs to, not just the entry state and the glyph.
+    #[test]
+    fn the_enters_message_names_the_tape_that_actually_broke_it() {
+        let e = err("\
+alphabet bits { '_', '0', 'x' }
+routine r(tape a: bits enters { '0' }, tape b: bits enters { 'x' }) {
+  entry state s { ['0', '0'] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "enters-not-accepted");
+        assert_eq!(
+            e.kind.to_string(),
+            "entry state `s` has no rule for 'x' on tape `b`, which its `enters` clause declares"
         );
     }
 

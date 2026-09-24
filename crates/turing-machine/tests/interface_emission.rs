@@ -724,7 +724,7 @@ machine {
 /// for `enters`/`leaves` (as the routine two-arm test's mutation 2 does)
 /// takes the clause out of both `graph_body_lines`'s printed text AND
 /// `graph_digest`'s hash input, since both read the identical rendering —
-/// the header assertion below goes red (no `enters { 'x' } leaves { 'y' }`
+/// the header assertion below goes red (no `enters { 'x' } leaves { 'x' }`
 /// substring) and the two fixtures' digests collapse to equal.
 #[test]
 fn a_graphs_declared_head_contract_reaches_the_header_and_its_exported_digest() {

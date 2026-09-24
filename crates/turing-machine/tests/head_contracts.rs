@@ -9,9 +9,10 @@
 //! symbol-less moment for the head to be at — so it is its own error,
 //! `empty-head-clause`.
 //!
-//! This file checks the grammar, the AST and these checks only: nothing
-//! here reads a header, an IR or generated code, none of which yet knows
-//! the two clauses exist.
+//! This file checks the grammar and the AST-level clause checks
+//! (canonical order, duplicates, the empty-clause rejection) only; the
+//! object/header carriage and the static `enters`/`leaves` compile
+//! checks each have their own test files.
 
 use mtc_core::syntax::SyntaxNode;
 use mtc_turing_machine::CompileErrorKind;
