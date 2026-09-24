@@ -10,7 +10,7 @@
 //! write vector `check_char_arithmetic` inspects — and build no second
 //! node tree of their own alongside it.
 //!
-//! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
+//! The 31 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
 //! expected. `deprecated` is contextual (an attribute word) and is not in that
 //! set.

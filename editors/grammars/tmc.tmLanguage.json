@@ -47,7 +47,7 @@
     },
     "keywordsStorage": {
       "name": "keyword.control.tmc",
-      "match": "\\b(alphabet|machine|tape|state|routine|graph|namespace)\\b"
+      "match": "\\b(alphabet|machine|tape|state|routine|graph|namespace|set)\\b"
     },
     "keywordsModifier": {
       "name": "keyword.control.tmc",
@@ -71,7 +71,7 @@
     },
     "keywordsContract": {
       "name": "keyword.control.tmc",
-      "match": "\\b(writes|preserves)\\b"
+      "match": "\\b(writes|preserves|enters|leaves)\\b"
     },
     "declaration": {
       "comment": "Colors the name introduced by a declaring keyword. The keyword itself is re-scoped here because a TextMate rule consumes what it matches; the authoritative keyword lists are the `keywords*` rules above.",

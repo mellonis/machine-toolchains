@@ -443,7 +443,7 @@ fn reuse_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
 /// `graph`, matched on the header keyword's own text (`crate::lexer`'s
 /// lexer emits no keyword token kind at all: every word, reserved or
 /// not, arrives as an ordinary `IDENT`, and `routine`/`graph` are two
-/// of the 27 fully-reserved words in `crate::lexer::RESERVED` that the
+/// of the 31 fully-reserved words in `crate::lexer::RESERVED` that the
 /// PARSER refuses wherever a name is expected — not a contextual word;
 /// `deprecated` is this language's only contextual one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1038,7 +1038,7 @@ fn as_name_after(node: &SyntaxNode, terminator: TmcKind) -> Option<SyntaxToken> 
 impl GraftView {
     /// Whether `entry` was written — the first header IDENT's text, the
     /// same prefix-modifier rule `StateView::is_entry` uses. `entry` is
-    /// one of the 27 fully-reserved words the parser refuses wherever a
+    /// one of the 31 fully-reserved words the parser refuses wherever a
     /// name is expected (`crate::lexer::RESERVED`); it attaches only to
     /// `state`/`graft`, never `bind` (docs/tmt/language.md (entry)).
     pub fn is_entry(&self) -> bool {

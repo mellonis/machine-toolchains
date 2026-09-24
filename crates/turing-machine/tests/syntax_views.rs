@@ -223,7 +223,7 @@ fn namespace_items_are_scoped_to_it() {
 // segment's text against `"as"` — in `.pmc`, a name can legally spell
 // `as`, so the two ways of finding the marker could in principle
 // disagree and the test pins that they don't. `.tmc` has no counterpart
-// and cannot: `as` is one of the 27 words in `lexer::RESERVED`, so
+// and cannot: `as` is one of the 31 words in `lexer::RESERVED`, so
 // `Parser::name()` rejects it wherever a name is expected and `use as
 // as as;` never parses — a segment can never literally spell `as`, so
 // `use_path_parts`'s positional split and a hypothetical textual one
