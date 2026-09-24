@@ -155,7 +155,7 @@ use mtc_core::formats::object::{
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
     self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, WorldKind,
-    clause_glyphs, full_name, published_writes,
+    clause_glyphs, full_name, published_writes, symset_glyphs,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -1640,14 +1640,12 @@ fn sig_param_text(
                 .get(&tape.alphabet)
                 .expect("resolution guarantees every tape alphabet is resolved")
                 .glyphs;
-            let writes: Vec<String> = published
-                .iter()
-                .filter_map(|index| alphabet_glyphs.get(index as usize).cloned())
-                .collect();
-            // The SAME declared-clause resolution `writes` above just went
-            // through, applied to `enters`/`leaves` (`compiler::
-            // clause_glyphs`, over `ResolvedTape::enters`/`::leaves` —
-            // `resolve_contract_clause`'s own output, the walk that raises
+            let writes = symset_glyphs(published, alphabet_glyphs);
+            // The SAME index-to-label step `writes` above just went
+            // through (`compiler::symset_glyphs`), applied to `enters`/
+            // `leaves` (`compiler::clause_glyphs`, over
+            // `ResolvedTape::enters`/`::leaves` — `resolve_contract_
+            // clause`'s own output, the walk that raises
             // `ContractSymbolUnknown`).
             let enters = clause_glyphs(tape.enters, alphabet_glyphs);
             let leaves = clause_glyphs(tape.leaves, alphabet_glyphs);

@@ -1757,21 +1757,31 @@ pub(crate) fn published_writes(tape: &ResolvedTape, inferred: Option<SymSet>) ->
     }
 }
 
+/// A resolved symbol set, in THIS tape's alphabet frame, to glyph labels in
+/// band order — the ONE index-to-label step every published per-tape fact
+/// goes through: `ir::lower` and `header::sig_param_text` both call this
+/// directly to publish a tape's `writes` set (the result of
+/// `published_writes`, itself always present when a tape publishes
+/// anything), and `clause_glyphs` below calls it for `enters`/`leaves`.
+/// `pub(crate)` rather than folded into `clause_glyphs`, because `writes`
+/// has no `Option` to unwrap at this step — `published_writes` already
+/// collapsed "no restriction declared" down to a concrete `SymSet` before
+/// this function ever sees it.
+pub(crate) fn symset_glyphs(set: SymSet, glyphs: &[String]) -> Vec<String> {
+    set.iter()
+        .filter_map(|index| glyphs.get(index as usize).cloned())
+        .collect()
+}
+
 /// A resolved head-position clause (`ResolvedTape::enters`/`::leaves`),
-/// from symbol indices to glyph labels — the SAME index-to-label step
-/// `ir::lower` and `header::sig_param_text` already take to publish a
-/// tape's `writes` set, just applied to a clause that carries no
-/// `writes`/`preserves`-style effective-set arithmetic of its own: an
-/// `enters`/`leaves` clause is either declared exactly as written or not
-/// declared at all. `None` in, `None` out; a present clause is never
-/// empty (the parser rejects `enters {}`/`leaves {}`), so this never
+/// through the same [`symset_glyphs`] step `writes` uses, for a clause that
+/// carries no `writes`/`preserves`-style effective-set arithmetic of its
+/// own: an `enters`/`leaves` clause is either declared exactly as written
+/// or not declared at all. `None` in, `None` out; a present clause is
+/// never empty (the parser rejects `enters {}`/`leaves {}`), so this never
 /// produces `Some(vec![])` either.
 pub(crate) fn clause_glyphs(clause: Option<SymSet>, glyphs: &[String]) -> Option<Vec<String>> {
-    clause.map(|set| {
-        set.iter()
-            .filter_map(|index| glyphs.get(index as usize).cloned())
-            .collect()
-    })
+    clause.map(|set| symset_glyphs(set, glyphs))
 }
 
 /// Check every declared write contract against the inferred write footprint.

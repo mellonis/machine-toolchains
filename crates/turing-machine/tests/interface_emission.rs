@@ -594,6 +594,50 @@ fn enters_and_leaves_round_trip_identically_on_both_header_arms() {
     );
 }
 
+/// The header printer canonicalizes a declared clause — band order,
+/// duplicates collapsed — never the author's own spelling: `enters`
+/// declares `'^', '0', '1', '$'` (out of band order) and `leaves` repeats
+/// `'$'`. `docs/tmt/language.md` (headers) states this exactly; this test
+/// pins the resulting text so the claim is a checked contract, not prose
+/// alone.
+const HEAD_CONTRACT_ORDER_FIXTURE: &str = "\
+export alphabet sym { '_', '^', '$', '0', '1' }
+
+export routine walk(tape num: sym writes {} enters { '^', '0', '1', '$' } leaves { '$', '$', '0' }) {
+  entry state go {
+    ['$'] -> return;
+    [*]   -> move [>] goto go;
+  }
+}
+
+machine {
+  tape t: sym;
+  entry state s { [*] -> call walk(num = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+/// Mutation: reordering `symset_glyphs`'s iteration (e.g. descending
+/// instead of ascending band order) turns this red on both assertions
+/// below, since neither `'^', '$', '0', '1'` nor `'$', '0'` would print.
+#[test]
+fn a_declared_clause_prints_in_band_order_with_duplicates_collapsed() {
+    let dir = scratch("interface_head_contract_order");
+    let src_path = dir.join("walk.tmc");
+    std::fs::write(&src_path, HEAD_CONTRACT_ORDER_FIXTURE).unwrap();
+    let source_header = run_interface(&src_path);
+
+    assert!(
+        source_header.contains("enters { '^', '$', '0', '1' }"),
+        "expected `enters` in the alphabet's own band order, not the \
+         author's declared order `'^', '0', '1', '$'`:\n{source_header}"
+    );
+    assert!(
+        source_header.contains("leaves { '$', '0' }"),
+        "expected `leaves` deduplicated to one `'$'`:\n{source_header}"
+    );
+}
+
 /// A parameter with NEITHER clause carries no suffix on either arm — the
 /// pair to the test above.
 const NO_HEAD_CONTRACT_FIXTURE: &str = "\
@@ -633,4 +677,87 @@ fn no_head_clause_prints_no_suffix_on_either_arm() {
             "unexpected `leaves` with no declared clause:\n{header}"
         );
     }
+}
+
+// -- head-position contracts on a GRAPH parameter (docs/tmt/language.md
+// (headers): a graph shares the routine signature grammar) ----------------
+
+/// A graph's tape parameter carries `enters`/`leaves` too. Unlike a
+/// routine, a graph has no object-arm signature print at all (an object
+/// carries a graph only as `name + digest`, never a body), so the two
+/// surfaces the clause reaches are: the printed SOURCE header, and the
+/// exported digest every consumer's graft-drift check compares against.
+const GRAPH_HEAD_CONTRACT_FIXTURE: &str = "\
+export alphabet marks { '_', 'x', 'y' }
+
+export graph g(tape t: marks enters { 'x' } leaves { 'y' }, state found) {
+  entry state walk {
+    ['x'] -> found;
+    [*]   -> move [>] goto walk;
+  }
+}
+
+machine {
+  tape m: marks;
+  entry state go { [*] -> stop; }
+}
+";
+
+/// The same graph, clause-free — the digest's control case.
+const GRAPH_NO_HEAD_CONTRACT_FIXTURE: &str = "\
+export alphabet marks { '_', 'x', 'y' }
+
+export graph g(tape t: marks, state found) {
+  entry state walk {
+    ['x'] -> found;
+    [*]   -> move [>] goto walk;
+  }
+}
+
+machine {
+  tape m: marks;
+  entry state go { [*] -> stop; }
+}
+";
+
+/// Mutation: the same `tape_param_text` call sites going to `None`/`None`
+/// for `enters`/`leaves` (as the routine two-arm test's mutation 2 does)
+/// takes the clause out of both `graph_body_lines`'s printed text AND
+/// `graph_digest`'s hash input, since both read the identical rendering —
+/// the header assertion below goes red (no `enters { 'x' } leaves { 'y' }`
+/// substring) and the two fixtures' digests collapse to equal.
+#[test]
+fn a_graphs_declared_head_contract_reaches_the_header_and_its_exported_digest() {
+    let dir = scratch("interface_graph_head_contract");
+    let src_path = dir.join("g.tmc");
+    std::fs::write(&src_path, GRAPH_HEAD_CONTRACT_FIXTURE).unwrap();
+    let source_header = run_interface(&src_path);
+    assert!(
+        source_header.contains("enters { 'x' } leaves { 'y' }"),
+        "expected the graph's declared clause in its printed signature:\n{source_header}"
+    );
+
+    let with_clause = compile(GRAPH_HEAD_CONTRACT_FIXTURE, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("expected a clean compile: {e}"))
+        .object;
+    let without_clause = compile(GRAPH_NO_HEAD_CONTRACT_FIXTURE, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("expected a clean compile: {e}"))
+        .object;
+
+    let digest_of = |o: &ObjectFile| {
+        o.interface
+            .as_ref()
+            .expect("carries an interface section")
+            .graphs
+            .iter()
+            .find(|g| g.name == "g")
+            .expect("graph `g` is exported")
+            .digest
+    };
+    assert_ne!(
+        digest_of(&with_clause),
+        digest_of(&without_clause),
+        "the graph's exported digest did not change when its declared \
+         `enters`/`leaves` clause did"
+    );
 }

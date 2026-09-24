@@ -1268,10 +1268,10 @@ set, and declared `enters`/`leaves` head-position clauses (when
 written), its `state` parameter count, and its declared `noreturn`
 clause.
 Routine bodies and the `machine` block contribute nothing and are not
-needed. Both of those last two are DECLARED facts, never inferred ones:
-the reading never walks a body, so a routine that declares no `writes`
-clause is read as able to write its whole alphabet, and one that does not
-say `noreturn` is read as able to return.
+needed. The write set and `noreturn` are both DECLARED facts here, never
+inferred ones: the reading never walks a body, so a routine that declares
+no `writes` clause is read as able to write its whole alphabet, and one
+that does not say `noreturn` is read as able to return.
 
 What a compile is given to read is a matter for the tools rather than the
 language: `tmt compile --extern FILE`, the sibling sources and libraries
@@ -1335,11 +1335,25 @@ What it carries follows from that:
   `preserves` clause never appears; it has no independent meaning once
   the effective set is published, and could not be reconstructed from a
   compiled object anyway.
-- **A declared `enters { … }`/`leaves { … }` clause appears exactly as
-  written**, in that order, after `writes { … }`. Unlike `writes`, these
-  carry no inferred stand-in: a tape with no `enters`/`leaves` clause
-  prints neither, since an absent clause and an empty one are not the
-  same thing (`docs/formats.md (routine interfaces)`).
+- **A declared `enters { … }`/`leaves { … }` clause prints in the tape's
+  own band order, duplicates collapsed** — the canonical spelling, not the
+  author's, exactly the way `writes { … }` is canonical rather than
+  echoed: `enters { '^', '0', '1', '$' }` in source can print as
+  `enters { '^', '$', '0', '1' }`, and a repeated element such as
+  `enters { '1', '1', '0' }` collapses to `enters { '0', '1' }`. The
+  clause is held internally as a symbol set keyed by band position, so
+  this ordering and deduplication are inherent to the representation, not
+  a printer choice. `enters`/`leaves` print in that order, after
+  `writes { … }`. Unlike `writes`, these two carry no inferred stand-in: a
+  tape with no `enters`/`leaves` clause prints neither, since an absent
+  clause and an empty one are not the same thing (`docs/formats.md
+  (routine interfaces)`). A `graph`'s tape parameter may carry the same
+  clauses, since a graph and a routine share one signature grammar; they
+  print the identical way on a graph's own header entry, digested along
+  with the rest of its printed body. A graph is spliced rather than
+  called, so this release carries and prints the clauses without giving
+  them any checked meaning of their own; whether a later one does is
+  undecided here.
 - **`volatile` never appears.** The modifier shapes how a routine's own
   body is compiled and is never checked at a call site, so it is not part
   of what a caller may rely on ("Volatile tapes").

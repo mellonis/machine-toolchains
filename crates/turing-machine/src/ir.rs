@@ -970,28 +970,28 @@ fn lower_world(
                 // deliberately withhold their contract rather than
                 // computing and discarding one, leaving that path's
                 // codegen and every `machine`-bearing golden alone.
-                let rt = rw.and_then(|w| {
+                // `(w, rt)` bound together — never `rt` alone — so `writes`
+                // below never needs to re-derive `w` from `rw` (and so never
+                // needs an `.expect` to justify doing so: `rt`'s own
+                // presence already proves a routine world was found).
+                let routine_tape = rw.and_then(|w| {
                     if w.kind != WorldKind::Routine {
                         return None;
                     }
-                    w.tapes.get(i)
+                    w.tapes.get(i).map(|rt| (w, rt))
                 });
-                let writes = rt.map(|rt| {
+                let writes = routine_tape.map(|(w, rt)| {
                     let inferred = footprint
                         .worlds
-                        .get(
-                            &rw.expect("a resolved tape implies a resolved routine world")
-                                .name,
-                        )
+                        .get(&w.name)
                         .and_then(|wf| wf.tapes.get(i).copied());
                     let indices = crate::compiler::published_writes(rt, inferred);
-                    indices
-                        .iter()
-                        .filter_map(|index| glyphs.get(index as usize).cloned())
-                        .collect()
+                    crate::compiler::symset_glyphs(indices, &glyphs)
                 });
-                let enters = rt.and_then(|rt| crate::compiler::clause_glyphs(rt.enters, &glyphs));
-                let leaves = rt.and_then(|rt| crate::compiler::clause_glyphs(rt.leaves, &glyphs));
+                let enters = routine_tape
+                    .and_then(|(_, rt)| crate::compiler::clause_glyphs(rt.enters, &glyphs));
+                let leaves = routine_tape
+                    .and_then(|(_, rt)| crate::compiler::clause_glyphs(rt.leaves, &glyphs));
                 IrTape {
                     name: t.name.clone(),
                     alphabet: t.alphabet.clone(),
