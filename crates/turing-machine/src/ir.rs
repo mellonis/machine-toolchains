@@ -214,6 +214,28 @@ pub struct IrTape {
     /// compiled bytes for no observable gain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writes: Option<Vec<String>>,
+    /// A ROUTINE tape's declared entry contract, as glyphs
+    /// (`compiler::clause_glyphs` over `ResolvedTape::enters` — the same
+    /// declared-clause resolution `writes` already goes through, applied
+    /// to a clause that carries no effective-set arithmetic of its own):
+    /// the symbols the head may be sitting on when a call transfers
+    /// control into this tape. `None` when the parameter declares no
+    /// `enters { … }` clause; a `Some` list is never empty (the source
+    /// languages reject an empty clause). Always `None` on a MACHINE tape,
+    /// for the same reason `writes` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters: Option<Vec<String>>,
+    /// A ROUTINE tape's declared exit contract, same shape and same
+    /// `None`/never-empty meaning as `enters`: the symbols the head may be
+    /// sitting on when control returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaves: Option<Vec<String>>,
+    /// Whether every state that reads this tape reads it as a wildcard, so
+    /// the routine never discriminates its glyphs. Plumbed here always
+    /// `false` — no analysis computes this fact yet; a later round wires
+    /// it up.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub opaque: bool,
 }
 
 /// One state: an id, its source name (synthetic for graft-instance internals),
@@ -941,31 +963,35 @@ fn lower_world(
                 // `rw.tapes` and `ew.tapes` are both vector-position order
                 // over the same signature (a machine's tape decls, or a
                 // routine's tape params), so index `i` names the same tape
-                // in both.
-                let writes = rw.and_then(|w| {
-                    let rt = w.tapes.get(i)?;
-                    // Machine worlds are excluded — nothing reads `main`'s
-                    // own interface entry (the object arm's printer skips
-                    // the entry world outright — docs/tmt/cli.md
-                    // (interface)) — so this deliberately withholds an
-                    // inferred set rather than computing and discarding
-                    // one, leaving that path's codegen and every
-                    // `machine`-bearing golden alone.
+                // in both. Machine worlds are excluded — nothing reads
+                // `main`'s own interface entry (the object arm's printer
+                // skips the entry world outright — docs/tmt/cli.md
+                // (interface)) — so `writes`/`enters`/`leaves` all
+                // deliberately withhold their contract rather than
+                // computing and discarding one, leaving that path's
+                // codegen and every `machine`-bearing golden alone.
+                let rt = rw.and_then(|w| {
                     if w.kind != WorldKind::Routine {
                         return None;
                     }
+                    w.tapes.get(i)
+                });
+                let writes = rt.map(|rt| {
                     let inferred = footprint
                         .worlds
-                        .get(&w.name)
+                        .get(
+                            &rw.expect("a resolved tape implies a resolved routine world")
+                                .name,
+                        )
                         .and_then(|wf| wf.tapes.get(i).copied());
                     let indices = crate::compiler::published_writes(rt, inferred);
-                    Some(
-                        indices
-                            .iter()
-                            .filter_map(|index| glyphs.get(index as usize).cloned())
-                            .collect(),
-                    )
+                    indices
+                        .iter()
+                        .filter_map(|index| glyphs.get(index as usize).cloned())
+                        .collect()
                 });
+                let enters = rt.and_then(|rt| crate::compiler::clause_glyphs(rt.enters, &glyphs));
+                let leaves = rt.and_then(|rt| crate::compiler::clause_glyphs(rt.leaves, &glyphs));
                 IrTape {
                     name: t.name.clone(),
                     alphabet: t.alphabet.clone(),
@@ -973,6 +999,11 @@ fn lower_world(
                     volatile: t.volatile,
                     glyphs,
                     writes,
+                    enters,
+                    leaves,
+                    // No analysis computes opacity yet; a later round wires
+                    // this up (see `IrTape::opaque`'s own doc).
+                    opaque: false,
                 }
             })
             .collect(),
@@ -2134,9 +2165,10 @@ machine {
 
     /// The bare version literal names the acceptance contract, not a hint:
     /// version 4 has not shipped in any release, so every field this arc
-    /// adds — `param`, the `Label` `dst`, and `map_written` — joins the
-    /// same number instead of opening a new one. Mutation: bumping
-    /// `TM_IR_VERSION` to 5.
+    /// adds — `param`, the `Label` `dst`, `map_written`, and
+    /// `IrTape`'s `enters`, `leaves` and `opaque` — joins the same number
+    /// instead of opening a new one. Mutation: bumping `TM_IR_VERSION` to
+    /// 5.
     #[test]
     fn the_version_literal_is_four() {
         assert_eq!(TM_IR_VERSION, 4);
@@ -2145,16 +2177,19 @@ machine {
     /// A document exercising every v4 field — glyphs and an effective
     /// write set, a two-exit `CallThen` alongside a `ReturnExit`, a
     /// `noreturn` world, a named (WRITTEN) binding-call param, a
-    /// glyph-labelled map pair, and a SECOND binding entry that is
+    /// glyph-labelled map pair, a SECOND binding entry that is
     /// `map_written: true` with an EMPTY `pairs` list — the one shape
     /// where the field carries the whole meaning, since a pair-bearing
-    /// entry is written by definition either way. Round-trips unchanged.
-    /// Mutation: `#[serde(skip_serializing)]` on `IrTapeBinding.param`
-    /// (or on `map_written`) drops it from the wire form, so the compare
-    /// goes red — the second entry is what makes the `map_written`
-    /// mutation observable at all, since the first entry's own
-    /// `map_written: true` is otherwise redundant with its non-empty
-    /// `pairs`.
+    /// entry is written by definition either way — and, on the routine
+    /// world's own tape, a declared `enters`/`leaves` pair plus `opaque:
+    /// true`. Round-trips unchanged. Mutation: `#[serde(skip_serializing)]`
+    /// on `IrTapeBinding.param` (or on `map_written`) drops it from the
+    /// wire form, so the compare goes red — the second entry is what
+    /// makes the `map_written` mutation observable at all, since the
+    /// first entry's own `map_written: true` is otherwise redundant with
+    /// its non-empty `pairs`; the same `#[serde(skip_serializing)]`
+    /// mutation on `IrTape::enters`/`::leaves`/`::opaque` drops each of
+    /// those from the wire form the identical way.
     #[test]
     fn v4_documents_round_trip() {
         let ir = IrProgram {
@@ -2171,6 +2206,9 @@ machine {
                         volatile: false,
                         glyphs: vec!["_".into(), "x".into(), "y".into()],
                         writes: Some(vec!["x".into(), "y".into()]),
+                        enters: None,
+                        leaves: None,
+                        opaque: false,
                     }],
                     entry: 0,
                     states: vec![IrState {
@@ -2258,6 +2296,9 @@ machine {
                         volatile: false,
                         glyphs: vec!["_".into(), "x".into(), "y".into()],
                         writes: None,
+                        enters: Some(vec!["x".into()]),
+                        leaves: Some(vec!["y".into()]),
+                        opaque: true,
                     }],
                     entry: 0,
                     states: vec![IrState {
@@ -2344,6 +2385,9 @@ machine {
         let tape = &w.tapes[0];
         assert!(tape.glyphs.is_empty());
         assert_eq!(tape.writes, None);
+        assert_eq!(tape.enters, None);
+        assert_eq!(tape.leaves, None);
+        assert!(!tape.opaque);
         let IrTransition::CallThen { binding, .. } = &w.states[0].rules[0].transition else {
             panic!("expected a call_then");
         };
@@ -2371,6 +2415,9 @@ machine {
                             volatile: false,
                             glyphs: vec!["_".into(), "x".into(), "y".into()],
                             writes: None,
+                            enters: None,
+                            leaves: None,
+                            opaque: false,
                         },
                         IrTape {
                             name: "b".into(),
@@ -2379,6 +2426,9 @@ machine {
                             volatile: false,
                             glyphs: vec!["_".into(), "x".into(), "y".into()],
                             writes: None,
+                            enters: None,
+                            leaves: None,
+                            opaque: false,
                         },
                     ],
                     entry: 0,
@@ -2441,6 +2491,9 @@ machine {
                         volatile: false,
                         glyphs: vec!["_".into(), "x".into(), "y".into()],
                         writes: None,
+                        enters: None,
+                        leaves: None,
+                        opaque: false,
                     }],
                     entry: 0,
                     states: vec![IrState {
@@ -2524,6 +2577,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         };
         let json = serde_json::to_string(&tape).unwrap();
         assert!(!json.contains("volatile"), "false is omitted: {json}");

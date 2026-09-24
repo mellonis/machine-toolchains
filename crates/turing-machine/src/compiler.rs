@@ -1202,6 +1202,16 @@ pub(crate) struct ResolvedTape {
     /// The declared `preserves { … }` clause, same frame and same `None`
     /// meaning: nothing is declared off-limits.
     pub preserves: Option<SymSet>,
+    /// The declared `enters { … }` clause — the symbols the head may be
+    /// sitting on when a call transfers control into this parameter's
+    /// tape — same frame and `None` meaning as `writes`/`preserves`: no
+    /// clause declares no restriction, never an empty one (the parser
+    /// rejects `enters {}`). Always `None` on a machine tape.
+    pub enters: Option<SymSet>,
+    /// The declared `leaves { … }` clause: the symbols the head may be
+    /// sitting on when control returns. Same frame and `None` meaning as
+    /// `enters`.
+    pub leaves: Option<SymSet>,
 }
 
 /// A resolved graft declaration: the mangled graph target plus the raw
@@ -1745,6 +1755,23 @@ pub(crate) fn published_writes(tape: &ResolvedTape, inferred: Option<SymSet>) ->
     } else {
         inferred.unwrap_or_else(SymSet::empty)
     }
+}
+
+/// A resolved head-position clause (`ResolvedTape::enters`/`::leaves`),
+/// from symbol indices to glyph labels — the SAME index-to-label step
+/// `ir::lower` and `header::sig_param_text` already take to publish a
+/// tape's `writes` set, just applied to a clause that carries no
+/// `writes`/`preserves`-style effective-set arithmetic of its own: an
+/// `enters`/`leaves` clause is either declared exactly as written or not
+/// declared at all. `None` in, `None` out; a present clause is never
+/// empty (the parser rejects `enters {}`/`leaves {}`), so this never
+/// produces `Some(vec![])` either.
+pub(crate) fn clause_glyphs(clause: Option<SymSet>, glyphs: &[String]) -> Option<Vec<String>> {
+    clause.map(|set| {
+        set.iter()
+            .filter_map(|index| glyphs.get(index as usize).cloned())
+            .collect()
+    })
 }
 
 /// Check every declared write contract against the inferred write footprint.
@@ -2556,11 +2583,11 @@ fn resolve_world(
                     .expect("a resolved tape alphabet is in the table");
                 // `enters`/`leaves` take the same membership check as
                 // `writes`/`preserves` — every element must be a symbol of
-                // the parameter's own alphabet — but the resolved set is
-                // not carried on `ResolvedTape`: nothing downstream (IR,
-                // header, codegen) reads a head-position contract yet.
-                resolve_contract_clause(enters.as_deref(), "enters", glyphs, &full)?;
-                resolve_contract_clause(leaves.as_deref(), "leaves", glyphs, &full)?;
+                // the parameter's own alphabet — and, like them, the
+                // resolved set is carried on `ResolvedTape` for `ir::lower`
+                // and the source arm of `tmt interface` to read.
+                let enters = resolve_contract_clause(enters.as_deref(), "enters", glyphs, &full)?;
+                let leaves = resolve_contract_clause(leaves.as_deref(), "leaves", glyphs, &full)?;
                 tapes.push(ResolvedTape {
                     name: p.name.clone(),
                     name_span: p.name_span,
@@ -2575,6 +2602,8 @@ fn resolve_world(
                         glyphs,
                         &full,
                     )?,
+                    enters,
+                    leaves,
                 });
             }
             SigParamKind::State => state_params.push(p.name.clone()),
@@ -2695,6 +2724,8 @@ fn resolve_machine_world(
             // live on signature parameters, where a caller can read them.
             writes: None,
             preserves: None,
+            enters: None,
+            leaves: None,
         });
     }
     let (grafts, binds, entry) =

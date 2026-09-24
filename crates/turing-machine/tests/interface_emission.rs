@@ -10,6 +10,7 @@
 use mtc_core::formats::crc32::crc32;
 use mtc_core::formats::object::{ObjectFile, RoutineInterface, SymbolDef};
 use mtc_turing_machine::asm::assemble;
+use mtc_turing_machine::cli::execute;
 use mtc_turing_machine::compiler::{CompileOptions, Declarations, compile};
 use mtc_turing_machine::optimizer::OptLevel;
 use mtc_turing_machine::stdlib;
@@ -460,4 +461,176 @@ machine {{
         reassembled.to_bytes(),
         "compiled object and independently reassembled `.tma` diverged"
     );
+}
+
+// -- head-position contracts on `tmt interface`'s two arms -----------------
+
+fn cli_args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
+/// uniquely by process id + an atomic counter (`tests/header_roundtrip.rs::
+/// scratch`'s own precedent — the collision-free-temp-paths rule).
+fn scratch(name: &str) -> std::path::PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("{name}-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `tmt interface INPUT`, through the public CLI — the printer itself is
+/// crate-private, so this is the only way an integration test can reach it
+/// (`tests/header_roundtrip.rs::run_interface`'s own precedent).
+fn run_interface(path: &std::path::Path) -> String {
+    let out = execute(&cli_args(&["interface", path.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface {}: {e}", path.display()));
+    assert_eq!(out.code, 0, "interface {}: {}", path.display(), out.stderr);
+    out.stdout
+}
+
+/// The same one-tape-parameter shape `tests/head_contracts.rs::BOTH_CLAUSES`
+/// checks at the grammar/AST level, here `export`ed so it reaches both
+/// header arms: a declared `writes {}` alongside `enters { … }` and
+/// `leaves { … }` in canonical order.
+const HEAD_CONTRACT_FIXTURE: &str = "\
+export alphabet sym { '_', '^', '$', '0', '1' }
+
+export routine walk(tape num: sym writes {} enters { '^', '0', '1', '$' } leaves { '$' }) {
+  entry state go {
+    ['$'] -> return;
+    [*]   -> move [>] goto go;
+  }
+}
+
+machine {
+  tape t: sym;
+  entry state s { [*] -> call walk(num = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+/// The same shape as [`HEAD_CONTRACT_FIXTURE`], but the alphabet is NOT
+/// exported: an exported alphabet is one of the text-expressibility gate's
+/// three declared exceptions (a compiler fact with no directive,
+/// docs/formats.md (text-expressibility caveats)), same as
+/// [`emitted_assembly_reassembles_to_the_same_object`]'s own fixture
+/// avoids it — this fixture isolates the `enters=`/`leaves=` suffixes
+/// alone.
+const HEAD_CONTRACT_REASSEMBLY_FIXTURE: &str = "\
+alphabet sym { '_', '^', '$', '0', '1' }
+
+export routine walk(tape num: sym writes {} enters { '^', '0', '1', '$' } leaves { '$' }) {
+  entry state go {
+    ['$'] -> return;
+    [*]   -> move [>] goto go;
+  }
+}
+
+machine {
+  tape t: sym;
+  entry state s { [*] -> call walk(num = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+/// The `enters=`/`leaves=` `.param` suffixes are hand-writable text, same
+/// as `writes=` (docs/formats.md (routine interfaces), the
+/// text-expressibility gate): `compile -S`, then assemble that text
+/// independently, then byte-compare the two objects — the same round trip
+/// [`emitted_assembly_reassembles_to_the_same_object`] runs, over a source
+/// that actually exercises the two new suffixes.
+#[test]
+fn head_contract_suffixes_reassemble_to_the_same_object() {
+    let output = compile(HEAD_CONTRACT_REASSEMBLY_FIXTURE, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("expected a clean compile: {e}"));
+    assert!(
+        output.tma.contains("enters=") && output.tma.contains("leaves="),
+        "expected `enters=`/`leaves=` in the emitted `.tma`:\n{}",
+        output.tma
+    );
+    let reassembled = assemble(&output.tma, false).expect("the emitted `.tma` reassembles");
+    assert_eq!(
+        output.object.to_bytes(),
+        reassembled.to_bytes(),
+        "compiled object and independently reassembled `.tma` diverged"
+    );
+}
+
+/// The falsifying test: render the header from the SOURCE and from the
+/// compiled OBJECT and require the two arms to agree byte-for-byte, and to
+/// both actually name the clauses. Byte identity alone would not catch a
+/// mutation where both arms silently agree on DROPPING `enters`/`leaves`
+/// (e.g. reading them from neither arm at all), which this pair catches
+/// from the substring side; the byte-compare side catches the opposite
+/// mutation, printing the clause on the source arm only.
+#[test]
+fn enters_and_leaves_round_trip_identically_on_both_header_arms() {
+    let dir = scratch("interface_head_contracts");
+    let src_path = dir.join("walk.tmc");
+    std::fs::write(&src_path, HEAD_CONTRACT_FIXTURE).unwrap();
+    let source_header = run_interface(&src_path);
+
+    let object = compile(HEAD_CONTRACT_FIXTURE, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("expected a clean compile: {e}"))
+        .object;
+    let obj_path = dir.join("walk.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+    let object_header = run_interface(&obj_path);
+
+    assert_eq!(
+        source_header, object_header,
+        "the source and object arms diverged on a routine declaring `enters`/`leaves`"
+    );
+    assert!(
+        source_header.contains("enters {"),
+        "expected an `enters` clause in:\n{source_header}"
+    );
+    assert!(
+        source_header.contains("leaves {"),
+        "expected a `leaves` clause in:\n{source_header}"
+    );
+}
+
+/// A parameter with NEITHER clause carries no suffix on either arm — the
+/// pair to the test above.
+const NO_HEAD_CONTRACT_FIXTURE: &str = "\
+alphabet bits { '_', '0', '1' }
+
+export routine plain(tape a: bits writes { '1' }) {
+  entry state s { [*] -> return; }
+}
+
+machine {
+  tape m: bits;
+  entry state go { [*] -> stop; }
+}
+";
+
+#[test]
+fn no_head_clause_prints_no_suffix_on_either_arm() {
+    let dir = scratch("interface_no_head_clause");
+    let src_path = dir.join("plain.tmc");
+    std::fs::write(&src_path, NO_HEAD_CONTRACT_FIXTURE).unwrap();
+    let source_header = run_interface(&src_path);
+
+    let object = compile(NO_HEAD_CONTRACT_FIXTURE, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("expected a clean compile: {e}"))
+        .object;
+    let obj_path = dir.join("plain.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+    let object_header = run_interface(&obj_path);
+
+    for header in [&source_header, &object_header] {
+        assert!(
+            !header.contains("enters"),
+            "unexpected `enters` with no declared clause:\n{header}"
+        );
+        assert!(
+            !header.contains("leaves"),
+            "unexpected `leaves` with no declared clause:\n{header}"
+        );
+    }
 }

@@ -155,7 +155,7 @@ use mtc_core::formats::object::{
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
     self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, WorldKind,
-    full_name, published_writes,
+    clause_glyphs, full_name, published_writes,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -612,11 +612,12 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
             })?;
             let (ns, local) = split_ns(&symbol.name);
             let mut params = Vec::with_capacity(routine.params.len());
-            for ((param_name, glyphs), writes) in routine
+            for (((param_name, glyphs), writes), (enters, leaves)) in routine
                 .params
                 .iter()
                 .zip(&routine.glyphs)
                 .zip(&routine.writes)
+                .zip(routine.enters.iter().zip(&routine.leaves))
             {
                 let alphabet_name = match resolve_object_alphabet(
                     interface,
@@ -638,7 +639,13 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
                         synth
                     }
                 };
-                params.push(tape_param_text(param_name, &alphabet_name, writes));
+                params.push(tape_param_text(
+                    param_name,
+                    &alphabet_name,
+                    writes,
+                    enters.as_deref(),
+                    leaves.as_deref(),
+                ));
             }
             // The wire carries the exit COUNT and no names — a `state`
             // parameter's name is compile-time material the object never
@@ -1637,7 +1644,20 @@ fn sig_param_text(
                 .iter()
                 .filter_map(|index| alphabet_glyphs.get(index as usize).cloned())
                 .collect();
-            tape_param_text(&param.name, alphabet, &writes)
+            // The SAME declared-clause resolution `writes` above just went
+            // through, applied to `enters`/`leaves` (`compiler::
+            // clause_glyphs`, over `ResolvedTape::enters`/`::leaves` —
+            // `resolve_contract_clause`'s own output, the walk that raises
+            // `ContractSymbolUnknown`).
+            let enters = clause_glyphs(tape.enters, alphabet_glyphs);
+            let leaves = clause_glyphs(tape.leaves, alphabet_glyphs);
+            tape_param_text(
+                &param.name,
+                alphabet,
+                &writes,
+                enters.as_deref(),
+                leaves.as_deref(),
+            )
         }
     }
 }
@@ -1661,13 +1681,32 @@ fn fresh_param_name(taken: &mut HashSet<String>, k: u8) -> String {
     }
 }
 
-/// One tape parameter's rendered text — `tape NAME: ALPHABET writes { … }`
-/// — the ONE renderer both the source arm (`sig_param_text`) and the object
-/// arm (`from_object`) call, so the two can never drift apart on how a
-/// parameter is formatted, only on what write set they pass in (which
-/// `compiler::published_writes` also unifies — see the module doc).
-fn tape_param_text(name: &str, alphabet: &str, writes: &[String]) -> String {
-    format!("tape {name}: {alphabet} writes {}", braced_list(writes))
+/// One tape parameter's rendered text — `tape NAME: ALPHABET writes { … }`,
+/// optionally followed by `enters { … }` and/or `leaves { … }` — the ONE
+/// renderer both the source arm (`sig_param_text`) and the object arm
+/// (`from_object`) call, so the two can never drift apart on how a
+/// parameter is formatted, only on what clauses they pass in (which
+/// `compiler::published_writes`/`compiler::clause_glyphs` also unify — see
+/// the module doc). `enters`/`leaves` print only when `Some` — unlike
+/// `writes`, which always prints (`writes {}` included) because it carries
+/// an inferred fact even when nothing was declared, an absent head-position
+/// clause declares no restriction at all, and a present one is never
+/// empty, so there is no `{}` form to fall back to.
+fn tape_param_text(
+    name: &str,
+    alphabet: &str,
+    writes: &[String],
+    enters: Option<&[String]>,
+    leaves: Option<&[String]>,
+) -> String {
+    let mut out = format!("tape {name}: {alphabet} writes {}", braced_list(writes));
+    if let Some(glyphs) = enters {
+        let _ = write!(out, " enters {}", braced_list(glyphs));
+    }
+    if let Some(glyphs) = leaves {
+        let _ = write!(out, " leaves {}", braced_list(glyphs));
+    }
+    out
 }
 
 fn state_lines(state: &State) -> Vec<String> {

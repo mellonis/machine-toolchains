@@ -1263,8 +1263,10 @@ reach a graph defined elsewhere.
 
 A declarations reading yields: exported alphabets, exported named maps,
 exported graphs *with their bodies*, and exported routine signatures —
-each routine's tapes with their glyph lists and declared effective write
-set, its `state` parameter count, and its declared `noreturn` clause.
+each routine's tapes with their glyph lists, declared effective write
+set, and declared `enters`/`leaves` head-position clauses (when
+written), its `state` parameter count, and its declared `noreturn`
+clause.
 Routine bodies and the `machine` block contribute nothing and are not
 needed. Both of those last two are DECLARED facts, never inferred ones:
 the reading never walks a body, so a routine that declares no `writes`
@@ -1333,6 +1335,11 @@ What it carries follows from that:
   `preserves` clause never appears; it has no independent meaning once
   the effective set is published, and could not be reconstructed from a
   compiled object anyway.
+- **A declared `enters { … }`/`leaves { … }` clause appears exactly as
+  written**, in that order, after `writes { … }`. Unlike `writes`, these
+  carry no inferred stand-in: a tape with no `enters`/`leaves` clause
+  prints neither, since an absent clause and an empty one are not the
+  same thing (`docs/formats.md (routine interfaces)`).
 - **`volatile` never appears.** The modifier shapes how a routine's own
   body is compiled and is never checked at a call site, so it is not part
   of what a caller may rely on ("Volatile tapes").

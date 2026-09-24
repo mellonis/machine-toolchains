@@ -747,11 +747,15 @@ neither clause was written — rather than the author's own spelling, and
 never the whole alphabet as a stand-in for "no restriction declared" (the
 wire has no way to spell that). `preserves` itself never appears on
 either arm: it has no representation on the wire and an object-arm render
-could not reproduce it. `volatile` is dropped from both arms
-for the same reason: the modifier is compile-time-only and leaves no
-trace in the generated assembly (docs/tmt/language.md (volatile tapes)),
-and it is never checked at a call site either, so it is not part of what
-a caller may rely on. **Both arms print, ahead of each namespace's own
+could not reproduce it. A declared `enters { … }`/`leaves { … }` clause
+prints identically on both arms too, right after `writes { … }`, and
+prints on NEITHER arm when the parameter declared none — unlike `writes`,
+these two have no inferred stand-in to fall back to. `volatile` is
+dropped from both arms for the same reason: the modifier is
+compile-time-only and leaves no trace in the generated assembly
+(docs/tmt/language.md (volatile tapes)), and it is never checked at a
+call site either, so it is not part of what a caller may rely on.
+**Both arms print, ahead of each namespace's own
 declarations, the `use` lines that namespace's printed content needs** —
 though the two decide "needs" from different data. The source arm keeps
 a `use` when its bound name is referenced AND EITHER the header prints

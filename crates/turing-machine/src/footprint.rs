@@ -874,6 +874,9 @@ mod tests {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }
     }
 

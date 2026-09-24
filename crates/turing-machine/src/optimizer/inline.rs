@@ -501,6 +501,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }];
         let machine = IrWorld {
             name: "main".into(),
@@ -614,6 +617,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }];
         let callee_tapes = vec![IrTape {
             name: "t".into(),
@@ -622,6 +628,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }];
         let machine = IrWorld {
             name: "main".into(),
@@ -783,6 +792,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }];
         let stop_state = |id: u32, name: &str| IrState {
             id,
@@ -874,6 +886,9 @@ machine {
                 volatile: true,
                 glyphs: Vec::new(),
                 writes: None,
+                enters: None,
+                leaves: None,
+                opaque: false,
             }],
             entry: 0,
             states: vec![
@@ -931,6 +946,9 @@ machine {
                 volatile: false,
                 glyphs: Vec::new(),
                 writes: None,
+                enters: None,
+                leaves: None,
+                opaque: false,
             }],
             entry: 0,
             states: vec![IrState {

@@ -883,8 +883,13 @@ pub(crate) fn render_glyph_list(glyphs: &[String]) -> String {
 /// when it carries something — an absent clause (`None`) and a
 /// written-but-empty one both decode to "no suffix" on the wire, so the
 /// shorter spelling is canonical either way and `writes=()` is never
-/// printed. `enters=`, `leaves=` and `opaque` are not emitted here: the
-/// IR carries no head contract or opacity fact yet.
+/// printed. `enters=`/`leaves=` print exactly when the signature
+/// parameter declared the matching clause (`IrTape.enters`/`::leaves`,
+/// filled through the same declared-clause resolution `writes` already
+/// goes through) — a present clause is never empty, so unlike `writes=`
+/// there is no emptiness guard to apply. `opaque` is not emitted here
+/// yet: the IR carries the field, but no analysis computes it, so it
+/// always reads `false` for now.
 fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
     for t in tapes {
         let mut code = format!(".param {}, ({})", t.name, render_glyph_list(&t.glyphs));
@@ -892,6 +897,14 @@ fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
             && !writes.is_empty()
         {
             code.push_str(&format!(", writes=({})", render_glyph_list(writes)));
+        }
+        if let Some(enters) = &t.enters {
+            debug_assert!(!enters.is_empty(), "an enters clause is never empty");
+            code.push_str(&format!(", enters=({})", render_glyph_list(enters)));
+        }
+        if let Some(leaves) = &t.leaves {
+            debug_assert!(!leaves.is_empty(), "a leaves clause is never empty");
+            code.push_str(&format!(", leaves=({})", render_glyph_list(leaves)));
         }
         e.push(code, 0);
     }
