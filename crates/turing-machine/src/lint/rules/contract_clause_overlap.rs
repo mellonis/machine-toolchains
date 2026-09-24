@@ -357,7 +357,7 @@ routine mark(tape t: bits writes {'0'} preserves {'1'}) {
         let src = "\
 alphabet bits { '_', '0', '1' }
 routine mark(tape t: bits enters { '1' } leaves { '1' }) {
-  entry state s { ['1'] -> return; }
+  entry state s { [*] -> return; }
 }
 ";
         assert!(findings(src).is_empty(), "{:?}", findings(src));

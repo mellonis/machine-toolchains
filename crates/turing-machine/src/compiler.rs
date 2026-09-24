@@ -238,23 +238,36 @@ pub enum CompileErrorKind {
     /// A declared `enters { … }` clause names a glyph the world's entry
     /// state has no rule for: entering on that glyph traps rather than
     /// being handled, so the clause promises a moment the body cannot
-    /// accept. `state` is the entry state; `glyph` is the first unaccepted
-    /// symbol, in the tape's own band order. Never raised when the entry
-    /// state's own coverage cannot be proven (an arity mismatch or an
-    /// unresolvable range cell) or when the entry is an unnamed graft
-    /// instance, which carries no state to examine ahead of expansion.
-    EntersNotAccepted { state: String, glyph: String },
+    /// accept. `state` is the entry state, `tape` the parameter that
+    /// declared the clause; `glyph` is the first unaccepted symbol, in the
+    /// tape's own band order. Never raised when the entry state's own
+    /// coverage cannot be proven (an arity mismatch or an unresolvable
+    /// range cell) or when the entry is a graft instance, named or not, or
+    /// the world has no body (a bodiless routine read in declarations
+    /// mode) — none of those carries a state to examine ahead of
+    /// expansion.
+    EntersNotAccepted {
+        state: String,
+        tape: String,
+        glyph: String,
+    },
     /// A declared `leaves { … }` clause is contradicted by an EXIT row whose
     /// leaving glyph is statically known: a `return` row (a routine) or a
-    /// `goto` onto an exit parameter (a graph) that neither moves this tape
-    /// nor writes it with a `{expr}` substitution — the row's own matched
-    /// cell (an unwritten position) or its literal write names a glyph the
-    /// clause does not list. `state` and `glyph` name the offending row's
-    /// state and the symbol; the span points at the row itself. Never
-    /// raised over a row whose leaving glyph is not statically known (a
-    /// move on this tape, or a `{expr}` write) — the runtime check covers
-    /// that case instead.
-    LeavesOutsideContract { state: String, glyph: String },
+    /// `goto` onto an exit parameter (a graph) that neither moves the
+    /// declaring tape nor writes it in a way that leaves more than one
+    /// glyph possible. The leaving glyph is known ONLY for a literal write,
+    /// or an unwritten (`Keep`) cell whose pattern matches exactly one
+    /// glyph of the tape's own alphabet — a wildcard or a multi-member
+    /// range leaves no single glyph to name, so it is left to the runtime
+    /// check exactly like a move or a `{expr}` substitution write. `state`
+    /// and `tape` name the offending row's state and the parameter that
+    /// declared the clause; `glyph` is the symbol; the span points at the
+    /// row itself.
+    LeavesOutsideContract {
+        state: String,
+        tape: String,
+        glyph: String,
+    },
 
     // -- graft + range expansion -------------------------------------------
     /// A graph definition graft-depends on itself (directly or through a
@@ -805,16 +818,16 @@ impl std::fmt::Display for CompileErrorKind {
                     "`{world}` may write {named} on tape `{tape}`, which its contract forbids"
                 )
             }
-            CompileErrorKind::EntersNotAccepted { state, glyph } => {
+            CompileErrorKind::EntersNotAccepted { state, tape, glyph } => {
                 write!(
                     f,
-                    "entry state `{state}` has no rule for '{glyph}', which its tape's `enters` clause declares"
+                    "entry state `{state}` has no rule for '{glyph}' on tape `{tape}`, which its `enters` clause declares"
                 )
             }
-            CompileErrorKind::LeavesOutsideContract { state, glyph } => {
+            CompileErrorKind::LeavesOutsideContract { state, tape, glyph } => {
                 write!(
                     f,
-                    "this exit row in state `{state}` may leave on '{glyph}', which its tape's `leaves` clause forbids"
+                    "this exit row in state `{state}` may leave '{glyph}' on tape `{tape}`, which its `leaves` clause forbids"
                 )
             }
             CompileErrorKind::GraftCycle(n) => {
@@ -1918,13 +1931,13 @@ fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), 
 /// through `return`, a GRAPH through a `goto` onto one of its own exit
 /// (`state`) parameters; the two never overlap, since a graph carries no
 /// `return` and this check never follows a routine's own exit parameters
-/// (docs/tmt/language.md ("state" parameters)). An exit row is checked only
-/// where its leaving glyph is statically exact: no move on the declaring
-/// tape, and a write that is either absent/`Keep` (the row's own matched
-/// cell) or a literal — never a `{expr}` substitution. These are the same
-/// three tiers `footprint.rs`'s source-level seeding distinguishes (Keep
-/// and Lit exact, Subst not); a row this check cannot prove is simply left
-/// to the runtime check instead of being guessed at.
+/// (docs/tmt/language.md ("state" parameters)). An exit row's leaving
+/// glyph is known ONLY in two shapes: a literal write, or an unwritten
+/// (`Keep`) cell whose pattern matches exactly one glyph of the tape's own
+/// alphabet. A move on the declaring tape, a `{expr}` substitution write,
+/// a wildcard `Keep` cell, and a multi-member range `Keep` cell are all
+/// left to the runtime check instead of being guessed at — none of them
+/// pins the leaving glyph down to one symbol.
 fn check_head_contracts(resolved: &Resolved) -> Result<(), CompileError> {
     for world in &resolved.worlds {
         if world
@@ -1952,7 +1965,7 @@ fn check_head_contracts(resolved: &Resolved) -> Result<(), CompileError> {
                 check_enters(world, k, tape, enters, &tape_glyphs)?;
             }
             if let Some(leaves) = tape.leaves {
-                check_leaves(world, k, leaves, &tape_glyphs)?;
+                check_leaves(world, k, tape, leaves, &tape_glyphs)?;
             }
         }
     }
@@ -1970,8 +1983,9 @@ fn check_enters(
     tape_glyphs: &[&[String]],
 ) -> Result<(), CompileError> {
     let Some(entry_state) = world.states.iter().find(|s| s.entry) else {
-        // The entry is an unnamed graft instance — no state to examine ahead
-        // of expansion.
+        // The entry is a graft instance — named or not — or the world has
+        // no body (a bodiless routine read in declarations mode): no state
+        // to examine ahead of expansion, either way.
         return Ok(());
     };
     let Some(accepted) = accepted_glyphs(&entry_state.rules, tape_glyphs) else {
@@ -1984,6 +1998,7 @@ fn check_enters(
                 span: tape.span,
                 kind: CompileErrorKind::EntersNotAccepted {
                     state: entry_state.name.clone(),
+                    tape: tape.name.clone(),
                     glyph,
                 },
             });
@@ -1993,11 +2008,12 @@ fn check_enters(
 }
 
 /// The `leaves` half of [`check_head_contracts`]: every EXIT row's leaving
-/// glyph on tape `k`, where that glyph is statically exact, must be among
+/// glyph on tape `k`, where that glyph is statically known, must be among
 /// what the declared `leaves` clause lists.
 fn check_leaves(
     world: &ResolvedWorld,
     k: usize,
+    tape: &ResolvedTape,
     leaves: SymSet,
     tape_glyphs: &[&[String]],
 ) -> Result<(), CompileError> {
@@ -2007,19 +2023,18 @@ fn check_leaves(
             if !is_exit_row(world, rule) {
                 continue;
             }
-            let Some(outcome) = exit_glyphs(rule, k, tape_glyphs) else {
-                continue; // the leaving glyph is not statically exact
+            let Some(glyph) = exit_glyph(rule, k, tape_glyphs) else {
+                continue; // the leaving glyph is not statically known
             };
-            for glyph in outcome {
-                if !declared.contains(&glyph) {
-                    return Err(CompileError {
-                        span: rule.span,
-                        kind: CompileErrorKind::LeavesOutsideContract {
-                            state: state.name.clone(),
-                            glyph,
-                        },
-                    });
-                }
+            if !declared.contains(&glyph) {
+                return Err(CompileError {
+                    span: rule.span,
+                    kind: CompileErrorKind::LeavesOutsideContract {
+                        state: state.name.clone(),
+                        tape: tape.name.clone(),
+                        glyph,
+                    },
+                });
             }
         }
     }
@@ -2029,8 +2044,9 @@ fn check_leaves(
 /// Whether `rule` leaves `world` at all — a ROUTINE only through `return`,
 /// a GRAPH only through a `goto` onto one of its own `state` (exit)
 /// parameters, matched by name. A routine's own exit parameters (it may
-/// have some too) are deliberately not exit rows here: this task checks a
-/// routine's `leaves` clause against `return` alone.
+/// have some too) are deliberately not exit rows here: a routine's
+/// `leaves` clause is checked against `return` alone, since an exit
+/// parameter is not the moment control returns.
 fn is_exit_row(world: &ResolvedWorld, rule: &Rule) -> bool {
     match world.kind {
         WorldKind::Routine => matches!(rule.transition, Transition::Return { .. }),
@@ -2042,13 +2058,19 @@ fn is_exit_row(world: &ResolvedWorld, rule: &Rule) -> bool {
     }
 }
 
-/// The glyphs tape `k` may hold when `rule` fires, or `None` when that is
-/// not statically exact: a move on tape `k`, or a `{expr}` substitution
-/// write there. An absent write vector, or a `Keep` cell, leaves the tape
-/// as the rule's own pattern matched it — [`cell_labels`] of that cell,
-/// which may be more than one glyph for a range or wildcard pattern; a
-/// literal write is the one glyph it names.
-fn exit_glyphs(rule: &Rule, k: usize, tape_glyphs: &[&[String]]) -> Option<Vec<String>> {
+/// The one glyph tape `k` holds when `rule` fires, or `None` when that is
+/// not statically known: a move on tape `k`; a `{expr}` substitution write
+/// there; or — on the unwritten/`Keep` path — a matched pattern cell that
+/// does not resolve to exactly one glyph of the tape's own alphabet. A
+/// wildcard or a multi-member range names a SET, not a single symbol, so
+/// neither pins the leaving glyph down ([`cell_labels`] of either may
+/// answer several labels); a `Single` cell naming a glyph the tape's own
+/// alphabet does not carry can never actually match — the same "drop it,
+/// no valid index to lower" a `Single`/degenerate `Range` cell gets at
+/// expansion (`expand.rs::cell_options`) — so it is declined here too,
+/// rather than named as a false promise the row can never even reach. A
+/// literal write is always the one glyph it names.
+fn exit_glyph(rule: &Rule, k: usize, tape_glyphs: &[&[String]]) -> Option<String> {
     let stayed = match &rule.mov {
         None => true,
         Some(mv) => !matches!(mv.cells.get(k), Some(c) if c.dir != MoveDir::Stay),
@@ -2061,11 +2083,14 @@ fn exit_glyphs(rule: &Rule, k: usize, tape_glyphs: &[&[String]]) -> Option<Vec<S
         | Some(WriteCell {
             kind: WriteCellKind::Keep,
             ..
-        }) => cell_labels(rule.pattern.cells.get(k)?, tape_glyphs[k]),
+        }) => match cell_labels(rule.pattern.cells.get(k)?, tape_glyphs[k])?.as_slice() {
+            [one] if tape_glyphs[k].contains(one) => Some(one.clone()),
+            _ => None,
+        },
         Some(WriteCell {
             kind: WriteCellKind::Lit(lit),
             ..
-        }) => Some(vec![glyph_label(lit)]),
+        }) => Some(glyph_label(lit)),
         Some(WriteCell {
             kind: WriteCellKind::Subst { .. },
             ..
@@ -4412,10 +4437,12 @@ mod tests {
             },
             CompileErrorKind::EntersNotAccepted {
                 state: "s".into(),
+                tape: "t".into(),
                 glyph: "x".into(),
             },
             CompileErrorKind::LeavesOutsideContract {
                 state: "s".into(),
+                tape: "t".into(),
                 glyph: "x".into(),
             },
             CompileErrorKind::GraftCycle("x".into()),
@@ -5421,7 +5448,7 @@ routine r(tape t: bits enters { 'x' }) {
         assert_eq!(e.kind.code(), "enters-not-accepted");
         assert_eq!(
             e.kind.to_string(),
-            "entry state `s` has no rule for 'x', which its tape's `enters` clause declares"
+            "entry state `s` has no rule for 'x' on tape `t`, which its `enters` clause declares"
         );
     }
 
@@ -5452,7 +5479,7 @@ routine r(tape t: bits leaves { '$' }) {
         assert_eq!(e.kind.code(), "leaves-outside-contract");
         assert_eq!(
             e.kind.to_string(),
-            "this exit row in state `s` may leave on '0', which its tape's `leaves` clause forbids"
+            "this exit row in state `s` may leave '0' on tape `t`, which its `leaves` clause forbids"
         );
     }
 
@@ -5517,7 +5544,7 @@ graph g(tape t: bits enters { 'x' }, state done) {
         assert_eq!(e.kind.code(), "enters-not-accepted");
         assert_eq!(
             e.kind.to_string(),
-            "entry state `s` has no rule for 'x', which its tape's `enters` clause declares"
+            "entry state `s` has no rule for 'x' on tape `t`, which its `enters` clause declares"
         );
     }
 
@@ -5533,6 +5560,108 @@ routine r(tape t: bits leaves { '$' }, state done) {
   entry state s { [*] -> write ['0'] goto done; }
 }
 ");
+    }
+
+    /// A `Keep` exit row whose pattern cell is a WILDCARD names a SET, not
+    /// one glyph: the row never writes and never moves, but the leaving
+    /// glyph could be ANY member of the tape's alphabet, so a narrow
+    /// `leaves` clause is left unchecked rather than compared against that
+    /// whole set.
+    /// **Mutation caught:** comparing the whole matched-cell set — instead
+    /// of requiring it to name exactly one glyph — turns this near miss
+    /// into a false refusal (see `a_single_glyph_keep_exit_row_leaving_
+    /// outside_the_set_is_rejected` below for the case that must still
+    /// fire).
+    #[test]
+    fn a_wildcard_keep_exit_row_is_not_statically_known_and_stays_clean() {
+        ok("\
+alphabet bits { '_', '0', '1', '$' }
+routine r(tape t: bits leaves { '$' }) {
+  entry state s { [*] -> return; }
+}
+");
+    }
+
+    /// The same near miss over a RANGE pattern cell: several glyphs are
+    /// still several glyphs, not one, regardless of how narrow the
+    /// declared `leaves` clause is.
+    /// **Mutation caught:** same as the wildcard case above.
+    #[test]
+    fn a_range_keep_exit_row_is_not_statically_known_and_stays_clean() {
+        ok("\
+alphabet digits { '_', '0'..'9' }
+routine r(tape t: digits leaves { '0' }) {
+  entry state s { ['0'..'9'] -> return; }
+}
+");
+    }
+
+    /// The two near misses above do not blunt the check: a SINGLE-glyph
+    /// pattern cell on a `Keep` exit row is exactly as exact as a literal
+    /// write (fixture 3), and still fires.
+    #[test]
+    fn a_single_glyph_keep_exit_row_leaving_outside_the_set_is_rejected() {
+        let e = err("\
+alphabet bits { '_', '0', '$' }
+routine r(tape t: bits leaves { '$' }) {
+  entry state s { ['0'] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+    }
+
+    /// A single-glyph pattern cell naming a glyph the tape's own alphabet
+    /// does not carry can never actually match — expansion drops such a
+    /// row outright (`expand.rs::cell_options`) — so it must not be named
+    /// as a leaving glyph either, even though the cell resolves to exactly
+    /// one label.
+    /// **Mutation caught:** dropping the alphabet-membership check (keeping
+    /// only "exactly one label") would report this row's dead glyph as if
+    /// the row could really leave on it.
+    #[test]
+    fn a_single_glyph_keep_row_naming_a_glyph_outside_the_alphabet_is_declined() {
+        ok("\
+alphabet bits { '_', '0', '1' }
+routine r(tape t: bits leaves { '_' }) {
+  entry state s { ['2'] -> return; }
+}
+");
+    }
+
+    /// A `{expr}` substitution write's possible outputs are never evaluated
+    /// by this check — left to the runtime check exactly like a move or a
+    /// wildcard/range `Keep` cell, never guessed at from the expression's
+    /// text.
+    /// **Mutation caught:** treating the substitution as though it named
+    /// its own matched cell (rather than declining) turns this near miss
+    /// into a false refusal.
+    #[test]
+    fn a_substitution_write_on_an_exit_row_is_not_statically_known_and_stays_clean() {
+        ok("\
+alphabet digits { 0..5 }
+routine r(tape t: digits leaves { 0 }) {
+  entry state s { [1 as d] -> write [{d}] return; }
+}
+");
+    }
+
+    /// A declared clause names the TAPE it belongs to, not just the state
+    /// and the glyph — a multi-tape world's diagnostic must point at the
+    /// parameter whose promise the row actually breaks, not merely at
+    /// whichever tape happens to come first.
+    #[test]
+    fn the_leaves_message_names_the_tape_that_actually_broke_it() {
+        let e = err("\
+alphabet bits { '_', '0', '$' }
+routine r(tape a: bits leaves { '_' }, tape b: bits leaves { '$' }) {
+  entry state s { [*, *] -> write [-, '0'] return; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "this exit row in state `s` may leave '0' on tape `b`, which its `leaves` clause forbids"
+        );
     }
 
     // -- the canonical examples resolve end-to-end -------------------------

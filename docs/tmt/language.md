@@ -461,16 +461,20 @@ own body alone — never a call graph or a footprint fixpoint the way
 `writes`/`preserves` are. `enters` is checked against the world's entry
 state: every glyph the clause names must be one some rule of that state
 matches, or the state traps on exactly the input the clause promises a
-caller may hand it — `enters-not-accepted`, naming the entry state and
-the unaccepted glyph. `leaves` is checked against the world's own EXIT
-rows — a routine leaves through `return`; a graph leaves through a
-`goto` onto one of its own `state` (exit) parameters, and a routine's
-own exit parameters are not `leaves` rows, only `return` is — and only
-where the leaving glyph is statically exact: no move on the declaring
-tape, and a write that is either the row's own matched cell or a
-literal, never a `{expr}` substitution. A row whose leaving glyph is not
-statically exact is left unchecked rather than guessed at —
-`leaves-outside-contract`, naming the row's state and the glyph.
+caller may hand it — `enters-not-accepted`, naming the entry state, the
+tape, and the unaccepted glyph. `leaves` is checked against the world's
+own EXIT rows — a routine leaves through `return`; a graph leaves
+through a `goto` onto one of its own `state` (exit) parameters, and a
+routine's own exit parameters are not `leaves` rows, only `return` is —
+and only where the leaving glyph is known to be exactly ONE glyph: a
+literal write, or an unwritten (`Keep`) cell whose pattern matches
+exactly one glyph of the tape's own alphabet. A move on the declaring
+tape, a `{expr}` substitution write, and a `Keep` cell that is a
+wildcard or names more than one glyph (a range) are all left unchecked
+rather than guessed at — none of them pins the leaving glyph down to a
+single symbol, so none of them can be compared against the declared
+set — `leaves-outside-contract`, naming the row's state, the tape, and
+the glyph.
 
 A machine's own `tape` declaration carries no contract grammar at all —
 `writes`/`preserves`/`enters`/`leaves` are legal only on a signature

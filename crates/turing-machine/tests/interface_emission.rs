@@ -690,9 +690,9 @@ fn no_head_clause_prints_no_suffix_on_either_arm() {
 const GRAPH_HEAD_CONTRACT_FIXTURE: &str = "\
 export alphabet marks { '_', 'x', 'y' }
 
-export graph g(tape t: marks enters { 'x' } leaves { 'y' }, state found) {
+export graph g(tape t: marks enters { 'x' } leaves { 'x' }, state found) {
   entry state walk {
-    ['x'] -> write ['y'] found;
+    ['x'] -> found;
     [*]   -> move [>] goto walk;
   }
 }
@@ -733,7 +733,7 @@ fn a_graphs_declared_head_contract_reaches_the_header_and_its_exported_digest() 
     std::fs::write(&src_path, GRAPH_HEAD_CONTRACT_FIXTURE).unwrap();
     let source_header = run_interface(&src_path);
     assert!(
-        source_header.contains("enters { 'x' } leaves { 'y' }"),
+        source_header.contains("enters { 'x' } leaves { 'x' }"),
         "expected the graph's declared clause in its printed signature:\n{source_header}"
     );
 
@@ -759,5 +759,46 @@ fn a_graphs_declared_head_contract_reaches_the_header_and_its_exported_digest() 
         digest_of(&without_clause),
         "the graph's exported digest did not change when its declared \
          `enters`/`leaves` clause did"
+    );
+}
+
+/// The near miss to the `assert_ne!` above: [`GRAPH_HEAD_CONTRACT_FIXTURE`]
+/// and [`GRAPH_NO_HEAD_CONTRACT_FIXTURE`] are the SAME graph but for the
+/// declared clause — stripping the clause text out of the first must
+/// recover a source byte-identical to the second, and compiling it must
+/// then produce the SAME digest as `without_clause`. Without this the
+/// `assert_ne!` above proves nothing: it would pass just as well if the two
+/// fixtures' bodies differed for any other reason.
+#[test]
+fn stripping_the_clause_recovers_the_digest_free_control_pair() {
+    let stripped = GRAPH_HEAD_CONTRACT_FIXTURE.replacen(" enters { 'x' } leaves { 'x' }", "", 1);
+    assert_eq!(
+        stripped, GRAPH_NO_HEAD_CONTRACT_FIXTURE,
+        "the clause-bearing and clause-free fixtures must be byte-identical \
+         but for the clause itself"
+    );
+
+    let stripped_object = compile(&stripped, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("expected a clean compile: {e}"))
+        .object;
+    let without_clause = compile(GRAPH_NO_HEAD_CONTRACT_FIXTURE, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("expected a clean compile: {e}"))
+        .object;
+
+    let digest_of = |o: &ObjectFile| {
+        o.interface
+            .as_ref()
+            .expect("carries an interface section")
+            .graphs
+            .iter()
+            .find(|g| g.name == "g")
+            .expect("graph `g` is exported")
+            .digest
+    };
+    assert_eq!(
+        digest_of(&stripped_object),
+        digest_of(&without_clause),
+        "the same body with its clause stripped must digest identically to \
+         the clause-free control fixture"
     );
 }
