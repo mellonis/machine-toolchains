@@ -241,7 +241,14 @@ fn alphabet_header_comments_stay_in_the_header() {
 /// The remaining header families. Measured destinations: `namespace`,
 /// `machine`, `state` → own line inside the body (after the `{`);
 /// `routine`, `graft`, `bind` → riding the argument list's `(`;
-/// `tape` → trailing after the whole statement's `;`.
+/// `tape` → trailing after the whole statement's `;`. The three
+/// `sig-param` entries are a signature tape parameter's `enters`/`leaves`
+/// head-position clauses: a comment before the `enters` keyword, inside a
+/// clause's own braces, or between the two clauses all stay exactly where
+/// written — a BLOCK comment prints inline, a LINE comment breaks the
+/// whole parameter list to one parameter per line (the same
+/// comment-bearing-parameter path every other signature entry above
+/// takes).
 const OTHER_HEADERS: &[(&str, &str)] = &[
     (
         "namespace/kw-name",
@@ -306,6 +313,18 @@ const OTHER_HEADERS: &[(&str, &str)] = &[
     (
         "bind/kw-target",
         "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n    entry state s { [*] -> d; }\n  }\n}\nmachine {\n  tape main: ab;\n  bind @C@\n  n::g(t = main, d = fin) as x;\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "sig-param/before-enters",
+        "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab @C@\n  enters { 'a' } leaves { 'b' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
+    ),
+    (
+        "sig-param/enters-interior",
+        "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab enters { 'a', @C@\n  'b' } leaves { 'b' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
+    ),
+    (
+        "sig-param/between-enters-leaves",
+        "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab enters { 'a' } @C@\n  leaves { 'b' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
     ),
 ];
 

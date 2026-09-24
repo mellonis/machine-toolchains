@@ -114,6 +114,12 @@ pub enum CompileErrorKind {
     /// A second `writes` or `preserves` clause on one signature tape
     /// parameter. `what` names the repeated keyword.
     DuplicateContractClause { what: &'static str },
+    /// An `enters { … }` or `leaves { … }` clause with no elements. Unlike
+    /// `writes {}`/`preserves {}` — a legal, meaningful empty SET ("writes
+    /// nothing" / "preserves nothing") — a head-position clause states
+    /// where the head is at a moment in time, and there is no such thing
+    /// as arriving or departing on no symbol at all.
+    EmptyHeadClause,
 
     // -- resolution / flatten / world checks (this task) -------------------
     /// An alphabet with no elements — a world needs at least one symbol
@@ -438,6 +444,7 @@ impl CompileErrorKind {
         CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
         CompileErrorKind::ContractClauseOrder => "contract-clause-order",
         CompileErrorKind::DuplicateContractClause { .. } => "duplicate-contract-clause",
+        CompileErrorKind::EmptyHeadClause => "empty-head-clause",
         CompileErrorKind::EmptyAlphabet => "empty-alphabet",
         CompileErrorKind::DuplicateGlyph(_) => "duplicate-glyph",
         CompileErrorKind::AlphabetTooLarge(_) => "alphabet-too-large",
@@ -600,6 +607,9 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::DuplicateContractClause { what } => {
                 write!(f, "duplicate `{what}` clause")
+            }
+            CompileErrorKind::EmptyHeadClause => {
+                write!(f, "an `enters`/`leaves` clause needs at least one symbol")
             }
             CompileErrorKind::EmptyAlphabet => {
                 write!(f, "an alphabet needs at least one symbol")
@@ -2526,6 +2536,8 @@ fn resolve_world(
                 volatile,
                 writes,
                 preserves,
+                enters,
+                leaves,
                 ..
             } => {
                 let (full, card) =
@@ -2534,6 +2546,13 @@ fn resolve_world(
                     .get(&full)
                     .map(|a| a.glyphs.as_slice())
                     .expect("a resolved tape alphabet is in the table");
+                // `enters`/`leaves` take the same membership check as
+                // `writes`/`preserves` — every element must be a symbol of
+                // the parameter's own alphabet — but the resolved set is
+                // not carried on `ResolvedTape`: nothing downstream (IR,
+                // header, codegen) reads a head-position contract yet.
+                resolve_contract_clause(enters.as_deref(), "enters", glyphs, &full)?;
+                resolve_contract_clause(leaves.as_deref(), "leaves", glyphs, &full)?;
                 tapes.push(ResolvedTape {
                     name: p.name.clone(),
                     name_span: p.name_span,
@@ -4079,6 +4098,7 @@ mod tests {
             CompileErrorKind::DuplicateAttribute,
             CompileErrorKind::ContractClauseOrder,
             CompileErrorKind::DuplicateContractClause { what: "writes" },
+            CompileErrorKind::EmptyHeadClause,
             CompileErrorKind::EmptyAlphabet,
             CompileErrorKind::DuplicateGlyph("x".into()),
             CompileErrorKind::AlphabetTooLarge(200),
@@ -5713,7 +5733,7 @@ namespace mylib {
   ? widens the bare alphabet onto the richer one
   export map widen: bits -> wide { '_' => '_', '0' => 'a', '1' -> 'b' }
 
-  export graph walk(tape t: wide writes {}, state found) {
+  export graph walk(tape t: wide writes {} enters { 'a' } leaves { 'c' }, state found) {
     entry state s {
       ['_'] -> goto found;
       [*]   -> move [>] goto s;

@@ -343,6 +343,26 @@ routine mark(tape t: bits writes {'0'} preserves {'1'}) {
         assert!(findings(src).is_empty(), "{:?}", findings(src));
     }
 
+    /// `enters { … }` and `leaves { … }` naming the same glyph is not a
+    /// contradiction the way `writes`/`preserves` overlap is — it is the
+    /// normal shape for a routine that walks to a marker and stops on it,
+    /// since the two clauses state two different MOMENTS (where the head
+    /// starts, where it ends), not one promise made twice. This rule stays
+    /// `writes` × `preserves` only.
+    ///
+    /// Mutation this catches: extending the overlap computation over the
+    /// new clauses.
+    #[test]
+    fn enters_and_leaves_sharing_a_glyph_are_quiet() {
+        let src = "\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits enters { '1' } leaves { '1' }) {
+  entry state s { [*] -> return; }
+}
+";
+        assert!(findings(src).is_empty(), "{:?}", findings(src));
+    }
+
     #[test]
     fn a_partially_overlapping_range_names_only_the_overlap_and_ships_no_fix() {
         let src = "\

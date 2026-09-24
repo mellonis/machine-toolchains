@@ -206,6 +206,18 @@ pub enum SigParamKind {
         writes: Option<ContractClause>,
         /// A declared `preserves { … }` clause, signature-only.
         preserves: Option<ContractClause>,
+        /// A declared `enters { … }` clause, signature-only: the symbols
+        /// the head may be sitting on when a call transfers control into
+        /// this parameter's tape. Canonical order: after `writes`/
+        /// `preserves`, before `leaves`. Boxed (alongside `leaves`) to keep
+        /// this variant from dwarfing `State`'s zero-byte payload — a
+        /// signature-only pair, so the indirection never touches a
+        /// world-body hot path.
+        enters: Option<Box<ContractClause>>,
+        /// A declared `leaves { … }` clause, signature-only: the symbols
+        /// the head may be sitting on when control returns. Canonical
+        /// order: last of the four.
+        leaves: Option<Box<ContractClause>>,
     },
     State,
 }
@@ -1638,15 +1650,22 @@ impl Parser<'_> {
             // (docs/tmt/language.md (qualified names)).
             let q = self.qual_name("an alphabet name")?;
             let (alphabet, alphabet_span) = (q.joined(), q.span);
-            // `writes { … }`, then `preserves { … }`, both optional — the
+            // `writes { … }`, `preserves { … }`, `enters { … }`,
+            // `leaves { … }`, all optional, in that canonical order — the
             // fixed order is a grammar rule, not an fmt convention, because
             // fmt is token-preserving and cannot reorder an author's
-            // clauses.
+            // clauses. `enters`/`leaves` state head POSITION at a moment
+            // (call-in / return), not a write footprint, so an empty one
+            // has no meaning the way `writes {}`/`preserves {}` do (an
+            // explicit empty SET) — `EmptyHeadClause` catches it right
+            // where it is parsed.
             let mut writes: Option<ContractClause> = None;
             let mut preserves: Option<ContractClause> = None;
+            let mut enters: Option<Box<ContractClause>> = None;
+            let mut leaves: Option<Box<ContractClause>> = None;
             loop {
                 if self.at_kw("writes") {
-                    if preserves.is_some() {
+                    if preserves.is_some() || enters.is_some() || leaves.is_some() {
                         return Err(Self::err_at(
                             self.peek(),
                             CompileErrorKind::ContractClauseOrder,
@@ -1660,6 +1679,12 @@ impl Parser<'_> {
                     }
                     writes = Some(self.contract_clause()?);
                 } else if self.at_kw("preserves") {
+                    if enters.is_some() || leaves.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::ContractClauseOrder,
+                        ));
+                    }
                     if preserves.is_some() {
                         return Err(Self::err_at(
                             self.peek(),
@@ -1667,12 +1692,50 @@ impl Parser<'_> {
                         ));
                     }
                     preserves = Some(self.contract_clause()?);
+                } else if self.at_kw("enters") {
+                    if leaves.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::ContractClauseOrder,
+                        ));
+                    }
+                    if enters.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::DuplicateContractClause { what: "enters" },
+                        ));
+                    }
+                    let clause = self.contract_clause()?;
+                    if clause.elems.is_empty() {
+                        return Err(CompileError {
+                            span: clause.span,
+                            kind: CompileErrorKind::EmptyHeadClause,
+                        });
+                    }
+                    enters = Some(Box::new(clause));
+                } else if self.at_kw("leaves") {
+                    if leaves.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::DuplicateContractClause { what: "leaves" },
+                        ));
+                    }
+                    let clause = self.contract_clause()?;
+                    if clause.elems.is_empty() {
+                        return Err(CompileError {
+                            span: clause.span,
+                            kind: CompileErrorKind::EmptyHeadClause,
+                        });
+                    }
+                    leaves = Some(Box::new(clause));
                 } else {
                     break;
                 }
             }
-            let last_span = preserves
-                .as_ref()
+            let last_span = leaves
+                .as_deref()
+                .or(enters.as_deref())
+                .or(preserves.as_ref())
                 .or(writes.as_ref())
                 .map_or(alphabet_span, |c| c.span);
             Ok(SigParam {
@@ -1682,6 +1745,8 @@ impl Parser<'_> {
                     volatile,
                     writes,
                     preserves,
+                    enters,
+                    leaves,
                 },
                 name,
                 name_span,

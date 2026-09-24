@@ -1133,7 +1133,8 @@ fn continuation_text(cont: &Continuation) -> String {
     }
 }
 
-/// One `writes { … }` or `preserves { … }` clause, re-encoded losslessly:
+/// One `writes { … }`, `preserves { … }`, `enters { … }`, or `leaves { … }`
+/// clause, re-encoded losslessly:
 /// a single leading space ahead of the keyword, then the same brace-body
 /// spacing an `alphabet` renders inline (`{ elem, elem }`,
 /// [`render_alphabet`]). An empty clause is meaningful — it declares that
@@ -1169,6 +1170,8 @@ fn signature_params(params: &[SigParam]) -> Vec<String> {
                 volatile,
                 writes,
                 preserves,
+                enters,
+                leaves,
                 ..
             } => {
                 let prefix = if *volatile { "volatile " } else { "" };
@@ -1178,6 +1181,12 @@ fn signature_params(params: &[SigParam]) -> Vec<String> {
                 }
                 if let Some(clause) = preserves {
                     out.push_str(&contract_clause_text("preserves", clause));
+                }
+                if let Some(clause) = enters {
+                    out.push_str(&contract_clause_text("enters", clause));
+                }
+                if let Some(clause) = leaves {
+                    out.push_str(&contract_clause_text("leaves", clause));
                 }
                 out
             }

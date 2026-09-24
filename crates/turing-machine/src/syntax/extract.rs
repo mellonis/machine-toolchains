@@ -1677,6 +1677,8 @@ mod tests {
                         kw_span: Span::new(1, 37, 1, 46),
                         span: Span::new(1, 37, 1, 54),
                     }),
+                    enters: None,
+                    leaves: None,
                 },
                 name: "t".to_string(),
                 name_span: Span::new(1, 16, 1, 17),

@@ -168,6 +168,7 @@ fn sig_tapes(sig: &Signature) -> Vec<WorldTape<'_>> {
                 volatile,
                 writes,
                 preserves,
+                ..
             } => Some(WorldTape {
                 name: p.name.as_str(),
                 name_span: p.name_span,
