@@ -512,6 +512,14 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
         stdlib::SOURCE,
         CompileOptions {
             opt_level: OptLevel::O0,
+            // Irrelevant here, spelled out rather than left to the
+            // default: this object exists only so `tmt interface` can
+            // read its declared routine signatures back — a contract
+            // check inside a routine's own body, if one is ever
+            // synthesized, changes no routine's declared `writes=`/param
+            // signature, which is all the two-arms comparison below
+            // reads.
+            strip_asserts: false,
             ..CompileOptions::default()
         },
     )

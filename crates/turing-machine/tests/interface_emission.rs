@@ -67,6 +67,10 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
         stdlib::SOURCE,
         CompileOptions {
             opt_level: OptLevel::O0,
+            // The plain build, not the release preset — no contract-check
+            // states to strip here either way, spelled out so this byte
+            // pin's premise cannot drift silently.
+            strip_asserts: false,
             ..CompileOptions::default()
         },
     )
@@ -77,6 +81,8 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
         CompileOptions {
             opt_level: OptLevel::O1,
             strip_debugger: true,
+            // The release preset strips contract-check states too.
+            strip_asserts: true,
             ..CompileOptions::default()
         },
     )
@@ -119,6 +125,9 @@ fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
         stdlib::SOURCE,
         CompileOptions {
             opt_level: OptLevel::O0,
+            // The plain build, not the release preset — spelled out so
+            // this byte pin's premise cannot drift silently.
+            strip_asserts: false,
             ..CompileOptions::default()
         },
     )
@@ -130,6 +139,8 @@ fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
         CompileOptions {
             opt_level: OptLevel::O1,
             strip_debugger: true,
+            // The release preset strips contract-check states too.
+            strip_asserts: true,
             ..CompileOptions::default()
         },
     )

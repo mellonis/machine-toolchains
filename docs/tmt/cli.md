@@ -64,8 +64,9 @@ FLAGS:
   -g                 record debug info (labels + .tmc lines)
   -O0 | -O1          optimization level (default -O0)
   --strip-debugger   drop `brk` at codegen
+  --strip-asserts    drop contract-check states
   --debug            preset: -g -O0
-  --release          preset: -O1 --strip-debugger
+  --release          preset: -O1 --strip-debugger --strip-asserts
   -S                 emit the generated .tma instead of an object
   --stamped-asm      emit raw stamped .tma (skip .rept re-detection)
   --emit-ir[=STAGE]  write the world-graph IR JSON next to the output
@@ -95,16 +96,18 @@ implies it — the debug line map is keyed to the stamped physical lines and
 cannot survive the rewrite — so a `-g` build always carries the stamped text.
 
 `--debug` and `--release` are presets applied *before* the individual flags,
-so `-O0` / `-O1` / `-g` / `--strip-debugger` can still override one piece of
-a preset on the same command line. The default build (no flags) is `-O0`
-with no debug info.
+so `-O0` / `-O1` / `-g` / `--strip-debugger` / `--strip-asserts` can still
+override one piece of a preset on the same command line. The default build
+(no flags) is `-O0` with no debug info.
 
 `-g` records the label/line debug section, which the linker carries into the
 `.tmx.map` sidecar and `dis` / `run --trace` read back as real names.
 `--strip-debugger` drops `brk` at codegen; note that `brk` is also an
 observability barrier the optimizer will not move code across, so stripping
 it and optimizing are related choices rather than independent ones
-(`docs/tmt/isa.md`).
+(`docs/tmt/isa.md`). `--strip-asserts` drops contract-check states the same
+way, independently of `--strip-debugger` — the two flags strip unrelated
+things and either may be passed without the other.
 
 Compile warnings always print to stderr as `FILE:LINE:COL: warning: MESSAGE`.
 `-v` additionally renders the optimizer's report — the number of fixpoint
@@ -503,6 +506,7 @@ COMPILE FLAGS (argv mode; manifest mode: override the profile):
   -O0 | -O1             optimization level
   -g                    record debug info
   --strip-debugger      drop `brk` at codegen
+  --strip-asserts       drop contract-check states
   --fno-<pass>          disable one optimizer pass (repeatable)
   --foutline            enable the default-off `outline` pass
   -Werror               treat (post-refinement) warnings as errors
@@ -540,13 +544,14 @@ a build is either fully argv-driven or fully manifest-driven.
 **Flag table**, split by which mode reads which flag:
 
 - **Compile-side** (`--debug`/`--release`, `-O0`/`-O1`, `-g`,
-  `--strip-debugger`, `--fno-<pass>`, `--foutline`, `-Werror`) apply in
-  argv mode directly; in manifest mode they **override** the
-  corresponding key of the selected profile for this invocation only —
-  the manifest itself is never rewritten. Two of them have no such key
-  to override: `--fno-<pass>` and `--foutline` are **flag-only axes**.
-  A profile carries `opt`, `debug-info`, `strip-debugger`, and `werror`
-  and nothing else, so pass selection cannot be committed to the
+  `--strip-debugger`, `--strip-asserts`, `--fno-<pass>`, `--foutline`,
+  `-Werror`) apply in argv mode directly; in manifest mode they
+  **override** the corresponding key of the selected profile for this
+  invocation only — the manifest itself is never rewritten. Two of them
+  have no such key to override: `--fno-<pass>` and `--foutline` are
+  **flag-only axes**. A profile carries `opt`, `debug-info`,
+  `strip-debugger`, `strip-asserts`, and `werror` and nothing else, so
+  pass selection cannot be committed to the
   manifest at all — those two always come from the command line,
   layered on top of whichever profile is in force. `-S`, `--emit-ir`,
   and `--stamped-asm` are deliberately absent from `tmt build`:

@@ -33,8 +33,9 @@ FLAGS:
   -g                 record debug info (labels + .tmc lines)
   -O0 | -O1          optimization level (default -O0)
   --strip-debugger   drop `brk` at codegen
+  --strip-asserts    drop contract-check states
   --debug            preset: -g -O0
-  --release          preset: -O1 --strip-debugger
+  --release          preset: -O1 --strip-debugger --strip-asserts
   -S                 emit the generated .tma instead of an object
   --stamped-asm      emit raw stamped .tma (skip .rept re-detection)
   --emit-ir[=STAGE]  write the world-graph IR JSON next to the output
@@ -297,16 +298,19 @@ pub(super) fn render_opt_report(stderr: &mut String, report: &CompileReport) {
     }
 }
 
-pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
-    let mut args = Args::new(raw);
-    if args.help() {
-        return Ok(CliOutput::ok(COMPILE_USAGE.into(), String::new()));
-    }
+/// The compile-time option surface alone, parsed off `args` in exactly the
+/// order `compile()` itself reads them — factored out so a unit test can
+/// inspect the resulting [`CompileOptions`] directly. `--strip-asserts` has
+/// nothing to strip yet (no contract check synthesizes a state it would
+/// drop), so a disconnected flag and a threaded one produce byte-identical
+/// output; this is the route that catches the disconnected one anyway.
+fn parse_compile_options(args: &mut Args) -> CompileOptions {
     let debug_preset = args.flag("--debug");
     let release_preset = args.flag("--release");
     let mut options = CompileOptions {
         debug_info: debug_preset || args.flag("-g"),
         strip_debugger: release_preset || args.flag("--strip-debugger"),
+        strip_asserts: release_preset || args.flag("--strip-asserts"),
         stamped_asm: args.flag("--stamped-asm"),
         opt_level: if release_preset {
             OptLevel::O1
@@ -324,6 +328,15 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     // `--foutline` enables the default-off `outline` pass; it takes effect
     // only at `-O1` (the optimizer runs nowhere else).
     options.outline = args.flag("--foutline");
+    options
+}
+
+pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
+    let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(COMPILE_USAGE.into(), String::new()));
+    }
+    let mut options = parse_compile_options(&mut args);
     let emit_asm = args.flag("-S");
     let werror = args.flag("-Werror");
     let verbose = args.flag("-v");
@@ -1004,6 +1017,44 @@ namespace glib {
         assert_eq!(
             msg,
             "main+0x0000: warning: x [y]\n-Werror: 2 link warning(s) treated as errors"
+        );
+    }
+
+    // ---- `--strip-asserts` threading -------------------------------------
+    //
+    // Nothing exists yet for the flag to strip, so `tmt compile -S`'s
+    // output cannot tell a threaded `--strip-asserts` apart from a
+    // disconnected one (parsed and accepted, never reaching
+    // `CompileOptions`) — both compile to byte-identical text. These two
+    // tests are the real headline guard: they read the field straight off
+    // the struct `parse_compile_options` returns.
+
+    /// Mutation: dropping `strip_asserts: release_preset ||
+    /// args.flag("--strip-asserts")` from `parse_compile_options` (or
+    /// wiring it to a different flag) — the field stays `false` here.
+    #[test]
+    fn strip_asserts_flag_threads_into_compile_options() {
+        let mut args = Args::new(&["--strip-asserts".to_string()]);
+        let options = parse_compile_options(&mut args);
+        assert!(
+            options.strip_asserts,
+            "--strip-asserts must reach CompileOptions.strip_asserts"
+        );
+    }
+
+    /// `--release` expands to `-O1 --strip-debugger --strip-asserts`.
+    /// Mutation: expanding the preset without the third flag.
+    #[test]
+    fn release_preset_also_sets_strip_asserts() {
+        let mut args = Args::new(&["--release".to_string()]);
+        let options = parse_compile_options(&mut args);
+        assert!(
+            options.strip_debugger,
+            "premise: --release strips the debugger too"
+        );
+        assert!(
+            options.strip_asserts,
+            "--release must also set CompileOptions.strip_asserts"
         );
     }
 }

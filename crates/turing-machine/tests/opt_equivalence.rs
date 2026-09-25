@@ -1093,6 +1093,11 @@ fn stdlib_object_bytes(level: OptLevel) -> Vec<u8> {
         CompileOptions {
             opt_level: level,
             strip_debugger: true,
+            // Both levels strip contract-check states too, isolating opt
+            // level as the only variable this byte comparison exercises —
+            // a later round's synthesized states must not leak a false
+            // divergence in here (docs/tmt/cli.md (compile)).
+            strip_asserts: true,
             ..Default::default()
         },
     )
@@ -1291,6 +1296,10 @@ fn everything_matrix_is_green() {
         CompileOptions {
             opt_level: OptLevel::O1,
             strip_debugger: true,
+            // Matches `stdlib_object_bytes`'s O0 side below: both strip
+            // contract-check states, so this stays the same opt-level-only
+            // comparison it was before any assert existed.
+            strip_asserts: true,
             ..Default::default()
         },
     )

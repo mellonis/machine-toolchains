@@ -70,6 +70,11 @@ pub fn object() -> &'static ObjectFile {
             CompileOptions {
                 opt_level: OptLevel::O1,
                 strip_debugger: true,
+                // The shipped preset strips contract-check states too, so
+                // the embedded object never moves when the stdlib is later
+                // annotated with them — only the header pin does
+                // (docs/tmt/cli.md (compile)).
+                strip_asserts: true,
                 // The library vouches for nobody but itself — and must not
                 // consult its own once-per-process cache while building it.
                 // Fields spelled out rather than `..Default::default()`:

@@ -75,6 +75,11 @@ fn stdlib_object(level: OptLevel) -> mtc_core::formats::object::ObjectFile {
                 CompileOptions {
                     opt_level: OptLevel::O0,
                     strip_debugger: true,
+                    // Matches `stdlib::object()`'s O1 side: both strip
+                    // contract-check states, so the 2×3 behavioral matrix
+                    // this backs never compares an assert-bearing build
+                    // against a stripped one once asserts exist.
+                    strip_asserts: true,
                     ..Default::default()
                 },
             )

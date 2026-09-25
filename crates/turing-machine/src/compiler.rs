@@ -3306,6 +3306,11 @@ pub struct CompileOptions {
     /// `--strip-debugger`: drop `brk` at codegen. The optimizer runs BEFORE
     /// stripping, so the `brk` barrier always holds.
     pub strip_debugger: bool,
+    /// `--strip-asserts`: a compiler decision, so it never reaches
+    /// [`crate::codegen::CodegenOptions`] the way `strip_debugger` does —
+    /// there is nothing here for codegen to drop yet, since no contract
+    /// check synthesizes a raisable state this option would strip.
+    pub strip_asserts: bool,
     /// `-O0` (default) or `-O1` (runs the optimizer pass pipeline).
     pub opt_level: OptLevel,
     /// Pass names to disable (`--fno-<pass>`).
@@ -3340,6 +3345,7 @@ impl Default for CompileOptions {
             externals: Declarations::stdlib(),
             debug_info: false,
             strip_debugger: false,
+            strip_asserts: false,
             opt_level: OptLevel::default(),
             disabled_passes: Vec::new(),
             capture_ir: false,

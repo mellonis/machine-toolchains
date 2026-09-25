@@ -1382,6 +1382,60 @@ fn strip_debugger_flag_overrides_a_manifest_profile_that_keeps_it() {
     );
 }
 
+/// **Not a falsifier of the flag's plumbing** — `--strip-asserts` has
+/// nothing to strip yet, since nothing synthesizes a contract-check state
+/// for it to drop, so `tmt compile -S` with the flag and without it are the
+/// correct answer either way, whether or not the flag actually reaches
+/// `CompileOptions`. This only proves the flag does not itself perturb the
+/// generated assembly on the current golden corpus; a disconnected flag
+/// and a threaded one are exactly the case this test cannot tell apart —
+/// `cli::build::tests::strip_asserts_flag_threads_into_compile_options`
+/// and `cli::driver::tests::strip_asserts_flag_wins_against_a_false_
+/// profile` are the tests that actually catch a disconnected flag.
+#[test]
+fn strip_asserts_is_a_no_harm_flag_on_the_golden_corpus_today() {
+    const CORPUS: &[&str] = &[
+        "a1_replace_b",
+        "a2_binary_plus_one",
+        "a3_two_tape_copy",
+        "a4_byte_increment",
+        "a5_call_across_alphabets",
+        "a6_graph_graft_multi_exit",
+        "nested_graft",
+    ];
+    for name in CORPUS {
+        let src = fixture(&format!("{name}.tmc"));
+        let dir = scratch(&format!("strip-asserts-no-harm-{name}"));
+        let plain = dir.join("plain.tma");
+        let stripped = dir.join("stripped.tma");
+
+        execute(&args(&[
+            "compile",
+            src.to_str().unwrap(),
+            "-S",
+            "-o",
+            plain.to_str().unwrap(),
+        ]))
+        .unwrap_or_else(|e| panic!("{name}: plain compile: {e}"));
+
+        execute(&args(&[
+            "compile",
+            src.to_str().unwrap(),
+            "-S",
+            "--strip-asserts",
+            "-o",
+            stripped.to_str().unwrap(),
+        ]))
+        .unwrap_or_else(|e| panic!("{name}: --strip-asserts compile: {e}"));
+
+        assert_eq!(
+            fs::read_to_string(&plain).unwrap(),
+            fs::read_to_string(&stripped).unwrap(),
+            "{name}: --strip-asserts changed -S output with nothing yet to strip"
+        );
+    }
+}
+
 /// `-Werror` is the one compile-side axis resolved by `||` rather than a
 /// branch, so it gets the same treatment: an unreachable exported routine
 /// calling a genuinely undefined `missing` warns (nothing in the declared

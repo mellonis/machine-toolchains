@@ -1817,8 +1817,19 @@ machine {
     fn the_stdlib_source_walk_covers_the_ir_walk() {
         let resolved = resolve(crate::stdlib::SOURCE);
         let source = infer_resolved(&resolved);
-        let out =
-            compile(crate::stdlib::SOURCE, CompileOptions::default()).expect("the stdlib compiles");
+        let out = compile(
+            crate::stdlib::SOURCE,
+            CompileOptions {
+                // The source-level walk has no notion of a synthesized
+                // contract-check state at all, so once one exists it must
+                // not appear in the IR walk either, or this source-covers-
+                // IR relation would go false for a reason unrelated to the
+                // footprint inference this test is actually about.
+                strip_asserts: true,
+                ..Default::default()
+            },
+        )
+        .expect("the stdlib compiles");
         let ir = infer_ir(&out.ir);
 
         assert!(ir.worlds.len() >= 10, "the stdlib has many worlds");

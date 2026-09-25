@@ -240,8 +240,9 @@ fn compile_spec() -> CommandSpec {
             FlagSpec::boolean("-O1", "optimization level O1 (full pass pipeline)")
                 .exclusive("opt-level"),
             FlagSpec::boolean("--strip-debugger", "drop `brk` at codegen"),
+            FlagSpec::boolean("--strip-asserts", "drop contract-check states"),
             FlagSpec::boolean("--debug", "preset: -g -O0"),
-            FlagSpec::boolean("--release", "preset: -O1 --strip-debugger"),
+            FlagSpec::boolean("--release", "preset: -O1 --strip-debugger --strip-asserts"),
             FlagSpec::boolean("-S", "emit the generated .tma instead of an object"),
             FlagSpec::boolean(
                 "--stamped-asm",
@@ -366,12 +367,16 @@ fn build_spec() -> CommandSpec {
         ]))),
         flags: vec![
             FlagSpec::boolean("--debug", "preset/profile: -g -O0").exclusive("profile"),
-            FlagSpec::boolean("--release", "preset/profile: -O1 --strip-debugger")
-                .exclusive("profile"),
+            FlagSpec::boolean(
+                "--release",
+                "preset/profile: -O1 --strip-debugger --strip-asserts",
+            )
+            .exclusive("profile"),
             FlagSpec::boolean("-O0", "optimization level O0").exclusive("opt-level"),
             FlagSpec::boolean("-O1", "optimization level O1").exclusive("opt-level"),
             FlagSpec::boolean("-g", "record debug info"),
             FlagSpec::boolean("--strip-debugger", "drop `brk` at codegen"),
+            FlagSpec::boolean("--strip-asserts", "drop contract-check states"),
             FlagSpec::suffix_family(
                 "--fno-",
                 "disable one optimizer pass (repeatable)",

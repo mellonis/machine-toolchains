@@ -57,6 +57,13 @@ fn assembly(src: &str, level: OptLevel) -> String {
         src,
         CompileOptions {
             opt_level: level,
+            // Every caller here inspects emitted assembly text, including
+            // the stdlib's own (`a_program_without_state_parameters_is_
+            // byte_identical`, whose own doc calls it byte-identical); a
+            // later round's synthesized contract-check states must not
+            // change what this helper prints for a program that declares
+            // none of the exits/rows this file is actually about.
+            strip_asserts: true,
             ..Default::default()
         },
     )

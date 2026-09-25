@@ -161,13 +161,16 @@ fn sweep_cap(cap: usize) -> Totals {
     // delimited std::binaryNumbers and bare std::binaryNumbersBare
     // namespaces, each with its volatile mirror) in one file — compiled
     // directly through `compile()` with the cap (mirroring
-    // `stdlib::object()`'s own build options: -O1, debugger-stripped).
+    // `stdlib::object()`'s own build options: -O1, debugger- and
+    // asserts-stripped).
     // No `machine` block, so bytes/instructions only.
     let stdlib_out = compile(
         stdlib::SOURCE,
         CompileOptions {
             opt_level: OptLevel::O1,
             strip_debugger: true,
+            // Mirrors `stdlib::object()`'s own build options fully.
+            strip_asserts: true,
             inline_cap: Some(cap),
             ..Default::default()
         },

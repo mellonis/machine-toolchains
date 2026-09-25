@@ -40,6 +40,7 @@ COMPILE FLAGS (argv mode; manifest mode: override the profile):
   -O0 | -O1             optimization level
   -g                    record debug info
   --strip-debugger      drop `brk` at codegen
+  --strip-asserts       drop contract-check states
   --fno-<pass>          disable one optimizer pass (repeatable)
   --foutline            enable the default-off `outline` pass
   -Werror               treat (post-refinement) warnings as errors
@@ -67,6 +68,7 @@ struct Flags {
     o1: bool,
     debug_info: bool,
     strip_debugger: bool,
+    strip_asserts: bool,
     outline: bool,
     werror: bool,
     allow: Vec<String>,
@@ -98,6 +100,7 @@ pub(super) fn build(raw: &[String]) -> Result<CliOutput, String> {
         o1: args.flag("-O1"),
         debug_info: args.flag("-g"),
         strip_debugger: args.flag("--strip-debugger"),
+        strip_asserts: args.flag("--strip-asserts"),
         outline: args.flag("--foutline"),
         werror: args.flag("-Werror"),
         allow: args.values("--allow")?,
@@ -311,8 +314,8 @@ pub(crate) struct DapTargetBuild {
 ///
 /// Scope deliberately narrower than a full `tmt build TARGET` run: only
 /// `-g` is force-overridable here — opt level, `--strip-debugger`,
-/// `-Werror`, and `--call-mech` still come from the resolved profile /
-/// manifest declaration as declared (`build_one_target`'s own
+/// `--strip-asserts`, `-Werror`, and `--call-mech` still come from the
+/// resolved profile / manifest declaration as declared (`build_one_target`'s own
 /// `flags.call_mech.or_else(|| manifest.effective_call_mech(target))`
 /// chain applies unchanged — this seam never sets `flags.call_mech`,
 /// so the target's own committed lowering wins, exactly as `tmt build
@@ -360,6 +363,7 @@ pub(crate) fn build_target_for_launch(
         o1: false,
         debug_info: force_debug_info,
         strip_debugger: false,
+        strip_asserts: false,
         outline: false,
         werror: false,
         allow: Vec::new(),
@@ -408,23 +412,18 @@ pub(crate) fn build_target_for_launch(
     })
 }
 
-/// Builds one target: compile/assemble/load its effective sources with
-/// the resolved profile (+ flag overrides), refine warnings against the
-/// declared set, link with the declared libraries + entry + resolved
-/// call-mech, write the output (+ sidecar) relative to the manifest
-/// directory. Returns the absolute output path and the stderr chunk.
-fn build_one_target(
-    root: &Path,
-    manifest: &crate::project::Manifest,
-    name: &str,
-    target: &crate::project::Target,
+/// The manifest-mode profile/flag merge alone — factored out of
+/// `build_one_target` so a unit test can inspect the resulting
+/// [`CompileOptions`] directly. `--strip-asserts` has no CLI-observable
+/// effect yet (docs/tmt/cli.md (build)): with nothing to strip, a build
+/// with the flag and one without it produce byte-identical output, so the
+/// axes' usual end-to-end tests (mirrored on `--strip-debugger` via `tmt
+/// dis`) cannot exercise the flag-beats-profile contract for it. This is
+/// the route that can.
+fn manifest_compile_options(
+    profile: crate::project::ResolvedProfile,
     flags: &Flags,
-    manifest_allow: &[String],
-) -> Result<(PathBuf, String), String> {
-    // In manifest mode --debug/--release are PURE profile selectors
-    // (docs/tmt/cli.md (build)): only the individual flags (-g, -O*,
-    // --strip-debugger, -Werror) override the resolved profile's keys.
-    let profile = manifest.profiles.resolve(flags.release_preset);
+) -> CompileOptions {
     let mut options = CompileOptions {
         // Overwritten per unit, below `unit_declarations` — this base
         // value is never itself handed to a compile.
@@ -438,6 +437,11 @@ fn build_one_target(
             true
         } else {
             profile.strip_debugger
+        },
+        strip_asserts: if flags.strip_asserts {
+            true
+        } else {
+            profile.strip_asserts
         },
         opt_level: profile.opt_level,
         disabled_passes: flags.disabled_passes.clone(),
@@ -460,6 +464,28 @@ fn build_one_target(
     if flags.o1 {
         options.opt_level = OptLevel::O1;
     }
+    options
+}
+
+/// Builds one target: compile/assemble/load its effective sources with
+/// the resolved profile (+ flag overrides), refine warnings against the
+/// declared set, link with the declared libraries + entry + resolved
+/// call-mech, write the output (+ sidecar) relative to the manifest
+/// directory. Returns the absolute output path and the stderr chunk.
+fn build_one_target(
+    root: &Path,
+    manifest: &crate::project::Manifest,
+    name: &str,
+    target: &crate::project::Target,
+    flags: &Flags,
+    manifest_allow: &[String],
+) -> Result<(PathBuf, String), String> {
+    // In manifest mode --debug/--release are PURE profile selectors
+    // (docs/tmt/cli.md (build)): only the individual flags (-g, -O*,
+    // --strip-debugger, --strip-asserts, -Werror) override the resolved
+    // profile's keys.
+    let profile = manifest.profiles.resolve(flags.release_preset);
+    let options = manifest_compile_options(profile, flags);
     let werror = profile.werror || flags.werror;
     // The link stage's allow list is `--allow` unioned with this same
     // manifest file's own `lint.allow` — no second discovery walk, since
@@ -749,6 +775,7 @@ fn argv_compile_options(flags: &Flags) -> CompileOptions {
         externals: Declarations::none(),
         debug_info: flags.debug_preset || flags.debug_info,
         strip_debugger: flags.release_preset || flags.strip_debugger,
+        strip_asserts: flags.release_preset || flags.strip_asserts,
         opt_level: if flags.release_preset {
             OptLevel::O1
         } else {
@@ -1391,5 +1418,89 @@ machine {
         let b = placeholder_object(2);
         let objects = link_library_objects(vec![Some(a.clone()), None, Some(b.clone())]);
         assert_eq!(objects, vec![a, b]);
+    }
+
+    // ---- `--strip-asserts` manifest-mode flag-beats-profile pair ---------
+    //
+    // `--strip-asserts` has no CLI-observable effect yet (nothing exists
+    // for it to strip), so the end-to-end route the other axes' "flag
+    // wins" tests use (`tests/build_driver.rs`, via `tmt dis` for
+    // `--strip-debugger`) cannot exercise it. `manifest_compile_options`
+    // is the white-box seam instead: both directions of the contract are
+    // needed, because each catches a DIFFERENT broken merge (neither
+    // direction alone would).
+
+    /// A `Flags` value with every axis at its argv-mode-off default,
+    /// overridden field by field per test — mirrors
+    /// `build_target_for_launch`'s own full literal, since `Flags` derives
+    /// no `Default`.
+    fn no_flags() -> Flags {
+        Flags {
+            debug_preset: false,
+            release_preset: false,
+            o0: false,
+            o1: false,
+            debug_info: false,
+            strip_debugger: false,
+            strip_asserts: false,
+            outline: false,
+            werror: false,
+            allow: Vec::new(),
+            disabled_passes: Vec::new(),
+            no_relax: false,
+            nostdlib: false,
+            keep_objects: false,
+            search_dirs: Vec::new(),
+            lib_names: Vec::new(),
+            out: None,
+            entry: None,
+            call_mech: None,
+            run: false,
+            list_targets: false,
+            verbose: false,
+        }
+    }
+
+    /// Direction 1: no `--strip-asserts` flag, but the RELEASE base turns
+    /// it on by itself. Mutation this catches: a merge that reads only
+    /// `flags.strip_asserts` and drops the profile fallback entirely —
+    /// `options.strip_asserts` would then be `false` here even though the
+    /// profile says `true`.
+    #[test]
+    fn strip_asserts_profile_wins_when_the_flag_is_absent() {
+        let profile = crate::project::Profiles::default().resolve(true);
+        assert!(
+            profile.strip_asserts,
+            "premise: the release base strips asserts"
+        );
+        let options = manifest_compile_options(profile, &no_flags());
+        assert!(
+            options.strip_asserts,
+            "the release base's strip-asserts must reach CompileOptions when no flag overrides it"
+        );
+    }
+
+    /// Direction 2 — the pair's real headline: the DEBUG base leaves
+    /// strip-asserts off, and `--strip-asserts` is passed anyway. Mutation
+    /// this catches: a merge that reads only `profile.strip_asserts` and
+    /// never consults the flag — direction 1 above would still pass by
+    /// coincidence against such a bug, since the release base is already
+    /// `true` there regardless of the flag.
+    #[test]
+    fn strip_asserts_flag_wins_against_a_false_profile() {
+        let profile = crate::project::Profiles::default().resolve(false);
+        assert!(
+            !profile.strip_asserts,
+            "premise: the debug base leaves it off"
+        );
+        let flags = Flags {
+            strip_asserts: true,
+            ..no_flags()
+        };
+        let options = manifest_compile_options(profile, &flags);
+        assert!(
+            options.strip_asserts,
+            "--strip-asserts must override the debug base's strip-asserts: false"
+        );
     }
 }

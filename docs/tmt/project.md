@@ -15,14 +15,15 @@ directory). Every key is validated strictly: an unrecognized key at any
 level, or a value of the wrong shape, is a hard error naming the file and
 the offending key. `tmt.json` itself carries no literal version marker;
 this page and the release notes track the `project` section's schema as
-its own versioned contract, currently **0.2**. The lint-only shape that
+its own versioned contract, currently **0.3**. The lint-only shape that
 existed before the `project` section was added is retroactively **0.1**.
 
 `tmt.json` and PM-1's `pmt.json` are separate contracts that happen to
-share a version number. `tmt build` reads only `tmt.json` and `pmt build`
-only `pmt.json`; the two files never merge, and neither tool looks at the
-other's. At 0.2 the two schemas already diverge — `call-mech` and the
-differently-shaped `run` block exist only here.
+share a version number when they move together, and diverge otherwise.
+`tmt build` reads only `tmt.json` and `pmt build` only `pmt.json`; the two
+files never merge, and neither tool looks at the other's. `call-mech` and
+the differently-shaped `run` block exist only here; `strip-asserts` moved
+`tmt.json` alone to 0.3, with `pmt.json` unchanged at 0.2.
 
 ## Discovery
 
@@ -296,22 +297,23 @@ experiment against that commitment for a single build without editing
 ### Profiles
 
 `profiles` holds at most two keys, `debug` and `release` — any other name
-is rejected. Each names up to four overrides, all optional:
+is rejected. Each names up to five overrides, all optional:
 
 | Key | Type | Meaning |
 |---|---|---|
 | `opt` | `"O0"` \| `"O1"` | Optimization level. |
 | `debug-info` | bool | Record debug info (labels + `.tmc` lines). |
 | `strip-debugger` | bool | Drop `brk` at codegen. |
+| `strip-asserts` | bool | Drop contract-check states. |
 | `werror` | bool | Treat post-refinement warnings as errors. |
 
 An override layers on top of one of two fixed bases, which mirror the CLI
 presets (`docs/tmt/cli.md`, `tmt compile`'s `--debug`/`--release`):
 
-| Base | `opt` | `debug-info` | `strip-debugger` | `werror` |
-|---|---|---|---|---|
-| `debug` | `O0` | `true` | `false` | `false` |
-| `release` | `O1` | `false` | `true` | `false` |
+| Base | `opt` | `debug-info` | `strip-debugger` | `strip-asserts` | `werror` |
+|---|---|---|---|---|---|
+| `debug` | `O0` | `true` | `false` | `false` | `false` |
+| `release` | `O1` | `false` | `true` | `true` | `false` |
 
 Profile selection happens once per `tmt build` invocation, not per
 target: `--release` selects the `release` base for every target built in
@@ -320,9 +322,10 @@ that invocation, and omitting both `--release` and `--debug` selects the
 means a bare `tmt build` (no flags at all) still resolves the full
 `debug` base, including `debug-info: true` — unlike `tmt compile`'s own
 true no-flags default, which carries no debug info. The individual
-compile-side flags (`-g`, `-O0`/`-O1`, `--strip-debugger`, `-Werror`)
-override the resolved profile's matching key for that invocation only;
-the manifest is never rewritten (`docs/tmt/cli.md (build)`, "flags win").
+compile-side flags (`-g`, `-O0`/`-O1`, `--strip-debugger`,
+`--strip-asserts`, `-Werror`) override the resolved profile's matching key
+for that invocation only; the manifest is never rewritten
+(`docs/tmt/cli.md (build)`, "flags win").
 
 Two compile-side flags have **no profile key at all**: `--fno-<pass>` and
 `--foutline`. Pass selection is not part of the schema, so those two
