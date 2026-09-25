@@ -1336,8 +1336,10 @@ pre-version-4 document has neither field.
   into whatever follows — docs/tmt/language.md (routines)), `return`,
   `return_exit` (`exit`, a resume
   through one of the callee's declared exits instead of `then`), `stop`,
-  `halt`, `tail_call` (`target`), and the two synthesized trap terminals
-  `trap_read` and `trap_write`. A `binding` entry carries the same
+  `halt`, `tail_call` (`target`), and the three synthesized trap
+  terminals `trap_read`, `trap_write` and `trap_contract` — the first two
+  the map-hole failure kinds, the third a check finding false something
+  the source declared about itself. A `binding` entry carries the same
   per-callee-tape data the `.tma` binding-call operand does: `caller_tape`,
   an optional `param` naming a symbolic (out-of-unit) entry's callee
   parameter, `map_written` (whether a `with map` was authored at all — an

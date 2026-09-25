@@ -1124,6 +1124,9 @@ mod tests {
         // 0x15 = test-arch "raise unmapped-read".
         let (ev, _) = run_fetch(&[0x15], 0);
         assert_eq!(ev, Ev::Trapped(Trap::UnmappedRead { at: 0 }));
+        // 0x16 = test-arch "raise unmapped-write".
+        let (ev, _) = run_fetch(&[0x16], 0);
+        assert_eq!(ev, Ev::Trapped(Trap::UnmappedWrite { at: 0 }));
         // 0x1E = test-arch "raise contract": an architecture may raise a
         // broken-contract trap through the same micro-op.
         let (ev, _) = run_fetch(&[0x1E], 0);

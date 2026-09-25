@@ -41,8 +41,10 @@ pub mod opcodes {
     /// group; the move group uses the same 0 stay / 1 left / 2 right codes.
     pub const WRMV: u8 = 0x12;
     /// Raise a typed trap explicitly (`trap #kind`): kind `0` = unmapped
-    /// read, `1` = unmapped write. The frames stubs a linker composition
-    /// emits reach for these to signal a crossed map hole.
+    /// read, `1` = unmapped write, `2` = broken contract. The frames stubs
+    /// a linker composition emits reach for the first two to signal a
+    /// crossed map hole; the compiler emits the third where a check finds
+    /// false something the source declared about itself.
     pub const TRAP: u8 = 0x11;
     /// Framed call (`call.m target, F`): call `target` and activate the
     /// frame descriptor at table label `F` for the callee. The caller's

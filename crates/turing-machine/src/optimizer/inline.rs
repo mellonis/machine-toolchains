@@ -298,18 +298,23 @@ fn widen_rule(r: &mut IrRule, n: usize) {
 /// copied).
 ///
 /// `then: None` is a tail-position site — legal only against a callee KNOWN
-/// to be `noreturn`, which by that very fact has NO `return` transition
-/// anywhere in its body, dead or live (`ir::body_can_return`). A candidate
-/// spliced from such a callee therefore never reaches the `Return` arm
-/// below in practice. It is handled rather than `unreachable!`ing anyway:
-/// a future unsoundness in `body_can_return` would otherwise turn a wrong
-/// BIT into an `-O1` panic on ordinary user input instead of a diagnosable
-/// stop, and the point of the `trap`-after-tail-call emission
-/// (`codegen.rs`) is that a `noreturn` claim proving false is a
-/// controlled trap everywhere else it can surface — this is the one
-/// remaining place it could surface as a panic instead, so it gets the
-/// same treatment, and the same kind: a synthesized contract trap, never
-/// a crash.
+/// to be `noreturn`. The `Return` arm's `None` case below is therefore
+/// **unreachable for any well-formed compilation**, and the chain is closed
+/// at every link: an in-unit routine declaring `noreturn` over a body that
+/// can return is refused outright, a `then`-less call into an in-unit
+/// callee that can return is refused as well, candidates are in-unit
+/// worlds only, and both production sites that build an
+/// `IrTransition::Return` are seen by the body scan the "known" fact comes
+/// from — so reaching it would take a callee that both can and cannot
+/// return.
+///
+/// It is handled rather than `unreachable!`ing anyway: a future unsoundness
+/// in that scan would otherwise turn a wrong BIT into an `-O1` panic on
+/// ordinary user input instead of a diagnosable stop. The kind matches the
+/// `trap`-after-tail-call emission (`codegen.rs`) so the defensive path
+/// tells the same story as the live one rather than reporting a map fault
+/// for a broken `noreturn` claim. Being unreachable, it is deliberately
+/// unpinned — no test can construct the input that would exercise it.
 fn remap_transition(t: &IrTransition, base: u32, then: Option<IrThen>) -> (IrTransition, bool) {
     match t {
         IrTransition::Goto { state } => (
