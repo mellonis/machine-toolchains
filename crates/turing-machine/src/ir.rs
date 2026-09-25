@@ -958,10 +958,16 @@ fn rows_admit_the_opaque_index(states: &[IrState], k: usize) -> bool {
 /// a hole, and the tape closes. (An open inner map on unequal alphabets
 /// is no exception — measured, the symbol still passes through as itself.)
 ///
+/// A TRANSPARENT call or bind — no argument list — forwards too: it
+/// binds callee tape `k` to caller tape `k` by index, so every caller
+/// tape the callee has is forwarded, under the same rule.
+///
 /// A forward into a routine OUTSIDE this compilation unit always closes — a header
 /// carries no opacity, so whether the callee could take the symbol is not
 /// knowable here. A routine that forwards a tape to another unit's routine
-/// is therefore never opaque on that tape.
+/// — bound or transparent — is therefore never opaque on that tape; a
+/// transparent call into another unit closes every tape of the caller,
+/// the callee's arity being unknown here too.
 ///
 /// Computed as a GREATEST fixpoint over the unit's routines: start from
 /// the local answer and close tapes until nothing changes, so a routine
@@ -988,6 +994,19 @@ fn settle_opacity(worlds: &mut [IrWorld]) {
                     else {
                         return false;
                     };
+                    if binding.is_empty() {
+                        // A TRANSPARENT call forwards every tape it has
+                        // by index: callee tape `k` IS caller tape `k`.
+                        // Its arity is known only for an in-unit callee;
+                        // for any other, every tape counts as forwarded,
+                        // and closes, since nothing here knows the
+                        // callee's opacity anyway.
+                        let forwarded = by_name
+                            .get(target.as_str())
+                            .is_none_or(|&ci| k < worlds[ci].tapes.len());
+                        return forwarded
+                            && !forward_keeps_opacity(worlds, &by_name, target, k, tape);
+                    }
                     binding.iter().enumerate().any(|(j, b)| {
                         b.caller_tape as usize == k
                             && !forward_keeps_opacity(worlds, &by_name, target, j, tape)
@@ -2268,6 +2287,104 @@ mod tests {
         let externals = Declarations::stdlib();
         let ex = expand(&a.resolved, &externals).unwrap_or_else(|e| panic!("expand failed: {e}"));
         lower(&ex, &a.resolved, &externals).unwrap_or_else(|e| panic!("lower failed: {e}"))
+    }
+
+    /// One-tape routine world `name` over `card` symbols, `opaque` as
+    /// given, whose single state holds `rules` — the minimal IR shape
+    /// [`settle_opacity`] reads.
+    fn opacity_world(name: &str, card: u32, opaque: bool, rules: Vec<IrRule>) -> IrWorld {
+        IrWorld {
+            name: name.into(),
+            kind: IrWorldKind::Routine,
+            arity: 1,
+            tapes: vec![IrTape {
+                name: "n".into(),
+                alphabet: "al".into(),
+                cardinality: card,
+                volatile: false,
+                glyphs: (0..card).map(|i| i.to_string()).collect(),
+                writes: None,
+                enters: None,
+                leaves: None,
+                opaque,
+            }],
+            entry: 0,
+            states: vec![IrState {
+                id: 0,
+                name: "s".into(),
+                line: 1,
+                rules,
+                dispatch: IrDispatch::Table,
+            }],
+            local: false,
+            line: 1,
+            exits: 0,
+            returns: true,
+        }
+    }
+
+    /// A `[*]` row whose transition is `transition`.
+    fn star_row(transition: IrTransition) -> IrRule {
+        IrRule {
+            pattern: vec![IrCell::Wildcard],
+            write: None,
+            moves: None,
+            debugger: false,
+            transition,
+            synthesized: false,
+            direct: false,
+            line: 1,
+        }
+    }
+
+    /// `r`'s one row calls `callee` TRANSPARENTLY — an empty binding, which
+    /// forwards caller tape 0 to callee tape 0 by index.
+    fn transparent_caller(callee: &str) -> IrWorld {
+        opacity_world(
+            "r",
+            3,
+            true,
+            vec![star_row(IrTransition::CallThen {
+                target: callee.into(),
+                binding: Vec::new(),
+                exits: Vec::new(),
+                then: Some(IrThen::Return),
+            })],
+        )
+    }
+
+    /// A transparent call into an in-unit callee whose same-size tape is
+    /// itself opaque delivers the opaque symbol onto the callee's own
+    /// opaque index, so the caller stays opaque. `.tmc` cannot spell this
+    /// in-unit (a bindless call into a tape-bearing routine is
+    /// `missing-arg`), but IR the compiler builds for itself can, and the
+    /// rule has to be right for it.
+    ///
+    /// Mutation it catches: close every tape a transparent call forwards,
+    /// whatever the callee — `r` loses the bit.
+    #[test]
+    fn a_transparent_call_into_an_opaque_same_size_callee_keeps_opacity() {
+        let mut worlds = vec![
+            transparent_caller("inner"),
+            opacity_world("inner", 3, true, vec![star_row(IrTransition::Return)]),
+        ];
+        settle_opacity(&mut worlds);
+        assert!(worlds[0].tapes[0].opaque);
+    }
+
+    /// The same transparent call into a callee that is NOT opaque closes
+    /// the caller's tape.
+    ///
+    /// Mutation it catches: skip calls whose binding is empty when looking
+    /// for forwards — `r` keeps the bit.
+    #[test]
+    fn a_transparent_call_into_a_non_opaque_callee_closes_the_tape() {
+        let mut worlds = vec![
+            transparent_caller("inner"),
+            opacity_world("inner", 3, false, vec![star_row(IrTransition::Return)]),
+        ];
+        settle_opacity(&mut worlds);
+        assert!(!worlds[0].tapes[0].opaque);
     }
 
     /// analyze → expand → lower, expecting the front end to pass and lowering

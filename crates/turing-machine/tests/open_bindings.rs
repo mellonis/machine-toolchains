@@ -19,6 +19,7 @@ use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, 
 use mtc_turing_machine::arch::Tm1;
 use mtc_turing_machine::asm::link;
 use mtc_turing_machine::compiler::{CompileOptions, CompileOutput, compile};
+use mtc_turing_machine::stdlib;
 
 /// Compile at the default level, or panic with the diagnostic.
 fn build(src: &str) -> CompileOutput {
@@ -668,6 +669,84 @@ machine {
         param_line(&out.tma, "r", "n"),
         ".param n, ('_', '^', '$', '0', '1')"
     );
+}
+
+/// `inner` on a NARROWER two-glyph alphabet, opaque: its own opaque index
+/// is 2, while `r`'s is 3 — so a symbol passed through unchanged would sit
+/// past even `inner`'s opaque index, which no row, `*` included, is built
+/// to meet.
+const INNER_TWO_OPAQUE: &str = "
+alphabet two { '_', 'a' }
+routine inner(tape m: two) {
+  entry state w {
+    ['_'] -> return;
+    [*]   -> move [>] goto w;
+  }
+}
+";
+
+/// A forward into a NARROWER opaque callee closes too: opacity survives a
+/// forward only onto the callee's own opaque index, which is `r`'s exactly
+/// when the two alphabets are the same size — narrower is as wrong as
+/// wider.
+///
+/// Mutation it catches: accept a callee no wider than the forwarding tape
+/// (`<=` in place of `==`) — `r` stays opaque and the open binding links.
+#[test]
+fn a_forward_into_a_narrower_opaque_callee_closes_the_tape() {
+    assert_forward_closes(&forwarding(INNER_TWO_OPAQUE, " with map { 'a' -> 'a' }"));
+}
+
+/// A TRANSPARENT call — no argument list — forwards every tape it has by
+/// index, exactly as a bound one forwards the tapes it names. Into another
+/// unit's routine that closes the tape, as any cross-unit forward does:
+/// here `std::binaryNumbersBare::plusOne` discriminates its digits, so an
+/// opaque symbol reaching it would stop the machine with no row to match.
+///
+/// Mutation it catches: skip calls whose binding is empty when looking for
+/// forwards — `r` publishes `opaque`, the open binding links, and the run
+/// traps inside `plusOne`.
+#[test]
+fn a_transparent_call_into_another_units_routine_closes_the_tape() {
+    let src = "\
+routine r(tape n: std::binaryNumbersBare::symbols) {
+  entry state go { [*] -> call std::binaryNumbersBare::plusOne() then done; }
+  state done { [*] -> return; }
+}
+
+alphabet wide { '_', '0', '1', 'x' }
+
+machine {
+  tape t: wide;
+  entry state go {
+    [*] -> call r(n = t with map { '0' -> '0', '1' -> '1', * }) then done;
+  }
+  state done { [*] -> stop; }
+}
+";
+    let out = build(src);
+    assert_eq!(
+        param_line(&out.tma, "r", "n"),
+        ".param n, ('_', '0', '1'), writes=('0', '1')"
+    );
+    // Linked against the embedded standard library, as `tmt build` does,
+    // so the call resolves and the refusal is the opacity check's.
+    for mech in MECHS {
+        let err = link(
+            std::slice::from_ref(&out.object),
+            std::slice::from_ref(stdlib::object()),
+            LinkOptions {
+                call_mech: mech,
+                ..Default::default()
+            },
+        )
+        .expect_err("a closed tape must refuse an open binding");
+        assert!(
+            matches!(&err, LinkError::OpenBindingUnsupported { callee, param: Some(p), .. }
+                if callee == "r" && p == "n"),
+            "under {mech}: {err:?}"
+        );
+    }
 }
 
 // ── more than one tape ─────────────────────────────────────────────────────
