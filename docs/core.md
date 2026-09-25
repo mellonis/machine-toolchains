@@ -344,6 +344,7 @@ Trap causes:
 | `UnmappedWrite` | the same, outward |
 | `ExitOutOfRange` | a multi-exit return named an exit the active frame lacks, or fired with no frame active |
 | `ProfileViolation` | an instruction requiring the frames profile ran on a base-profile core |
+| `Contract` | a contract the program declared about itself was broken where a compiler-planted check tested it |
 
 A non-interactive run reports a trap as a structured trapped outcome;
 under the debug API it instead pauses on the faulting instruction.

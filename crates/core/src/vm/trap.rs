@@ -66,6 +66,15 @@ pub enum Trap {
     ProfileViolation {
         at: u32,
     },
+    /// A contract the program itself declared was broken — a check the
+    /// compiler planted found the declaration false at run time. The
+    /// processor knows nothing of the contracts themselves: it raises
+    /// this where an architecture's explicit-trap instruction names the
+    /// kind, and the language that made the declaration decides what
+    /// counts as breaking it.
+    Contract {
+        at: u32,
+    },
 }
 
 impl core::fmt::Display for Trap {
@@ -99,6 +108,9 @@ impl core::fmt::Display for Trap {
             Self::ProfileViolation { at } => {
                 write!(f, "instruction outside the execution profile at {at:#010x}")
             }
+            Self::Contract { at } => {
+                write!(f, "a declared contract was broken at {at:#010x}")
+            }
         }
     }
 }
@@ -109,4 +121,7 @@ impl core::fmt::Display for Trap {
 pub enum RaisedTrapKind {
     UnmappedRead,
     UnmappedWrite,
+    /// A declaration the program made about itself turned out to be
+    /// false where a compiler-planted check tested it.
+    Contract,
 }

@@ -646,6 +646,7 @@ impl<'a> Core<'a> {
                     return self.trap(match kind {
                         RaisedTrapKind::UnmappedRead => Trap::UnmappedRead { at },
                         RaisedTrapKind::UnmappedWrite => Trap::UnmappedWrite { at },
+                        RaisedTrapKind::Contract => Trap::Contract { at },
                     });
                 }
                 MicroOp::MoveLeft { dev } => match self.phys_dev(dev) {
@@ -1114,12 +1115,19 @@ mod tests {
         assert_eq!(core.tr(), &[7, 9]);
     }
 
-    /// The Raise micro-op traps with the instruction's own address.
+    /// The Raise micro-op traps with the instruction's own address, and
+    /// each raisable kind reaches its own trap. Mutation: map a kind to
+    /// another kind's trap in the `MicroOp::Raise` arm and the
+    /// corresponding line fails on the trap it got.
     #[test]
     fn raise_micro_op_traps_typed() {
         // 0x15 = test-arch "raise unmapped-read".
         let (ev, _) = run_fetch(&[0x15], 0);
         assert_eq!(ev, Ev::Trapped(Trap::UnmappedRead { at: 0 }));
+        // 0x1E = test-arch "raise contract": an architecture may raise a
+        // broken-contract trap through the same micro-op.
+        let (ev, _) = run_fetch(&[0x1E], 0);
+        assert_eq!(ev, Ev::Trapped(Trap::Contract { at: 0 }));
     }
 
     /// Full scripted driver: code image + tiny stack + fake device log.

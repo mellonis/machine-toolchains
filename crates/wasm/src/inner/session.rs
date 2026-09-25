@@ -120,6 +120,7 @@ pub fn trap_kind(t: &Trap) -> &'static str {
         Trap::UnmappedWrite { .. } => "unmapped-write",
         Trap::ExitOutOfRange { .. } => "exit-out-of-range",
         Trap::ProfileViolation { .. } => "profile-violation",
+        Trap::Contract { .. } => "contract",
     }
 }
 
@@ -134,7 +135,8 @@ fn trap_info(t: &Trap) -> TrapInfo {
         | Trap::UnmappedRead { at }
         | Trap::UnmappedWrite { at }
         | Trap::ExitOutOfRange { at }
-        | Trap::ProfileViolation { at } => Some(*at),
+        | Trap::ProfileViolation { at }
+        | Trap::Contract { at } => Some(*at),
         Trap::CallTargetNotEntry { target } => Some(*target),
         Trap::StackOverflow
         | Trap::StackUnderflow
