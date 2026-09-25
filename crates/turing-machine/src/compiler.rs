@@ -308,6 +308,14 @@ pub enum CompileErrorKind {
     /// glyph-for-glyph equal — an omitted map means identity, which requires
     /// matching alphabets.
     IdentityGlyphMismatch,
+    /// A graft binding's symbol map carries the open marker (`*`). The
+    /// marker means "send every unlisted caller symbol to the callee's
+    /// opaque index", and a graft has no callee to have one: its body is
+    /// spliced into the host's own tape frame before lowering, so there
+    /// is no interface, no binding record, and no index outside the
+    /// graph's alphabet for an unlisted symbol to land on
+    /// (docs/tmt/language.md (symbol maps)).
+    OpenGraftUnsupported,
     /// A named map declaration (`map NAME: SRC -> DST { … }`) leaves a
     /// non-blank SOURCE symbol unmapped, on unequal-cardinality alphabets —
     /// the one declaration check with no inline-form analog (`name` is the
@@ -521,6 +529,7 @@ impl CompileErrorKind {
         CompileErrorKind::MapConflict { .. } => "map-conflict",
         CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
         CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
+        CompileErrorKind::OpenGraftUnsupported => "open-graft-unsupported",
         CompileErrorKind::MapNotClosed(_) => "map-not-closed",
         CompileErrorKind::NamedMapSourceMismatch { .. } => "named-map-source-mismatch",
         CompileErrorKind::NamedMapTargetMismatch { .. } => "named-map-target-mismatch",
@@ -867,6 +876,12 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "an omitted graft map means identity, which requires the two tapes to have glyph-for-glyph equal alphabets"
+                )
+            }
+            CompileErrorKind::OpenGraftUnsupported => {
+                write!(
+                    f,
+                    "a graft map may not be left open with `*` — a graft splices its body into the host's own tapes, so it has no opaque index for unlisted symbols to read as; name them, or call a routine instead"
                 )
             }
             CompileErrorKind::MapNotClosed(g) => {
@@ -4476,6 +4491,7 @@ mod tests {
             CompileErrorKind::MapConflict { symbol: "x".into() },
             CompileErrorKind::MapNotInjective { symbol: "x".into() },
             CompileErrorKind::IdentityGlyphMismatch,
+            CompileErrorKind::OpenGraftUnsupported,
             CompileErrorKind::MapNotClosed("x".into()),
             CompileErrorKind::NamedMapSourceMismatch {
                 map: "m".into(),

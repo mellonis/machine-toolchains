@@ -1552,6 +1552,7 @@ mod tests {
                     }],
                     span: Span::new(5, 22, 5, 38),
                     named: None,
+                    open: None,
                 }),
             },
             span: Span::new(5, 11, 5, 38),
@@ -1620,6 +1621,7 @@ mod tests {
             ],
             span: Span::new(5, 22, 5, 48),
             named: None,
+            open: None,
         };
 
         let root =

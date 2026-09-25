@@ -119,6 +119,16 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
 /// anything in the stdlib's own compile path (opt pipeline, codegen, the
 /// `externals` table it is built with) producing different bytes than
 /// before.
+///
+/// Re-pinned once more when the compiler began INFERRING each routine
+/// tape's `opaque` bit: fourteen of the stdlib's `.param` lines — every
+/// walker and every facade whose states read the tape through a `*` row,
+/// in both the plain and the volatile twin namespace — now publish it.
+/// Both LENGTHS are unchanged by construction, because `opaque` rides an
+/// existing per-tape flags byte rather than adding a field
+/// (docs/formats.md (routine interfaces)); only the checksums move. A
+/// length that moves here alongside the checksum is therefore a DIFFERENT
+/// change wearing this one's clothes, and the pin says so.
 #[test]
 fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
     let o0 = compile(
@@ -150,12 +160,12 @@ fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
 
     assert_eq!(
         fingerprint(&o0),
-        (7825, 3034593110),
+        (7825, 838128356),
         "the -O0 stdlib object's bytes moved"
     );
     assert_eq!(
         fingerprint(&o1),
-        (7765, 1710262935),
+        (7765, 3861290830),
         "the -O1 (release preset) stdlib object's bytes moved"
     );
 }

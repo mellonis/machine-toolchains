@@ -1690,6 +1690,22 @@ fn fresh_param_name(taken: &mut HashSet<String>, k: u8) -> String {
 /// an inferred fact even when nothing was declared, an absent head-position
 /// clause declares no restriction at all, and a present one is never
 /// empty, so there is no `{}` form to fall back to.
+///
+/// The `opaque` bit is deliberately NOT printed here, on either arm, for
+/// the reason `volatile` is not (see [`sig_param_text`]) and one more.
+/// `opaque` is not a DECLARATION: it is a fact the compiler infers from a
+/// routine's body — whether every state that reads the tape reads it
+/// through a `*` cell — and publishes to the object for the linker to
+/// judge an open binding against (docs/formats.md (routine interfaces)).
+/// A header is the declarations surface, and the `.tmh` grammar is the
+/// `.tmc` grammar under a declarations-only reading; `.tmc` has no
+/// spelling for the bit and is not given one, because a bodiless
+/// declaration has no body for the fact to be true of and a reader of one
+/// could not re-derive it. Printing a word the language cannot read back
+/// would break the round trip that makes `tmt interface`'s output a
+/// header at all. What a caller needs the bit for — may I open this
+/// binding? — is answered by the linker against the OBJECT, which carries
+/// it, not against the header.
 fn tape_param_text(
     name: &str,
     alphabet: &str,
@@ -1900,8 +1916,17 @@ fn binding_value_text(value: &BindingValue) -> String {
     }
 }
 
+/// An inline `with map { … }`'s interior: its pairs, then the open
+/// marker when the site left the map open — the marker is the list's last
+/// entry, the only position the grammar admits it (docs/tmt/language.md
+/// (symbol maps)), so a printed header re-reads as the same site.
 fn map_pairs_text(map: &SymMap) -> String {
-    map_pair_list_text(&map.pairs)
+    let pairs = map_pair_list_text(&map.pairs);
+    match (map.open.is_some(), pairs.is_empty()) {
+        (false, _) => pairs,
+        (true, true) => "*".to_string(),
+        (true, false) => format!("{pairs}, *"),
+    }
 }
 
 /// One comma-`, `-joined pair list — shared by an inline `with map { … }`

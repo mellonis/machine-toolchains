@@ -353,6 +353,24 @@ const LIST_INTERIORS: &[(&str, &str)] = &[
         "graft/in-arg",
         "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n    entry state s { [*] -> d; }\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = @C@\n  main, d = fin) as i;\n  state fin { [*] -> stop; }\n}\n",
     ),
+    // The open marker is a list position of its own, and a single token,
+    // so the only slots it has are the two BOUNDARIES around it — plus
+    // the one between `{` and a marker standing alone. All three neighbour
+    // pairs must survive; the map breaking to multi-line around a boundary
+    // comment is the surface's recorded rendering gap
+    // (docs/tmt/fmt.md (comments inside a list)), and it moves no comment.
+    (
+        "map/before-open-marker",
+        "alphabet ab { '_', 'a' }\nalphabet cd { '_', 'a', 'b' }\nroutine r(tape t: ab) {\n  entry state s { [*] -> return; }\n}\nmachine {\n  tape main: cd;\n  entry state g {\n    [*] -> call r(t = main with map { 'a' -> 'a', @C@\n    * }) then fin;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "map/after-open-marker",
+        "alphabet ab { '_', 'a' }\nalphabet cd { '_', 'a', 'b' }\nroutine r(tape t: ab) {\n  entry state s { [*] -> return; }\n}\nmachine {\n  tape main: cd;\n  entry state g {\n    [*] -> call r(t = main with map { 'a' -> 'a', * @C@\n    }) then fin;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "map/before-lone-open-marker",
+        "alphabet ab { '_', 'a' }\nalphabet cd { '_', 'a', 'b' }\nroutine r(tape t: ab) {\n  entry state s { [*] -> return; }\n}\nmachine {\n  tape main: cd;\n  entry state g {\n    [*] -> call r(t = main with map { @C@\n    * }) then fin;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
 ];
 
 #[test]

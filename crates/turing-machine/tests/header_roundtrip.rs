@@ -658,6 +658,136 @@ export routine touchA(tape t: tri) {
     );
 }
 
+/// An exported graph whose body carries a `bind` with an OPEN map: the
+/// printer reproduces the `*` as the map's last entry, and the printed
+/// header re-reads and reprints byte-identically. A graph body is the one
+/// place a header renders a binding site at all, so it is the only place
+/// the marker can reach a `.tmh`.
+///
+/// Mutation it catches: dropping the marker from `header::map_pairs_text`
+/// — the printed header still parses, but it describes a CLOSED map, and
+/// a consumer grafting the graph would splice a body whose unlisted
+/// symbols hole instead of arriving opaque. The round-trip half catches
+/// the opposite error: printing the marker anywhere but last, which does
+/// not re-read.
+#[test]
+fn a_graph_bodys_open_map_prints_its_marker_and_round_trips() {
+    const OPEN_MAP_FIXTURE: &str = "\
+export alphabet five { '_', 'a', 'b', 'c', 'd' }
+export alphabet three { '_', 'a', 'b' }
+
+export routine swapABopen(tape n: three) {
+  entry state walk {
+    ['_'] -> return;
+    ['a'] -> write ['b'] move [>] goto walk;
+    [*]   -> move [>] goto walk;
+  }
+}
+
+export graph drive(tape t: five, state done) {
+  bind swapABopen(n = t with map { 'a' -> 'a', 'b' -> 'b', * }) as go;
+  entry state s { [*] -> call go() then done; }
+}
+";
+    let dir = scratch("header_open_map");
+    let src_path = dir.join("drive.tmc");
+    std::fs::write(&src_path, OPEN_MAP_FIXTURE).unwrap();
+    let first = run_interface(&src_path);
+    assert!(
+        first
+            .stdout
+            .contains("bind swapABopen(n = t with map { 'a' -> 'a', 'b' -> 'b', * }) as go;"),
+        "{}",
+        first.stdout
+    );
+
+    let header_path = dir.join("drive.tmh");
+    std::fs::write(&header_path, &first.stdout).unwrap();
+    let second = run_interface(&header_path);
+    assert_eq!(
+        first.stdout, second.stdout,
+        "a printed header carrying an open map must re-read as itself"
+    );
+}
+
+/// A routine whose tape is INFERRED opaque — every state reads it through
+/// a `*` cell, so the compiled object's `.param` line carries the
+/// `opaque` suffix — renders identically on both arms, and neither arm
+/// prints the word.
+///
+/// That omission is a rule, not an oversight (`header::tape_param_text`).
+/// `opaque` is a fact inferred from a BODY and published for the linker;
+/// a header is the declarations surface, the `.tmh` grammar is the `.tmc`
+/// grammar, and `.tmc` has no spelling for the bit — so a header that
+/// printed it would not re-read as a header. The two assertions below are
+/// therefore one property seen from both ends: the object really does
+/// carry the bit (otherwise the omission would be vacuous), and the
+/// printed header does not.
+///
+/// Mutation it catches: rendering `opaque` on either arm — the object arm
+/// alone makes the two disagree; on both arms, the printed header stops
+/// parsing and the emitted-header assertion goes red.
+#[test]
+fn an_opaque_tape_renders_identically_on_both_arms_and_names_no_opaque() {
+    const OPAQUE_FIXTURE: &str = "\
+export alphabet tri { '_', 'a', 'b' }
+
+export routine walkRight(tape t: tri) {
+  entry state go {
+    ['b'] -> return;
+    [*]   -> move [>] goto go;
+  }
+}
+";
+    let dir = scratch("header_opaque_agree");
+    let src_path = dir.join("walk_right.tmc");
+    std::fs::write(&src_path, OPAQUE_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    let object = compile(
+        OPAQUE_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile OPAQUE_FIXTURE: {e}"))
+    .object;
+    // Non-vacuity: the fixture really is opaque on the wire, so the
+    // omission below is about a bit that exists.
+    assert!(
+        object
+            .interface
+            .as_ref()
+            .expect("a compiled object publishes an interface")
+            .routines
+            .iter()
+            .any(|r| r.opaque.iter().any(|&o| o)),
+        "the fixture must compile to an object that publishes `opaque`"
+    );
+
+    let obj_path = dir.join("walk_right.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+    let object_out = run_interface(&obj_path);
+
+    assert_eq!(
+        source_out.stdout, object_out.stdout,
+        "the two arms disagree on an opaque routine"
+    );
+    assert!(
+        !source_out.stdout.contains("opaque"),
+        "no arm may print the inferred bit: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out
+            .stdout
+            .contains("export routine walkRight(tape t: tri writes {});"),
+        "{}",
+        source_out.stdout
+    );
+}
+
 /// The object arm must skip the entry world: a `machine` block is never a
 /// callee, so it has no interface entry to read and no declaration to
 /// render — printing it would falsely claim `main` "writes nothing".

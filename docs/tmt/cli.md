@@ -310,6 +310,7 @@ subsection.
 | `map-conflict` | A symbol map maps one symbol to two different images in one direction. |
 | `map-not-injective` | A symbol map on equal-size alphabets is not injective — identity completion collides. |
 | `identity-glyph-mismatch` | An omitted symbol map on tapes whose alphabets are not glyph-for-glyph equal — an omitted map means identity. |
+| `open-graft-unsupported` | A graft binding's symbol map left open with `*`. A graft splices its body into the host's own tapes, so there is no callee alphabet and no opaque index for unlisted symbols to read as; name them, or call a routine. |
 | `map-not-closed` | A named map declaration's two alphabets differ in size and it leaves a non-blank source symbol unmapped — unlike a graft's inline map (which silently holes an unnamed source), a declaration reused at many sites must name every one explicitly. |
 | `named-map-source-mismatch` | A `with map NAME` site's caller tape alphabet is not the named map's own declared source alphabet. |
 | `named-map-target-mismatch` | A `with map NAME` site's callee parameter alphabet is not the named map's own declared target alphabet. |

@@ -1057,6 +1057,22 @@ fn build_tapemap(
         });
     };
 
+    // The open marker is a BINDING-RECORD fact: it tells the linker to
+    // send unlisted caller symbols onto the callee's opaque index, an
+    // index the callee's own `*` rows are what survive. A graft has no
+    // binding record and no callee — the graph's body is spliced into
+    // this host before lowering, and its rows are rewritten into the
+    // HOST's index space through the very map being built here, where
+    // "outside the graph's alphabet" names no cell at all. Refused at the
+    // marker rather than silently dropped: accepting it would hole
+    // exactly the symbols the author asked to keep.
+    if let Some(star) = m.open {
+        return Err(CompileError {
+            span: star,
+            kind: CompileErrorKind::OpenGraftUnsupported,
+        });
+    }
+
     let (mut rmap, mut wmap, bidir) = build_symbol_maps(&m.pairs, host_glyphs, graph_glyphs)?;
     // Closed-on-unequal (docs/formats.md (bound calls)): identity completion
     // exists only for equal-size alphabets. Across differently-sized tapes

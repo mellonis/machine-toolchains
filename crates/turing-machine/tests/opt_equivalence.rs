@@ -936,6 +936,39 @@ machine {
   state done { [*] -> stop; }
 }";
 
+/// An OPEN binding written in `.tmc`: a five-symbol caller band bound into
+/// a three-symbol callee through `with map { …, * }`, so the two caller
+/// glyphs the map does not name arrive as the callee's opaque index. The
+/// callee's one state dispatches every glyph it knows AND carries a `*`
+/// row, which is what makes it opaque and the binding legal
+/// (docs/formats.md (bound calls)).
+///
+/// Worth a matrix column because the three mechanisms reach the opaque
+/// index by three different routes — frames through the composite's dense
+/// read map, mono through the stamped copy's row rewriting, hybrid by
+/// routing the site to frames because an open binding is not a bijection —
+/// and only a seeded run can say they agree. The `.tma` twin in
+/// `tests/link_matrix.rs` pins the hand-authored form; this is the same
+/// shape reached from the language.
+const OPEN_BINDING: &str = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', 'a', 'b' }
+routine swapABopen(tape n: three) {
+  entry state walk {
+    ['_'] -> return;
+    ['a'] -> write ['b'] move [>] goto walk;
+    ['b'] -> write ['a'] move [>] goto walk;
+    [*]   -> move [>] goto walk;
+  }
+}
+machine {
+  tape t: five;
+  entry state go {
+    [*] -> call swapABopen(n = t with map { 'a' -> 'a', 'b' -> 'b', * }) then done;
+  }
+  state done { [*] -> stop; }
+}";
+
 #[test]
 fn inline_arity_reducing_projection_is_equivalent_across_the_matrix() {
     // Three cases across the full 2×3 matrix. The last two carry data on the
@@ -1284,14 +1317,24 @@ fn everything_matrix_is_green() {
             HEAD_CONTRACT.to_string(),
             vec![&[(&[1], 0)], &[(&[0, 1], 0)], &[(&[0, 2], 0)]],
         ),
+        (
+            // An open binding, seeded so the walk reaches all three of
+            // the callee's answers: the two glyphs the map names (which
+            // swap) and one it does not (which arrives opaque and is
+            // walked past untouched by the `*` row).
+            "open_binding",
+            OPEN_BINDING.to_string(),
+            vec![&[(&[1, 2, 3], 0)], &[(&[3, 4], 0)], &[(&[], 0)]],
+        ),
     ];
     assert_eq!(
         roster.len(),
-        16,
+        17,
         "the single-source pass-exercise roster: 6 Appendix A + nested graft + \
-         9 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
+         10 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
          dead-rows, inline ×2, the brk barrier, the exit-bearing call, the \
-         facade that forwards its exits, and the planted head-contract checks)"
+         facade that forwards its exits, the planted head-contract checks, \
+         and the open binding whose unlisted glyphs arrive opaque)"
     );
     for (label, src, cases) in &roster {
         assert!(!src.is_empty(), "roster program `{label}` has a source");

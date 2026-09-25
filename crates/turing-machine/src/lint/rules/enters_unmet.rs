@@ -30,6 +30,20 @@ fn named(glyphs: &[String]) -> String {
         .join(", ")
 }
 
+/// What the head may be on, as the message names it. An OPEN map's
+/// unlisted caller glyphs arrive as the opaque index — a symbol outside
+/// the callee's alphabet, which therefore has no glyph to quote and is in
+/// no clause by construction. It is named in words, and joined to any
+/// glyphs that offend alongside it.
+fn offenders(gap: &crate::head_flow::EntersGap) -> String {
+    let opaque = "a symbol this map leaves opaque";
+    match (gap.offending.is_empty(), gap.opaque) {
+        (true, _) => opaque.to_string(),
+        (false, false) => named(&gap.offending),
+        (false, true) => format!("{}, or {opaque}", named(&gap.offending)),
+    }
+}
+
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for gap in enters_gaps(ctx.resolved, ctx.externals) {
         out.push(Diagnostic {
@@ -37,7 +51,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             span: gap.site,
             message: format!(
                 "the head may be on {} here, outside the `enters {{ {} }}` that `{}`'s tape `{}` declares",
-                named(&gap.offending),
+                offenders(&gap),
                 named(&gap.declared),
                 gap.callee,
                 gap.param,
@@ -627,6 +641,148 @@ machine {
             ]
         );
         assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
+    }
+
+    /// An OPEN map (`with map { …, * }`) sends every caller glyph it does
+    /// not list to the callee's opaque index — a symbol outside the
+    /// callee's own alphabet, and so in no `enters` clause by
+    /// construction. Here `'p'` is the only glyph that reaches the site
+    /// and the map does not list it, so nothing lands inside the callee's
+    /// frame at all and the finding rests entirely on the opaque arrival.
+    ///
+    /// Mutation: reading an open map as a closed one — the cardinalities
+    /// differ, so `'p'` becomes a HOLE that delivers nothing, the
+    /// offending set is empty, and this fixture goes silent.
+    #[test]
+    fn an_open_maps_unlisted_glyph_reaches_the_head_as_an_opaque_symbol() {
+        let src = "\
+alphabet wide  { '_', 'p', 'q' }
+alphabet small { '_', 'A' }
+
+routine mark(tape t: small enters { 'A' }) {
+  entry state go { [*] -> write ['A'] return; }
+}
+
+machine {
+  tape data: wide;
+
+  entry state s {
+    ['p'] -> call mark(t = data with map { 'q' -> 'A', * }) then done;
+    [*]   -> stop;
+  }
+  state done { [*] -> stop; }
+}
+";
+        assert_eq!(
+            findings(src),
+            vec![
+                "the head may be on a symbol this map leaves opaque here, outside the `enters { 'A' }` that `mark`'s tape `t` declares"
+            ]
+        );
+    }
+
+    /// The twin: the same open map at a row whose pattern admits only the
+    /// glyph the map DOES list. Nothing goes opaque, the one listed image
+    /// is inside the clause, and the site is silent — so the fixture above
+    /// fires because a symbol really escapes, not because the marker is
+    /// present.
+    ///
+    /// Mutation: reporting an open map unconditionally (without asking
+    /// whether any reaching glyph is actually unlisted) — this fires.
+    #[test]
+    fn an_open_map_whose_reaching_glyphs_are_all_listed_is_silent() {
+        let src = "\
+alphabet wide  { '_', 'p', 'q' }
+alphabet small { '_', 'A' }
+
+routine mark(tape t: small enters { 'A' }) {
+  entry state go { [*] -> write ['A'] return; }
+}
+
+machine {
+  tape data: wide;
+
+  entry state s {
+    ['q'] -> call mark(t = data with map { 'q' -> 'A', * }) then done;
+    [*]   -> stop;
+  }
+  state done { [*] -> stop; }
+}
+";
+        assert!(findings(src).is_empty(), "{:?}", findings(src));
+    }
+
+    /// The BLANK is pinned in both directions and never goes opaque, even
+    /// through an open map that lists nothing for it — index 0 always
+    /// reads as index 0, which is why the linker's own dense read map for
+    /// an open binding starts `[0, …]` rather than sending the blank past
+    /// the callee's alphabet. Here the reaching set is the whole caller
+    /// alphabet, the one non-blank glyph IS listed, and the clause covers
+    /// both the blank and that glyph's image — so nothing escapes and the
+    /// site is silent.
+    ///
+    /// The only fixture whose reaching set contains the blank at all:
+    /// Mutation it catches: treating the blank as an ordinary unlisted
+    /// symbol (dropping the `symbol != 0` guard from the opaque-escape
+    /// test) — every open map with a reachable blank starts firing, and
+    /// the three fixtures either side of this one stay green because none
+    /// of their reaching sets holds index 0.
+    #[test]
+    fn the_blank_is_pinned_through_an_open_map_and_never_goes_opaque() {
+        let src = "\
+alphabet wide  { '_', 'p' }
+alphabet small { '_', 'A' }
+
+routine mark(tape t: small enters { '_', 'A' }) {
+  entry state go { [*] -> write ['A'] return; }
+}
+
+machine {
+  tape data: wide;
+
+  entry state s {
+    [*] -> call mark(t = data with map { 'p' -> 'A', * }) then done;
+  }
+  state done { [*] -> stop; }
+}
+";
+        assert!(findings(src).is_empty(), "{:?}", findings(src));
+    }
+
+    /// Both at once: one listed glyph lands on a callee symbol the clause
+    /// does not name, and one unlisted glyph goes opaque. The message
+    /// carries both, because they are different facts about the same site
+    /// and neither implies the other.
+    ///
+    /// Mutation: reporting only one of the two (dropping the opaque
+    /// conjunct, or suppressing the glyph list once a symbol escapes) —
+    /// the message changes.
+    #[test]
+    fn a_glyph_gap_and_an_opaque_arrival_are_reported_together() {
+        let src = "\
+alphabet wide  { '_', 'p', 'q', 'r' }
+alphabet small { '_', 'A', 'B' }
+
+routine mark(tape t: small enters { 'A' }) {
+  entry state go { [*] -> write ['A'] return; }
+}
+
+machine {
+  tape data: wide;
+
+  entry state s {
+    ['p'..'r'] -> call mark(t = data with map { 'q' -> 'A', 'r' -> 'B', * }) then done;
+    [*]        -> stop;
+  }
+  state done { [*] -> stop; }
+}
+";
+        assert_eq!(
+            findings(src),
+            vec![
+                "the head may be on 'B', or a symbol this map leaves opaque here, outside the `enters { 'A' }` that `mark`'s tape `t` declares"
+            ]
+        );
     }
 
     /// `--allow enters-unmet` suppresses it, like every other rule.

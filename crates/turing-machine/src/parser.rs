@@ -596,6 +596,17 @@ pub struct SymMap {
     /// `Some((name, name_span))` for `with map NAME`; `None` for the
     /// inline `with map { … }` form.
     pub named: Option<(String, Span)>,
+    /// The `*` marker's own span when the map was left OPEN — `with map
+    /// { 'a' -> 'a', * }` or `with map { * }` — and `None` for a closed
+    /// map (docs/tmt/language.md (symbol maps)). An open map sends every
+    /// caller symbol it does not list onto the callee's opaque index
+    /// rather than holing it, which only a callee whose every reading
+    /// state carries a `*` row can survive; the span is what a
+    /// diagnostic about the marker points at. Carried as the span rather
+    /// than a bare flag for the same reason a declared `noreturn` is
+    /// (`ResolvedWorld::declared_noreturn`): the fact and the place it
+    /// was written are one piece of information.
+    pub open: Option<Span>,
 }
 
 /// One map pair `src -> dst` (bidirectional) or `src => dst` (read-only).
@@ -2710,12 +2721,13 @@ impl Parser<'_> {
         self.g_flush_start(TmcKind::SymMap);
         let map_tok = self.expect_kw_tok("map", "`map` after `with`")?;
         if matches!(self.peek().kind, TokenKind::LBrace) {
-            let (pairs, body_span) = self.map_pairs_body()?;
+            let (pairs, open, body_span) = self.map_pairs_body(true)?;
             self.g_finish(); // SymMap
             Ok(SymMap {
                 pairs,
                 span: join(map_tok.span(), body_span),
                 named: None,
+                open,
             })
         } else {
             let q = self.qual_name("a named map")?;
@@ -2725,6 +2737,7 @@ impl Parser<'_> {
                 pairs: Vec::new(),
                 span: join(map_tok.span(), name_span),
                 named: Some((q.joined(), name_span)),
+                open: None,
             })
         }
     }
@@ -2732,12 +2745,49 @@ impl Parser<'_> {
     /// A `{ pairs }` map body, positioned at `{` — shared by
     /// [`Self::sym_map`]'s inline form and [`Self::parse_map_decl`]'s
     /// declaration body, so the comma/`}` separator rule has one owner.
-    /// Returns the pairs and the body's own span (`{` start → `}` end).
-    fn map_pairs_body(&mut self) -> Result<(Vec<MapPair>, Span), CompileError> {
+    /// Returns the pairs, the `*` marker's span when the body was left
+    /// OPEN, and the body's own span (`{` start → `}` end).
+    ///
+    /// `allow_open` is what keeps the marker out of a top-level `map`
+    /// DECLARATION. Only a binding SITE can be left open: the marker's
+    /// whole meaning is "this site sends its unlisted caller symbols onto
+    /// the callee's opaque index", and a declaration has no site and no
+    /// callee — `parse_map_decl` discards its pairs and every site that
+    /// names the map re-reads them, so a marker written there would be
+    /// swallowed with no open binding anywhere. With `allow_open` off the
+    /// `*` falls through to [`Self::map_pair`], which refuses it as a
+    /// symbol literal exactly as it always has.
+    ///
+    /// The marker is the body's LAST entry, with or without a trailing
+    /// comma (docs/tmt/language.md (symbol maps)): a marker that could
+    /// appear anywhere has no reading that is not arbitrary, and the
+    /// disassembler already prints it last.
+    fn map_pairs_body(
+        &mut self,
+        allow_open: bool,
+    ) -> Result<(Vec<MapPair>, Option<Span>, Span), CompileError> {
         let lb = self.expect(&TokenKind::LBrace, "`{` to open the map")?;
         let mut pairs: Vec<MapPair> = Vec::new();
+        let mut open: Option<Span> = None;
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             loop {
+                if allow_open && matches!(self.peek().kind, TokenKind::Star) {
+                    let star = self.peek().span();
+                    self.bump();
+                    open = Some(star);
+                    // Nothing may follow but the closing brace, optionally
+                    // through one trailing comma.
+                    if matches!(self.peek().kind, TokenKind::Comma) {
+                        self.bump();
+                    }
+                    if !matches!(self.peek().kind, TokenKind::RBrace) {
+                        return Err(Self::expected(
+                            self.peek(),
+                            "`}` — a map's `*` is its last entry",
+                        ));
+                    }
+                    break;
+                }
                 pairs.push(self.map_pair()?);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
@@ -2747,7 +2797,7 @@ impl Parser<'_> {
             }
         }
         let rb = self.expect(&TokenKind::RBrace, "`}` to close the map")?;
-        Ok((pairs, join(lb.span(), rb.span())))
+        Ok((pairs, open, join(lb.span(), rb.span())))
     }
 
     /// `export? map NAME: SRC -> DST { pairs }` — a top-level declaration
@@ -2761,7 +2811,7 @@ impl Parser<'_> {
         self.qual_name("a source alphabet name")?;
         self.expect(&TokenKind::Arrow, "`->` between the map's two alphabets")?;
         self.qual_name("a target alphabet name")?;
-        self.map_pairs_body()?;
+        self.map_pairs_body(false)?;
         Ok(())
     }
 
@@ -2923,7 +2973,10 @@ pub(crate) fn reparse_map_pairs(tokens: &[Token]) -> Vec<MapPair> {
     while !matches!(p.peek().kind, TokenKind::LBrace | TokenKind::Eof) {
         p.bump();
     }
-    p.map_pairs_body()
+    // `false`, matching `parse_map_decl`: a DECLARATION's body never
+    // carries the open marker, so re-reading one that could would accept
+    // a shape the real parser refused.
+    p.map_pairs_body(false)
         .expect("reparse_map_pairs: extraction only ever runs on an already-parsed tree")
         .0
 }

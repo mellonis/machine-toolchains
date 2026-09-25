@@ -1259,7 +1259,14 @@ fn binding_value_text(value: &BindingValue, col: usize, map_interior: &Interior<
 /// (module doc, "Argument lists and the width threshold";
 /// docs/tmt/fmt.md (comments inside a list)).
 fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
-    let pairs: Vec<String> = map.pairs.iter().map(map_pair_clean_text).collect();
+    // The open marker is an ENTRY of the list, always its last, so it
+    // takes a slot of its own in both the one-line and the broken form —
+    // which is what lets a comment written beside it key to that slot
+    // rather than to the pair before it ([`map_pair_count`]).
+    let mut pairs: Vec<String> = map.pairs.iter().map(map_pair_clean_text).collect();
+    if map.open.is_some() {
+        pairs.push("*".to_string());
+    }
     if interior.is_empty() {
         return format!("with map {{ {} }}", pairs.join(", "));
     }
@@ -1304,11 +1311,13 @@ fn map_pair_clean_text(pair: &MapPair) -> String {
     format!("{} {arrow} {}", sym_text(&pair.src), sym_text(&pair.dst))
 }
 
-/// The pair count of a binding argument's map, or 0 when it carries none —
-/// what [`bucket`] needs to size a map's own slot list.
+/// The ENTRY count of a binding argument's map, or 0 when it carries none
+/// — what [`bucket`] needs to size a map's own slot list. An open map's
+/// `*` is an entry like any other (it is separated by the same comma and
+/// counted by the same `trivia::interior` walk), so it adds one.
 fn map_pair_count(value: &BindingValue) -> usize {
     match value {
-        BindingValue::Named { map: Some(m), .. } => m.pairs.len(),
+        BindingValue::Named { map: Some(m), .. } => m.pairs.len() + usize::from(m.open.is_some()),
         _ => 0,
     }
 }

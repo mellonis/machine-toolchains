@@ -65,8 +65,8 @@ use crate::compiler::{
 };
 use crate::declarations::Declarations;
 use crate::footprint::{
-    SitePlacement, SymSet, find_external, glyph_index, project_forward, project_write_back,
-    site_placement,
+    SitePlacement, SymSet, escapes_opaque, find_external, glyph_index, project_forward,
+    project_write_back, site_placement,
 };
 use crate::parser::{
     BindingArg, BindingValue, Continuation, MoveDir, PatternCell, PatternCellKind, Rule,
@@ -89,9 +89,15 @@ pub(crate) struct EntersGap {
     /// The declared clause, in the CALLEE's alphabet frame, band order.
     pub(crate) declared: Vec<String>,
     /// The glyphs the head may be on that the clause does not list, same
-    /// frame and order. Never empty — a gap with nothing offending is not
-    /// reported at all.
+    /// frame and order. May be empty ONLY when `opaque` is set — a gap
+    /// with nothing offending at all is not reported.
     pub(crate) offending: Vec<String>,
+    /// Whether the head may also arrive on an OPAQUE symbol: the site's
+    /// map is open and some caller glyph it does not list reaches the
+    /// callee as the index past its alphabet. Such a symbol has no glyph
+    /// in the callee's frame, so it can appear in no `enters` clause and
+    /// cannot be named in `offending` — it is reported as its own fact.
+    pub(crate) opaque: bool,
 }
 
 /// Whether any world in `module` declares an `enters` clause. The whole
@@ -324,7 +330,7 @@ fn after_call(
                 let host_card = cards[link.host];
                 out[link.host] = match (ct.leaves, &link.pairs) {
                     (Some(set), Some(pairs)) => {
-                        project_write_back(set, pairs, host_card, ct.cardinality as u32)
+                        project_write_back(set, pairs, host_card, ct.cardinality as u32, link.open)
                     }
                     _ => SymSet::full(host_card),
                 };
@@ -335,7 +341,19 @@ fn after_call(
 }
 
 /// The head set a callee tape RECEIVES at one site: the host tape's own set
-/// projected forward through the binding into the callee's alphabet frame.
+/// projected forward through the binding into the callee's alphabet frame,
+/// plus whether any host symbol reaches it as the OPAQUE index of an open
+/// binding — a symbol the callee's own alphabet does not spell, and so one
+/// no `enters` clause can list.
+///
+/// The two halves travel together because an open map splits the answer in
+/// two: the listed images land inside the callee's frame and the rest land
+/// outside it, where a `SymSet` over that frame cannot represent them
+/// ([`crate::footprint::project_forward`] /
+/// [`crate::footprint::escapes_opaque`]). A caller that read only the set
+/// would see an open map as a narrower closed one and silently conclude
+/// the site is safe.
+///
 /// `None` when the site says nothing about that tape — an unreadable map, or
 /// an identity placement with no host tape at that position.
 fn received(
@@ -344,22 +362,22 @@ fn received(
     post: &[SymSet],
     cards: &[u32],
     callee_card: u32,
-) -> Option<SymSet> {
+) -> Option<(SymSet, bool)> {
     match &site.placement {
         SitePlacement::Opaque => None,
         // Identity placement: callee tape `k` IS host tape `k`, symbols
-        // unchanged, clamped to the callee's own alphabet.
+        // unchanged, clamped to the callee's own alphabet. An identity
+        // placement carries no map, so nothing can be open.
         SitePlacement::Identity => post
             .get(k)
-            .map(|set| set.intersect(SymSet::full(callee_card))),
+            .map(|set| (set.intersect(SymSet::full(callee_card)), false)),
         SitePlacement::Bound(links) => {
             let link = links.get(k)?;
             let pairs = link.pairs.as_ref()?;
-            Some(project_forward(
-                *post.get(link.host)?,
-                pairs,
-                *cards.get(link.host)?,
-                callee_card,
+            let host = *post.get(link.host)?;
+            Some((
+                project_forward(host, pairs, *cards.get(link.host)?, callee_card, link.open),
+                escapes_opaque(host, pairs, link.open),
             ))
         }
     }
@@ -638,7 +656,7 @@ fn check_site(site: &Site, post: &[SymSet], cards: &[u32], span: Span, out: &mut
     for (k, ct) in site.callee.tapes.iter().enumerate() {
         let Some(enters) = ct.enters else { continue };
         let callee_card = ct.cardinality as u32;
-        let Some(receives) = received(site, k, post, cards, callee_card) else {
+        let Some((receives, opaque)) = received(site, k, post, cards, callee_card) else {
             continue;
         };
         let Some(callee_glyphs) = alphabet(site.module, &ct.alphabet) else {
@@ -650,7 +668,7 @@ fn check_site(site: &Site, post: &[SymSet], cards: &[u32], span: Span, out: &mut
                 offending.insert(index);
             }
         }
-        if offending.is_empty() {
+        if offending.is_empty() && !opaque {
             continue;
         }
         out.push(EntersGap {
@@ -659,6 +677,7 @@ fn check_site(site: &Site, post: &[SymSet], cards: &[u32], span: Span, out: &mut
             param: ct.name.clone(),
             declared: symset_glyphs(enters, callee_glyphs),
             offending: symset_glyphs(offending, callee_glyphs),
+            opaque,
         });
     }
 }

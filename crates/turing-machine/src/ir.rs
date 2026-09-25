@@ -231,9 +231,12 @@ pub struct IrTape {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaves: Option<Vec<String>>,
     /// Whether every state that reads this tape reads it as a wildcard, so
-    /// the routine never discriminates its glyphs. Plumbed here always
-    /// `false` — no analysis computes this fact yet; a later round wires
-    /// it up.
+    /// the routine never rejects a glyph for being unlisted — the
+    /// precondition a caller's OPEN binding needs, and the one fact the
+    /// linker checks before letting unlisted caller symbols arrive as the
+    /// opaque index ([`tape_is_opaque`] computes it; docs/formats.md
+    /// (routine interfaces)). Always `false` on a MACHINE tape, for the
+    /// same reason `writes`/`enters`/`leaves` are `None` there.
     #[serde(default, skip_serializing_if = "is_false")]
     pub opaque: bool,
 }
@@ -461,6 +464,16 @@ pub struct IrTapeBinding {
     /// (docs/formats.md (bound calls)).
     #[serde(default, skip_serializing_if = "is_false")]
     pub map_written: bool,
+    /// Whether the site's map was left OPEN with `*` (`with map { 'a' ->
+    /// 'a', * }`, or `with map { * }`): every caller symbol the pairs do
+    /// not list reads as the callee's OPAQUE index — the index equal to
+    /// its cardinality, which no callee row names and only a `*` row
+    /// matches — instead of becoming a hole. An open map is written by
+    /// definition, so this never appears without `map_written`. The
+    /// linker refuses an open binding into a tape the callee does not
+    /// publish as `opaque` (docs/formats.md (bound calls)).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub open: bool,
 }
 
 /// One `src -> dst` (or `src => dst`, `one_way`) symbol-map pair: `src` a
@@ -876,6 +889,42 @@ pub(crate) fn known_noreturn(
     }
 }
 
+/// Whether tape position `k` of a world whose lowered states are `states`
+/// is OPAQUE: every state that READS the tape reads it through a `*` cell
+/// there, so no glyph is ever rejected for being unlisted and a caller may
+/// bind the tape open (docs/formats.md (routine interfaces)).
+///
+/// **A state reads the tape iff it has at least one rule.** TM-1's match
+/// step is a batch `rd` over every head followed by one table lookup, so a
+/// state with rows reads all of its world's tapes at once — there is no
+/// per-tape "did this state look?" beyond that. A ROWLESS state reads
+/// nothing: it has no table to match against and traps the moment it is
+/// entered. A state whose every row is `*` at `k` still reads the tape;
+/// it reads it through the wildcard, which is the whole point.
+///
+/// The quantifier is UNIVERSAL over readers and EXISTENTIAL over one
+/// reader's rows: one reading state with no `*` cell at `k` closes the
+/// tape, because an opaque symbol arriving in that state matches none of
+/// its rows. A world with no reading state at all is opaque vacuously —
+/// nothing there can reject anything.
+///
+/// The rule is per POSITION, which is exact at arity 1 (a `*` at the only
+/// position is a catch-all row) and an approximation above it: a state
+/// whose rows are `[0, *]` and `[*, 1]` has a `*` at each position
+/// separately, yet an opaque symbol on tape 0 with tape 1 reading `0`
+/// matches neither row. That is the rule as specified; a caller who
+/// widens a state's cover on one tape without widening the row that
+/// carries it is relying on a promise this analysis states more loosely
+/// than the machine keeps it.
+fn tape_is_opaque(states: &[IrState], k: usize) -> bool {
+    states.iter().all(|s| {
+        s.rules.is_empty()
+            || s.rules
+                .iter()
+                .any(|r| matches!(r.pattern.get(k), Some(IrCell::Wildcard)))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_world(
     ew: &ExpandedWorld,
@@ -1002,6 +1051,14 @@ fn lower_world(
                     .and_then(|(_, rt)| crate::compiler::clause_glyphs(rt.enters, &glyphs));
                 let leaves = routine_tape
                     .and_then(|(_, rt)| crate::compiler::clause_glyphs(rt.leaves, &glyphs));
+                // Opacity is a ROUTINE's promise to its callers, read only
+                // by the linker when it judges an open binding, so it is
+                // withheld on a machine tape for exactly the reason
+                // `writes`/`enters`/`leaves` are: `main` is never a
+                // callee, nothing reads its interface entry, and a
+                // suffix there would move every `machine`-bearing
+                // program's bytes for no observable gain.
+                let opaque = routine_tape.is_some() && tape_is_opaque(&states, i);
                 IrTape {
                     name: t.name.clone(),
                     alphabet: t.alphabet.clone(),
@@ -1011,9 +1068,7 @@ fn lower_world(
                     writes,
                     enters,
                     leaves,
-                    // No analysis computes opacity yet; a later round wires
-                    // this up (see `IrTape::opaque`'s own doc).
-                    opaque: false,
+                    opaque,
                 }
             })
             .collect(),
@@ -1696,6 +1751,7 @@ fn resolve_binding(
                 caller_tape: phys as u32,
                 pairs,
                 map_written: map.is_some(),
+                open: map.as_ref().is_some_and(|m| m.open.is_some()),
             });
         }
         // Entries are named or positional, never mixed in one list (a
@@ -1775,6 +1831,10 @@ fn resolve_binding(
             // out-of-unit entry — the wire's `map_written` distinction is
             // not symbolic-only (docs/formats.md (bound calls)).
             map_written: map.is_some(),
+            // Likewise the open marker: an in-unit callee is judged by
+            // the linker against its own published `opaque` bit exactly
+            // as an out-of-unit one is.
+            open: map.as_ref().is_some_and(|m| m.open.is_some()),
         });
     }
     Ok(binding)
@@ -2184,10 +2244,10 @@ machine {
 
     /// The bare version literal names the acceptance contract, not a hint:
     /// version 4 has not shipped in any release, so every field this arc
-    /// adds — `param`, the `Label` `dst`, `map_written`, and
-    /// `IrTape`'s `enters`, `leaves` and `opaque` — joins the same number
-    /// instead of opening a new one. Mutation: bumping `TM_IR_VERSION` to
-    /// 5.
+    /// adds — `param`, the `Label` `dst`, `map_written`,
+    /// `IrTapeBinding::open`, and `IrTape`'s `enters`, `leaves` and
+    /// `opaque` — joins the same number instead of opening a new one.
+    /// Mutation: bumping `TM_IR_VERSION` to 5.
     #[test]
     fn the_version_literal_is_four() {
         assert_eq!(TM_IR_VERSION, 4);
@@ -2199,7 +2259,8 @@ machine {
     /// glyph-labelled map pair, a SECOND binding entry that is
     /// `map_written: true` with an EMPTY `pairs` list — the one shape
     /// where the field carries the whole meaning, since a pair-bearing
-    /// entry is written by definition either way — on the routine
+    /// entry is written by definition either way — an `open` entry
+    /// beside a closed one, on the routine
     /// world's own tape, a declared `enters`/`leaves` pair plus `opaque:
     /// true`, and the contract terminal, whose whole wire form is its
     /// tag. Round-trips unchanged. Mutation: `#[serde(skip_serializing)]`
@@ -2208,7 +2269,8 @@ machine {
     /// makes the `map_written` mutation observable at all, since the
     /// first entry's own `map_written: true` is otherwise redundant with
     /// its non-empty `pairs`; the same `#[serde(skip_serializing)]`
-    /// mutation on `IrTape::enters`/`::leaves`/`::opaque` drops each of
+    /// mutation on `IrTapeBinding::open` and on
+    /// `IrTape::enters`/`::leaves`/`::opaque` drops each of
     /// those from the wire form the identical way, and renaming the
     /// contract terminal's `#[serde]` tag makes its row fail to read
     /// back.
@@ -2262,12 +2324,14 @@ machine {
                                             ],
                                             param: Some("k".into()),
                                             map_written: true,
+                                            open: true,
                                         },
                                         IrTapeBinding {
                                             caller_tape: 0,
                                             pairs: Vec::new(),
                                             param: Some("j".into()),
                                             map_written: true,
+                                            open: false,
                                         },
                                     ],
                                     // A two-exit call: the exits= operand
@@ -2488,6 +2552,7 @@ machine {
                                         }],
                                         param: None,
                                         map_written: true,
+                                        open: false,
                                     }],
                                     exits: Vec::new(),
                                     then: Some(IrThen::Goto { state: 0 }),

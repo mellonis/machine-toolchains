@@ -186,13 +186,23 @@ pub(crate) struct FootprintTable {
 /// * unequal cardinalities close the map: an unlisted non-blank callee symbol
 ///   is a hole, and writing it takes the unmapped-write trap instead of
 ///   landing on the caller's tape, so it contributes nothing.
+///
+/// `open` — the site's `*` marker — closes the map in this direction
+/// WHATEVER the cardinalities: the opaque index an open binding mints is
+/// read-only (an image equal to the physical cardinality names no cell of
+/// the caller's band), so the linker holes an unlisted callee symbol on
+/// the write side even where the two alphabets are the same size and a
+/// closed map would have identity-completed (docs/formats.md (bound
+/// calls)). Opening a binding therefore never WIDENS what a callee may
+/// write back; it can only narrow it.
 pub(crate) fn project_write_back(
     callee: SymSet,
     pairs: &[IrMapPair],
     caller_card: u32,
     callee_card: u32,
+    open: bool,
 ) -> SymSet {
-    let identity_completes = caller_card == callee_card;
+    let identity_completes = caller_card == callee_card && !open;
     let mut out = SymSet::empty();
     for symbol in callee.iter() {
         let mut listed = false;
@@ -237,6 +247,15 @@ pub(crate) fn project_write_back(
 ///   is a HOLE, and reading it takes the unmapped-read trap rather than
 ///   delivering a symbol to the callee, so it contributes nothing.
 ///
+/// `open` — the site's `*` marker — replaces BOTH completion rules in this
+/// direction: an unlisted non-blank host symbol is neither a hole nor an
+/// identity image, it reads as the callee's OPAQUE index, the index equal
+/// to the callee's cardinality. That index is outside the frame a `SymSet`
+/// over `callee_card` symbols can hold, so it is simply absent from the
+/// set this returns — [`escapes_opaque`] is the companion that answers
+/// whether any symbol went there, and a caller reasoning about what the
+/// callee's head may hold must ask BOTH (docs/formats.md (bound calls)).
+///
 /// A `Label` dst is minted only for a callee whose alphabet this compile
 /// cannot see; [`source_pairs`], the one producer feeding this function,
 /// resolves both sides against real glyph tables and so only ever yields an
@@ -247,8 +266,9 @@ pub(crate) fn project_forward(
     pairs: &[IrMapPair],
     host_card: u32,
     callee_card: u32,
+    open: bool,
 ) -> SymSet {
-    let identity_completes = host_card == callee_card;
+    let identity_completes = host_card == callee_card && !open;
     let mut out = SymSet::empty();
     for symbol in host.iter() {
         let mut listed = false;
@@ -267,6 +287,23 @@ pub(crate) fn project_forward(
         }
     }
     out.intersect(SymSet::full(callee_card))
+}
+
+/// Whether any symbol of `host` reaches the callee as the OPAQUE index —
+/// true exactly when the site's map is open and some non-blank host symbol
+/// in the set is unlisted. The blank is pinned in both directions and
+/// never goes opaque, so it never counts.
+///
+/// This is the half of an open map's read direction that
+/// [`project_forward`] cannot express: the opaque index lies outside the
+/// callee's alphabet, so no `SymSet` over that alphabet can name it. What
+/// it means for a caller is that the callee's head may hold a symbol its
+/// OWN alphabet does not spell — which is therefore in no declared
+/// `enters` clause, since a clause lists that alphabet's glyphs.
+pub(crate) fn escapes_opaque(host: SymSet, pairs: &[IrMapPair], open: bool) -> bool {
+    open && host
+        .iter()
+        .any(|symbol| symbol != 0 && !pairs.iter().any(|p| p.src == symbol))
 }
 
 /// Every caller tape's whole alphabet — the conservative answer whenever a
@@ -344,6 +381,7 @@ fn call_contribution(
             &tb.pairs,
             caller_tape.cardinality,
             callee_tape.cardinality,
+            tb.open,
         );
         out[tape].union_with(projected);
     }
@@ -510,6 +548,12 @@ pub(crate) struct TapeLink {
     /// produced), and then nothing about this tape can be ruled out in
     /// either direction.
     pub(crate) pairs: Option<Vec<IrMapPair>>,
+    /// Whether the site left this tape's map OPEN with `*`. It changes
+    /// both directions: unlisted host symbols read as the callee's opaque
+    /// index instead of holing or identity-completing, and the write half
+    /// closes whatever the cardinalities ([`project_forward`],
+    /// [`project_write_back`], [`escapes_opaque`]).
+    pub(crate) open: bool,
 }
 
 /// How a binding site places a callee's tapes onto its host's — the one walk
@@ -593,7 +637,11 @@ pub(crate) fn site_placement(
                 .zip(callee_module.alphabets.get(&ct.alphabet))
                 .and_then(|(h, c)| source_pairs(m, &h.glyphs, &c.glyphs)),
         };
-        links.push(TapeLink { host: phys, pairs });
+        links.push(TapeLink {
+            host: phys,
+            pairs,
+            open: map.as_ref().is_some_and(|m| m.open.is_some()),
+        });
     }
     SitePlacement::Bound(links)
 }
@@ -631,9 +679,13 @@ fn binding_contribution(
                     // The map cannot be read, so nothing about this tape can
                     // be ruled out.
                     None => SymSet::full(host_card),
-                    Some(pairs) => {
-                        project_write_back(*callee_set, pairs, host_card, ct.cardinality as u32)
-                    }
+                    Some(pairs) => project_write_back(
+                        *callee_set,
+                        pairs,
+                        host_card,
+                        ct.cardinality as u32,
+                        link.open,
+                    ),
                 };
                 out[link.host].union_with(add);
             }
@@ -1057,6 +1109,7 @@ mod tests {
                 .collect(),
             param: None,
             map_written: !pairs.is_empty(),
+            open: false,
         }]
     }
 

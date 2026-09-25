@@ -740,7 +740,13 @@ fn render_binding(binding: &[IrTapeBinding]) -> String {
                 None => b.caller_tape.to_string(),
             };
             if b.pairs.is_empty() {
-                if b.map_written {
+                if b.open {
+                    // `with map { * }` — the marker alone. It is still a
+                    // written map, so the braces print either way; what
+                    // makes this arm its own is that the marker must not
+                    // be lost to the empty-pair-list shortcut.
+                    format!("{prefix}{{*}}")
+                } else if b.map_written {
                     format!("{prefix}{{}}")
                 } else {
                     prefix
@@ -769,7 +775,13 @@ fn render_binding(binding: &[IrTapeBinding]) -> String {
                         format!("{}{}{}", p.src, arrow, dst)
                     })
                     .collect();
-                format!("{}{{{}}}", prefix, pairs.join(", "))
+                let mut entries = pairs.join(", ");
+                if b.open {
+                    // The marker prints LAST, the one position the
+                    // grammar allows it (docs/formats.md (bound calls)).
+                    entries.push_str(", *");
+                }
+                format!("{}{{{}}}", prefix, entries)
             }
         })
         .collect();
@@ -890,9 +902,10 @@ pub(crate) fn render_glyph_list(glyphs: &[String]) -> String {
 /// parameter declared the matching clause (`IrTape.enters`/`::leaves`,
 /// filled through the same declared-clause resolution `writes` already
 /// goes through) — a present clause is never empty, so unlike `writes=`
-/// there is no emptiness guard to apply. `opaque` is not emitted here
-/// yet: the IR carries the field, but no analysis computes it, so it
-/// always reads `false` for now.
+/// there is no emptiness guard to apply. `opaque` prints LAST, after all
+/// three lists and without a value of its own, exactly when the inferred
+/// bit is set (`IrTape::opaque`) — the wire's fixed suffix order
+/// (docs/formats.md (routine interfaces)).
 fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
     for t in tapes {
         let mut code = format!(".param {}, ({})", t.name, render_glyph_list(&t.glyphs));
@@ -908,6 +921,9 @@ fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
         if let Some(leaves) = &t.leaves {
             debug_assert!(!leaves.is_empty(), "a leaves clause is never empty");
             code.push_str(&format!(", leaves=({})", render_glyph_list(leaves)));
+        }
+        if t.opaque {
+            code.push_str(", opaque");
         }
         e.push(code, 0);
     }
@@ -1311,7 +1327,11 @@ copy__2:
         // publishes the INFERRED write set — the tape actually writes '0'
         // and '1' — rather than omitting `writes=` (docs/formats.md
         // (routine interfaces): an absent `writes=` decodes as "writes
-        // nothing", which would be false here).
+        // nothing", which would be false here). It also publishes
+        // `opaque`: `inc` is the routine's only state and its rows are
+        // `[2]` and `[*]`, so the wildcard row means no glyph is ever
+        // rejected for being unlisted — the exact precondition a caller's
+        // open binding needs.
         let expected = "\
 .section tables
 T0:     .row    [2]
@@ -1322,7 +1342,7 @@ T1:     .row    [2, *]
 D1:     .targets main__0, main__1
 .section code
 .routine mylib::plusOne, tapes=1, alpha=(3)
-.param num, ('_', '0', '1'), writes=('0', '1')
+.param num, ('_', '0', '1'), writes=('0', '1'), opaque
 .func mylib::plusOne
 inc:
         rd
