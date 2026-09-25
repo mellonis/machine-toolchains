@@ -722,24 +722,39 @@ l.tmc:13:26: lint: the head may be on '_' here, outside the `enters { '0', '1' }
 ```
 
 The analysis is a forward dataflow over "where the head may be", one
-world and one tape at a time. A world's entry state is seeded from the
-world's OWN `enters` clause — the whole alphabet where it declares none,
-which is why a machine's entry state starts unconstrained. A row narrows
-that set by its pattern cell and then carries it forward: a literal write
-pins the head's glyph, an unwritten cell keeps what the pattern matched,
-and a move or a `{expr}` write leaves the whole alphabet, since neither
-says where the head lands. After a `then` the continuation resumes from
-the callee's declared `leaves`, mapped back through the binding — the
-whole alphabet where the callee declares none. The sets union to a
-fixpoint, so the finding covers every path into the row at once, where a
-run's own assert sees only the path it took.
+world and one tape at a time. A ROUTINE's entry state is seeded from the
+routine's own `enters` clause — the whole alphabet where it declares
+none, which is why a machine's entry state starts unconstrained. A
+GRAPH's clause is deliberately not used for this: nothing enforces it
+(no runtime check is planted for a graph, and a `graft` edge is not a
+site this rule reports), so a graph's body starts on the whole alphabet
+rather than on a promise nobody is held to.
 
-A `graft` is where the analysis is coarsest. Its body is not spliced at
-this stage, so where it leaves the head cannot be known here — and the
-states a graft exits into are reachable only through it. Each of them
-therefore resumes with the whole alphabet, which keeps their own sites
-checked (silence there would hide most of a graft-driven program) at the
-cost of reporting sites a splice-aware answer might clear.
+A row narrows that set by its pattern cell and then carries it forward: a
+literal write pins the head's glyph, an unwritten cell keeps what the
+pattern matched, and a move or a `{expr}` write leaves the whole
+alphabet, since neither says where the head lands. After a `then` the
+continuation resumes from the callee's declared `leaves`, mapped back
+through the binding — the whole alphabet where the callee declares none.
+That step BELIEVES the clause rather than proving it: the compiler checks
+`leaves` only where an exit row's leaving glyph is exactly one known
+glyph, and it is the check a debug build plants that enforces the rest,
+including the rows the static half declines. A build with the asserts
+stripped trusts the declaration, by design — the same trust the whole
+scheme rests on. The sets union to a fixpoint, so the finding covers
+every path into the row at once, where a run's own assert sees only the
+path it took.
+
+**Every way into a state widens it**, and the two that leave the world
+and come back are the coarsest. A `graft` instance's body is not spliced
+at this stage, and a callee's EXIT parameters are wired to states of the
+calling world; in neither case can this analysis know where the head was
+left, and a `leaves` clause does not answer it either (that clause
+describes a `return`, not an exit). So a state reached as a graft exit or
+as a call's exit resumes with the whole alphabet. That keeps its own
+sites checked — silence there would hide most of a graft-driven or
+exit-driven program — at the cost of reporting sites a splice-aware
+answer might clear.
 
 At a site the set is projected forward through the binding's symbol map
 into the callee's own alphabet frame, which is the frame the message's
@@ -761,10 +776,13 @@ the call, and nothing here can tell which was meant.
 
 Two silences are by design. A callee that declares no `enters` is never
 reported — an absent clause permits every glyph, it is not an empty set.
-And a callee whose `enters` this unit cannot see is left alone: the rule
-reads a routine or graph defined HERE, or one declared in the
-declarations this compile was given (`--extern`, a sibling source, a
-library, the embedded standard library), and nothing else.
+And a callee whose `enters` this unit cannot see is left alone, because
+nothing here could tell "unmet" from "unknown". What it can see is
+exactly two things: a routine or graph defined in the file being linted,
+and the embedded standard library's declarations. `tmt lint` takes no
+`--extern`, and neither it nor the editor is handed a manifest project's
+sibling sources or libraries — so a clause declared in one of those is
+NOT honoured, and a call into such a callee is never reported.
 
 ### state-may-trap (opt-in)
 

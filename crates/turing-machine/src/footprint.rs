@@ -519,6 +519,13 @@ pub(crate) struct TapeLink {
 pub(crate) enum SitePlacement {
     /// No named args at all: the identity placement, callee tape `k` onto
     /// host tape `k`, symbols unchanged.
+    ///
+    /// Reached only for a callee with NO tape parameters — a bindless call
+    /// into a tape-bearing one is rejected as a missing binding argument
+    /// long before this — so it is untested by construction and its
+    /// per-tape arms below never run. It exists because the walk this was
+    /// extracted from had it, and keeping it preserves that behaviour
+    /// exactly.
     Identity,
     /// One entry per callee tape, in callee tape order.
     Bound(Vec<TapeLink>),

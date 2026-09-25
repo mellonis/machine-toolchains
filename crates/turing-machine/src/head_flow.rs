@@ -24,42 +24,53 @@
 //! The walk runs over the RESOLVED module, before graft splicing and range
 //! expansion, because that is all the lint layer ever sees.
 //!
-//! A GRAFT is the one construct that costs real precision there. Its body is
-//! not spliced yet, so where it leaves the head is unknowable here — and a
-//! graft carries control flow, not just rules: the states it exits into are
-//! reachable ONLY through it. Ignoring it would leave every one of them
-//! unreachable and their own sites silently unchecked, which on a
-//! graft-driven program is most of the program. So a graft instance takes
-//! part as a pseudo-state: reaching it is tracked (it is addressable by name
-//! in the same space states are, and a `goto` may name one), and a reached
-//! one hands the WHOLE ALPHABET to each host state its args name as an exit.
-//! Coarse, sound, and — unlike silence — able to report.
+//! **Every way INTO a state widens it, and there are five.** A state's set is
+//! the join over all of them: the world's entry seed, a `goto` (or an
+//! omitted transition, which is a self-`goto`), a `call`'s `then`
+//! continuation, a `call`'s EXIT arguments, and a `graft` instance's exit
+//! arguments. The last two are the ones that leave the world and come back
+//! somewhere the calling row does not name, and they hand out the WHOLE
+//! ALPHABET: where a callee's own body or a spliced graph left the head is
+//! not knowable here, and neither is a `leaves` promise — that clause
+//! describes a `return`, not an exit parameter, and no planted check
+//! constrains one. Missing either would leave a state narrower than the
+//! truth, or unreachable and silently unexamined; on a graft-driven or
+//! exit-driven program that is most of the program.
 //!
-//! What remains under-approximated, costing findings and never inventing
-//! one: a state no walked path reaches keeps no set at all, and its own rows
-//! are never examined.
+//! What remains: a state NO walked path reaches keeps no set at all and its
+//! own rows are never examined. That is silence, not a narrowed answer —
+//! it costs findings and cannot invent one.
 //!
-//! # Per world, not per program
+//! # Per world, not per program, and only a ROUTINE's clause is believed
 //!
-//! Unlike the write footprint, this needs no cross-world fixpoint. A world's
-//! entry is seeded from the world's OWN `enters` clause, which is a promise
-//! its callers are held to separately — by this very rule at their sites, and
-//! by the planted assert at run time. So each world settles on its own, and
-//! the loop is bounded by its tapes' cardinalities.
+//! Unlike the write footprint, this needs no cross-world fixpoint: each
+//! world is seeded from its own signature and settles on its own, and the
+//! loop is bounded by its tapes' cardinalities.
+//!
+//! A routine's `enters` is believed as that seed because something enforces
+//! it — a debug build plants a check on the parameter, so a caller that
+//! breaks the clause stops there, and this very rule reports the caller's
+//! site besides. A GRAPH's `enters` is NOT believed: no check is planted for
+//! one, and a graft edge is not a site this analysis reports, so believing
+//! it would narrow a graph's body on a promise nothing holds anyone to. A
+//! graph's body therefore starts on the whole alphabet. A machine never
+//! carries a clause at all.
 
 use std::collections::{BTreeMap, HashMap};
 
 use mtc_core::diagnostics::Span;
 
-use crate::compiler::{Resolved, ResolvedCall, ResolvedCallTarget, ResolvedWorld, symset_glyphs};
+use crate::compiler::{
+    Resolved, ResolvedCall, ResolvedCallTarget, ResolvedWorld, WorldKind, symset_glyphs,
+};
 use crate::declarations::Declarations;
 use crate::footprint::{
     SitePlacement, SymSet, find_external, glyph_index, project_forward, project_write_back,
     site_placement,
 };
 use crate::parser::{
-    BindingValue, Continuation, MoveDir, PatternCell, PatternCellKind, Rule, Transition, WriteCell,
-    WriteCellKind,
+    BindingArg, BindingValue, Continuation, MoveDir, PatternCell, PatternCellKind, Rule,
+    Transition, WriteCell, WriteCellKind,
 };
 use crate::patterns::cell_labels;
 
@@ -133,17 +144,11 @@ fn resolve_site<'a>(
     host: &ResolvedWorld,
     call: &'a ResolvedCall,
 ) -> Option<Site<'a>> {
-    let (target, external, args) = match &call.target {
-        ResolvedCallTarget::Routine {
-            name,
-            external,
-            args,
-        } => (name.as_str(), *external, args.as_slice()),
-        // A bind-call's binding lives on the `bind` declaration, shared by
-        // every call of that instance.
+    let (target, external) = match &call.target {
+        ResolvedCallTarget::Routine { name, external, .. } => (name.as_str(), *external),
         ResolvedCallTarget::Bind { name } => {
             let bind = host.binds.iter().find(|b| b.name == *name)?;
-            (bind.target.as_str(), bind.external, bind.args.as_slice())
+            (bind.target.as_str(), bind.external)
         }
     };
     let (module, callee) = if external {
@@ -155,8 +160,24 @@ fn resolve_site<'a>(
     Some(Site {
         callee,
         module,
-        placement: site_placement(resolved, module, host, callee, args),
+        placement: site_placement(resolved, module, host, callee, call_args(host, call)),
     })
+}
+
+/// The binding args a site carries: the call's own for a direct call, the
+/// `bind` declaration's for a bind-call (one binding, shared by every call
+/// of that instance). Read WITHOUT resolving the callee, because the exit
+/// wiring below has to be followed even for a callee nothing vouches for —
+/// where control goes on an exit is a fact about the caller's own text.
+fn call_args<'a>(host: &'a ResolvedWorld, call: &'a ResolvedCall) -> &'a [BindingArg] {
+    match &call.target {
+        ResolvedCallTarget::Routine { args, .. } => args,
+        ResolvedCallTarget::Bind { name } => host
+            .binds
+            .iter()
+            .find(|b| b.name == *name)
+            .map_or(&[][..], |b| b.args.as_slice()),
+    }
 }
 
 /// The glyph labels of an alphabet by mangled name, or `None` when the
@@ -430,17 +451,41 @@ fn walk_world(
         .iter()
         .map(|call| (call.span, resolve_site(resolved, modules, world, call)))
         .collect();
+    // The same sites' raw binding args, kept separately because the exit
+    // wiring must be followed even where the callee itself did not resolve.
+    let exit_args: BTreeMap<Span, &[BindingArg]> = world
+        .calls
+        .iter()
+        .map(|call| (call.span, call_args(world, call)))
+        .collect();
+    // The conservative per-tape answer, built once: what a graft instance
+    // and a call exit both hand to the states they lead to.
+    let full_set: Vec<SymSet> = cards.iter().map(|c| SymSet::full(*c)).collect();
 
     let mut heads: Vec<Option<Vec<SymSet>>> = vec![None; world.states.len()];
     let mut reached: Vec<bool> = vec![false; world.grafts.len()];
     match world.states.iter().position(|s| s.entry) {
         Some(entry) => {
+            // A ROUTINE's `enters` is believed, and a GRAPH's is not. The
+            // difference is what ENFORCES the promise: a debug build plants
+            // a check on a routine's tape parameter, so a caller that breaks
+            // the clause stops at the parameter; a graph gets no such check
+            // (docs/tmt/language.md (head-position clauses)) and a graft
+            // edge is not a site this analysis reports. Seeding a graph from
+            // its own clause would narrow its body on a promise nothing
+            // holds anyone to — so a graph's body starts on the whole
+            // alphabet, and only the static entry-coverage check reads its
+            // clause at all.
+            let believe = world.kind == WorldKind::Routine;
             heads[entry] = Some(
                 world
                     .tapes
                     .iter()
                     .zip(&cards)
-                    .map(|(t, card)| t.enters.unwrap_or_else(|| SymSet::full(*card)))
+                    .map(|(t, card)| match t.enters {
+                        Some(set) if believe => set,
+                        _ => SymSet::full(*card),
+                    })
                     .collect(),
             );
         }
@@ -475,6 +520,29 @@ fn walk_world(
                     // An omitted transition stays in the current state.
                     Transition::Stay { .. } => grew |= flow(&mut heads, si, &post),
                     Transition::Call { span, then, .. } => {
+                        // The callee's EXITS, wired to states of this world:
+                        // control can arrive at one with the head wherever
+                        // the callee's own body left it. That is not the
+                        // callee's `leaves`, which describes the moment it
+                        // RETURNS and says nothing about an exit parameter,
+                        // and no planted check constrains it — so the whole
+                        // alphabet, the same answer a graft's exits get. An
+                        // arg naming a TAPE names no state and is passed
+                        // over.
+                        if let Some(args) = exit_args.get(span) {
+                            for arg in *args {
+                                if let BindingValue::Named { target, .. } = &arg.value {
+                                    grew |= reach(
+                                        &mut heads,
+                                        &mut reached,
+                                        &by_state,
+                                        &by_graft,
+                                        target,
+                                        &full_set,
+                                    );
+                                }
+                            }
+                        }
                         let Some(Continuation::State { name, .. }) = then else {
                             continue;
                         };
@@ -495,7 +563,6 @@ fn walk_world(
         // Tapes and states are separate namespaces, so one name can be both;
         // reading it as both only widens a set, which is the direction this
         // walk is allowed to err in.
-        let full: Vec<SymSet> = cards.iter().map(|c| SymSet::full(*c)).collect();
         for (gi, graft) in world.grafts.iter().enumerate() {
             if !reached[gi] {
                 continue;
@@ -504,7 +571,7 @@ fn walk_world(
                 if let BindingValue::Named { target, .. } = &arg.value
                     && let Some(&exit) = by_state.get(target.as_str())
                 {
-                    grew |= flow(&mut heads, exit, &full);
+                    grew |= flow(&mut heads, exit, &full_set);
                 }
             }
         }

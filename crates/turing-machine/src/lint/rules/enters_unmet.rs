@@ -335,21 +335,20 @@ machine {
         assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
     }
 
-    /// A binding map projects the caller's glyphs into the CALLEE's frame,
-    /// and that frame is the one the message names: `'C'` is a glyph the
-    /// caller's alphabet does not even spell, reached from `'s'` through a
-    /// one-way read pair (which reads exactly like a two-way one).
+    /// The blank is pinned through a CLOSED map, and the message names the
+    /// projected glyphs in the CALLEE's frame: `'C'` is a glyph the caller's
+    /// alphabet does not even spell, reached from `'s'` through a one-way
+    /// read pair (which reads exactly like a two-way one).
     ///
-    /// The alphabets differ in size, so the map is CLOSED: `'q'` and `'r'`
-    /// are holes, and reading either takes the `UnmappedRead` trap rather
-    /// than delivering a glyph to the callee's head — so the callee's `'B'`,
-    /// which only an identity completion could produce, is not reported.
+    /// Every non-blank caller glyph is listed here, on purpose: the hole
+    /// rule therefore has nothing to decide, and this fixture answers for
+    /// the blank pin alone.
     ///
-    /// Mutation: completing an unlisted symbol to its own index regardless
-    /// of the two cardinalities — `'B'` joins the offending list and the
-    /// message changes.
+    /// Mutation: dropping the blank pin, so index 0 falls to the closed
+    /// map's hole rule — `'_'` leaves the offending list and the message
+    /// changes.
     #[test]
-    fn a_binding_map_projects_into_the_callees_alphabet_frame() {
+    fn the_blank_is_pinned_through_a_closed_map() {
         let src = "\
 alphabet wide  { '_', 'p', 'q', 'r', 's' }
 alphabet small { '_', 'A', 'B', 'C' }
@@ -362,7 +361,9 @@ machine {
   tape data: wide;
 
   entry state s {
-    [*] -> call mark(t = data with map { 'p' -> 'A', 's' => 'C' }) then done;
+    [*] -> call mark(
+             t = data with map { 'p' -> 'A', 'q' => 'C', 'r' => 'C', 's' => 'C' }
+           ) then done;
   }
   state done { [*] -> stop; }
 }
@@ -375,23 +376,234 @@ machine {
         );
     }
 
-    /// A state reachable only through a `graft` is still walked: the graft's
-    /// spliced body is not here, so the state it exits into resumes with the
-    /// whole alphabet and its own call site is checked. Without that, every
-    /// state a graft leads to would be unreachable to the analysis and its
-    /// sites silently unchecked — most of a graft-driven program.
+    /// The twin property: under a CLOSED map (the cardinalities differ) an
+    /// unlisted non-blank caller glyph is a HOLE — reading it takes the
+    /// `UnmappedRead` trap rather than delivering a glyph to the callee's
+    /// head — so it is not reported. `'q'`, `'r'` and `'s'` are the holes
+    /// here, and the calling row's cell excludes the blank, so the blank pin
+    /// has nothing to decide and this fixture answers for the hole rule
+    /// alone.
     ///
-    /// Mutation: not flowing into a reached graft's exit states — `hit` is
-    /// never reached, and the finding disappears.
+    /// Mutation: identity-completing an unlisted symbol regardless of the
+    /// two cardinalities — `'q'` and `'r'` become the callee's `'B'` and
+    /// `'C'`, and this silent fixture fires.
+    #[test]
+    fn a_closed_maps_holes_do_not_reach_the_callees_head() {
+        let src = "\
+alphabet wide  { '_', 'p', 'q', 'r', 's' }
+alphabet small { '_', 'A', 'B', 'C' }
+
+routine mark(tape t: small enters { 'A' }) {
+  entry state go { [*] -> write ['A'] return; }
+}
+
+machine {
+  tape data: wide;
+
+  entry state s {
+    ['p'..'s'] -> call mark(t = data with map { 'p' -> 'A' }) then done;
+    [*]        -> stop;
+  }
+  state done { [*] -> stop; }
+}
+";
+        assert!(findings(src).is_empty(), "{:?}", findings(src));
+    }
+
+    /// A row that MOVES the head before calling reaches the callee with the
+    /// head on a cell nothing read, so the calling row's own pattern cell
+    /// proves nothing about it. Here that cell would otherwise prove the
+    /// site safe — `['0']` is inside the callee's declared set — and the
+    /// move is the only reason the site is reported.
+    ///
+    /// Mutation: keeping the pattern cell's set after a move instead of
+    /// widening to the whole alphabet — this fixture goes silent.
+    #[test]
+    fn a_row_that_moves_before_calling_is_reported() {
+        let src = program(
+            PLUS_ONE,
+            "\
+machine {
+  tape data: bits;
+
+  entry state s {
+    ['0'] -> move [>] call plusOne(num = data) then done;
+    [*]   -> stop;
+  }
+  state done { [*] -> stop; }
+}
+",
+        );
+        assert_eq!(
+            findings(&src),
+            vec![
+                "the head may be on '_' here, outside the `enters { '0', '1' }` that `plusOne`'s tape `num` declares"
+            ]
+        );
+        assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
+    }
+
+    /// A state wired as a callee's EXIT resumes with the whole alphabet:
+    /// control arrives there with the head wherever the callee's own body
+    /// left it, which is not what its `leaves` clause describes and what no
+    /// planted check constrains.
+    ///
+    /// The fixture is built so the gap shows on a state the walk ALREADY
+    /// examines rather than on an unreachable one: `won` is reached both by
+    /// `['0'] -> goto won` (which alone would leave it holding `'0'`, inside
+    /// the callee's declared set, and silent) and through `pick`'s `hit`
+    /// exit, which fires from a `['_']` row. Joining the exit path is what
+    /// makes the head's `'_'` visible at `won`'s own call site.
+    ///
+    /// Mutation: not flowing a call's exit arguments — `won` keeps only
+    /// `{'0'}` and this fixture goes silent, with no unreachable state to
+    /// make the loss obvious.
+    #[test]
+    fn a_state_wired_as_a_callees_exit_resumes_unconstrained() {
+        let src = program(
+            &format!(
+                "{PLUS_ONE}
+routine pick(tape t: bits, state hit, state miss) {{
+  entry state look {{
+    ['_'] -> goto hit;
+    ['0'] -> goto miss;
+    ['1'] -> return;
+  }}
+}}
+"
+            ),
+            "\
+machine {
+  tape data: bits;
+
+  entry state s {
+    ['0'] -> goto won;
+    [*]   -> call pick(t = data, hit = won, miss = lost) then done;
+  }
+  state won  { [*] -> call plusOne(num = data) then done; }
+  state lost { [*] -> stop; }
+  state done { [*] -> stop; }
+}
+",
+        );
+        assert_eq!(
+            findings(&src),
+            vec![
+                "the head may be on '_' here, outside the `enters { '0', '1' }` that `plusOne`'s tape `num` declares"
+            ]
+        );
+        assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
+    }
+
+    /// A GRAPH's own `enters` does not seed its body. Nothing enforces a
+    /// graph's clause — no check is planted for one, and a graft edge is not
+    /// a site this rule reports — so believing it would narrow the graph's
+    /// body on a promise nobody is held to. A routine's clause IS believed,
+    /// which the seeding fixture above pins; this is that rule's other half.
+    ///
+    /// Mutation: seeding a graph from its own `enters` the way a routine is
+    /// seeded — this fixture goes silent.
+    #[test]
+    fn a_graphs_own_enters_does_not_seed_its_body() {
+        let src = program(
+            &format!(
+                "{PLUS_ONE}
+export graph bump(tape n: bits enters {{ '0', '1' }}, state done) {{
+  entry state go {{ [*] -> call plusOne(num = n) then done; }}
+}}
+"
+            ),
+            "\
+machine {
+  tape data: bits;
+
+  entry state s { [*] -> move [>] stop; }
+}
+",
+        );
+        assert_eq!(
+            findings(&src),
+            vec![
+                "the head may be on '_' here, outside the `enters { '0', '1' }` that `plusOne`'s tape `num` declares"
+            ]
+        );
+        assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
+    }
+
+    /// A `bind` declaration may carry the callee's EXIT wiring as well as
+    /// its tape binding, and the exits must be followed from there — the
+    /// bind's args ARE the site's args, one list shared by every call of
+    /// that instance. The fixture is the exit fixture above with `pick`
+    /// bound instead of called directly, so `won` is again reached both by
+    /// a `goto` holding `{'0'}` and through the `hit` exit.
+    ///
+    /// Mutation: reading a bind-call's args as empty — the direct-call
+    /// fixtures stay green (they resolve through the routine arm) and this
+    /// one goes silent.
+    #[test]
+    fn a_bind_declarations_exit_wiring_is_followed_too() {
+        let src = program(
+            &format!(
+                "{PLUS_ONE}
+routine pick(tape t: bits, state hit, state miss) {{
+  entry state look {{
+    ['_'] -> goto hit;
+    ['0'] -> goto miss;
+    ['1'] -> return;
+  }}
+}}
+"
+            ),
+            "\
+machine {
+  tape data: bits;
+
+  bind pick(t = data, hit = won, miss = lost) as p;
+
+  entry state s {
+    ['0'] -> goto won;
+    [*]   -> call p() then done;
+  }
+  state won  { [*] -> call plusOne(num = data) then done; }
+  state lost { [*] -> stop; }
+  state done { [*] -> stop; }
+}
+",
+        );
+        assert_eq!(
+            findings(&src),
+            vec![
+                "the head may be on '_' here, outside the `enters { '0', '1' }` that `plusOne`'s tape `num` declares"
+            ]
+        );
+        assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
+    }
+
+    /// A state reachable only through a `graft` is still walked, and it
+    /// resumes with the WHOLE alphabet: the graft's spliced body is not here
+    /// to ask where it left the head. Without the flow, every state a graft
+    /// leads to would be unreachable to the analysis and its sites silently
+    /// unchecked — most of a graft-driven program.
+    ///
+    /// The grafted graph declares `leaves { '0', '1' }`, which its own exit
+    /// rows prove and which would put the head inside `plusOne`'s declared
+    /// set. It is deliberately NOT read: a `leaves` clause on a graph is not
+    /// enforced by any planted check, and this fixture is what makes the
+    /// difference between "the whole alphabet" and "the graph's `leaves`"
+    /// observable at all.
+    ///
+    /// Mutations, each of which makes it silent: not flowing into a reached
+    /// graft's exit states (`hit` is never reached), and narrowing those
+    /// exits to the grafted graph's `leaves`.
     #[test]
     fn a_state_reached_only_through_a_graft_is_still_checked() {
         let src = program(
             &format!(
                 "{PLUS_ONE}
-graph pick(tape n: bits, state yes, state no) {{
+graph pick(tape n: bits leaves {{ '0', '1' }}, state yes, state no) {{
   entry state look {{
     ['1'] -> goto yes;
-    [*]   -> goto no;
+    ['0'] -> goto no;
   }}
 }}
 "
