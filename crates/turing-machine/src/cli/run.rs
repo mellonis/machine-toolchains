@@ -281,16 +281,19 @@ fn render_outcome(outcome: Outcome, map: Option<&MapFile>) -> String {
     }
 }
 
-/// A broken contract, at whichever of two fidelities the image supports.
+/// A broken contract, at whatever fidelity the image supports.
 ///
-/// The trap KIND and the faulting ADDRESS are always there. The ROUTINE
+/// The trap KIND and the faulting ADDRESS are always there. The FUNCTION
 /// comes from the function range, which a map sidecar carries whether or
-/// not the objects were built with `-g`. The TAPE and the CLAUSE live in
-/// the label of the check state the trap fired in, and the SIGNATURE LINE
-/// in the line table — and a linked function's labels and lines are both
-/// empty without `-g` objects (docs/formats.md (map sidecar)), so a build
-/// without debug info reports the reduced message and nothing is guessed
-/// in its place.
+/// not the objects were built with `-g`; it is the function the check
+/// physically sits in, which after inlining is the caller rather than the
+/// routine that declared the clause. The TAPE and the CLAUSE are read back
+/// from the LABEL of the check's own dispatch block, and the SIGNATURE
+/// LINE from the line table — a linked function's labels and lines are
+/// both empty without `-g` objects (docs/formats.md (map sidecar)), and
+/// even with them a block whose label the lowering did not emit leaves
+/// nothing to read. Each part is therefore added only when it is really
+/// there; nothing is guessed in place of a missing one.
 fn render_contract(at: u32, map: Option<&MapFile>) -> String {
     let mut text = format!("contract broken at {at:#010x}");
     let Some(function) = map.and_then(|m| m.functions.iter().find(|f| at >= f.start && at < f.end))

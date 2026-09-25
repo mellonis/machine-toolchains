@@ -124,22 +124,34 @@ fn build(src: &str, level: OptLevel, mech: CallMech, strip_asserts: bool) -> Exe
     .executable
 }
 
-/// Run a one-tape image on `cells` laid at origin 0 with the head at 0.
-fn run(exe: &Executable, cells: &[u8]) -> (Outcome, TapeSnapshot) {
+/// Run an image on one seed per physical tape — each laid at origin 0 with
+/// its head at 0 — and return the outcome with every band's final snapshot.
+fn run(exe: &Executable, seeds: &[&[u8]]) -> (Outcome, Vec<TapeSnapshot>) {
+    assert_eq!(
+        seeds.len(),
+        exe.tape_count as usize,
+        "a case seeds exactly one tape per machine tape"
+    );
     let mut registry = ArchRegistry::new();
     registry.register(Box::new(Tm1::new(exe.tape_count)));
     let machine = Machine::from_executable(exe, &registry).expect("loads");
-    let mut tape = WideTape::from_snapshot(
-        &TapeSnapshot {
-            origin: 0,
-            cells: cells.to_vec(),
-            head: 0,
-            alphabet: None,
-        },
-        exe.alphabet_cardinalities[0],
-    )
-    .expect("the seed fits the tape width");
-    let mut devices: Vec<&mut dyn Tape> = vec![&mut tape];
+    let mut tapes: Vec<WideTape> = seeds
+        .iter()
+        .zip(&exe.alphabet_cardinalities)
+        .map(|(cells, &width)| {
+            WideTape::from_snapshot(
+                &TapeSnapshot {
+                    origin: 0,
+                    cells: cells.to_vec(),
+                    head: 0,
+                    alphabet: None,
+                },
+                width,
+            )
+            .expect("the seed fits the tape width")
+        })
+        .collect();
+    let mut devices: Vec<&mut dyn Tape> = tapes.iter_mut().map(|t| t as &mut dyn Tape).collect();
     let result = machine
         .run_tapes(
             &mut devices,
@@ -153,7 +165,16 @@ fn run(exe: &Executable, cells: &[u8]) -> (Outcome, TapeSnapshot) {
         )
         .expect("run set-up ok");
     drop(devices);
-    (result.outcome, tape.to_snapshot())
+    (
+        result.outcome,
+        tapes.iter().map(WideTape::to_snapshot).collect(),
+    )
+}
+
+/// `run` on a one-tape image, unwrapping the single band.
+fn run_one(exe: &Executable, cells: &[u8]) -> (Outcome, TapeSnapshot) {
+    let (outcome, mut snaps) = run(exe, &[cells]);
+    (outcome, snaps.remove(0))
 }
 
 /// A snapshot's cell at an ABSOLUTE tape coordinate — the total view of the
@@ -203,7 +224,7 @@ fn matrix() -> Vec<(OptLevel, CallMech)> {
 fn an_entry_outside_the_enters_clause_traps() {
     for (level, mech) in matrix() {
         let exe = build(CONTRACTED, level, mech, false);
-        let (outcome, snap) = run(&exe, ENTERS_VIOLATION);
+        let (outcome, snap) = run_one(&exe, ENTERS_VIOLATION);
         assert!(
             matches!(outcome, Outcome::Trapped(Trap::Contract { .. })),
             "{level:?}/{mech}: expected a contract trap, got {outcome:?}"
@@ -223,7 +244,7 @@ fn an_entry_outside_the_enters_clause_traps() {
 fn a_return_outside_the_leaves_clause_traps() {
     for (level, mech) in matrix() {
         let exe = build(CONTRACTED, level, mech, false);
-        let (outcome, snap) = run(&exe, LEAVES_VIOLATION);
+        let (outcome, snap) = run_one(&exe, LEAVES_VIOLATION);
         assert!(
             matches!(outcome, Outcome::Trapped(Trap::Contract { .. })),
             "{level:?}/{mech}: expected a contract trap, got {outcome:?}"
@@ -242,7 +263,7 @@ fn a_return_outside_the_leaves_clause_traps() {
 fn a_kept_contract_runs_to_its_ordinary_stop() {
     for (level, mech) in matrix() {
         let exe = build(CONTRACTED, level, mech, false);
-        let (outcome, snap) = run(&exe, SATISFIED);
+        let (outcome, snap) = run_one(&exe, SATISFIED);
         assert_eq!(outcome, Outcome::Stopped, "{level:?}/{mech}");
         assert_eq!(snap.head, 1, "{level:?}/{mech}");
         assert_nothing_was_written(&snap, SATISFIED);
@@ -256,7 +277,7 @@ fn stripping_the_asserts_restores_the_unchecked_run() {
     for (level, mech) in matrix() {
         let exe = build(CONTRACTED, level, mech, true);
         for seed in [ENTERS_VIOLATION, LEAVES_VIOLATION, SATISFIED] {
-            let (outcome, snap) = run(&exe, seed);
+            let (outcome, snap) = run_one(&exe, seed);
             assert_eq!(outcome, Outcome::Stopped, "{level:?}/{mech} on {seed:?}");
             assert_eq!(snap.head, 1, "{level:?}/{mech} on {seed:?}");
             assert_nothing_was_written(&snap, seed);
@@ -304,16 +325,92 @@ fn a_call_resuming_at_a_return_is_checked_too() {
     for (level, mech) in matrix() {
         let exe = build(THEN_RETURN, level, mech, false);
 
-        let (outcome, snap) = run(&exe, LEAVES_VIOLATION);
+        let (outcome, snap) = run_one(&exe, LEAVES_VIOLATION);
         assert!(
             matches!(outcome, Outcome::Trapped(Trap::Contract { .. })),
             "{level:?}/{mech}: expected a contract trap, got {outcome:?}"
         );
         assert_eq!(snap.head, 1, "{level:?}/{mech}");
 
-        let (outcome, snap) = run(&exe, SATISFIED);
+        let (outcome, snap) = run_one(&exe, SATISFIED);
         assert_eq!(outcome, Outcome::Stopped, "{level:?}/{mech}");
         assert_eq!(snap.head, 1, "{level:?}/{mech}");
+    }
+}
+
+/// TWO tape parameters, with clauses on BOTH — so the `enters` chain has
+/// two links — and the second tape carrying a clause of its own, so a check
+/// state's row has to name the column the clause was declared on rather
+/// than the first one. `p` never moves; `q` moves right once, which leaves
+/// its exit glyph statically unknown and so leaves it to run time.
+const TWO_TAPES: &str = "\
+alphabet sym { '_', 'a', 'b' }
+
+routine pair(tape p: sym enters { '_' }, tape q: sym enters { 'a' } leaves { 'b' }) {
+  entry state go {
+    [*, *] -> move [., >] return;
+  }
+}
+
+machine {
+  tape x: sym;
+  tape y: sym;
+  entry state s { [*, *] -> call pair(p = x, q = y) then done; }
+  state done { [*, *] -> stop; }
+}
+";
+
+/// Each case is `(p's seed, q's seed, the outcome, q's final head)`. `p`'s
+/// head never moves, and neither tape is ever written, so those two facts
+/// are asserted for every case rather than listed per case.
+///
+/// The derivation, from the source alone: the chain reads `p`'s `enters`,
+/// then `q`'s, then the body moves `q` right once, then `q`'s `leaves` is
+/// read on the cell the move landed on.
+///
+/// Two mutations this catches, one per unguarded path:
+/// * a check row naming the FIRST column instead of the declaring tape's —
+///   case 4 then traps on `p`'s blank against `q`'s `enters { 'a' }`
+///   instead of running clean, and case 3 traps before the move rather
+///   than after it, so its `q` head is wrong;
+/// * a chain that plants only one of the clauses — case 1 or case 2 then
+///   runs through, depending on which link is dropped.
+const TWO_TAPE_CASES: &[(&[u8], &[u8], bool, i64)] = &[
+    // `p` enters on 'a', outside `enters { '_' }`: the FIRST link fires,
+    // before `q` is ever read.
+    (&[1], &[1, 2], true, 0),
+    // `p` is fine; `q` enters on 'b', outside `enters { 'a' }`: the SECOND
+    // link fires, still before the move.
+    (&[0], &[2, 2], true, 0),
+    // Both entries fine; the move lands `q` on 'a', outside
+    // `leaves { 'b' }`.
+    (&[0], &[1, 1], true, 1),
+    // The near miss: every clause held.
+    (&[0], &[1, 2], false, 1),
+];
+
+#[test]
+fn a_clause_on_a_second_tape_reads_that_tape() {
+    for (level, mech) in matrix() {
+        let exe = build(TWO_TAPES, level, mech, false);
+        for (i, (p, q, traps, q_head)) in TWO_TAPE_CASES.iter().enumerate() {
+            let (outcome, snaps) = run(&exe, &[p, q]);
+            if *traps {
+                assert!(
+                    matches!(outcome, Outcome::Trapped(Trap::Contract { .. })),
+                    "{level:?}/{mech} case {i}: expected a contract trap, got {outcome:?}"
+                );
+            } else {
+                assert_eq!(outcome, Outcome::Stopped, "{level:?}/{mech} case {i}");
+            }
+            assert_eq!(snaps[0].head, 0, "{level:?}/{mech} case {i}: p's head");
+            assert_eq!(
+                snaps[1].head, *q_head,
+                "{level:?}/{mech} case {i}: q's head"
+            );
+            assert_nothing_was_written(&snaps[0], p);
+            assert_nothing_was_written(&snaps[1], q);
+        }
     }
 }
 
@@ -347,7 +444,7 @@ machine {
 fn an_exit_parameter_is_not_a_leaves_row() {
     for (level, mech) in matrix() {
         let exe = build(EXIT_PARAMETER, level, mech, false);
-        let (outcome, snap) = run(&exe, LEAVES_VIOLATION);
+        let (outcome, snap) = run_one(&exe, LEAVES_VIOLATION);
         assert_eq!(outcome, Outcome::Stopped, "{level:?}/{mech}");
         assert_eq!(snap.head, 1, "{level:?}/{mech}");
         assert_nothing_was_written(&snap, LEAVES_VIOLATION);
@@ -366,14 +463,21 @@ fn an_exit_parameter_is_not_a_leaves_row() {
 /// reason that has nothing to do with this property.
 ///
 /// Mutation this catches: any residue of the clauses in the code, symbol,
-/// relocation, table or bound-call sections of a stripped object. The
-/// `assert_ne` guards the exemption itself — a stripping that also dropped
-/// the published contract turns this test red rather than passing quietly.
+/// relocation, table or bound-call sections of a stripped object. The two
+/// interface assertions guard the exemption itself from both sides — the
+/// positive one is the claim (stripping publishes exactly what an
+/// unstripped build publishes), the negative one is what makes exempting
+/// the section from the byte compare legitimate.
 #[test]
 fn a_stripped_object_is_the_clause_free_object() {
     for level in [OptLevel::O0, OptLevel::O1] {
         let mut stripped = object(CONTRACTED, level, true);
         let plain = object(UNCONTRACTED, level, false);
+        assert_eq!(
+            stripped.interface,
+            object(CONTRACTED, level, false).interface,
+            "{level:?}: stripping the check keeps the published contract"
+        );
         assert_ne!(
             stripped.interface, plain.interface,
             "{level:?}: the declared contract is published either way"
@@ -498,9 +602,9 @@ fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
-/// `tmt build` the contracted source in `dir` (with or without `-g`), seed
-/// a one-band `.tmt`, and return `tmt run`'s stdout.
-fn run_cli(dir: &Path, debug_info: bool, seed: &[u8]) -> String {
+/// `tmt build` the contracted source in `dir` under `flags`, seed a
+/// one-band `.tmt`, and return `tmt run`'s stdout.
+fn run_cli(dir: &Path, flags: &[&str], seed: &[u8]) -> String {
     let src = dir.join("walk.tmc");
     fs::write(&src, CONTRACTED).unwrap();
     let exe = dir.join("walk.tmx");
@@ -510,9 +614,7 @@ fn run_cli(dir: &Path, debug_info: bool, seed: &[u8]) -> String {
         "-o".to_string(),
         exe.to_str().unwrap().to_string(),
     ];
-    if debug_info {
-        build_args.push("-g".to_string());
-    }
+    build_args.extend(flags.iter().map(|f| f.to_string()));
     execute(&build_args).expect("the build succeeds");
 
     let block = TapeBlockFile {
@@ -538,14 +640,19 @@ fn run_cli(dir: &Path, debug_info: bool, seed: &[u8]) -> String {
     out.stdout
 }
 
-/// The `-g` fidelity: the routine, the tape, the clause, and the source
-/// position the clause was declared at. Mutation this catches: rendering
-/// the outcome through the default `Debug` formatting (the reader then
-/// gets `Trapped(Contract { at: 12 })` and nothing else).
+/// The full fidelity — the routine, the tape, the clause, and the source
+/// position the clause was declared at — which needs the check's own
+/// dispatch block to survive as a LABEL in the sidecar. A `-g` build at
+/// `-O0` is where that holds; the next test is the `-O1` build where it
+/// does not, and the claim is deliberately not made here for both.
+///
+/// Mutation this catches: rendering the outcome through the default
+/// `Debug` formatting (the reader then gets `Trapped(Contract { at: 12 })`
+/// and nothing else).
 #[test]
 fn a_debug_build_names_the_routine_the_tape_and_the_clause() {
     let dir = scratch("debug");
-    let stdout = run_cli(&dir, true, LEAVES_VIOLATION);
+    let stdout = run_cli(&dir, &["-g"], LEAVES_VIOLATION);
     let first = stdout.lines().next().expect("an outcome line");
     assert!(first.contains("contract"), "got: {first}");
     assert!(first.contains("walk"), "got: {first}");
@@ -554,6 +661,44 @@ fn a_debug_build_names_the_routine_the_tape_and_the_clause() {
     assert!(
         first.contains(&format!("walk.tmc:{SIGNATURE_LINE}")),
         "the trap maps to the signature line; got: {first}"
+    );
+}
+
+/// The `-O1` degradation, with debug info present throughout. `inline`
+/// splices the check into its caller and `dispatch-select` lowers it to
+/// the two-row branch form, which emits the trap with no dispatch block
+/// ahead of it — so the label that carried the tape and the clause is gone
+/// even though the line table is not. What survives is the kind, the
+/// address, the function the check now physically lives in, and the
+/// signature line.
+///
+/// A recorded limit rather than a defect: the trap itself is correct and
+/// nothing is guessed in the label's place. Keeping a label for the branch
+/// form purely so this message could be richer is a codegen question, not
+/// this check's.
+///
+/// Mutation this catches: resolving the tape and the clause through
+/// anything other than a real label in the sidecar — the same unconditional
+/// resolution the no-debug-info test catches, which panics or renders
+/// nonsense here too.
+#[test]
+fn an_optimized_build_loses_the_tape_and_the_clause() {
+    let dir = scratch("optimized");
+    let stdout = run_cli(&dir, &["-g", "-O1"], LEAVES_VIOLATION);
+    let first = stdout.lines().next().expect("an outcome line");
+    assert!(first.contains("contract"), "got: {first}");
+    assert!(first.contains("0x"), "the faulting address; got: {first}");
+    assert!(
+        first.contains("main"),
+        "the function the check was spliced into; got: {first}"
+    );
+    assert!(
+        first.contains(&format!("walk.tmc:{SIGNATURE_LINE}")),
+        "the line table survives the splice; got: {first}"
+    );
+    assert!(
+        !first.contains("leaves") && !first.contains("enters") && !first.contains("num"),
+        "no label is left to name the tape or the clause; got: {first}"
     );
 }
 
@@ -570,7 +715,7 @@ fn a_debug_build_names_the_routine_the_tape_and_the_clause() {
 #[test]
 fn a_build_without_debug_info_reports_the_reduced_message() {
     let dir = scratch("nodebug");
-    let stdout = run_cli(&dir, false, LEAVES_VIOLATION);
+    let stdout = run_cli(&dir, &[], LEAVES_VIOLATION);
     let first = stdout.lines().next().expect("an outcome line");
     assert!(first.contains("contract"), "got: {first}");
     assert!(first.contains("0x"), "the faulting address; got: {first}");

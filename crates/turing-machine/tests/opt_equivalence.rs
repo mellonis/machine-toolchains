@@ -910,14 +910,24 @@ machine {
 /// shape no other roster program has: a state the SOURCE never wrote,
 /// which every pass must treat as an ordinary one.
 ///
+/// The contracted routine leaves through a CALL's continuation rather than
+/// a `return` row of its own, so the check displaces a `then return` into
+/// a `then goto` — the one rewrite that changes what the `tail_call` pass
+/// can see, and the reason this program is worth a matrix column at all.
+///
 /// Carried here rather than by relaxing the stdlib floor below: the
 /// library compiles with its asserts stripped, so its `-O1` floor is not
 /// the place a contract-bearing program's new slack could show up.
 const HEAD_CONTRACT: &str = "\
 alphabet sym { '_', 'a', 'b' }
+routine step(tape num: sym) {
+  entry state s {
+    [*] -> move [>] return;
+  }
+}
 routine walk(tape num: sym enters { '_' } leaves { 'b' }) {
   entry state go {
-    [*] -> move [>] return;
+    [*] -> call step(num = num) then return;
   }
 }
 machine {

@@ -12,11 +12,15 @@
 //!
 //! **Where they go.** The `enters` chain becomes the world's entry and ends
 //! by going to the state that used to be it, so the check reads the head
-//! before a single body row runs. The `leaves` chain is planted before
-//! every `return` — the rule's own, and a call's `then return`, which is
-//! the same moment — and ends by returning itself. Planting it at the
-//! return rather than at the body rows before it is what makes the check
-//! read the REAL cell: any move the body made has already happened.
+//! before a single body row runs. It therefore fires when a CALL transfers
+//! control in, and only then: the body's own `goto`s back to the state
+//! that used to be the entry keep targeting it directly and run no check,
+//! which is what the clause promises and all it promises. The `leaves`
+//! chain is planted before every `return` — the rule's own, and a call's
+//! `then return`, which is the same moment — and ends by returning itself.
+//! Planting it at the return rather than at the body rows before it is
+//! what makes the check read the REAL cell: any move the body made has
+//! already happened.
 //!
 //! Three shapes deliberately get no `leaves` check, each for a reason the
 //! language already states. `stop`/`halt` end the whole run rather than
@@ -37,6 +41,17 @@
 //! **Opt-in per clause.** A tape without a clause gets no state; a routine
 //! whose tapes declare none is not touched at all, so a module that
 //! declares nothing compiles to the same bytes it always did.
+//!
+//! **What a reader sees when one fires.** A check state becomes an
+//! assembly label and, in a debug build, a label in the map sidecar, which
+//! is where `tmt run` reads the tape and the clause back from. That holds
+//! as long as the check's own per-row dispatch block survives as a label —
+//! true of an unoptimized debug build, and not guaranteed once the
+//! optimizer has run: inlining moves a check into its caller, so the
+//! function named is the caller, and the branch lowering emits the trap
+//! with no block label ahead of it, leaving the trap kind, the address and
+//! the source line but no tape and no clause. The check itself is
+//! unaffected either way; only how much of it can be named is.
 
 use std::collections::HashSet;
 
