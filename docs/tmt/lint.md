@@ -708,6 +708,64 @@ program's observable behavior is unchanged, since the callee was never
 going to resume there anyway. Withheld by the shared comment guard
 (quickfix availability, above) when a comment sits inside the clause.
 
+### enters-unmet
+
+A `call`/`bind` site whose callee declares `enters` on one of its tape
+parameters (`docs/tmt/language.md (head-position clauses)`), where the
+caller's own head-position analysis says the head MAY be sitting on a
+glyph outside that set when control transfers. It finds the commonest
+head-contract mistake before the first run — a `[*]` row in a machine's
+entry state, where nothing has constrained the head yet:
+
+```
+l.tmc:13:26: lint: the head may be on '_' here, outside the `enters { '0', '1' }` that `plusOne`'s tape `num` declares
+```
+
+The analysis is a forward dataflow over "where the head may be", one
+world and one tape at a time. A world's entry state is seeded from the
+world's OWN `enters` clause — the whole alphabet where it declares none,
+which is why a machine's entry state starts unconstrained. A row narrows
+that set by its pattern cell and then carries it forward: a literal write
+pins the head's glyph, an unwritten cell keeps what the pattern matched,
+and a move or a `{expr}` write leaves the whole alphabet, since neither
+says where the head lands. After a `then` the continuation resumes from
+the callee's declared `leaves`, mapped back through the binding — the
+whole alphabet where the callee declares none. The sets union to a
+fixpoint, so the finding covers every path into the row at once, where a
+run's own assert sees only the path it took.
+
+A `graft` is where the analysis is coarsest. Its body is not spliced at
+this stage, so where it leaves the head cannot be known here — and the
+states a graft exits into are reachable only through it. Each of them
+therefore resumes with the whole alphabet, which keeps their own sites
+checked (silence there would hide most of a graft-driven program) at the
+cost of reporting sites a splice-aware answer might clear.
+
+At a site the set is projected forward through the binding's symbol map
+into the callee's own alphabet frame, which is the frame the message's
+glyphs are named in. A caller glyph the map holds out is not reported
+here: it never reaches the callee's head at all — reading it takes the
+`UnmappedRead` trap instead (`docs/tmt/language.md (symbol maps)`).
+
+The answer OVER-approximates, and the message says so: "may be on". A
+row that moves on the bound tape reaches the callee with the head on a
+cell nothing read, so such a site is reported unless the clause happens
+to list the tape's whole alphabet — the honest answer, not a defect. A
+guard row that reads the cell after the move, and calls from there, is
+what makes such a site provable. The authority on what
+a given run actually does is the `enters` assert a debug build plants
+(`docs/tmt/language.md (head-position clauses)`), which is why this is a
+warning and not an error, and why it ships **no quickfix**: the remedy
+may be a wider `enters`, a narrower call site, or a guard row ahead of
+the call, and nothing here can tell which was meant.
+
+Two silences are by design. A callee that declares no `enters` is never
+reported — an absent clause permits every glyph, it is not an empty set.
+And a callee whose `enters` this unit cannot see is left alone: the rule
+reads a routine or graph defined HERE, or one declared in the
+declarations this compile was given (`--extern`, a sibling source, a
+library, the embedded standard library), and nothing else.
+
 ### state-may-trap (opt-in)
 
 A state whose rules leave some input unmatched and that has no

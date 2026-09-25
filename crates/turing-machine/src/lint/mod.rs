@@ -184,6 +184,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
         "unreachable-continuation",
         rules::unreachable_continuation::check,
     ),
+    ("enters-unmet", rules::enters_unmet::check),
 ];
 
 /// The opt-in rule table: off by default, run only when `--warn` names the

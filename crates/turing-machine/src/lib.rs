@@ -17,6 +17,7 @@ mod declarations;
 pub mod expand;
 pub mod fmt;
 pub(crate) mod footprint;
+pub(crate) mod head_flow;
 mod header;
 pub mod ir;
 pub mod lexer;
