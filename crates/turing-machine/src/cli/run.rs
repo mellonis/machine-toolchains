@@ -13,7 +13,7 @@ use mtc_core::formats::tapeblock::TapeBlockFile;
 use mtc_core::linker::MapFile;
 use mtc_core::vm::{
     ArchRegistry, DebugEvent, Machine, Outcome, PauseCause, RunLimits, RunOptions, RunStats, Tape,
-    WideTape,
+    Trap, WideTape,
 };
 
 use crate::arch::Tm1;
@@ -217,7 +217,7 @@ pub(super) fn execute_run(
     drop(devices);
 
     let mut stdout = String::new();
-    let _ = writeln!(stdout, "outcome: {outcome:?}");
+    let _ = writeln!(stdout, "outcome: {}", render_outcome(outcome, map.as_ref()));
     let _ = writeln!(
         stdout,
         "steps {}, core tacts {}, stall tacts {} (total {})",
@@ -267,6 +267,101 @@ pub(super) fn execute_run(
         stderr: String::new(), // trace streams straight to trace_out, not buffered here
         code,
     })
+}
+
+/// The `outcome:` line's text. Every outcome but one renders as the plain
+/// `Outcome` debug form it always did; a broken contract gets a rendering of
+/// its own, because the machine's own vocabulary ("a declared contract was
+/// broken at 0x…") names neither the declaration nor who made it, and both
+/// are recoverable here — in the CLI, where every byte of output belongs.
+fn render_outcome(outcome: Outcome, map: Option<&MapFile>) -> String {
+    match outcome {
+        Outcome::Trapped(Trap::Contract { at }) => render_contract(at, map),
+        other => format!("{other:?}"),
+    }
+}
+
+/// A broken contract, at whichever of two fidelities the image supports.
+///
+/// The trap KIND and the faulting ADDRESS are always there. The ROUTINE
+/// comes from the function range, which a map sidecar carries whether or
+/// not the objects were built with `-g`. The TAPE and the CLAUSE live in
+/// the label of the check state the trap fired in, and the SIGNATURE LINE
+/// in the line table — and a linked function's labels and lines are both
+/// empty without `-g` objects (docs/formats.md (map sidecar)), so a build
+/// without debug info reports the reduced message and nothing is guessed
+/// in its place.
+fn render_contract(at: u32, map: Option<&MapFile>) -> String {
+    let mut text = format!("contract broken at {at:#010x}");
+    let Some(function) = map.and_then(|m| m.functions.iter().find(|f| at >= f.start && at < f.end))
+    else {
+        return text;
+    };
+    let _ = write!(text, " in `{}`", function.name);
+    if let Some((clause, tape)) = label_at(&function.labels, at).and_then(check_label) {
+        let _ = write!(text, ": tape `{tape}` broke its `{clause}` clause");
+    }
+    if let Some(line) = line_at(&function.lines, at) {
+        match &function.source {
+            Some(source) => {
+                let _ = write!(text, " ({source}:{line})");
+            }
+            None => {
+                let _ = write!(text, " (line {line})");
+            }
+        }
+    }
+    text
+}
+
+/// The label whose address is closest at or before `at` — the faulting
+/// instruction's own block, since every per-row dispatch block prints a
+/// label. The two lookups are written out rather than shared: a label entry
+/// is `(name, address)` and a line entry `(address, line)`, and one generic
+/// helper over "a pair ending in an address" would silently read the line
+/// table's ADDRESS as its payload.
+fn label_at(labels: &[(String, u32)], at: u32) -> Option<&str> {
+    labels
+        .iter()
+        .filter(|(_, address)| *address <= at)
+        .max_by_key(|(_, address)| *address)
+        .map(|(label, _)| label.as_str())
+}
+
+/// The source line of the entry closest at or before `at`.
+fn line_at(lines: &[(u32, u32)], at: u32) -> Option<u32> {
+    lines
+        .iter()
+        .filter(|(address, _)| *address <= at)
+        .max_by_key(|(address, _)| *address)
+        .map(|(_, line)| *line)
+}
+
+/// The clause and tape a head-contract check encodes in its state name —
+/// `enters_<tape>` / `leaves_<tape>`, reaching the sidecar as the label of
+/// one of that state's per-row dispatch blocks (`<state>__<row>`).
+///
+/// Best-effort by construction, and deliberately so. The crate has no
+/// reserved state-name namespace: a synthesized name that collides with a
+/// source one is the name that gets renamed, so a hand-written state
+/// called `leaves_num` decodes here as a check. Every miss — and every
+/// label a later renaming has made undecodable — falls back to the reduced
+/// message, the same text a build without debug info gets.
+fn check_label(label: &str) -> Option<(&'static str, &str)> {
+    let state = match label.rsplit_once("__") {
+        Some((head, row)) if !row.is_empty() && row.chars().all(|c| c.is_ascii_digit()) => head,
+        _ => label,
+    };
+    for clause in ["enters", "leaves"] {
+        if let Some(tape) = state
+            .strip_prefix(clause)
+            .and_then(|rest| rest.strip_prefix('_'))
+            && !tape.is_empty()
+        {
+            return Some((clause, tape));
+        }
+    }
+    None
 }
 
 /// Traced multi-tape run: DebugSession stepping with one listing line per

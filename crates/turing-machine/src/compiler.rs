@@ -3306,10 +3306,12 @@ pub struct CompileOptions {
     /// `--strip-debugger`: drop `brk` at codegen. The optimizer runs BEFORE
     /// stripping, so the `brk` barrier always holds.
     pub strip_debugger: bool,
-    /// `--strip-asserts`: a compiler decision, so it never reaches
+    /// `--strip-asserts`: drop the compiler-planted contract checks. A
+    /// compiler decision, so it never reaches
     /// [`crate::codegen::CodegenOptions`] the way `strip_debugger` does —
-    /// there is nothing here for codegen to drop yet, since no contract
-    /// check synthesizes a raisable state this option would strip.
+    /// the check states are simply never built (`crate::contracts::head`),
+    /// so a stripped build's own IR carries none and codegen has nothing
+    /// to filter.
     pub strip_asserts: bool,
     /// `-O0` (default) or `-O1` (runs the optimizer pass pipeline).
     pub opt_level: OptLevel,
@@ -3440,6 +3442,18 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     drop_unreachable_rules(&mut analysis.resolved, &mut unreachable_diags);
     let expanded = crate::expand::expand(&analysis.resolved, &options.externals)?;
     let (mut ir, ir_warnings) = lower(&expanded, &analysis.resolved, &options.externals)?;
+
+    // A debug build plants the head-position checks the static analysis
+    // could neither prove nor disprove (docs/tmt/language.md (head-position
+    // clauses)). Gated HERE rather than later in the pipeline: stripping is
+    // a compiler decision, so a stripped build never builds the states at
+    // all and its IR carries no trace of them — nothing downstream filters
+    // anything out. Before `validate_ir`, so the planted states are held to
+    // the same invariants every other world is, and before the optimizer,
+    // so they are ordinary states every pass sees.
+    if !options.strip_asserts {
+        crate::contracts::head::synthesize(&mut ir);
+    }
 
     // Validate every compiler-produced world before codegen relies on the
     // invariants (dense ids, in-bounds indices, arity-wide rows, traps only on

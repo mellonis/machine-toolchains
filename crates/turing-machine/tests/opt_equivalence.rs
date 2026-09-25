@@ -902,6 +902,30 @@ machine {
   state done { [*, *] -> halt; }
 }";
 
+/// A routine whose tape parameter declares BOTH head-position clauses, so
+/// a debug build plants a check state at the entry and another before the
+/// return (docs/tmt/language.md (head-position clauses)). The whole matrix
+/// has to agree on which seeds keep the promise and which break it — and
+/// the `leaves` check, standing between the body and the `return`, is a
+/// shape no other roster program has: a state the SOURCE never wrote,
+/// which every pass must treat as an ordinary one.
+///
+/// Carried here rather than by relaxing the stdlib floor below: the
+/// library compiles with its asserts stripped, so its `-O1` floor is not
+/// the place a contract-bearing program's new slack could show up.
+const HEAD_CONTRACT: &str = "\
+alphabet sym { '_', 'a', 'b' }
+routine walk(tape num: sym enters { '_' } leaves { 'b' }) {
+  entry state go {
+    [*] -> move [>] return;
+  }
+}
+machine {
+  tape t: sym;
+  entry state s { [*] -> call walk(num = t) then done; }
+  state done { [*] -> stop; }
+}";
+
 #[test]
 fn inline_arity_reducing_projection_is_equivalent_across_the_matrix() {
     // Three cases across the full 2×3 matrix. The last two carry data on the
@@ -1242,14 +1266,22 @@ fn everything_matrix_is_green() {
             EXIT_FACADE.to_string(),
             vec![&[(&[], 0), (&[], 0)], &[(&[2], 0), (&[], 0)]],
         ),
+        (
+            // All three outcomes of a planted head-contract check, seeded:
+            // the entry glyph outside `enters`, the leaving glyph outside
+            // `leaves`, and a seed that keeps both promises.
+            "head_contract",
+            HEAD_CONTRACT.to_string(),
+            vec![&[(&[1], 0)], &[(&[0, 1], 0)], &[(&[0, 2], 0)]],
+        ),
     ];
     assert_eq!(
         roster.len(),
-        15,
+        16,
         "the single-source pass-exercise roster: 6 Appendix A + nested graft + \
-         8 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
-         dead-rows, inline ×2, the brk barrier, the exit-bearing call and \
-         the facade that forwards its exits)"
+         9 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
+         dead-rows, inline ×2, the brk barrier, the exit-bearing call, the \
+         facade that forwards its exits, and the planted head-contract checks)"
     );
     for (label, src, cases) in &roster {
         assert!(!src.is_empty(), "roster program `{label}` has a source");

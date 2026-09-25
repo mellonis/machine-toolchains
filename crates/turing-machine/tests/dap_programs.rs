@@ -2744,3 +2744,68 @@ fn frame_in_a_function_with_no_mapped_lines_stays_sourceless() {
          (DAP: line 0 is only legal sourceless), got: {frame}"
     );
 }
+
+/// A routine whose tape parameter declares where the head may be when a
+/// call enters it, seeded so the promise is false — the one trap kind the
+/// program itself plants rather than the machine faulting.
+const HEAD_CONTRACT_TMC: &str = "\
+alphabet sym { '_', 'a', 'b' }
+
+routine walk(tape num: sym enters { '_' }) {
+  entry state go {
+    [*] -> move [>] return;
+  }
+}
+
+machine {
+  tape t: sym;
+  entry state s { [*] -> call walk(num = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+/// A broken contract stops under its OWN reason rather than the
+/// `"exception"` every machine fault shares: it is the program's
+/// declaration failing, not the machine faulting, and a client can offer a
+/// different affordance for it. The description stays the trap's own
+/// `Display`.
+///
+/// Mutation this catches: forwarding the literal `"exception"` for every
+/// trap kind, which is what every other trap in this file still gets.
+#[test]
+fn a_broken_head_contract_stops_with_the_contract_reason() {
+    let dir = scratch("contract");
+    let program = write_tmc_debug(&dir, "contract", HEAD_CONTRACT_TMC);
+    // Seeded on `'a'`, which the `enters` clause does not name.
+    let tape = write_one_tape_block(&dir, "contract", 3, 1);
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, false), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    adapter.handle("continue", &Value::Null, &mut out).unwrap();
+
+    let events = drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Stopped);
+    match events.as_slice() {
+        [
+            AdapterEvent::Stopped {
+                reason,
+                description,
+            },
+        ] => {
+            assert_eq!(*reason, "contract");
+            assert!(
+                description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("contract")),
+                "got: {description:?}"
+            );
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
+}

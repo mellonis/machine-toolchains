@@ -1503,7 +1503,14 @@ impl Forwarders {
 /// returning: `base`, then `base_1`, `base_2`, … Mirrors codegen's own
 /// label minting, and keeps the result a plain identifier so it stays a
 /// legal assembly label.
-fn fresh_state_name(used: &mut HashSet<String>, base: &str) -> String {
+///
+/// The ONE freshening mechanism for a synthesized state name — the
+/// forwarders above and the head-contract checks (`contracts::head`) both
+/// mint through it. It renames the SYNTHESIZED name on a collision, never
+/// the source's: there is no reserved state-name namespace in this crate,
+/// and a user state that happens to take a name a later synthesis wanted is
+/// not an error.
+pub(crate) fn fresh_state_name(used: &mut HashSet<String>, base: &str) -> String {
     if used.insert(base.to_string()) {
         return base.to_string();
     }

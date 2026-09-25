@@ -149,7 +149,7 @@ use mtc_core::formats::{ARCH_TM1, PROFILE_BASE, PROFILE_FRAMES};
 use mtc_core::linemap::LineIndex;
 use mtc_core::linker::MapFile;
 use mtc_core::vm::{
-    ArchRegistry, DebugEvent, DebugSession, Machine, Outcome, PauseCause, RunOptions, Tape,
+    ArchRegistry, DebugEvent, DebugSession, Machine, Outcome, PauseCause, RunOptions, Tape, Trap,
     WideTape,
 };
 
@@ -213,10 +213,26 @@ enum StopWhen {
     DepthAtMost(usize),
 }
 
+/// The DAP stop reason a trap is reported under. Every kind the machine can
+/// fault with is an `"exception"`; a broken contract is the one divergence,
+/// because it is the PROGRAM's own declaration turning out to be false
+/// rather than the machine faulting, and a client can offer its own
+/// affordance for that. It reads the trap KIND alone, so it holds in a
+/// build with no debug info — only the source location the client then
+/// shows degrades. The `description` stays `Trap`'s own `Display` either
+/// way.
+fn stop_reason(trap: Trap) -> &'static str {
+    match trap {
+        Trap::Contract { .. } => "contract",
+        _ => "exception",
+    }
+}
+
 /// Every `DebugEvent` shape that is NOT a bare `Step` pause, converted to a
 /// stepping outcome. Mirrors `PmDapAdapter::nonstep_outcome` exactly — the
 /// underlying `DebugEvent`/`PauseCause` types are shared, arch-agnostic
-/// core types.
+/// core types, and the one place the two adapters differ is the contract
+/// stop reason above, which PM-1 has no way to raise.
 fn nonstep_outcome(event: DebugEvent) -> Option<StepOutcome> {
     match event {
         DebugEvent::Paused(PauseCause::Step) => None,
@@ -228,7 +244,7 @@ fn nonstep_outcome(event: DebugEvent) -> Option<StepOutcome> {
             Some("debugger statement".to_string()),
         )),
         DebugEvent::Paused(PauseCause::Trap(trap)) => {
-            Some(StepOutcome::Stop("exception", Some(trap.to_string())))
+            Some(StepOutcome::Stop(stop_reason(trap), Some(trap.to_string())))
         }
         DebugEvent::Paused(PauseCause::Manual) => Some(StepOutcome::Stop("step", None)),
         DebugEvent::Finished(outcome) => Some(StepOutcome::Finished(outcome)),
@@ -1613,7 +1629,7 @@ impl DebugAdapter for TmDapAdapter {
         match event {
             DebugEvent::Paused(PauseCause::Manual) => {}
             DebugEvent::Paused(PauseCause::Trap(trap)) => {
-                self.push_stopped(out, "exception", Some(trap.to_string()));
+                self.push_stopped(out, stop_reason(trap), Some(trap.to_string()));
                 self.run_state = RunState::Stopped;
             }
             DebugEvent::Paused(PauseCause::Breakpoint(_)) => {

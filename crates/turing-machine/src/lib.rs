@@ -11,6 +11,7 @@ pub mod codegen;
 pub mod compiler;
 pub mod completions;
 mod config;
+pub(crate) mod contracts;
 pub mod dap;
 mod declarations;
 pub mod expand;
