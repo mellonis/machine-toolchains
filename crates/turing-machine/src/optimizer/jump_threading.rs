@@ -116,7 +116,8 @@ pub fn run(w: &mut IrWorld) -> u32 {
                     | IrTransition::Stop
                     | IrTransition::Halt
                     | IrTransition::TrapRead
-                    | IrTransition::TrapWrite => {}
+                    | IrTransition::TrapWrite
+                    | IrTransition::TrapContract => {}
                 }
             }
         }

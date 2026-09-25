@@ -248,7 +248,8 @@ fn compute_inbound(w: &IrWorld) -> HashMap<u32, Vec<u32>> {
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
+                | IrTransition::TrapWrite
+                | IrTransition::TrapContract => {}
             }
         }
     }

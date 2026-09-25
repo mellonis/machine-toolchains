@@ -273,8 +273,9 @@ tmt: unknown IR stage `after:dead_rows` (lowered | final | after:inline | after:
 In the rendered graphs one node is one **state**, not a block: `S<id>`
 is its dense id and the quoted text is its source name. Round nodes are
 shared terminal pseudo-nodes — `stp`, `hlt`, `ret`, `tail`, and
-`trap #0` / `trap #1` for the two synthesized trap kinds — declared once
-each and reused, so all of a world's control flow ends somewhere
+`trap #0` / `trap #1` / `trap #2` for the three synthesized trap
+kinds — declared once each and reused, so all of a world's control
+flow ends somewhere
 visible. Every edge is one match row, labelled with a compact summary of
 it: the match pattern in `[…]`, then the write vector as `w[…]` where
 the row writes and the move vector as `m[…]` where it moves, with `brk `

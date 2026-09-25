@@ -132,7 +132,7 @@ layout plus patching. Twenty mnemonics:
 | `0x0D` | `ent` | — | function landing pad; executes as a no-op |
 | `0x0E` | `brk` | — | debugger break |
 | `0x0F` | `mov` | move vector | move one step per tape (`<` left, `>` right, `.` stay) |
-| `0x11` | `trap` | `#kind` | raise a typed trap: `#0` unmapped-read, `#1` unmapped-write |
+| `0x11` | `trap` | `#kind` | raise a typed trap: `#0` unmapped-read, `#1` unmapped-write, `#2` broken contract |
 | `0x12` | `wrmv` | write + move vectors | fused write-then-move: all writes, then all moves |
 | `0x13` | `call.m` | framed call | call a routine and activate a frame for it |
 | `0x14` | `retx` | `#k` | multi-exit return — leave the active frame through exit `k` |
@@ -315,27 +315,27 @@ with no frame active, traps `ExitOutOfRange`.
 ### Explicit traps
 
 `trap #kind` raises a typed trap directly: `#0` is unmapped-read, `#1`
-is unmapped-write. Numeric kinds leave room for named kinds later
-without a grammar break; any other kind is a malformed operand.
+is unmapped-write, `#2` is a broken contract. Numeric kinds leave room
+for named kinds later without a grammar break; any other kind is a
+malformed operand.
 
-The instruction exists so a *statically* known map hole costs nothing at
+The first two exist so a *statically* known map hole costs nothing at
 run time. Where the frames profile discovers a hole dynamically by
 crossing a sentinel in the descriptor, a stamped copy of the same
 routine knows at link time that a symbol has no image and can branch
 straight to a `trap` stub — and both raise the same kind, which is what
 keeps the mechanisms below interchangeable.
 
-The `.tmc` compiler emits one more `trap`, for a reason that has nothing
-to do with maps: a `call` written without a continuation — legal only
-against a callee the source believed could never return
-(`docs/tmt/language.md (routines)`) — is followed by `trap #0`. An honest
-program never reaches it. A program whose belief was wrong, because the
-declaration it trusted did not match the linked body, stops there in a
-controlled way instead of falling through into whatever the linker placed
-next. `#0` is not a claim that a read failed: the dialect's `trap` can
-name only the map-hole pair, neither of which fits "control reached code
-the program declared unreachable", and `#0` is the one used for every
-such synthesized stop.
+`#2` says something else entirely: a claim the program made about
+itself was false where a compiler-planted check tested it. The `.tmc`
+compiler emits one for a `call` written without a continuation — legal
+only against a callee the source believed could never return
+(`docs/tmt/language.md (routines)`). An honest program never reaches
+that trap. A program whose belief was wrong, because the declaration it
+trusted did not match the linked body, stops there in a controlled way
+instead of falling through into whatever the linker placed next, and
+the kind reports the broken declaration rather than a map fault that
+never happened.
 
 ## Call mechanisms
 
@@ -445,7 +445,7 @@ the full taxonomy):
 |---|---|
 | `InvalidOpcode` | `0x00`, the `0x10` gap, or any byte the mnemonic table does not name |
 | `CodeOutOfBounds` | a jump, call target, or fetch landed outside the code image |
-| `BadOperand` | a malformed operand: a `wr`/`mov`/`wrmv` vector that is empty, over 16 wide, or mismatched between the two `wrmv` groups; a write payload above `0x7F` or a move code above `>`; a `trap` kind other than 0 or 1; a virtual tape index past the active frame's arity; a `call.m` site past the compose table's columns |
+| `BadOperand` | a malformed operand: a `wr`/`mov`/`wrmv` vector that is empty, over 16 wide, or mismatched between the two `wrmv` groups; a write payload above `0x7F` or a move code above `>`; a `trap` kind other than 0, 1, or 2; a virtual tape index past the active frame's arity; a `call.m` site past the compose table's columns |
 | `CallTargetNotEntry` | `call`, `call.s`, or `call.m` targeted a byte that is not `ent` |
 | `StackOverflow` / `StackUnderflow` | a call on a full return stack; a return on an empty one |
 | `StepLimit` / `TactLimit` | the `tmt run --max-steps` / `--max-tacts` budget was exceeded |
@@ -454,6 +454,7 @@ the full taxonomy):
 | `TableOutOfBounds` | a match walk or descriptor load ran past the table ROM, or a table header is malformed |
 | `DispatchOutOfRange` | MR indexed past the dispatch table's entries |
 | `UnmappedRead` / `UnmappedWrite` | a crossed map hole under a frame, or an explicit `trap #0` / `trap #1` |
+| `Contract` | an explicit `trap #2` — a check reached the declaration it tested was false, such as a callee declared never to return that returned |
 | `ExitOutOfRange` | `retx #k` named an exit the active frame lacks, or fired with no frame active |
 | `ProfileViolation` | `call.m` or `retx` ran on a base-profile image |
 

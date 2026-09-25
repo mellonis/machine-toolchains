@@ -332,8 +332,9 @@ pub enum IrMove {
 }
 
 /// A row's control transfer. `Goto` stays in-world; `CallThen` crosses to a
-/// routine and resumes at `then`; the terminators end the run; the two traps
-/// are the graft-hole failure kinds (`trap #0` / `trap #1`).
+/// routine and resumes at `then`; the terminators end the run; two of the
+/// traps are the graft-hole failure kinds (`trap #0` / `trap #1`) and the
+/// third is the broken-contract kind (`trap #2`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IrTransition {
@@ -363,7 +364,7 @@ pub enum IrTransition {
         /// (`compiler::CompileErrorKind::ThenRequired` refuses every other
         /// omission), so control is never MEANT to come back to resume one
         /// (docs/tmt/language.md (reuse)). Codegen still emits a
-        /// synthesized `trap #0` there rather than nothing: an honest
+        /// synthesized `trap #2` there rather than nothing: an honest
         /// program never reaches it, but a callee whose declared
         /// `noreturn` turns out to be a lie (a header, or a shadowed
         /// definition) would otherwise fall through into whatever the
@@ -399,6 +400,11 @@ pub enum IrTransition {
     TrapRead,
     /// A synthesized unmapped-write trap (`trap #1`).
     TrapWrite,
+    /// A synthesized contract trap (`trap #2`): a check the compiler
+    /// planted for something the source DECLARED about itself found the
+    /// declaration false. Unlike the two above it says nothing about a
+    /// map — the failure is the broken promise itself.
+    TrapContract,
 }
 
 /// A `call … then` resume point: a same-world state (its id), a terminator,
@@ -612,6 +618,10 @@ impl IrWorld {
                     IrTransition::TrapWrite => {
                         declare(&mut out, "T_trap1", "trap #1", &mut terms);
                         let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_trap1", st.id);
+                    }
+                    IrTransition::TrapContract => {
+                        declare(&mut out, "T_trap2", "trap #2", &mut terms);
+                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_trap2", st.id);
                     }
                 }
             }
@@ -1819,7 +1829,8 @@ fn unreachable_state_warnings(world: &IrWorld, ew: &ExpandedWorld, warnings: &mu
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
+                | IrTransition::TrapWrite
+                | IrTransition::TrapContract => {}
             }
         }
     }
@@ -1971,7 +1982,7 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
             }
             let is_trap = matches!(
                 r.transition,
-                IrTransition::TrapRead | IrTransition::TrapWrite
+                IrTransition::TrapRead | IrTransition::TrapWrite | IrTransition::TrapContract
             );
             if is_trap && !r.synthesized {
                 return Err(format!(
@@ -2056,7 +2067,8 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
+                | IrTransition::TrapWrite
+                | IrTransition::TrapContract => {}
             }
         }
     }
@@ -2180,16 +2192,19 @@ machine {
     /// glyph-labelled map pair, a SECOND binding entry that is
     /// `map_written: true` with an EMPTY `pairs` list — the one shape
     /// where the field carries the whole meaning, since a pair-bearing
-    /// entry is written by definition either way — and, on the routine
+    /// entry is written by definition either way — on the routine
     /// world's own tape, a declared `enters`/`leaves` pair plus `opaque:
-    /// true`. Round-trips unchanged. Mutation: `#[serde(skip_serializing)]`
+    /// true`, and the contract terminal, whose whole wire form is its
+    /// tag. Round-trips unchanged. Mutation: `#[serde(skip_serializing)]`
     /// on `IrTapeBinding.param` (or on `map_written`) drops it from the
     /// wire form, so the compare goes red — the second entry is what
     /// makes the `map_written` mutation observable at all, since the
     /// first entry's own `map_written: true` is otherwise redundant with
     /// its non-empty `pairs`; the same `#[serde(skip_serializing)]`
     /// mutation on `IrTape::enters`/`::leaves`/`::opaque` drops each of
-    /// those from the wire form the identical way.
+    /// those from the wire form the identical way, and renaming the
+    /// contract terminal's `#[serde]` tag makes its row fail to read
+    /// back.
     #[test]
     fn v4_documents_round_trip() {
         let ir = IrProgram {
@@ -2276,6 +2291,19 @@ machine {
                                 synthesized: false,
                                 direct: false,
                                 line: 3,
+                            },
+                            // The contract terminal — a synthesized row like
+                            // every trap row, and the only transition whose
+                            // wire form this document would otherwise miss.
+                            IrRule {
+                                pattern: vec![IrCell::Wildcard],
+                                write: None,
+                                moves: None,
+                                debugger: false,
+                                transition: IrTransition::TrapContract,
+                                synthesized: true,
+                                direct: false,
+                                line: 4,
                             },
                         ],
                         dispatch: IrDispatch::Table,
@@ -3186,6 +3214,58 @@ machine {
         assert!(mer.contains("-->|"), "{mer}");
         // The `stop` row routes to the shared terminal node.
         assert!(mer.contains("T_stp"), "{mer}");
+    }
+
+    /// Each trap kind is its own terminal node: a graph that folded the
+    /// contract trap onto a map-hole terminal would show a reader a
+    /// failure that cannot happen at that row. Nothing lowers to the
+    /// contract terminal yet, so the world is built by hand.
+    ///
+    /// Mutation: render `TrapContract` through `T_trap0` (the
+    /// unmapped-read terminal) and the `trap #2` node is gone.
+    #[test]
+    fn to_mermaid_gives_the_contract_trap_its_own_terminal() {
+        let w = IrWorld {
+            name: "main".into(),
+            kind: IrWorldKind::Machine,
+            arity: 1,
+            tapes: vec![IrTape {
+                name: "t".into(),
+                alphabet: "al".into(),
+                cardinality: 2,
+                volatile: false,
+                glyphs: vec!["_".into(), "a".into()],
+                writes: None,
+                enters: None,
+                leaves: None,
+                opaque: false,
+            }],
+            entry: 0,
+            states: vec![IrState {
+                id: 0,
+                name: "s".into(),
+                line: 1,
+                rules: vec![IrRule {
+                    pattern: vec![IrCell::Wildcard],
+                    write: None,
+                    moves: None,
+                    debugger: false,
+                    transition: IrTransition::TrapContract,
+                    synthesized: true,
+                    direct: false,
+                    line: 1,
+                }],
+                dispatch: IrDispatch::Table,
+            }],
+            local: false,
+            line: 1,
+            exits: 0,
+            returns: true,
+        };
+        let mer = w.to_mermaid();
+        assert!(mer.contains("T_trap2((\"trap #2\"))"), "{mer}");
+        assert!(mer.contains("| T_trap2"), "{mer}");
+        assert!(!mer.contains("T_trap0"), "{mer}");
     }
 
     /// The graph shows every way control leaves a call: one edge per

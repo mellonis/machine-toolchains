@@ -373,7 +373,8 @@ pub(crate) fn infer_ir(program: &IrProgram) -> FootprintTable {
                         | IrTransition::Stop
                         | IrTransition::Halt
                         | IrTransition::TrapRead
-                        | IrTransition::TrapWrite => continue,
+                        | IrTransition::TrapWrite
+                        | IrTransition::TrapContract => continue,
                     };
                     let contribution =
                         call_contribution(program, &by_name, &sets, wi, target, binding);

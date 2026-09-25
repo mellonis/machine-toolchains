@@ -1356,17 +1356,18 @@ machine {
 }
 ";
 
-/// A tail-position call prints a synthesized `trap #0` right after it,
+/// A tail-position call prints a synthesized `trap #2` right after it,
 /// never `ret`, `retx`, `stp`, `hlt`, or `jmp` — the resume shapes a
 /// WRITTEN `then` would print. An honest program never reaches this
 /// trap (the callee never returns), but it turns a LYING `noreturn`
 /// (a callee that returns anyway) into a controlled stop instead of
-/// falling through into whatever the linker placed next
+/// falling through into whatever the linker placed next, and the kind
+/// names the broken declaration rather than a map hole
 /// (docs/tmt/isa.md (explicit traps)).
 ///
 /// Mutation: falling back to some default resume `Then` (e.g. always
 /// synthesizing `stp`) when `IrTransition::CallThen.then` is `None`;
-/// the line right after `call` would then be `stp` instead of `trap #0`.
+/// the line right after `call` would then be `stp` instead of the trap.
 #[test]
 fn an_exit_bearing_tail_call_prints_a_trap() {
     let tma = assembly(NORETURN_TAIL, OptLevel::O0);
@@ -1377,7 +1378,7 @@ fn an_exit_bearing_tail_call_prints_a_trap() {
         .map(|l| l.trim())
         .unwrap_or_else(|| panic!("no line after the call:\n{tma}"));
     assert_eq!(
-        after_call, "trap    #0",
+        after_call, "trap    #2",
         "the tail call carries no safety trap:\n{tma}"
     );
 }
@@ -1467,14 +1468,18 @@ machine {
 /// LINKED definition actually `return`s — is a run-time TRAP under every
 /// call mechanism, never a silent `Stopped` with execution wandering into
 /// whatever the linker placed after the call. This is the whole point of
-/// the synthesized `trap #0` codegen now emits for a tail-position call:
+/// the synthesized `trap #2` codegen now emits for a tail-position call:
 /// without it, the callee's `ret` lands on the caller's own next
 /// instruction (or, with no instruction of its own to fall into, whatever
-/// code the linker placed physically next) and runs on silently.
+/// code the linker placed physically next) and runs on silently. The
+/// KIND is checked, not just the fact of a trap: a callee that returned
+/// after declaring it never would is a broken contract, and reporting it
+/// as a map fault would send a reader looking at the binding.
 ///
-/// Mutation: reverting `codegen.rs`'s `Term::Call { then: None, .. }`
-/// emission from `trap #0` back to nothing — the run ends `Stopped` with
-/// exit code 0 instead of trapping, under every mechanism.
+/// Mutation: emit the trap with any other kind — or revert
+/// `codegen.rs`'s `Term::Call { then: None, .. }` emission to nothing,
+/// which ends the run `Stopped` with exit code 0 — under every
+/// mechanism.
 #[test]
 fn a_lying_noreturn_header_traps_instead_of_falling_through() {
     let dir = scratch("lying_noreturn");
@@ -1524,8 +1529,8 @@ fn a_lying_noreturn_header_traps_instead_of_falling_through() {
         .executable;
         let (outcome, _) = run_image(&exe, &[2]);
         assert!(
-            matches!(outcome, Outcome::Trapped(Trap::UnmappedRead { .. })),
-            "under {mech} a lying `noreturn` must trap with UnmappedRead, not {outcome:?}"
+            matches!(outcome, Outcome::Trapped(Trap::Contract { .. })),
+            "under {mech} a lying `noreturn` must trap on the broken contract, not {outcome:?}"
         );
     }
 }
@@ -1548,14 +1553,14 @@ export routine liar(tape t: ab writes {}) {
 /// `tmt link` CLI rather than the library entry point, so the RENDERED
 /// warning text is observable. The caller's header trusts `liar`'s
 /// `noreturn` and omits `then`, which the compiler backs with a
-/// synthesized `trap #0` (`an_exit_bearing_tail_call_prints_a_trap`
+/// synthesized `trap #2` (`an_exit_bearing_tail_call_prints_a_trap`
 /// pins the codegen shape) — this test is the LINKER side of the same
 /// story: when the linked `liar` actually returns, the trap sits right
 /// after a call with no continuation, into a callee that CAN return,
 /// which is exactly `tail-call-no-continuation`'s shape.
 ///
 /// The caller's compiled shape is `call liar [t: 0]` immediately
-/// followed by `trap #0`, which HERE also happens to be `main`'s last
+/// followed by `trap #2`, which HERE also happens to be `main`'s last
 /// instruction (this fixture has one state) — the trap arm, not the
 /// "call is the last instruction" one (the compiler always emits the
 /// safety trap, so a real `.tmc` program never reaches the latter, the
@@ -1686,7 +1691,7 @@ machine {
 
 /// The multi-state counterpart to `a_lying_noreturn_header_prints_the_
 /// tail_call_warning`: same lying header, same library that actually
-/// returns, but `go`'s call is now followed by `trap #0` followed by
+/// returns, but `go`'s call is now followed by `trap #2` followed by
 /// `after`'s own block — the trap is NOT `main`'s last instruction. The
 /// warning must still fire: the check looks only at the instruction
 /// right after the call, never at what comes after the trap.

@@ -304,11 +304,12 @@ fn widen_rule(r: &mut IrRule, n: usize) {
 /// below in practice. It is handled rather than `unreachable!`ing anyway:
 /// a future unsoundness in `body_can_return` would otherwise turn a wrong
 /// BIT into an `-O1` panic on ordinary user input instead of a diagnosable
-/// stop, and the whole point of this task's `trap`-after-tail-call
-/// decision (`codegen.rs`) is that a `noreturn` claim proving false is a
+/// stop, and the point of the `trap`-after-tail-call emission
+/// (`codegen.rs`) is that a `noreturn` claim proving false is a
 /// controlled trap everywhere else it can surface — this is the one
 /// remaining place it could surface as a panic instead, so it gets the
-/// same treatment: a synthesized `trap #0`, never a crash.
+/// same treatment, and the same kind: a synthesized contract trap, never
+/// a crash.
 fn remap_transition(t: &IrTransition, base: u32, then: Option<IrThen>) -> (IrTransition, bool) {
     match t {
         IrTransition::Goto { state } => (
@@ -325,12 +326,13 @@ fn remap_transition(t: &IrTransition, base: u32, then: Option<IrThen>) -> (IrTra
             Some(IrThen::ReturnExit { exit }) => (IrTransition::ReturnExit { exit }, false),
             Some(IrThen::Stop) => (IrTransition::Stop, false),
             Some(IrThen::Halt) => (IrTransition::Halt, false),
-            None => (IrTransition::TrapRead, true),
+            None => (IrTransition::TrapContract, true),
         },
         IrTransition::Stop => (IrTransition::Stop, false),
         IrTransition::Halt => (IrTransition::Halt, false),
         IrTransition::TrapRead => (IrTransition::TrapRead, false),
         IrTransition::TrapWrite => (IrTransition::TrapWrite, false),
+        IrTransition::TrapContract => (IrTransition::TrapContract, false),
         IrTransition::CallThen { .. } | IrTransition::TailCall { .. } => {
             unreachable!("inline candidates are leaves — no nested call to remap")
         }

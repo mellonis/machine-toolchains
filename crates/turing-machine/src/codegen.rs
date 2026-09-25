@@ -23,8 +23,8 @@
 //!   dropped under `--strip-debugger`;
 //! * transitions: `goto` → `jmp <label>` (or fall-through), `call … then` →
 //!   `call <name>[ [<binding>]]` then the resume, `return`/`stop`/`halt` →
-//!   `ret`/`stp`/`hlt`, and the synthesized graft-hole traps → `trap #0` /
-//!   `trap #1`.
+//!   `ret`/`stp`/`hlt`, the synthesized graft-hole traps → `trap #0` /
+//!   `trap #1`, and the synthesized contract trap → `trap #2`.
 //!
 //! **Match-table discipline** (docs/tmt/isa.md (match and dispatch)):
 //! the exact rows (every cell concrete) are sorted lexicographically and their
@@ -109,11 +109,12 @@ enum Term {
     /// label printer needs the names, since a state reached only through an
     /// exits operand has no other reference to print its label for.
     /// `then: None` is TAIL POSITION — the callee is known `noreturn`
-    /// (docs/tmt/language.md (reuse)) — and prints a synthesized `trap #0`
+    /// (docs/tmt/language.md (reuse)) — and prints a synthesized `trap #2`
     /// rather than nothing: an honest program never reaches it (the callee
     /// never returns), but a LYING one — a declared-`noreturn` header whose
     /// linked definition actually returns — turns what would otherwise be
-    /// silent fall-through into a controlled stop (docs/tmt/isa.md
+    /// silent fall-through into a controlled stop, and the contract kind
+    /// names the broken declaration for what it is (docs/tmt/isa.md
     /// (explicit traps)).
     Call {
         operand: String,
@@ -137,6 +138,7 @@ enum Term {
     JumpIfMatch(String),
     TrapRead,
     TrapWrite,
+    TrapContract,
 }
 
 /// A `call … then` resume point — one instruction after the call, except
@@ -706,6 +708,7 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
         IrTransition::TailCall { target } => Term::TailCall(target.clone()),
         IrTransition::TrapRead => Term::TrapRead,
         IrTransition::TrapWrite => Term::TrapWrite,
+        IrTransition::TrapContract => Term::TrapContract,
         IrTransition::ReturnExit { exit } => Term::RetExit(*exit),
     }
 }
@@ -1029,19 +1032,16 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                 // claims `noreturn` while the linked definition returns
                 // anyway, or a first-wins shadowed definition) would let a
                 // stray `ret` fall through into whatever the linker placed
-                // next and run silently on. `trap #0` closes that hole: on
+                // next and run silently on. `trap #2` closes that hole: on
                 // an honest program it never fires (nothing reaches it), and
                 // on a lying one it turns silent fall-through into a
                 // controlled stop instead of arbitrary execution
-                // (docs/tmt/isa.md (explicit traps)). Kind 0 (unmapped-read)
-                // rather than 1: the ONLY two kinds the dialect's `trap`
-                // instruction can name are the map-hole pair, neither a
-                // literal fit for "control reached code the program declared
-                // unreachable" — `#0` is chosen for the same reason
-                // `zero_row`'s own synthesized stop is (below): the failure
-                // is on the read/match side, nothing the head reads here
-                // leads anywhere. `synthesized` marks it exactly like that
-                // other compiler-built trap row, never user-written.
+                // (docs/tmt/isa.md (explicit traps)). The contract kind
+                // says what actually went wrong — a declaration the source
+                // made about a callee turned out to be false — where the
+                // map-hole kinds would claim a read or write fault that
+                // never happened. `synthesized` marks the emission exactly
+                // like a compiler-built trap row, never user-written.
                 match then {
                     Some(Then::Goto(t)) => emit_goto(e, t),
                     Some(Then::Ret) => e.push(grid(None, "ret", ""), b.term_line),
@@ -1050,7 +1050,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                     }
                     Some(Then::Stop) => e.push(grid(None, "stp", ""), b.term_line),
                     Some(Then::Halt) => e.push(grid(None, "hlt", ""), b.term_line),
-                    None => e.push(grid(None, "trap", "#0"), b.term_line),
+                    None => e.push(grid(None, "trap", "#2"), b.term_line),
                 }
             }
             Term::Ret => e.push(grid(None, "ret", ""), b.term_line),
@@ -1066,6 +1066,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
             Term::JumpIfMatch(t) => e.push(grid(None, "jm", t), b.term_line),
             Term::TrapRead => e.push(grid(None, "trap", "#0"), b.term_line),
             Term::TrapWrite => e.push(grid(None, "trap", "#1"), b.term_line),
+            Term::TrapContract => e.push(grid(None, "trap", "#2"), b.term_line),
         }
     }
 }
