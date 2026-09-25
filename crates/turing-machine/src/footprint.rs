@@ -1277,6 +1277,43 @@ mod tests {
         );
     }
 
+    /// The twin of the test above with the site's map left OPEN: the same
+    /// pair, the same equal-size alphabets, but the unlisted callee symbol
+    /// 3 no longer identity-completes — an opaque symbol is read-only, so
+    /// the write half closes whatever the cardinalities and writing 3
+    /// takes the unmapped-write trap instead of landing on the caller.
+    ///
+    /// Mutation it catches: ignore the binding's `open` bit on the IR-side
+    /// write-back (`call_contribution`) — 3 comes back and the caller's
+    /// set is `{1, 3}` again.
+    #[test]
+    fn an_open_map_closes_its_write_half_on_equal_cardinality() {
+        let mut binding = bind1(0, &[(1, 2, false)]);
+        binding[0].open = true;
+        let p = program(vec![
+            world(
+                "caller",
+                vec![tape("host", 4)],
+                vec![rule(1, None, call("callee", binding))],
+            ),
+            world(
+                "callee",
+                vec![tape("v", 4)],
+                vec![
+                    rule(1, wr(&[Some(2)]), IrTransition::Return),
+                    rule(1, wr(&[Some(3)]), IrTransition::Return),
+                ],
+            ),
+        ]);
+
+        assert_eq!(
+            tapes_of(&infer_ir(&p), "caller")[0],
+            set(&[1]),
+            "callee 2 writes back through the pair; unlisted callee 3 is a \
+             hole under an open map even across equal-size alphabets"
+        );
+    }
+
     #[test]
     fn unequal_cardinality_holes_unlisted_but_pins_blank() {
         let p = program(vec![

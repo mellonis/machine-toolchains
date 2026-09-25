@@ -121,9 +121,12 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
 /// before.
 ///
 /// Re-pinned once more when the compiler began INFERRING each routine
-/// tape's `opaque` bit: fourteen of the stdlib's `.param` lines — every
-/// walker and every facade whose states read the tape through a `*` row,
-/// in both the plain and the volatile twin namespace — now publish it.
+/// tape's `opaque` bit: ten of the stdlib's `.param` lines — every walker
+/// whose states read the tape through a `*` row and hand it to no other
+/// routine, in both the plain and the volatile twin namespace — now
+/// publish it. `invertNumber` and `minusOne` do not: their `*` rows
+/// FORWARD the tape into routines that discriminate it, and a forward
+/// closes the tape unless the callee could take the opaque symbol.
 /// Both LENGTHS are unchanged by construction, because `opaque` rides an
 /// existing per-tape flags byte rather than adding a field
 /// (docs/formats.md (routine interfaces)); only the checksums move. A
@@ -160,12 +163,12 @@ fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
 
     assert_eq!(
         fingerprint(&o0),
-        (7825, 838128356),
+        (7825, 2785484549),
         "the -O0 stdlib object's bytes moved"
     );
     assert_eq!(
         fingerprint(&o1),
-        (7765, 3861290830),
+        (7765, 358730058),
         "the -O1 (release preset) stdlib object's bytes moved"
     );
 }

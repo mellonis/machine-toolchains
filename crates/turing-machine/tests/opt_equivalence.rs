@@ -969,6 +969,30 @@ machine {
   state done { [*] -> stop; }
 }";
 
+/// The pairless open map, `with map { * }`, on EQUAL alphabets: every
+/// caller glyph but the blank is unlisted, so each arrives as the callee's
+/// opaque index and only its `*` row can match. The callee's concrete
+/// `['a']` row must therefore never fire — seeding `'a'` is what tells an
+/// open binding from an identity one.
+///
+/// Worth its own column because this is the one shape an optimizer can
+/// mistake for a pass-through: no pairs and matching cardinalities look
+/// exactly like an omitted map, and a splice that reads it that way hands
+/// the callee's concrete rows the caller's real glyphs.
+const OPEN_BINDING_PAIRLESS: &str = "\
+alphabet three { '_', 'a', 'b' }
+routine r(tape n: three) {
+  entry state s {
+    ['a'] -> halt;
+    [*]   -> return;
+  }
+}
+machine {
+  tape t: three;
+  entry state go { [*] -> call r(n = t with map { * }) then done; }
+  state done { [*] -> stop; }
+}";
+
 #[test]
 fn inline_arity_reducing_projection_is_equivalent_across_the_matrix() {
     // Three cases across the full 2×3 matrix. The last two carry data on the
@@ -1326,15 +1350,24 @@ fn everything_matrix_is_green() {
             OPEN_BINDING.to_string(),
             vec![&[(&[1, 2, 3], 0)], &[(&[3, 4], 0)], &[(&[], 0)]],
         ),
+        (
+            // The pairless open map on equal alphabets, seeded on the glyph
+            // the callee's concrete row names: an open binding stops, an
+            // identity one halts.
+            "open_binding_pairless",
+            OPEN_BINDING_PAIRLESS.to_string(),
+            vec![&[(&[1], 0)], &[(&[2], 0)], &[(&[], 0)]],
+        ),
     ];
     assert_eq!(
         roster.len(),
-        17,
+        18,
         "the single-source pass-exercise roster: 6 Appendix A + nested graft + \
-         10 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
+         11 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
          dead-rows, inline ×2, the brk barrier, the exit-bearing call, the \
          facade that forwards its exits, the planted head-contract checks, \
-         and the open binding whose unlisted glyphs arrive opaque)"
+         the open binding whose unlisted glyphs arrive opaque, and the \
+         pairless open map an inliner could mistake for a pass-through)"
     );
     for (label, src, cases) in &roster {
         assert!(!src.is_empty(), "roster program `{label}` has a source");

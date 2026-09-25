@@ -36,7 +36,7 @@ fn named(glyphs: &[String]) -> String {
 /// no clause by construction. It is named in words, and joined to any
 /// glyphs that offend alongside it.
 fn offenders(gap: &crate::head_flow::EntersGap) -> String {
-    let opaque = "a symbol this map leaves opaque";
+    let opaque = "a symbol this open map sends to the callee's opaque index";
     match (gap.offending.is_empty(), gap.opaque) {
         (true, _) => opaque.to_string(),
         (false, false) => named(&gap.offending),
@@ -676,7 +676,7 @@ machine {
         assert_eq!(
             findings(src),
             vec![
-                "the head may be on a symbol this map leaves opaque here, outside the `enters { 'A' }` that `mark`'s tape `t` declares"
+                "the head may be on a symbol this open map sends to the callee's opaque index here, outside the `enters { 'A' }` that `mark`'s tape `t` declares"
             ]
         );
     }
@@ -780,7 +780,7 @@ machine {
         assert_eq!(
             findings(src),
             vec![
-                "the head may be on 'B', or a symbol this map leaves opaque here, outside the `enters { 'A' }` that `mark`'s tape `t` declares"
+                "the head may be on 'B', or a symbol this open map sends to the callee's opaque index here, outside the `enters { 'A' }` that `mark`'s tape `t` declares"
             ]
         );
     }

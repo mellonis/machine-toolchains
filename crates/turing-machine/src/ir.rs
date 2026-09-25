@@ -230,13 +230,15 @@ pub struct IrTape {
     /// sitting on when control returns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaves: Option<Vec<String>>,
-    /// Whether every state that reads this tape reads it as a wildcard, so
-    /// the routine never rejects a glyph for being unlisted — the
-    /// precondition a caller's OPEN binding needs, and the one fact the
-    /// linker checks before letting unlisted caller symbols arrive as the
-    /// opaque index ([`tape_is_opaque`] computes it; docs/formats.md
-    /// (routine interfaces)). Always `false` on a MACHINE tape, for the
-    /// same reason `writes`/`enters`/`leaves` are `None` there.
+    /// Whether an opaque symbol on this tape — the index past its
+    /// alphabet, which an OPEN binding delivers for every caller glyph it
+    /// does not list — can never be why no row matches, and is never
+    /// forwarded to a callee that could not take it. The precondition a
+    /// caller's open binding needs, and the one fact the linker checks
+    /// before admitting one ([`rows_admit_the_opaque_index`] and
+    /// [`settle_opacity`] compute it; docs/formats.md (routine
+    /// interfaces)). Always `false` on a MACHINE tape, for the same reason
+    /// `writes`/`enters`/`leaves` are `None` there.
     #[serde(default, skip_serializing_if = "is_false")]
     pub opaque: bool,
 }
@@ -772,6 +774,10 @@ pub(crate) fn lower(
         )?);
     }
 
+    // A tape's opacity also depends on the callees it is forwarded to,
+    // so it settles only once every world of the unit is lowered.
+    settle_opacity(&mut worlds);
+
     let program = IrProgram {
         version: TM_IR_VERSION,
         worlds,
@@ -890,39 +896,134 @@ pub(crate) fn known_noreturn(
 }
 
 /// Whether tape position `k` of a world whose lowered states are `states`
-/// is OPAQUE: every state that READS the tape reads it through a `*` cell
-/// there, so no glyph is ever rejected for being unlisted and a caller may
-/// bind the tape open (docs/formats.md (routine interfaces)).
+/// can never be the REASON no row matches — the local half of a routine
+/// tape's `opaque` bit (docs/formats.md (routine interfaces)). The other
+/// half, what the rows do with the tape once they match, is
+/// [`settle_opacity`]'s.
 ///
-/// **A state reads the tape iff it has at least one rule.** TM-1's match
-/// step is a batch `rd` over every head followed by one table lookup, so a
-/// state with rows reads all of its world's tapes at once — there is no
-/// per-tape "did this state look?" beyond that. A ROWLESS state reads
-/// nothing: it has no table to match against and traps the moment it is
-/// entered. A state whose every row is `*` at `k` still reads the tape;
-/// it reads it through the wildcard, which is the whole point.
+/// An opaque symbol is the index past the tape's alphabet: no row names
+/// it, and only a `*` cell at `k` matches it. So the question for each
+/// state is whether replacing the glyph at `k` by that symbol can turn a
+/// match into a miss. It cannot when every row `R` of the state is
+/// COVERED by a row `W` with `*` at `k` that also accepts whatever `R`
+/// accepts on every OTHER position (`W[i]` is `*`, or equals `R[i]`):
+/// whenever the other tapes let `R` fire, `W` fires too, opaque symbol and
+/// all. This is single-row cover, the relation the `dead-rows` pass uses.
+/// It is exact at arity 1, where it reduces to "the state has a `*` row";
+/// above it, rows `[0, *]` and `[*, 1]` are NOT opaque on either tape —
+/// an opaque symbol on tape 0 with tape 1 on `0` matches neither — though
+/// a per-position reading would call both tapes opaque. Joint cover by
+/// several `*`-at-`k` rows is not credited; that only costs precision.
 ///
-/// The quantifier is UNIVERSAL over readers and EXISTENTIAL over one
-/// reader's rows: one reading state with no `*` cell at `k` closes the
-/// tape, because an opaque symbol arriving in that state matches none of
-/// its rows. A world with no reading state at all is opaque vacuously —
-/// nothing there can reject anything.
-///
-/// The rule is per POSITION, which is exact at arity 1 (a `*` at the only
-/// position is a catch-all row) and an approximation above it: a state
-/// whose rows are `[0, *]` and `[*, 1]` has a `*` at each position
-/// separately, yet an opaque symbol on tape 0 with tape 1 reading `0`
-/// matches neither row. That is the rule as specified; a caller who
-/// widens a state's cover on one tape without widening the row that
-/// carries it is relying on a promise this analysis states more loosely
-/// than the machine keeps it.
-fn tape_is_opaque(states: &[IrState], k: usize) -> bool {
+/// **A state reads the tape iff it has at least one rule** — TM-1 reads
+/// every head at once, then does one table lookup — so a ROWLESS state
+/// reads nothing (it traps on entry, whatever the tapes hold), and a
+/// world with no reading state is opaque vacuously.
+fn rows_admit_the_opaque_index(states: &[IrState], k: usize) -> bool {
     states.iter().all(|s| {
-        s.rules.is_empty()
-            || s.rules
-                .iter()
-                .any(|r| matches!(r.pattern.get(k), Some(IrCell::Wildcard)))
+        s.rules.iter().all(|r| {
+            s.rules.iter().any(|w| {
+                matches!(w.pattern.get(k), Some(IrCell::Wildcard))
+                    && w.pattern.len() == r.pattern.len()
+                    && w.pattern
+                        .iter()
+                        .zip(&r.pattern)
+                        .enumerate()
+                        .all(|(i, (wc, rc))| i == k || *wc == IrCell::Wildcard || wc == rc)
+            })
+        })
     })
+}
+
+/// Close every routine tape whose opaque symbol a row could hand to a
+/// callee that cannot take it — the second half of the `opaque` bit, after
+/// [`rows_admit_the_opaque_index`] (docs/formats.md (routine interfaces)).
+///
+/// A row that binds tape `k` into a nested `call` or `bind` passes the
+/// WHOLE band, not just the cell under the head, so an opaque symbol
+/// anywhere on it reaches the inner callee — whatever the row's own
+/// pattern, and whether or not the row matched through a `*`. The linker
+/// checks opacity only at an open site's direct callee, so the forward is
+/// safe only when the symbol lands on the inner callee's OWN opaque index
+/// and that tape is itself opaque.
+///
+/// The link engine composes the outer and inner maps by passing an index
+/// outside the inner map's pairs straight through, unchanged — whether
+/// the inner map is omitted, closed, or open. The outer opaque symbol is
+/// such an index (it lies past the forwarding tape's alphabet), so it
+/// arrives as ITSELF, which is the callee's opaque index exactly when the
+/// two tapes have the SAME cardinality. That is the whole rule: an
+/// equal-size forward into an opaque tape keeps the tape opaque; on
+/// unequal alphabets the symbol lands on a real glyph of the callee or on
+/// a hole, and the tape closes. (An open inner map on unequal alphabets
+/// is no exception — measured, the symbol still passes through as itself.)
+///
+/// A forward into a routine OUTSIDE this compilation unit always closes — a header
+/// carries no opacity, so whether the callee could take the symbol is not
+/// knowable here. A routine that forwards a tape to another unit's routine
+/// is therefore never opaque on that tape.
+///
+/// Computed as a GREATEST fixpoint over the unit's routines: start from
+/// the local answer and close tapes until nothing changes, so a routine
+/// that forwards a tape to itself, or to a peer that forwards it back,
+/// stays opaque exactly when nothing else closes it.
+fn settle_opacity(worlds: &mut [IrWorld]) {
+    let by_name: HashMap<String, usize> = worlds
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.kind == IrWorldKind::Routine)
+        .map(|(i, w)| (w.name.clone(), i))
+        .collect();
+    loop {
+        let mut close: Vec<(usize, usize)> = Vec::new();
+        for (wi, w) in worlds.iter().enumerate() {
+            for (k, tape) in w.tapes.iter().enumerate() {
+                if !tape.opaque {
+                    continue;
+                }
+                let forwards_unsafely = w.states.iter().flat_map(|s| &s.rules).any(|r| {
+                    let IrTransition::CallThen {
+                        target, binding, ..
+                    } = &r.transition
+                    else {
+                        return false;
+                    };
+                    binding.iter().enumerate().any(|(j, b)| {
+                        b.caller_tape as usize == k
+                            && !forward_keeps_opacity(worlds, &by_name, target, j, tape)
+                    })
+                });
+                if forwards_unsafely {
+                    close.push((wi, k));
+                }
+            }
+        }
+        if close.is_empty() {
+            return;
+        }
+        for (wi, k) in close {
+            worlds[wi].tapes[k].opaque = false;
+        }
+    }
+}
+
+/// Whether binding entry `j` of a call to `target`, which forwards the
+/// opaque-carrying `tape`, delivers the opaque symbol intact onto an
+/// opaque tape of an in-unit callee ([`settle_opacity`]'s rule).
+fn forward_keeps_opacity(
+    worlds: &[IrWorld],
+    by_name: &HashMap<String, usize>,
+    target: &str,
+    j: usize,
+    tape: &IrTape,
+) -> bool {
+    // `by_name` holds this unit's routines only, so a callee in another
+    // unit is simply not found — and closes the tape, its opacity being
+    // unknowable here.
+    let Some(inner) = by_name.get(target).and_then(|&i| worlds[i].tapes.get(j)) else {
+        return false;
+    };
+    inner.opaque && inner.cardinality == tape.cardinality
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1058,7 +1159,7 @@ fn lower_world(
                 // callee, nothing reads its interface entry, and a
                 // suffix there would move every `machine`-bearing
                 // program's bytes for no observable gain.
-                let opaque = routine_tape.is_some() && tape_is_opaque(&states, i);
+                let opaque = routine_tape.is_some() && rows_admit_the_opaque_index(&states, i);
                 IrTape {
                     name: t.name.clone(),
                     alphabet: t.alphabet.clone(),

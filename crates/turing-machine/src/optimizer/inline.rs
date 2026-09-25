@@ -152,6 +152,13 @@ fn is_full_passthrough(binding: &[IrTapeBinding], caller: &IrWorld, callee: &IrW
         && binding.iter().enumerate().all(|(k, tb)| {
             tb.caller_tape as usize == k
                 && tb.pairs.is_empty()
+                // An OPEN map is never a pass-through, even with no pairs
+                // on equal alphabets: every unlisted caller glyph must
+                // arrive as the callee's opaque index, which only the
+                // link engine's composition produces. Spliced, the
+                // callee's concrete rows would read the caller's real
+                // glyphs instead (docs/formats.md (bound calls)).
+                && !tb.open
                 && k < callee.tapes.len()
                 && (tb.caller_tape as usize) < caller.tapes.len()
                 && caller.tapes[k].cardinality == callee.tapes[k].cardinality

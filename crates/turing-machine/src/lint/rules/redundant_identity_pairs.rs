@@ -67,6 +67,11 @@ fn check_binding(
         if host != graph {
             continue;
         }
+        // An open map does no identity completion — its unlisted glyphs
+        // arrive opaque — so no pair in it is supplied by anything else.
+        if map.open.is_some() {
+            continue;
+        }
         for pair in &map.pairs {
             if pair.arrow == MapArrow::Bidirectional
                 && glyph_label(&pair.src) == glyph_label(&pair.dst)
@@ -133,6 +138,28 @@ mod tests {
             .filter(|d| d.code == "redundant-identity-pairs")
             .map(|d| d.message)
             .collect()
+    }
+
+    /// An OPEN map completes nothing: every glyph it does not list reaches
+    /// the callee as the opaque index, so `'a' -> 'a'` is what keeps `'a'`
+    /// a real glyph there, and deleting it would change what the callee
+    /// reads. Same alphabets on both sides, so only the open marker stands
+    /// between this fixture and a finding.
+    ///
+    /// Mutation it catches: dropping the open-map skip — the pair is
+    /// reported as redundant, and following the advice sends `'a'` opaque.
+    #[test]
+    fn an_identity_pair_in_an_open_map_is_load_bearing() {
+        let src = "\
+alphabet ab { '_', 'a', 'b' }
+routine echo(tape t: ab) { entry state s { [*] -> return; } }
+machine {
+  tape m: ab;
+  entry state go { [*] -> call echo(t = m with map { 'a' -> 'a', * }) then done; }
+  state done { [*] -> stop; }
+}
+";
+        assert!(findings(src).is_empty(), "{:?}", findings(src));
     }
 
     #[test]

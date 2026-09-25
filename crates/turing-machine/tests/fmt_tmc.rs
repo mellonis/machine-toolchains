@@ -997,3 +997,43 @@ fn a_multiline_block_comment_takes_its_rule_off_the_grid() {
     let pass2 = format(&out).expect("formats");
     assert_eq!(pass2, out, "and pass 1 is a fixed point");
 }
+
+/// The open marker prints exactly where it was written — the map's last
+/// entry — both after pairs and alone, a trailing comma after it is
+/// dropped as it is after any last entry, and the result is a fixed
+/// point. Dropping the marker would silently CLOSE the binding while
+/// every pair still printed, so this pins the printer directly rather
+/// than through the comment-position audit alone.
+///
+/// Mutation it catches: the map printer omitting the marker — the
+/// expected text loses its `*`.
+#[test]
+fn the_open_marker_prints_last_and_is_idempotent() {
+    let src = "\
+alphabet three { '_', 'a', 'b' }
+
+routine r(tape n: three) {
+  entry state s { [*] -> return; }
+}
+
+machine {
+  tape t: three;
+
+  entry state go {
+    [*] -> call r(n = t with map {'a'->'a',*,}) then mid;
+  }
+  state mid { [*] -> call r(n = t with map {*}) then done; }
+  state done { [*] -> stop; }
+}
+";
+    let out = format(src).expect("formats");
+    assert!(
+        out.contains("call r(n = t with map { 'a' -> 'a', * }) then mid;"),
+        "{out}"
+    );
+    assert!(
+        out.contains("call r(n = t with map { * }) then done;"),
+        "{out}"
+    );
+    assert_eq!(format(&out).expect("formats again"), out);
+}

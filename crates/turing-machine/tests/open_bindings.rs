@@ -7,9 +7,10 @@
 //! `crates/core/tests/link_open.rs` proves the linker's half against a
 //! neutral dialect. What these tests hold is the `.tmc` END of it: that
 //! the marker parses only where it means something, that the inference
-//! publishes `opaque` on exactly the tapes no state discriminates, and
-//! that a program written in the language lands on the same wire shape
-//! the hand-written assembly does.
+//! publishes `opaque` exactly where an opaque symbol can never be why no
+//! row matches and is never forwarded to a callee that could not take it,
+//! and that a program written in the language lands on the same wire
+//! shape the hand-written assembly does.
 
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -447,6 +448,303 @@ machine {
         param_line(&closed.tma, "outer", "t"),
         ".param t, ('_', 'a', 'b'), writes=('b'), opaque"
     );
+}
+
+// ── forwarding a tape into a nested call ───────────────────────────────────
+
+/// An open binding into `r`, a routine whose only row is a `*` row that
+/// FORWARDS the tape into `inner` — `inner_decl` declares it, `inner_map`
+/// is the forwarding site's map text (empty for an omitted one). The
+/// outer map leaves `'c'` and `'d'` opaque.
+fn forwarding(inner_decl: &str, inner_map: &str) -> String {
+    format!(
+        "\
+alphabet five {{ '_', 'a', 'b', 'c', 'd' }}
+alphabet three {{ '_', 'a', 'b' }}
+{inner_decl}
+routine r(tape n: three) {{
+  entry state go {{ [*] -> call inner(m = n{inner_map}) then done; }}
+  state done {{ [*] -> return; }}
+}}
+
+machine {{
+  tape t: five;
+  entry state go {{
+    [*] -> call r(n = t with map {{ 'a' -> 'a', 'b' -> 'b', * }}) then done;
+  }}
+  state done {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+/// `inner` on the three-glyph alphabet, OPAQUE: a `*` row walks right
+/// over everything but the blank and `'b'`, which halts — so an opaque
+/// symbol misrouted onto `'b'` would halt, and one misrouted onto a hole
+/// would trap.
+const INNER_THREE_OPAQUE: &str = "
+routine inner(tape m: three) {
+  entry state w {
+    ['_'] -> return;
+    ['b'] -> halt;
+    [*]   -> move [>] goto w;
+  }
+}
+";
+
+/// The same walk with no `*` row: not opaque.
+const INNER_THREE_CLOSED: &str = "
+routine inner(tape m: three) {
+  entry state w {
+    ['_'] -> return;
+    ['a'] -> move [>] goto w;
+    ['b'] -> halt;
+  }
+}
+";
+
+/// `inner` on a FOUR-glyph alphabet, opaque, whose extra glyph `'z'`
+/// halts: `r`'s opaque symbol is index 3, which is `'z'`'s own index
+/// here, so a forward that passed it through unchanged would halt.
+const INNER_FOUR_OPAQUE: &str = "
+alphabet four { '_', 'a', 'b', 'z' }
+routine inner(tape m: four) {
+  entry state w {
+    ['_'] -> return;
+    ['z'] -> halt;
+    [*]   -> move [>] goto w;
+  }
+}
+";
+
+/// A forward that delivers the opaque symbol onto `inner`'s own opaque
+/// index keeps `r` opaque, and the run confirms it: seeded so the walk
+/// meets a real glyph and then the opaque one, it stops with the head on
+/// the blank past them — no halt (the symbol was not aliased onto a real
+/// glyph), no trap (it was not holed).
+fn assert_forward_keeps_opacity(src: &str, seed: &[u8]) {
+    let out = build(src);
+    assert_eq!(
+        param_line(&out.tma, "r", "n"),
+        ".param n, ('_', 'a', 'b'), opaque",
+        "{src}"
+    );
+    for mech in MECHS {
+        let exe = link_image(&out, mech).unwrap_or_else(|e| panic!("links under {mech}: {e}"));
+        let (outcome, snap) = run_one_tape(&exe, seed);
+        assert_eq!(outcome, Outcome::Stopped, "under {mech}");
+        assert_eq!(snap.head, 2, "under {mech}");
+    }
+}
+
+/// A forward the opaque symbol cannot survive closes `r`: its `.param`
+/// drops the bit and the open binding into it is refused at link time,
+/// naming `r` and its parameter.
+fn assert_forward_closes(src: &str) {
+    let out = build(src);
+    assert_eq!(
+        param_line(&out.tma, "r", "n"),
+        ".param n, ('_', 'a', 'b')",
+        "{src}"
+    );
+    for mech in MECHS {
+        let err = link_under(&out, mech).expect_err("a closed tape must refuse an open binding");
+        let LinkError::OpenBindingUnsupported { callee, param, .. } = &err else {
+            panic!("expected OpenBindingUnsupported under {mech}, got {err:?}");
+        };
+        assert_eq!((callee.as_str(), param.as_deref()), ("r", Some("n")));
+    }
+}
+
+/// A `*` row that forwards the tape is not a wildcard READ: the whole
+/// band — opaque symbols included — goes to `inner`, which names only
+/// real glyphs. Without this rule `r` publishes `opaque`, the open
+/// binding links, and the run traps inside `inner`.
+///
+/// Mutation it catches: skip the forwarding check (credit `r` with its
+/// `*` row alone) — `r` publishes `opaque` and the link succeeds.
+#[test]
+fn a_forward_into_a_non_opaque_callee_closes_the_tape() {
+    assert_forward_closes(&forwarding(INNER_THREE_CLOSED, ""));
+}
+
+/// A closed map across UNEQUAL alphabets passes an index outside its
+/// pairs through unchanged — so `r`'s opaque symbol (index 3) would land
+/// on `inner`'s real glyph `'z'`, a silent wrong result, even though
+/// `inner` itself is opaque.
+///
+/// Mutation it catches: accept a closed forward regardless of the two
+/// cardinalities — `r` stays opaque and the open binding links.
+#[test]
+fn a_closed_forward_across_unequal_alphabets_closes_the_tape() {
+    assert_forward_closes(&forwarding(
+        INNER_FOUR_OPAQUE,
+        " with map { 'a' -> 'a', 'b' -> 'b' }",
+    ));
+}
+
+/// An omitted map on equal alphabets is index identity: the opaque
+/// symbol lands on `inner`'s own opaque index. Seed `'a', 'c'`.
+///
+/// Mutation it catches: close every forward (or every omitted-map one)
+/// — `r` loses `opaque` and this open binding is refused.
+#[test]
+fn an_identity_forward_into_an_opaque_callee_keeps_the_tape_opaque() {
+    assert_forward_keeps_opacity(&forwarding(INNER_THREE_OPAQUE, ""), &[1, 3]);
+}
+
+/// A CLOSED map on equal alphabets — a permutation here — still passes
+/// the out-of-alphabet opaque index through unchanged, onto `inner`'s
+/// own opaque index. Seed `'b', 'c'`: `'b'` reads as `inner`'s `'a'`.
+///
+/// Mutation it catches: close every forward whose map carries pairs —
+/// `r` loses `opaque` and this open binding is refused.
+#[test]
+fn a_closed_same_size_forward_keeps_the_tape_opaque() {
+    assert_forward_keeps_opacity(
+        &forwarding(INNER_THREE_OPAQUE, " with map { 'a' -> 'b', 'b' -> 'a' }"),
+        &[2, 3],
+    );
+}
+
+/// An OPEN inner map on EQUAL alphabets: the outer opaque symbol is index
+/// 3, past `r`'s alphabet, and that is also `inner`'s own opaque index.
+/// `'a'` is unlisted too and goes opaque, so both cells take `inner`'s
+/// `*` row. Seed `'a', 'c'`.
+///
+/// Mutation it catches: close every forward whose map is open — `r`
+/// loses `opaque` and this open binding is refused.
+#[test]
+fn an_open_same_size_forward_keeps_the_tape_opaque() {
+    assert_forward_keeps_opacity(
+        &forwarding(INNER_THREE_OPAQUE, " with map { 'b' -> 'a', * }"),
+        &[1, 3],
+    );
+}
+
+/// An OPEN inner map across UNEQUAL alphabets does NOT carry the symbol
+/// intact: the link engine composes the two maps by passing an index
+/// outside the inner map straight through, open or not, so `r`'s opaque
+/// index 3 lands on `inner`'s real glyph `'z'` — measured: every
+/// mechanism halts there when `r` is let through. Opacity survives a
+/// forward only between alphabets of the same size.
+///
+/// Mutation it catches: accept an open forward whatever the two
+/// cardinalities — `r` stays opaque, the open binding links, and the
+/// run halts on `'z'`.
+#[test]
+fn an_open_forward_across_unequal_alphabets_closes_the_tape() {
+    assert_forward_closes(&forwarding(
+        INNER_FOUR_OPAQUE,
+        " with map { 'a' -> 'a', 'b' -> 'b', * }",
+    ));
+}
+
+/// A forward into ANOTHER unit's routine always closes: a header carries
+/// no opacity, so whether the callee could take the opaque symbol is not
+/// knowable at compile time. `std::binaryNumbers::goToNumber` walks with a
+/// `*` row and IS opaque in its own object — `r` still is not.
+///
+/// Mutation it catches: treat a callee this unit does not define as
+/// opaque instead of unknowable — `r` publishes `opaque`.
+#[test]
+fn a_forward_into_another_units_routine_closes_the_tape() {
+    let src = "\
+use std::binaryNumbers::symbols;
+
+routine r(tape n: symbols) {
+  entry state go { [*] -> call std::binaryNumbers::goToNumber(num = n) then done; }
+  state done { [*] -> return; }
+}
+
+machine {
+  tape t: symbols;
+  entry state go { [*] -> call r(n = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+    let out = build(src);
+    assert_eq!(
+        param_line(&out.tma, "r", "n"),
+        ".param n, ('_', '^', '$', '0', '1')"
+    );
+}
+
+// ── more than one tape ─────────────────────────────────────────────────────
+
+/// Two tapes, two rows, `['0', *]` and `[*, '1']`: each position has a
+/// `*` somewhere, yet an opaque symbol on `a` with `b` on `'0'` matches
+/// neither row. Neither tape is opaque, and the open binding into `a` is
+/// refused rather than linked into a run that traps.
+///
+/// Mutation it catches: read opacity per POSITION ("some row has `*` at
+/// `k`") — both tapes publish `opaque` and the link succeeds.
+#[test]
+fn two_tapes_whose_star_rows_do_not_cover_each_other_are_not_opaque() {
+    let src = "\
+alphabet two { '_', '0', '1' }
+alphabet wide { '_', '0', '1', 'x' }
+
+routine r(tape a: two, tape b: two) {
+  entry state s {
+    ['0', *] -> return;
+    [*, '1'] -> return;
+  }
+}
+
+machine {
+  tape p: wide;
+  tape q: two;
+  entry state go {
+    [*, *] -> call r(a = p with map { '0' -> '0', '1' -> '1', * }, b = q) then done;
+  }
+  state done { [*, *] -> stop; }
+}
+";
+    let out = build(src);
+    assert_eq!(param_line(&out.tma, "r", "a"), ".param a, ('_', '0', '1')");
+    assert_eq!(param_line(&out.tma, "r", "b"), ".param b, ('_', '0', '1')");
+    for mech in MECHS {
+        let err = link_under(&out, mech).expect_err("tape `a` is not opaque");
+        assert!(
+            matches!(&err, LinkError::OpenBindingUnsupported { param: Some(p), .. } if p == "a"),
+            "under {mech}: {err:?}"
+        );
+    }
+}
+
+/// The positive twin: `['0', '1']` is covered on tape `a` by `[*, '1']`,
+/// which accepts everything it does on `b` — so an opaque symbol on `a` is
+/// never why no row matches, and `a` is opaque with no full catch-all row
+/// in sight. Tape `b` is not: nothing with `*` at `b` covers `['0', '1']`.
+///
+/// Mutation it catches: demand a full catch-all row (the cheap sound
+/// rule) — `a` loses `opaque`.
+#[test]
+fn a_star_row_that_covers_every_other_row_keeps_its_tape_opaque() {
+    let src = "\
+alphabet two { '_', '0', '1' }
+
+routine r(tape a: two, tape b: two) {
+  entry state s {
+    ['0', '1'] -> halt;
+    [*, '1']   -> return;
+  }
+}
+
+machine {
+  tape p: two;
+  tape q: two;
+  entry state go { [*, *] -> call r(a = p, b = q) then done; }
+  state done { [*, *] -> stop; }
+}
+";
+    let out = build(src);
+    assert_eq!(
+        param_line(&out.tma, "r", "a"),
+        ".param a, ('_', '0', '1'), opaque"
+    );
+    assert_eq!(param_line(&out.tma, "r", "b"), ".param b, ('_', '0', '1')");
 }
 
 // ── the linker's verdict ───────────────────────────────────────────────────
