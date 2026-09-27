@@ -4545,8 +4545,6 @@ mod tests {
         assert_eq!(once, twice, "and pass 1 is a fixed point");
     }
 
-    /// A named map declaration — the same one-line canonical shape as an
-    /// alphabet — round-trips and is idempotent.
     /// A glyph set declaration prints in the alphabet's own one-line shape,
     /// and a set reference — bare or qualified — prints verbatim wherever an
     /// element list takes one: a set body, an alphabet body, a clause.
@@ -4581,6 +4579,8 @@ mod tests {
         assert_eq!(once, twice, "wrapped output must itself be a fixed point");
     }
 
+    /// A named map declaration — the same one-line canonical shape as an
+    /// alphabet — round-trips and is idempotent.
     #[test]
     fn a_named_map_declaration_round_trips() {
         pins(

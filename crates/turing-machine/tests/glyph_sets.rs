@@ -158,6 +158,30 @@ fn a_cycle_among_sets_is_an_error_not_a_hang() {
     );
 }
 
+/// The cycle error names the whole chain, in reference order, back to the
+/// set it started from — for a mutual pair and for a self-reference alike.
+/// Mutation: reporting only the set whose reference closes the cycle — the
+/// two-set message then names `a` alone.
+#[test]
+fn a_cycle_names_its_whole_chain() {
+    let message = |src: &str| {
+        compile(src, CompileOptions::default())
+            .expect_err("expected a compile error")
+            .kind
+            .to_string()
+    };
+    assert_eq!(
+        message("set a { b }\nset b { a }\n"),
+        "glyph sets form a cycle: `a` -> `b` -> `a` — a set built from sets must bottom \
+         out in literals and ranges"
+    );
+    assert_eq!(
+        message("set a { 'x', a }\n"),
+        "glyph sets form a cycle: `a` -> `a` — a set built from sets must bottom out in \
+         literals and ranges"
+    );
+}
+
 /// A set names glyphs; it is not an alphabet, so it is never a tape type —
 /// neither a machine tape's nor a signature parameter's. It lands exactly
 /// where a map or a routine named as a tape type lands: the name resolves
@@ -229,6 +253,36 @@ fn a_repeat_inside_a_set_is_absorbed_but_an_alphabet_still_refuses_one() {
         code("set s { '0', '1' }\nalphabet ab { '_', '0', s }\n"),
         "duplicate-glyph"
     );
+}
+
+/// A member reached twice — here `d`'s two glyphs, through both `b` and
+/// `c` — keeps the position of its FIRST occurrence, and that order is the
+/// alphabet's own symbol order: `a` expands to `x, y, p, q`, so the band
+/// is `'_', 'x', 'y', 'p', 'q'`. Mutation: absorbing a repeat at its LAST
+/// occurrence instead — the band becomes `'_', 'p', 'q', 'x', 'y'`, and
+/// every symbol index after the blank moves.
+#[test]
+fn a_repeated_member_keeps_its_first_position() {
+    let src = "\
+set d { 'x', 'y' }
+set b { d, 'p' }
+set c { 'q', d }
+set a { b, c }
+alphabet ab { '_', a }
+routine r(tape t: ab) {
+  entry state s { [*] -> return; }
+}
+";
+    let out = compile(src, CompileOptions::default()).unwrap_or_else(|e| panic!("{e}"));
+    let line = out
+        .tma
+        .lines()
+        .find(|l| l.starts_with(".param t,"))
+        .unwrap_or_else(|| panic!("a `.param t` line in:\n{}", out.tma));
+    // The band's glyph list only — the line's suffixes (the inferred
+    // `opaque` bit here) are other facts. No glyph here holds a `)`.
+    let band = &line[..=line.find(')').expect("the glyph list closes")];
+    assert_eq!(band, ".param t, ('_', 'x', 'y', 'p', 'q')");
 }
 
 /// A set accepts a doc run the way every top-level declaration does.

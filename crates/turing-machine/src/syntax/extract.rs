@@ -1668,15 +1668,6 @@ mod tests {
         assert_eq!(green_map, expected_map);
     }
 
-    /// Retokenizing a REUSE's own SIG_PARAM node and reparsing it
-    /// through `Parser::sig_param` reproduces the exact `SigParam`s
-    /// written below, across BOTH shapes the production itself branches
-    /// on: `Tape` (`writes`/`preserves` clauses included) and the plain
-    /// `State` parameter — a fixture with only the `Tape` shape would
-    /// leave the `State` arm of `Parser::sig_param` entirely unpinned.
-    /// The expected values are literals captured from the retired
-    /// hand-written-CST lowering of this fixture while that path was
-    /// still callable.
     /// A `set` declaration extracts to the written-out `SetDecl` below: the
     /// NAME's line with the HEADER's column (`export`, not `set`), its
     /// namespace path, and its body through the shared element production —
@@ -1713,6 +1704,15 @@ mod tests {
         assert_eq!(*got, expected);
     }
 
+    /// Retokenizing a REUSE's own SIG_PARAM node and reparsing it
+    /// through `Parser::sig_param` reproduces the exact `SigParam`s
+    /// written below, across BOTH shapes the production itself branches
+    /// on: `Tape` (`writes`/`preserves` clauses included) and the plain
+    /// `State` parameter — a fixture with only the `Tape` shape would
+    /// leave the `State` arm of `Parser::sig_param` entirely unpinned.
+    /// The expected values are literals captured from the retired
+    /// hand-written-CST lowering of this fixture while that path was
+    /// still callable.
     #[test]
     fn reparsed_sig_param_equals_the_expected_sig_param_for_both_shapes() {
         let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \

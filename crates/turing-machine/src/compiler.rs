@@ -195,9 +195,11 @@ pub enum CompileErrorKind {
     /// instead.
     UndefinedSet(SetMiss),
     /// A set's body reaches the set itself, directly or through a chain of
-    /// other sets, so its members have no finite expansion. `name` is the
-    /// set whose reference closes the cycle (mangled).
-    SetCycle(String),
+    /// other sets, so its members have no finite expansion. The payload is
+    /// the whole cycle, mangled, in reference order: from the set the
+    /// closing reference names, through each set it reaches, back to that
+    /// set again (`[a, b, a]`; a self-reference is `[a, a]`).
+    SetCycle(Vec<String>),
     /// A binding argument names a parameter the signature does not declare.
     UnknownArg(String),
     /// Two binding arguments share one parameter name.
@@ -807,11 +809,16 @@ impl std::fmt::Display for CompileErrorKind {
                      library, whichever this command reads)"
                 )
             }
-            CompileErrorKind::SetCycle(n) => {
+            CompileErrorKind::SetCycle(chain) => {
+                let chain = chain
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
                 write!(
                     f,
-                    "glyph set `{n}` reaches itself through its own body — a set built from sets \
-                     must bottom out in literals and ranges"
+                    "glyph sets form a cycle: {chain} — a set built from sets must bottom out \
+                     in literals and ranges"
                 )
             }
             CompileErrorKind::UnknownArg(n) => {
@@ -1275,10 +1282,16 @@ fn resolve_all_sets(
                             SetTarget::Local(full) => match out.get(&full) {
                                 Some(set) => (full, set.clone()),
                                 None => {
-                                    if stack.iter().any(|f| f.full == full) {
+                                    if let Some(first) = stack.iter().position(|f| f.full == full) {
+                                        // The cycle is the stack from the
+                                        // set this reference names, in
+                                        // order, back to that set again.
+                                        let mut chain: Vec<String> =
+                                            stack[first..].iter().map(|f| f.full.clone()).collect();
+                                        chain.push(full);
                                         return Err(CompileError {
                                             span: *span,
-                                            kind: CompileErrorKind::SetCycle(full),
+                                            kind: CompileErrorKind::SetCycle(chain),
                                         });
                                     }
                                     let named = decls[&full];
@@ -4867,7 +4880,7 @@ mod tests {
             },
             CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph("x".into())),
             CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet("x".into())),
-            CompileErrorKind::SetCycle("x".into()),
+            CompileErrorKind::SetCycle(vec!["x".into(), "x".into()]),
             CompileErrorKind::UnknownArg("x".into()),
             CompileErrorKind::DuplicateArg("x".into()),
             CompileErrorKind::MissingArg("x".into()),
