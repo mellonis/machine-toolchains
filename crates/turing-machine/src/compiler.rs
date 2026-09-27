@@ -32,7 +32,7 @@ use crate::parser::{
     SetMember, SigParamKind, State, SymLit, Transition, WriteCell, WriteCellKind,
     parse_green_from_tokens,
 };
-use crate::patterns::{accepted_glyphs, cell_labels};
+use crate::patterns::{DeclaredRangeMiss, accepted_glyphs, cell_labels, declared_range};
 
 /// Fatal compile error at a real source span (1-based, char-counted,
 /// end-exclusive; see `mtc_core::diagnostics`).
@@ -145,6 +145,30 @@ pub enum CompileErrorKind {
     /// A range whose low endpoint exceeds its high endpoint. Ranges are
     /// inclusive both ends and ascending; there is no descending form.
     RangeDescending,
+    /// A pattern cell's single symbol is not a symbol of the alphabet of the
+    /// tape the cell reads — a rule that could never match it.
+    SymbolOutsideAlphabet { glyph: String, alphabet: String },
+    /// A member of the glyph set a pattern cell names is not a symbol of the
+    /// alphabet of the tape the cell reads.
+    SetOutsideAlphabet {
+        glyph: String,
+        set: String,
+        alphabet: String,
+    },
+    /// A range in a pattern cell or a contract clause walks the declared
+    /// order of the alphabet it is written against, and this one has no
+    /// walk there: `missing` names an endpoint the alphabet lacks (a cell
+    /// only — a clause reports that under `contract-symbol-unknown`), and
+    /// `None` means both are symbols but `hi` comes first.
+    RangeOutsideAlphabet {
+        lo: String,
+        hi: String,
+        alphabet: String,
+        missing: Option<String>,
+    },
+    /// A pattern cell names a glyph set with no members — a rule that could
+    /// never match anything.
+    EmptySetInPattern(String),
     /// Two entities (alphabet / routine / graph / namespace) share one name
     /// in one scope. `what` names the EXISTING entity's kind.
     DuplicateName { name: String, what: &'static str },
@@ -523,6 +547,10 @@ impl CompileErrorKind {
         CompileErrorKind::AlphabetTooLarge(_) => "alphabet-too-large",
         CompileErrorKind::RangeEndpointNotScalar => "range-endpoint-not-scalar",
         CompileErrorKind::RangeDescending => "range-descending",
+        CompileErrorKind::SymbolOutsideAlphabet { .. } => "symbol-outside-alphabet",
+        CompileErrorKind::SetOutsideAlphabet { .. } => "set-outside-alphabet",
+        CompileErrorKind::RangeOutsideAlphabet { .. } => "range-outside-alphabet",
+        CompileErrorKind::EmptySetInPattern(_) => "empty-set-in-pattern",
         CompileErrorKind::DuplicateName { .. } => "duplicate-name",
         CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
         CompileErrorKind::TooManyTapes(_) => "too-many-tapes",
@@ -714,6 +742,50 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "a range must ascend — its low endpoint cannot exceed its high endpoint"
+                )
+            }
+            CompileErrorKind::SymbolOutsideAlphabet { glyph, alphabet } => {
+                write!(
+                    f,
+                    "'{glyph}' in this pattern cell is not a symbol of alphabet `{alphabet}`"
+                )
+            }
+            CompileErrorKind::SetOutsideAlphabet {
+                glyph,
+                set,
+                alphabet,
+            } => {
+                write!(
+                    f,
+                    "'{glyph}', a member of set `{set}`, is not a symbol of alphabet `{alphabet}`"
+                )
+            }
+            CompileErrorKind::RangeOutsideAlphabet {
+                lo,
+                hi,
+                alphabet,
+                missing: Some(glyph),
+            } => {
+                write!(
+                    f,
+                    "'{glyph}', an endpoint of the range '{lo}'..'{hi}', is not a symbol of alphabet `{alphabet}`"
+                )
+            }
+            CompileErrorKind::RangeOutsideAlphabet {
+                lo,
+                hi,
+                alphabet,
+                missing: None,
+            } => {
+                write!(
+                    f,
+                    "'{hi}' comes before '{lo}' in alphabet `{alphabet}` — a range here walks the alphabet's declared order, so write it '{hi}'..'{lo}'"
+                )
+            }
+            CompileErrorKind::EmptySetInPattern(set) => {
+                write!(
+                    f,
+                    "set `{set}` has no members, so a pattern cell naming it can never match"
                 )
             }
             CompileErrorKind::DuplicateName { name, what } => {
@@ -3569,9 +3641,13 @@ pub(crate) fn find_external_graph<'a>(
 /// an empty one: it declares nothing, where `writes {}` declares that nothing
 /// is written.
 ///
-/// A clause body is the alphabet-body element grammar, so it resolves the same
-/// way: a range expands by [`expand_range`] (inheriting its ascending and
-/// single-scalar-endpoint rules) and every resulting label must name a symbol
+/// A clause body is the alphabet-body element grammar, but it is written
+/// against an alphabet that already exists, so a range walks THAT
+/// alphabet's declared order ([`declared_range`], the walk a pattern cell's
+/// range takes) rather than Unicode succession: an endpoint the alphabet
+/// lacks is `contract-symbol-unknown` like any other clause symbol, and a
+/// pair written against the declared order is `range-outside-alphabet`
+/// (docs/tmt/language.md (pattern ranges)). Every other label must name a symbol
 /// of the alphabet. A repeat is harmless — a set absorbs it. A named glyph
 /// set expands in place to its members,
 /// each held to the same membership rule at the reference's own span, so a
@@ -3606,11 +3682,27 @@ fn resolve_contract_clause(
     for elem in &clause.elems {
         match elem {
             AlphabetElem::Single(s) => take(glyph_label(s), s.span())?,
-            AlphabetElem::Range { lo, hi, span } => {
-                for label in expand_range(lo, hi, *span)? {
-                    take(label, *span)?;
+            AlphabetElem::Range { lo, hi, span } => match declared_range(lo, hi, frame.glyphs) {
+                Ok(members) => {
+                    for label in members {
+                        take(label.clone(), *span)?;
+                    }
                 }
-            }
+                // An endpoint the alphabet lacks is a clause symbol the
+                // alphabet lacks — the clause's own code.
+                Err(DeclaredRangeMiss::Endpoint(glyph)) => take(glyph, *span)?,
+                Err(DeclaredRangeMiss::Reversed) => {
+                    return Err(CompileError {
+                        span: *span,
+                        kind: CompileErrorKind::RangeOutsideAlphabet {
+                            lo: glyph_label(lo),
+                            hi: glyph_label(hi),
+                            alphabet: frame.alphabet.to_string(),
+                            missing: None,
+                        },
+                    });
+                }
+            },
             AlphabetElem::SetRef { name, span } => {
                 for label in &frame.sets.members(name, *span, frame.ns, set_refs)?.glyphs {
                     take(label.clone(), *span)?;
@@ -4942,6 +5034,22 @@ mod tests {
             CompileErrorKind::AlphabetTooLarge(200),
             CompileErrorKind::RangeEndpointNotScalar,
             CompileErrorKind::RangeDescending,
+            CompileErrorKind::SymbolOutsideAlphabet {
+                glyph: "x".into(),
+                alphabet: "a".into(),
+            },
+            CompileErrorKind::SetOutsideAlphabet {
+                glyph: "x".into(),
+                set: "s".into(),
+                alphabet: "a".into(),
+            },
+            CompileErrorKind::RangeOutsideAlphabet {
+                lo: "x".into(),
+                hi: "y".into(),
+                alphabet: "a".into(),
+                missing: None,
+            },
+            CompileErrorKind::EmptySetInPattern("s".into()),
             CompileErrorKind::DuplicateName {
                 name: "x".into(),
                 what: "an alphabet",

@@ -22,45 +22,68 @@ pub(crate) fn glyph_label(s: &SymLit) -> String {
     }
 }
 
-fn single_scalar(g: &str) -> Option<char> {
-    let mut chars = g.chars();
-    let first = chars.next()?;
-    chars.next().is_none().then_some(first)
+/// The number a symbol label names, if it names one: the label is the
+/// canonical decimal spelling of a value a number literal can denote — so
+/// `'7'` and `7`, one symbol with the label `7`, both name 7, while `'07'`,
+/// `'+7'` and `'x'` name none.
+pub(crate) fn label_number(label: &str) -> Option<i64> {
+    let value: u32 = label.parse().ok()?;
+    (value.to_string() == label).then_some(i64::from(value))
 }
 
-/// Enumerate a pattern range's glyph labels (inclusive, ascending). `None` when
-/// the endpoints are descending, mixed-kind, or a non-single-scalar glyph — the
-/// cases resolution would reject or a lint cannot prove over. Mirrors the
-/// alphabet range expansion so the two agree on a range's membership.
-pub(crate) fn range_labels(lo: &SymLit, hi: &SymLit) -> Option<Vec<String>> {
-    match (lo, hi) {
-        (SymLit::Number { value: l, .. }, SymLit::Number { value: h, .. }) => {
-            (l <= h).then(|| (*l..=*h).map(|v| v.to_string()).collect())
-        }
-        (SymLit::Glyph { value: l, .. }, SymLit::Glyph { value: h, .. }) => {
-            let (lc, hc) = (single_scalar(l)?, single_scalar(h)?);
-            (lc as u32 <= hc as u32).then(|| {
-                (lc as u32..=hc as u32)
-                    .filter_map(char::from_u32)
-                    .map(|c| c.to_string())
-                    .collect()
-            })
-        }
-        _ => None,
+/// Why a range written in a pattern cell or a contract clause has no walk
+/// over the alphabet it is written against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeclaredRangeMiss {
+    /// This endpoint's label is not a symbol of the alphabet.
+    Endpoint(String),
+    /// Both endpoints are symbols, but the second comes first in the
+    /// alphabet's declared order.
+    Reversed,
+}
+
+/// The symbols a range written in a pattern cell or a contract clause
+/// stands for: `glyphs` — the alphabet it is written against, in declared
+/// order — from `lo`'s position to `hi`'s, inclusive. There is no
+/// succession to walk here, only the order the alphabet declares, so a
+/// multi-character endpoint is as good as a single scalar, and no member
+/// can fall outside by construction; the only failures are an endpoint the
+/// alphabet lacks and a pair written against the declared order
+/// (docs/tmt/language.md (pattern ranges)). A range in an alphabet or set BODY is
+/// the other walk — Unicode succession, which is what creates an order —
+/// and is `compiler::expand_range`'s.
+pub(crate) fn declared_range<'g>(
+    lo: &SymLit,
+    hi: &SymLit,
+    glyphs: &'g [String],
+) -> Result<&'g [String], DeclaredRangeMiss> {
+    let position = |s: &SymLit| {
+        let label = glyph_label(s);
+        glyphs
+            .iter()
+            .position(|g| *g == label)
+            .ok_or(DeclaredRangeMiss::Endpoint(label))
+    };
+    let (from, to) = (position(lo)?, position(hi)?);
+    if from > to {
+        return Err(DeclaredRangeMiss::Reversed);
     }
+    Ok(&glyphs[from..=to])
 }
 
 /// The glyph labels a pattern cell matches over `tape_glyphs` (its tape's
 /// alphabet, position order): a wildcard matches the whole alphabet, a single
-/// its one label, a range its enumerated labels, a set its members as
-/// resolution filled them in. `None` when a range is unresolvable or a set
-/// cell is not yet resolved — the caller then declines to reason about the
-/// cell.
+/// its one label, a range the declared-order run between its endpoints
+/// ([`declared_range`]), a set its members as resolution filled them in.
+/// `None` when a range has no walk over the alphabet or a set cell is not
+/// yet resolved — the caller then declines to reason about the cell.
 pub(crate) fn cell_labels(cell: &PatternCell, tape_glyphs: &[String]) -> Option<Vec<String>> {
     match &cell.kind {
         PatternCellKind::Wildcard => Some(tape_glyphs.to_vec()),
         PatternCellKind::Single(s) => Some(vec![glyph_label(s)]),
-        PatternCellKind::Range { lo, hi } => range_labels(lo, hi),
+        PatternCellKind::Range { lo, hi } => declared_range(lo, hi, tape_glyphs)
+            .ok()
+            .map(<[String]>::to_vec),
         PatternCellKind::SetRef { resolved, .. } => resolved
             .as_ref()
             .map(|r| r.members.iter().map(|m| m.label.clone()).collect()),
@@ -124,12 +147,11 @@ pub(crate) fn accepted_glyphs(
 #[cfg(test)]
 mod tests {
     use mtc_core::diagnostics::Span;
-    use proptest::prelude::*;
 
-    use crate::compiler::{expand_range, glyph_label as compiler_glyph_label};
+    use crate::compiler::glyph_label as compiler_glyph_label;
     use crate::parser::SymLit;
 
-    use super::{glyph_label, range_labels};
+    use super::{DeclaredRangeMiss, declared_range, glyph_label};
 
     fn num(value: u32) -> SymLit {
         SymLit::Number {
@@ -146,70 +168,77 @@ mod tests {
         }
     }
 
-    /// The one invariant: the lint's enumeration answers exactly when the
-    /// compiler's expansion succeeds, and with the same labels. A future
-    /// divergence in range handling would mis-attribute finding spans while
-    /// the overlap decision (computed from the resolved sets alone) stayed
-    /// right — this is the pin that surfaces it as a test failure instead.
-    fn assert_in_lockstep(lo: &SymLit, hi: &SymLit) {
-        let span = Span::new(1, 1, 1, 2);
+    fn labels(glyphs: &[&str]) -> Vec<String> {
+        glyphs.iter().map(|g| g.to_string()).collect()
+    }
+
+    /// A range written against an alphabet walks the alphabet's declared
+    /// order, derived here by hand: over `'_', 'a', 'z', 'b'`, `'a'..'z'`
+    /// is the two symbols between those positions — never the 26 of
+    /// Unicode succession, and never `'b'`, which comes after `'z'`.
+    /// Mutation: walking succession and keeping the members the alphabet
+    /// carries answers `a, b, z`.
+    #[test]
+    fn a_range_is_the_declared_run_between_its_endpoints() {
+        let alphabet = labels(&["_", "a", "z", "b"]);
         assert_eq!(
-            range_labels(lo, hi),
-            expand_range(lo, hi, span).ok(),
-            "lo={lo:?} hi={hi:?}"
+            declared_range(&glyph("a"), &glyph("z"), &alphabet),
+            Ok(&alphabet[1..=2])
+        );
+        assert_eq!(
+            declared_range(&glyph("z"), &glyph("b"), &alphabet),
+            Ok(&alphabet[2..=3])
+        );
+        assert_eq!(
+            declared_range(&glyph("a"), &glyph("a"), &alphabet),
+            Ok(&alphabet[1..=1])
         );
     }
 
+    /// The two failures: an endpoint the alphabet lacks, named, and a pair
+    /// the declared order reverses — including one Unicode succession would
+    /// call ascending.
     #[test]
-    fn the_matrix_pins_lint_attribution_to_the_compilers_expansion() {
-        // Numeric: ascending, single-value, descending.
-        assert_in_lockstep(&num(3), &num(7));
-        assert_in_lockstep(&num(5), &num(5));
-        assert_in_lockstep(&num(7), &num(3));
-        // Glyph: ascending, single-value, descending.
-        assert_in_lockstep(&glyph("a"), &glyph("f"));
-        assert_in_lockstep(&glyph("a"), &glyph("a"));
-        assert_in_lockstep(&glyph("f"), &glyph("a"));
-        // The surrogate gap: both walkers must skip it identically.
-        assert_in_lockstep(&glyph("\u{D7F0}"), &glyph("\u{E010}"));
-        // Endpoints resolution rejects: multi-scalar, empty, mixed kinds —
-        // each class at BOTH positions, since the two sides carry
-        // independent single_scalar copies and a position-blind matrix
-        // cannot catch an endpoint-asymmetric drift.
-        assert_in_lockstep(&glyph("ab"), &glyph("c"));
-        assert_in_lockstep(&glyph("a"), &glyph("bc"));
-        assert_in_lockstep(&glyph("a"), &glyph(""));
-        assert_in_lockstep(&glyph(""), &glyph("a"));
-        assert_in_lockstep(&num(1), &glyph("a"));
-        assert_in_lockstep(&glyph("a"), &num(1));
-        // A non-canonical `written` at a range endpoint: the `05` ≡ `5`
-        // identity must hold there too, not just on the single-literal path.
+    fn a_missing_endpoint_or_a_reversed_pair_has_no_walk() {
+        let alphabet = labels(&["_", "b", "a"]);
+        assert_eq!(
+            declared_range(&glyph("a"), &glyph("c"), &alphabet),
+            Err(DeclaredRangeMiss::Endpoint("c".to_string()))
+        );
+        assert_eq!(
+            declared_range(&glyph("x"), &glyph("a"), &alphabet),
+            Err(DeclaredRangeMiss::Endpoint("x".to_string()))
+        );
+        assert_eq!(
+            declared_range(&glyph("a"), &glyph("b"), &alphabet),
+            Err(DeclaredRangeMiss::Reversed)
+        );
+    }
+
+    /// No succession is walked, so an endpoint of several characters is a
+    /// symbol like any other, and a number endpoint is looked up by its
+    /// label (`05` is the symbol `5`).
+    #[test]
+    fn multi_character_and_numeric_endpoints_are_looked_up_by_label() {
+        let alphabet = labels(&["_", "ab", "cd", "ef"]);
+        assert_eq!(
+            declared_range(&glyph("ab"), &glyph("cd"), &alphabet),
+            Ok(&alphabet[1..=2])
+        );
+        let digits = labels(&["_", "5", "x", "7"]);
         let five_written_05 = SymLit::Number {
             value: 5,
             written: "05".to_string(),
             span: Span::new(1, 1, 1, 3),
         };
-        assert_in_lockstep(&five_written_05, &num(7));
+        assert_eq!(
+            declared_range(&five_written_05, &num(7), &digits),
+            Ok(&digits[1..=3])
+        );
     }
 
-    /// Derivation-first check of the gap-crossing range itself, so the
-    /// lockstep assert above cannot be satisfied by two walkers sharing the
-    /// same wrong answer: 0xD7F0..=0xE010 spans 0x821 code points, 0x800 of
-    /// them the surrogate gap, leaving 16 labels below it and 17 at or
-    /// above 0xE000 — 33 in all, none of them a surrogate.
-    #[test]
-    fn the_gap_crossing_range_is_derived_not_observed() {
-        let labels = range_labels(&glyph("\u{D7F0}"), &glyph("\u{E010}")).unwrap();
-        assert_eq!(labels.len(), 33);
-        assert_eq!(labels.first().unwrap(), "\u{D7F0}");
-        assert_eq!(labels.last().unwrap(), "\u{E010}");
-        // No separate no-surrogate assertion: a Rust `char` can never hold
-        // one, so the type system already guarantees it.
-    }
-
-    /// The single-literal leg of the same drift family: both sides label a
-    /// numeric literal by its VALUE's decimal string (the `05` ≡ `5` rule,
-    /// docs/tmt/language.md (alphabets)).
+    /// Both sides label a numeric literal by its VALUE's decimal string
+    /// (the `05` ≡ `5` rule, docs/tmt/language.md (alphabets)).
     #[test]
     fn glyph_label_matches_the_compilers() {
         for lit in [glyph("a"), glyph("ab"), glyph(""), num(0), num(5)] {
@@ -222,31 +251,5 @@ mod tests {
         };
         assert_eq!(glyph_label(&five), "5");
         assert_eq!(compiler_glyph_label(&five), "5");
-    }
-
-    proptest! {
-        /// Arbitrary numeric endpoints (span-bounded so an expansion stays
-        /// small) stay in lockstep — ascending and descending alike.
-        #[test]
-        fn numeric_endpoints_stay_in_lockstep(lo in 0u32..=1000, delta in -60i64..=60) {
-            let hi = (i64::from(lo) + delta).clamp(0, i64::from(u32::MAX)) as u32;
-            assert_in_lockstep(&num(lo), &num(hi));
-        }
-
-        /// Arbitrary glyph endpoints stay in lockstep over the broad endpoint
-        /// space `any::<char>()` draws from; the delta bound (±3000, wider
-        /// than the 2048-wide surrogate gap) merely permits a generated pair
-        /// to straddle the gap, it does not aim for it — `any::<char>()`
-        /// rarely lands near `0xD800`, so gap coverage here is incidental,
-        /// not guaranteed. The gap itself is covered deterministically by
-        /// the matrix's gap case and the derivation test above. A target
-        /// landing IN the gap is not a valid endpoint and is discarded.
-        #[test]
-        fn glyph_endpoints_stay_in_lockstep(lo in any::<char>(), delta in -3000i64..=3000) {
-            let target = (i64::from(lo as u32) + delta).clamp(0, 0x10FFFF) as u32;
-            prop_assume!(char::from_u32(target).is_some());
-            let hi = char::from_u32(target).unwrap();
-            assert_in_lockstep(&glyph(&lo.to_string()), &glyph(&hi.to_string()));
-        }
     }
 }

@@ -1,12 +1,16 @@
-//! The never-fires family (docs/tmt/language.md (rules)): a rule whose
-//! expansion produces zero rows (`empty-expansion`) and a rule shadowed by an
-//! earlier all-wildcard catch-all (`unreachable-rule`) both WARN and compile —
-//! never an internal compiler error. A state whose rules all vanished is a
-//! valid zero-row state: entering it traps exactly like a runtime no-match.
+//! The never-fires family (docs/tmt/language.md (rules)): a grafted rule that
+//! maps to no host symbol at its splice (`empty-expansion`) and a rule
+//! shadowed by an earlier all-wildcard catch-all (`unreachable-rule`) both
+//! WARN and compile — never an internal compiler error. A state with no rows
+//! — written with an empty body, or a graft instance whose every rule
+//! vanished at the splice — is a valid zero-row state: entering it traps
+//! exactly like a runtime no-match. A match cell naming a symbol its own
+//! tape lacks is not in this family: that is an authoring error, refused
+//! before any rule could vanish.
 //!
-//! Reproductions of the two "internal-error on plausible source" bugs: a range
-//! whose alternatives all fall outside the alphabet, and two catch-alls in one
-//! state. Result cases are derivation-first.
+//! Reproductions of the two "internal-error on plausible source" bugs: a
+//! state left with no rows, and two catch-alls in one state. Result cases
+//! are derivation-first.
 
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -97,12 +101,11 @@ fn run_capped_at(
 }
 
 #[test]
-fn empty_expansion_warns_and_compiles() {
-    // `small` has no numeric labels, so every alternative of `[0..5]` is absent
-    // and the rule expands to ZERO rows — a warning, not an error. The state
-    // keeps a working `['a']` rule, so the machine still does something: seed
-    // 'a' (index 1) fires the surviving rule (write 'b', stop); the [0..5] rule
-    // never fires. Derived final tape: "b" (cell [2]).
+fn a_range_its_own_tape_lacks_is_an_error_not_an_empty_expansion() {
+    // `small` has no numeric labels, so `[0..5]` names symbols its own tape
+    // does not carry. That rule could never fire, and the author can see so
+    // at the rule itself — an error at authoring time, never a rule dropped
+    // with a warning while the rest of the state compiles.
     let src = "\
 alphabet small { '_', 'a', 'b' }
 machine {
@@ -113,14 +116,8 @@ machine {
   }
 }
 ";
-    let codes = diag_codes(src);
-    assert!(
-        codes.iter().any(|c| c == "empty-expansion"),
-        "expected empty-expansion, got {codes:?}"
-    );
-    let (outcome, snaps) = run_capped(src, &[(snap(0, &[1], 0), 3)], 1_000);
-    assert_eq!(outcome, Outcome::Stopped);
-    assert_eq!(snaps, vec![snap(0, &[2], 0)]);
+    let err = compile(src, CompileOptions::default()).expect_err("an off-tape range is refused");
+    assert_eq!(err.kind.code(), "range-outside-alphabet", "{err}");
 }
 
 #[test]
@@ -166,20 +163,20 @@ machine {
 
 #[test]
 fn zero_row_state_traps_like_no_match() {
-    // The entry state's only rule `[0..5]` empty-expands, leaving a ZERO-ROW
-    // state. Entering it must trap exactly like a runtime no-match — the same
+    // The entry state is written with an empty body — a ZERO-ROW state.
+    // Entering it must trap exactly like a runtime no-match — the same
     // NoTransition kind a genuine unmatched read produces.
     let zero_row = "\
 alphabet small { '_', 'a', 'b' }
 machine {
   tape t: small;
-  entry state s { [0..5] -> move [>] goto s; }
+  entry state s { }
 }
 ";
     let codes = diag_codes(zero_row);
     assert!(
-        codes.iter().any(|c| c == "empty-expansion"),
-        "expected empty-expansion, got {codes:?}"
+        !codes.iter().any(|c| c == "empty-expansion"),
+        "an empty body is written, not expanded to nothing: {codes:?}"
     );
     let (outcome, _) = run_capped(zero_row, &[(snap(0, &[1], 0), 3)], 1_000);
     assert!(
@@ -210,26 +207,30 @@ machine {
 
 #[test]
 fn graft_instantiated_empty_expansion_warns_not_errors() {
-    // A graph written generically with a `[0..9]` rule, grafted onto a tape
-    // whose alphabet (`marks`) has no numeric labels: the `[0..9]` rule
-    // empty-expands (a warning, not an error) while the instance's other rule
-    // still works. Seed "x_": the surviving `['x'] -> found` reaches `win`,
-    // which stops. Derived: tape unchanged, head 0.
+    // A graph written generically over its own `gen` alphabet, digits
+    // included, with a `['0'..'9']` rule — legal where it is written. It is
+    // grafted onto a tape whose alphabet (`marks`) has no digits, bound by a
+    // map covering every host symbol: no host symbol reads as a digit, so the
+    // rule has no host preimage and vanishes at the SPLICE (a warning, not an
+    // error) while the instance's other rules still work. Seed 'x': the
+    // surviving `['x'] -> found` reaches `win`, which stops. Derived: tape
+    // unchanged, head 0.
     let src = "\
 alphabet marks { '_', 'x', 'y' }
+alphabet gen { '_', 'x', 'y', '0'..'9' }
 
-graph findX(tape t: marks, state found, state missing) {
+graph findX(tape t: gen, state found, state missing) {
   entry state scan {
-    [0..9] -> move [>] goto scan;
-    ['x']  -> found;
-    ['_']  -> missing;
-    [*]    -> move [>] goto scan;
+    ['0'..'9'] -> move [>] goto scan;
+    ['x']      -> found;
+    ['_']      -> missing;
+    [*]        -> move [>] goto scan;
   }
 }
 
 machine {
   tape work: marks;
-  entry graft findX(t = work, found = win, missing = lose) as g;
+  entry graft findX(t = work with map { 'x' -> 'x', 'y' -> 'y' }, found = win, missing = lose) as g;
   state win  { [*] -> stop; }
   state lose { [*] -> halt; }
 }
@@ -250,20 +251,23 @@ machine {
 
 #[test]
 fn graft_whose_only_rule_vanishes_becomes_a_zero_row_instance() {
-    // A grafted graph whose single rule empty-expands: the spliced instance is
-    // a ZERO-ROW state. As the entry graft it is entered immediately, and must
-    // trap NoTransition exactly like a hand-written zero-row state — the splice
-    // path reaches the same sound codegen.
+    // A grafted graph whose single rule vanishes at the splice (it matches
+    // only digits, which no host symbol reads as): the spliced instance is a
+    // ZERO-ROW state. As the entry graft it is entered immediately, and must
+    // trap NoTransition exactly like a hand-written zero-row state — the
+    // splice path reaches the same sound codegen. The map covers every host
+    // symbol, so no read-trap rows are synthesized either.
     let src = "\
 alphabet marks { '_', 'x', 'y' }
+alphabet gen { '_', 'x', 'y', '0'..'9' }
 
-graph dead(tape t: marks, state done) {
-  entry state s { [0..9] -> move [>] goto s; }
+graph dead(tape t: gen, state done) {
+  entry state s { ['0'..'9'] -> move [>] goto s; }
 }
 
 machine {
   tape work: marks;
-  entry graft dead(t = work, done = win) as g;
+  entry graft dead(t = work with map { 'x' -> 'x', 'y' -> 'y' }, done = win) as g;
   state win { [*] -> stop; }
 }
 ";
@@ -448,16 +452,16 @@ machine {
 
 #[test]
 fn zero_row_state_is_sound_at_both_opt_levels() {
-    // A zero-row state is a NEW IR shape (rules: []) the optimizer had never
-    // seen before this task; the optimizer runs on it at -O1 before codegen.
-    // The -O0/-O1 equivalence floor must hold: entering the zero-row state
-    // traps NoTransition at BOTH levels (no pass panics on the empty rule
-    // vector, none transforms it so codegen's zero-row branch is skipped).
+    // A zero-row state is an IR shape (rules: []) the optimizer runs on at
+    // -O1 before codegen. The -O0/-O1 equivalence floor must hold: entering
+    // the zero-row state traps NoTransition at BOTH levels (no pass panics on
+    // the empty rule vector, none transforms it so codegen's zero-row branch
+    // is skipped).
     let src = "\
 alphabet small { '_', 'a', 'b' }
 machine {
   tape t: small;
-  entry state s { [0..5] -> move [>] goto s; }
+  entry state s { }
 }
 ";
     for level in [OptLevel::O0, OptLevel::O1] {
@@ -485,16 +489,11 @@ fn zero_row_state_at_the_widest_alphabet_traps_not_ices() {
 alphabet ring { 0..126 }
 machine {
   tape t: ring;
-  entry state s { ['a'] -> move [>] goto s; }
+  entry state s { }
 }
 ";
-    // The glyph `'a'` is absent from the numeric alphabet, so the only rule
-    // empty-expands and `s` goes zero-row (a warning, never an error).
-    let codes = diag_codes(src);
-    assert!(
-        codes.iter().any(|c| c == "empty-expansion"),
-        "expected empty-expansion, got {codes:?}"
-    );
+    // The empty body makes `s` zero-row; it compiles, never an error.
+    diag_codes(src);
     // Trap on entry, unmapped-read kind, tape untouched (no `rd`/write/move
     // runs). Width 127 fits the alphabet; the seeded index is irrelevant to
     // the outcome. Sound at BOTH opt levels — the optimizer sees the same

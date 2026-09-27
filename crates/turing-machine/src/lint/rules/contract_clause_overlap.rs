@@ -59,7 +59,7 @@ use crate::compiler::{Scopes, SetScope, full_name};
 use crate::footprint::SymSet;
 use crate::lint::LintContext;
 use crate::parser::{AlphabetElem, ContractClause, Program, SigParam, SigParamKind};
-use crate::patterns::{glyph_label, range_labels};
+use crate::patterns::{declared_range, glyph_label};
 
 /// One alphabet-body element's own source span — a clause body uses the same
 /// element grammar as an alphabet body.
@@ -72,7 +72,7 @@ fn elem_span(elem: &AlphabetElem) -> Span {
 }
 
 /// `elem`'s own indices in the tape's alphabet frame: one for a single
-/// symbol, one per expanded glyph for a range, one per member for a named
+/// symbol, one per member of the declared run for a range, one per member for a named
 /// glyph set — looked up through the same set scope resolution expanded
 /// the clause with, from the declaring world's own namespace `ns`. `None`
 /// only on a shape resolution would already have rejected (an unresolvable
@@ -87,7 +87,7 @@ fn elem_indices(
 ) -> Option<Vec<u32>> {
     let labels = match elem {
         AlphabetElem::Single(s) => vec![glyph_label(s)],
-        AlphabetElem::Range { lo, hi, .. } => range_labels(lo, hi)?,
+        AlphabetElem::Range { lo, hi, .. } => declared_range(lo, hi, glyphs).ok()?.to_vec(),
         AlphabetElem::SetRef { name, span } => sets.lookup(name, *span, ns).ok()?.1.glyphs.clone(),
     };
     labels

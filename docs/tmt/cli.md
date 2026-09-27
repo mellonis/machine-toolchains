@@ -278,6 +278,10 @@ subsection.
 | `alphabet-too-large` | An alphabet resolves to more than 127 symbols. |
 | `range-endpoint-not-scalar` | A glyph range endpoint that is not a single Unicode scalar. |
 | `range-descending` | A range whose low endpoint exceeds its high endpoint — ranges are inclusive and ascending. |
+| `symbol-outside-alphabet` | A pattern cell's single symbol is not a symbol of the alphabet of the tape the cell reads. |
+| `set-outside-alphabet` | A member of the glyph set a pattern cell names is not a symbol of the alphabet of the tape the cell reads. |
+| `range-outside-alphabet` | A range in a pattern cell or a contract clause has no walk over the alphabet it is written against, which it walks in declared order: a cell range's endpoint is not a symbol of the alphabet, or the second endpoint comes first in it. |
+| `empty-set-in-pattern` | A pattern cell names a glyph set with no members, so the rule can never match. |
 | `duplicate-name` | Two entities (alphabet, map, routine, graph, or namespace) share one name in one scope — including a top-level `main`, which is reserved for the entry world in every unit, library or program (`docs/tmt/language.md (program structure)`). |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
 | `too-many-tapes` | A world declares more than 16 tapes. |
