@@ -434,7 +434,65 @@ pub struct PatternCell {
 pub enum PatternCellKind {
     Wildcard,
     Single(SymLit),
-    Range { lo: SymLit, hi: SymLit },
+    Range {
+        lo: SymLit,
+        hi: SymLit,
+    },
+    /// A named glyph set, bare or `::`-qualified, as written: the cell
+    /// matches each of the set's members, one expanded row per member,
+    /// exactly as a range matches each of its own. The parser knows only
+    /// the name, so `resolved` is `None` as parsed; resolution fills it in
+    /// the world's own scope, and every reader past resolution — expansion,
+    /// the coverage lints, the static head-contract checks — reads the
+    /// members from there, never the name.
+    SetRef {
+        name: String,
+        name_span: Span,
+        resolved: Option<SetCellMembers>,
+    },
+}
+
+/// What a set-naming pattern cell matches, filled by resolution: the set
+/// it resolved to and that set's members, in the set's own order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetCellMembers {
+    /// The set's mangled name.
+    pub set: String,
+    pub members: Vec<SetMember>,
+}
+
+/// One member of a set a pattern cell names: its glyph label, and whether
+/// the set spelled it as a number — a number member is what fold
+/// arithmetic may read, the same distinction a numeric range carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetMember {
+    pub label: String,
+    pub numeric: bool,
+}
+
+/// Where a rule's write vector applies arithmetic to a glyph-bound name:
+/// the span of the leftmost such reference in the first folding `{…}`
+/// cell, or `None`. A bare `{name}` is passthrough — legal for a glyph
+/// binding — so only a cell of any other shape is a fold, and a fold is
+/// numeric-only (docs/tmt/language.md (substitution)). The parser asks
+/// this for the bindings whose kind it can see; resolution asks it again
+/// for the set-bound names, whose members it alone knows.
+pub(crate) fn char_arithmetic_span(write: Option<&WriteVec>, glyph_bound: &[&str]) -> Option<Span> {
+    fn var_span(expr: &FoldExprNode, glyph_bound: &[&str]) -> Option<Span> {
+        match &expr.kind {
+            FoldExprKind::Var(name) => glyph_bound.contains(&name.as_str()).then_some(expr.span),
+            FoldExprKind::Int(_) => None,
+            FoldExprKind::Bin { lhs, rhs, .. } => {
+                var_span(lhs, glyph_bound).or_else(|| var_span(rhs, glyph_bound))
+            }
+        }
+    }
+    write?.cells.iter().find_map(|cell| match &cell.kind {
+        WriteCellKind::Subst { expr } if !matches!(expr.kind, FoldExprKind::Var(_)) => {
+            var_span(expr, glyph_bound)
+        }
+        _ => None,
+    })
 }
 
 /// A pattern-cell binding `as NAME`.
@@ -2192,9 +2250,6 @@ impl Parser<'_> {
         pattern: &Pattern,
         write: &Option<WriteVec>,
     ) -> Result<(), CompileError> {
-        let Some(w) = write else {
-            return Ok(());
-        };
         let mut glyph_bound: Vec<&str> = Vec::new();
         for cell in &pattern.cells {
             if let Some(b) = &cell.binding {
@@ -2202,36 +2257,21 @@ impl Parser<'_> {
                     PatternCellKind::Single(s) => s.is_glyph(),
                     PatternCellKind::Range { lo, .. } => lo.is_glyph(),
                     PatternCellKind::Wildcard => false,
+                    // A set's members are unknown until resolution, which
+                    // runs this same check over them (`char_arithmetic_span`).
+                    PatternCellKind::SetRef { .. } => false,
                 };
                 if is_glyph {
                     glyph_bound.push(b.name.as_str());
                 }
             }
         }
-        for cell in &w.cells {
-            if let WriteCellKind::Subst { expr } = &cell.kind
-                // A bare name keeps passthrough semantics — legal for a glyph
-                // binding. Any other shape is a fold, which is numeric-only.
-                && !matches!(expr.kind, FoldExprKind::Var(_))
-                && let Some(span) = Self::glyph_var_span(expr, &glyph_bound)
-            {
-                return Err(CompileError {
-                    span,
-                    kind: CompileErrorKind::CharArithmetic,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    /// The span of the first (leftmost) fold-expression reference to a
-    /// glyph-bound name, or `None` if the expression references none.
-    fn glyph_var_span(expr: &FoldExprNode, glyph_bound: &[&str]) -> Option<Span> {
-        match &expr.kind {
-            FoldExprKind::Var(name) => glyph_bound.contains(&name.as_str()).then_some(expr.span),
-            FoldExprKind::Int(_) => None,
-            FoldExprKind::Bin { lhs, rhs, .. } => Self::glyph_var_span(lhs, glyph_bound)
-                .or_else(|| Self::glyph_var_span(rhs, glyph_bound)),
+        match char_arithmetic_span(write.as_ref(), &glyph_bound) {
+            Some(span) => Err(CompileError {
+                span,
+                kind: CompileErrorKind::CharArithmetic,
+            }),
+            None => Ok(()),
         }
     }
 
@@ -2276,10 +2316,23 @@ impl Parser<'_> {
                     }
                 }
             }
+            // An identifier names a glyph set, the way it does in an
+            // alphabet body (`alphabet_elem`).
+            TokenKind::Ident(_) => {
+                let q = self.qual_name("a set name")?;
+                (
+                    PatternCellKind::SetRef {
+                        name: q.joined(),
+                        name_span: q.span,
+                        resolved: None,
+                    },
+                    q.span,
+                )
+            }
             _ => {
                 return Err(Self::expected(
                     &t,
-                    "a pattern element (glyph, number, range, or `*`)",
+                    "a pattern element (glyph, number, range, set name, or `*`)",
                 ));
             }
         };

@@ -28,8 +28,9 @@ use crate::lexer::{LexMode, Token, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
-    Graft, Machine, MoveDir, PatternCellKind, Program, QualName, Rule, SetDecl, SigParamKind,
-    State, SymLit, Transition, WriteCell, WriteCellKind, parse_green_from_tokens,
+    Graft, Machine, MoveDir, PatternCellKind, Program, QualName, Rule, SetCellMembers, SetDecl,
+    SetMember, SigParamKind, State, SymLit, Transition, WriteCell, WriteCellKind,
+    parse_green_from_tokens,
 };
 use crate::patterns::{accepted_glyphs, cell_labels};
 
@@ -3101,7 +3102,14 @@ fn resolve_module(
     let mut entry_world = None;
     if let Some(m) = &program.machine {
         entry_world = Some(worlds.len());
-        worlds.push(resolve_machine_world(m, scopes, &mut alphabets, externals)?);
+        worlds.push(resolve_machine_world(
+            m,
+            scopes,
+            &mut alphabets,
+            &set_scope,
+            &mut set_refs,
+            externals,
+        )?);
     }
 
     Ok(Resolved {
@@ -3250,8 +3258,10 @@ fn resolve_world(
             kind: CompileErrorKind::TooManyStateParams(state_params.len()),
         }
     })?;
-    let (grafts, binds, entry) = resolve_world_reuse(grafts, binds, states, ns, scopes, externals)?;
-    let calls = resolve_world_calls(states, &binds, ns, scopes);
+    let states = resolve_pattern_sets(states, ns, sets, set_refs)?;
+    let (grafts, binds, entry) =
+        resolve_world_reuse(grafts, binds, &states, ns, scopes, externals)?;
+    let calls = resolve_world_calls(&states, &binds, ns, scopes);
     Ok(ResolvedWorld {
         kind,
         name,
@@ -3262,13 +3272,76 @@ fn resolve_world(
         state_params,
         exits,
         declared_noreturn,
-        states: states.to_vec(),
+        states,
         grafts,
         binds,
         entry,
         calls,
         digest: None,
     })
+}
+
+/// A world's states with every set-naming pattern cell resolved: the name
+/// looked up from the world's namespace `ns` through [`SetScope::members`]
+/// — so the reference is recorded as consumed — and the set's members
+/// stored on the cell, in the set's own order. Everything downstream reads
+/// a set cell through those members; nothing past here resolves a set
+/// name again, which is also what lets a graph body grafted into another
+/// unit carry its sets with it.
+///
+/// A binding on a set cell may take fold arithmetic only when every member
+/// is a number — a range's rule, where a quoted range binds glyphs — so a
+/// fold over a set-bound name with any quoted member is the same
+/// `char-arithmetic` refusal the parser gives a glyph range's binding
+/// (docs/tmt/language.md (substitution)).
+fn resolve_pattern_sets(
+    states: &[State],
+    ns: &[String],
+    sets: &SetScope,
+    set_refs: &mut HashSet<String>,
+) -> Result<Vec<State>, CompileError> {
+    let mut out = states.to_vec();
+    for state in &mut out {
+        for rule in &mut state.rules {
+            let mut glyph_bound: Vec<String> = Vec::new();
+            for cell in &mut rule.pattern.cells {
+                let PatternCellKind::SetRef {
+                    name,
+                    name_span,
+                    resolved,
+                } = &mut cell.kind
+                else {
+                    continue;
+                };
+                let set = sets.members(name, *name_span, ns, set_refs)?;
+                let members: Vec<SetMember> = set
+                    .glyphs
+                    .iter()
+                    .map(|label| SetMember {
+                        label: label.clone(),
+                        numeric: set.numeric.contains(label),
+                    })
+                    .collect();
+                if let Some(b) = &cell.binding
+                    && members.iter().any(|m| !m.numeric)
+                {
+                    glyph_bound.push(b.name.clone());
+                }
+                *resolved = Some(SetCellMembers {
+                    set: set.name.clone(),
+                    members,
+                });
+            }
+            let bound: Vec<&str> = glyph_bound.iter().map(String::as_str).collect();
+            if let Some(span) = crate::parser::char_arithmetic_span(rule.write.as_ref(), &bound) {
+                return Err(CompileError {
+                    span,
+                    kind: CompileErrorKind::CharArithmetic,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Resolve every `call` transition in a world's rules to a [`ResolvedCall`]
@@ -3323,6 +3396,8 @@ fn resolve_machine_world(
     m: &Machine,
     scopes: &Scopes,
     alphabets: &mut HashMap<String, ResolvedAlphabet>,
+    sets: &SetScope,
+    set_refs: &mut HashSet<String>,
     externals: &Declarations,
 ) -> Result<ResolvedWorld, CompileError> {
     let mut tapes: Vec<ResolvedTape> = Vec::new();
@@ -3350,9 +3425,10 @@ fn resolve_machine_world(
             leaves: None,
         });
     }
+    let states = resolve_pattern_sets(&m.states, &[], sets, set_refs)?;
     let (grafts, binds, entry) =
-        resolve_world_reuse(&m.grafts, &m.binds, &m.states, &[], scopes, externals)?;
-    let calls = resolve_world_calls(&m.states, &binds, &[], scopes);
+        resolve_world_reuse(&m.grafts, &m.binds, &states, &[], scopes, externals)?;
+    let calls = resolve_world_calls(&states, &binds, &[], scopes);
     Ok(ResolvedWorld {
         kind: WorldKind::Machine,
         name: "main".to_string(),
@@ -3365,7 +3441,7 @@ fn resolve_machine_world(
         exits: 0,
         // A `machine` block has no `noreturn` grammar slot at all.
         declared_noreturn: None,
-        states: m.states.to_vec(),
+        states,
         grafts,
         binds,
         entry,
@@ -4134,6 +4210,13 @@ impl WorldCtx<'_> {
             }
             for s in states {
                 for rule in &s.rules {
+                    // A pattern cell naming a set is a set reference like
+                    // one in an element list.
+                    for cell in &rule.pattern.cells {
+                        if let PatternCellKind::SetRef { name, .. } = &cell.kind {
+                            mark(name, ns, ctx);
+                        }
+                    }
                     if let Transition::Call { target, args, .. } = &rule.transition {
                         mark(&target.joined(), ns, ctx);
                         mark_args(args, ns, ctx);

@@ -1051,6 +1051,7 @@ fn pattern_cell_text(cell: &PatternCell) -> String {
         PatternCellKind::Wildcard => "*".to_string(),
         PatternCellKind::Single(sym) => sym_text(sym),
         PatternCellKind::Range { lo, hi } => format!("{}..{}", sym_text(lo), sym_text(hi)),
+        PatternCellKind::SetRef { name, .. } => name.clone(),
     };
     if let Some(binding) = &cell.binding {
         out.push_str(" as ");

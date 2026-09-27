@@ -2,8 +2,9 @@
 //! `set NAME { … }` declaration built from literals, ranges and other
 //! sets — namespaced, `export`able and `use`-importable exactly as an
 //! alphabet is — expanding in place in an alphabet body and in any
-//! contract clause. A set is never a tape type, and a cycle among sets is
-//! a compile error rather than a hang.
+//! contract clause, and matching its members in a pattern cell. A set is
+//! never a tape type, and a cycle among sets is a compile error rather
+//! than a hang.
 //!
 //! **The central claim** (`a_set_is_a_spelling_of_its_members`): a set name
 //! is a SPELLING, not a semantics — a program naming a set compiles to the
@@ -13,6 +14,10 @@ use std::path::{Path, PathBuf};
 
 use mtc_turing_machine::cli::{CliOutput, execute};
 use mtc_turing_machine::compiler::{CompileOptions, compile};
+use mtc_turing_machine::fmt::format as fmt_format;
+use mtc_turing_machine::ir::IrCell;
+use mtc_turing_machine::lint::{LintOptions, lint};
+use mtc_turing_machine::optimizer::OptLevel;
 
 /// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
 /// uniquely by process id + an atomic counter so concurrent test processes
@@ -419,4 +424,443 @@ machine {
         err.contains("mylib::digits") && err.contains("declarations were not given"),
         "{err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A set in a pattern cell.
+// ---------------------------------------------------------------------------
+
+/// Compile at `-O0`, where the generated assembly is the expansion's own
+/// rows (no pass merges or reorders them), and return it.
+fn tma_o0(src: &str) -> String {
+    let options = CompileOptions {
+        opt_level: OptLevel::O0,
+        ..CompileOptions::default()
+    };
+    compile(src, options)
+        .unwrap_or_else(|e| panic!("expected success: {e}\n{src}"))
+        .tma
+}
+
+/// A one-tape machine over `alphabet` whose entry state carries `rules`
+/// and then a moving catch-all, with `decls` above it.
+fn one_tape_program(decls: &str, alphabet: &str, rules: &[String]) -> String {
+    let body: String = rules.iter().map(|r| format!("    {r}\n")).collect();
+    format!(
+        "{decls}alphabet tape_ab {{ {alphabet} }}\nmachine {{\n  tape main: tape_ab;\n  entry state go {{\n{body}    [*] -> move [>] goto go;\n  }}\n}}\n"
+    )
+}
+
+/// **Row equality.** `[odd] -> …` expands to one row per member, in the
+/// set's own member order, exactly the rows the members written out one
+/// rule each produce. The expected rows are DERIVED here from the set's
+/// written members, never read back from a run; the generated assembly at
+/// `-O0` is compared because it carries both the match rows and, through
+/// the dispatch targets, the order the expansion emitted them in.
+/// Mutation: expanding a set cell to ONE row (its first member, say) —
+/// the named form then lacks two rows and the assembly differs.
+#[test]
+fn a_set_cell_is_one_row_per_member() {
+    let members = ["7", "3", "1"];
+    let decl = format!(
+        "set odd {{ {} }}\n",
+        members
+            .iter()
+            .map(|m| format!("'{m}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let alphabet = "'_', '1', '3', '7', 'x'";
+    let named = one_tape_program(&decl, alphabet, &["[odd] -> write ['x'] stop;".to_string()]);
+    let literal_rules: Vec<String> = members
+        .iter()
+        .map(|m| format!("['{m}'] -> write ['x'] stop;"))
+        .collect();
+    let literal = one_tape_program(&decl, alphabet, &literal_rules);
+    assert_eq!(tma_o0(&named), tma_o0(&literal));
+}
+
+/// **The `as` form.** `[some as d] -> write [{d+1}]` binds each member in
+/// turn and folds per row, exactly as a numeric range does: the rows equal
+/// the members written out with their folded writes, derived here.
+/// Mutation: dropping the binding on the set arm — `{d+1}` then names no
+/// binding and the named form is refused.
+#[test]
+fn a_bound_set_cell_folds_per_row() {
+    let members: [u32; 4] = [5, 0, 1, 2];
+    let decl = format!(
+        "set some {{ {} }}\n",
+        members
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let alphabet = "'_', 0..6";
+    let named = one_tape_program(
+        &decl,
+        alphabet,
+        &["[some as d] -> write [{d+1}] stop;".to_string()],
+    );
+    let literal_rules: Vec<String> = members
+        .iter()
+        .map(|m| format!("[{m}] -> write [{}] stop;", m + 1))
+        .collect();
+    let literal = one_tape_program(&decl, alphabet, &literal_rules);
+    assert_eq!(tma_o0(&named), tma_o0(&literal));
+}
+
+/// A set-bound name takes arithmetic only when EVERY member is a number —
+/// the rule a range's binding follows, where a quoted range is glyph-bound.
+/// A quoted member anywhere in the set, first or not, makes a fold the
+/// `char-arithmetic` refusal; a bare `{c}` passthrough stays legal on any
+/// set. Mutation: deciding foldability on the set's FIRST member only (the
+/// way a range reads its low end) — the mixed set below, whose first member
+/// is a number, then reaches fold evaluation with a glyph in hand.
+#[test]
+fn a_set_binding_folds_only_when_every_member_is_a_number() {
+    let rules = |rule: &str| vec![rule.to_string()];
+    assert_eq!(
+        code(&one_tape_program(
+            "set letters { 'a', 'b' }\n",
+            "'_', 'a', 'b', 'c'",
+            &rules("[letters as c] -> write [{c+1}] stop;"),
+        )),
+        "char-arithmetic"
+    );
+    assert_eq!(
+        code(&one_tape_program(
+            "set mixed { 1, 'a' }\n",
+            "'_', 'a', 1, 2",
+            &rules("[mixed as c] -> write [{c+1}] stop;"),
+        )),
+        "char-arithmetic"
+    );
+    compiles(&one_tape_program(
+        "set letters { 'a', 'b' }\n",
+        "'_', 'a', 'b', 'c'",
+        &rules("[letters as c] -> write [{c}] stop;"),
+    ));
+}
+
+/// A set names what a pattern MATCHES; a write cell still takes one
+/// symbol, so a set name there stays the grammar's own refusal.
+/// Mutation: admitting an identifier in `write_cell` as a set reference —
+/// the source then gets past the parser.
+#[test]
+fn a_set_in_a_write_cell_is_refused() {
+    assert_eq!(
+        code(&one_tape_program(
+            "set odd { '1', '3' }\n",
+            "'_', '1', '3'",
+            &["[*] -> write [odd] stop;".to_string()],
+        )),
+        "unexpected-token"
+    );
+}
+
+/// **The agreement fixture.** One set, expanded once through an alphabet
+/// body and once through a pattern cell, lands in the same glyph order.
+/// The set is written out of order and through a range; the pattern cell
+/// sits on a tape whose alphabet lists the same glyphs in yet another
+/// order. The pattern-cell order is read off the lowered IR at `-O0` — the
+/// expansion's rows in the order it produced them, before codegen bands
+/// and sorts a state's match rows by symbol index — and the alphabet-body
+/// order off the other tape's own band.
+/// Mutation: a set arm that walks the TAPE's alphabet and keeps the
+/// members (tape order `5, 3, 2, 1, 9`), rather than walking the set's
+/// members (set order `9, 1, 2, 3, 5`).
+#[test]
+fn a_set_expands_in_one_order_in_an_alphabet_and_in_a_pattern() {
+    let src = "\
+set s { '9', '1'..'3', '5' }
+alphabet band { '_', s }
+alphabet other { '_', '5', '3', '2', '1', '9' }
+machine {
+  tape a: band;
+  tape b: other;
+  entry state go {
+    [*, s] -> stop;
+    [*, *] -> stop;
+  }
+}
+";
+    let options = CompileOptions {
+        opt_level: OptLevel::O0,
+        ..CompileOptions::default()
+    };
+    let out = compile(src, options).unwrap_or_else(|e| panic!("{e}"));
+    let world = out
+        .ir
+        .worlds
+        .iter()
+        .find(|w| w.name == "main")
+        .expect("the machine world");
+    let via_alphabet: Vec<String> = world.tapes[0].glyphs[1..].to_vec();
+    let state = world
+        .states
+        .iter()
+        .find(|s| s.name == "go")
+        .expect("state go");
+    let via_pattern: Vec<String> = state
+        .rules
+        .iter()
+        .filter_map(|r| match r.pattern[1] {
+            IrCell::Index { index } => Some(world.tapes[1].glyphs[index as usize].clone()),
+            IrCell::Wildcard => None,
+        })
+        .collect();
+    assert_eq!(via_alphabet, ["9", "1", "2", "3", "5"]);
+    assert_eq!(via_pattern, via_alphabet);
+}
+
+/// A pattern cell's set name resolves the way every other set reference
+/// does: nothing by that name is `undefined-set`, a name of another kind
+/// is `wrong-target-kind`. Mutation: resolving the cell's name as a glyph
+/// label (it would then match nothing and compile as a dead rule).
+#[test]
+fn an_unknown_or_wrong_kind_set_in_a_pattern_cell_is_refused() {
+    let rules = |rule: &str| vec![rule.to_string()];
+    assert_eq!(
+        code(&one_tape_program(
+            "",
+            "'_', 'a'",
+            &rules("[nosuch] -> stop;")
+        )),
+        "undefined-set"
+    );
+    assert_eq!(
+        code(&one_tape_program(
+            "",
+            "'_', 'a'",
+            &rules("[tape_ab] -> stop;")
+        )),
+        "wrong-target-kind"
+    );
+}
+
+/// An import whose only use is a pattern cell's set name is USED — and
+/// load-bearing: the same program without it does not resolve the name.
+/// Mutation: an import-usage walk that visits element lists but not
+/// pattern cells — the first compile then warns `unused-import`.
+#[test]
+fn an_import_used_only_by_a_pattern_cell_is_used() {
+    let with_use = "\
+namespace inner {
+  export set digits { '0'..'9' }
+}
+use inner::digits;
+alphabet dec { '_', '0'..'9' }
+machine {
+  tape main: dec;
+  entry state go { [digits] -> stop; [*] -> move [>] goto go; }
+}
+";
+    let out = compile(with_use, CompileOptions::default()).unwrap_or_else(|e| panic!("{e}"));
+    let unused: Vec<&str> = out
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "unused-import")
+        .map(|d| d.message.as_str())
+        .collect();
+    assert!(unused.is_empty(), "{unused:?}");
+    let without_use = with_use.replace("use inner::digits;\n", "");
+    assert_eq!(code(&without_use), "undefined-set");
+}
+
+/// Every coverage reader sees a set cell's MEMBERS — not the whole
+/// alphabet a wildcard would stand for, not nothing. A state matching only
+/// a set that misses the blank may trap; one matching a set that covers
+/// the alphabet may not. Mutation: a set cell read as a wildcard (the first
+/// finding disappears), as unresolvable (the reader declines, and the first
+/// finding disappears too), or as matching nothing (the second state is
+/// reported).
+#[test]
+fn coverage_reads_a_set_cells_members() {
+    let traps = |set: &str| {
+        let src = format!(
+            "set s {{ {set} }}\nalphabet ab {{ '_', 'a', 'b' }}\nmachine {{\n  tape t: ab;\n  entry state go {{ [s] -> stop; }}\n}}\n"
+        );
+        let options = LintOptions {
+            warn: vec!["state-may-trap".to_string()],
+            ..LintOptions::default()
+        };
+        lint(&src, options)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "state-may-trap")
+            .count()
+    };
+    assert_eq!(traps("'a', 'b'"), 1);
+    assert_eq!(traps("'_', 'a', 'b'"), 0);
+}
+
+/// The lint's binding product counts a set cell's members present on the
+/// tape: two cells of a seventeen-member set are 289 rows. Mutation:
+/// counting a set cell as one row, the way a wildcard counts.
+#[test]
+fn the_binding_product_counts_a_set_cells_members() {
+    let src = "\
+set big { 'a'..'q' }
+alphabet ab { '_', 'a'..'q' }
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state go { [big, big] -> stop; [*, *] -> stop; }
+}
+";
+    let found = lint(src, LintOptions::default())
+        .unwrap_or_else(|e| panic!("{e}"))
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "binding-product-threshold")
+        .count();
+    assert_eq!(found, 1);
+}
+
+/// `tmt fmt` prints a set cell's name back as written — qualified or
+/// bare, bound or not. Mutation: printing the cell by its members, or
+/// dropping the `as` binding.
+#[test]
+fn fmt_prints_a_set_cell_by_its_name() {
+    let src = "\
+namespace n {
+  export set s { 'a' }
+}
+alphabet ab { '_', 'a' }
+machine {
+  tape t: ab;
+  entry state go {
+    [n::s   as  v] -> write [{v}] stop;
+    [ *] -> stop;
+  }
+}
+";
+    let out = fmt_format(src).unwrap_or_else(|e| panic!("{e:?}"));
+    assert!(out.contains("[n::s as v] -> write [{v}] stop;"), "{out}");
+}
+
+const GRAPH_LIB_TMC: &str = "\
+namespace lib {
+  export alphabet dec { '_', '0'..'9' }
+  set evens { '0', '2', '4', '6', '8' }
+  export graph skip(tape t: dec, state done) {
+    entry state s {
+      [evens] -> move [>] goto s;
+      [*] -> done;
+    }
+  }
+}
+";
+
+/// A printed graph body naming a set prints the name, and so the header
+/// prints the set too — as a plain `set`, since this one is not exported
+/// on its own — so the header reads back byte for byte and a consumer can
+/// graft the graph through it. Mutation: a header that keeps printing only
+/// exported sets — reading it back then fails on `evens` (`undefined-set`).
+#[test]
+fn a_graph_body_naming_a_set_reaches_the_header_and_grafts() {
+    let dir = scratch("glyph_sets_graph_header");
+    let lib_path = write(&dir, "lib.tmc", GRAPH_LIB_TMC);
+    let header = run_interface(&lib_path).stdout;
+    assert!(
+        header.contains("  set evens { '0', '2', '4', '6', '8' }")
+            && header.contains("[evens] -> move [>] goto s;"),
+        "{header}"
+    );
+    let header_path = write(&dir, "lib.tmh", &header);
+    assert_eq!(run_interface(&header_path).stdout, header);
+
+    let consumer = "\
+use lib::dec;
+machine {
+  tape main: dec;
+  entry graft lib::skip(t = main, done = fin) as i;
+  state fin { [*] -> stop; }
+}
+";
+    assert_consumer_compiles(&dir, consumer, &header_path);
+}
+
+/// Compile `consumer` against the header at `header_path`.
+fn assert_consumer_compiles(dir: &Path, consumer: &str, header_path: &Path) {
+    let consumer_path = write(dir, "consumer.tmc", consumer);
+    let out_path = dir.join("consumer.tmo");
+    let compiled = execute(&args(&[
+        "compile",
+        consumer_path.to_str().unwrap(),
+        "--extern",
+        header_path.to_str().unwrap(),
+        "-o",
+        out_path.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile consumer: {e}"));
+    assert_eq!(compiled.code, 0, "{}", compiled.stderr);
+}
+
+/// A set whose members are numbers prints them bare in a header, so a
+/// printed graph body folding over a binding on it reads back as the same
+/// fold. Mutation: printing a set's members the way an alphabet's are —
+/// single digits quoted — so the header's own set is glyph-bound on
+/// read-back and the fold is refused (`char-arithmetic`).
+#[test]
+fn a_number_sets_members_stay_numbers_through_a_header() {
+    let lib = "\
+namespace lib {
+  export alphabet num { '_', 0..3 }
+  export set low { 0..2 }
+  export graph inc(tape t: num, state done) {
+    entry state s {
+      [low as d] -> write [{d+1}] goto done;
+      [*] -> goto done;
+    }
+  }
+}
+";
+    let dir = scratch("glyph_sets_number_header");
+    let lib_path = write(&dir, "lib.tmc", lib);
+    let header = run_interface(&lib_path).stdout;
+    assert!(header.contains("export set low { 0, 1, 2 }"), "{header}");
+    let header_path = write(&dir, "lib.tmh", &header);
+    assert_eq!(run_interface(&header_path).stdout, header);
+    let consumer = "\
+use lib::num;
+machine {
+  tape main: num;
+  entry graft lib::inc(t = main, done = fin) as i;
+  state fin { [*] -> stop; }
+}
+";
+    assert_consumer_compiles(&dir, consumer, &header_path);
+}
+
+/// A printed graph body's bare set name reached through a `use` keeps
+/// that `use` line in the header. Mutation: an import-usage scan over a
+/// printed graph body that skips pattern cells — the `use` line drops and
+/// the header no longer resolves `evens` on read-back.
+#[test]
+fn a_graph_bodys_imported_set_keeps_its_use_line() {
+    let lib = "\
+namespace sets {
+  export set evens { '0', '2' }
+}
+namespace lib {
+  use sets::evens;
+  export alphabet dec { '_', '0'..'3' }
+  export graph skip(tape t: dec, state done) {
+    entry state s {
+      [evens] -> move [>] goto s;
+      [*] -> goto done;
+    }
+  }
+}
+";
+    let dir = scratch("glyph_sets_graph_use");
+    let lib_path = write(&dir, "lib.tmc", lib);
+    let header = run_interface(&lib_path).stdout;
+    assert!(header.contains("use sets::evens;"), "{header}");
+    let header_path = write(&dir, "lib.tmh", &header);
+    assert_eq!(run_interface(&header_path).stdout, header);
 }

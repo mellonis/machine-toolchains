@@ -262,6 +262,37 @@ fn set_declaration_comments_stay_where_written() {
     run_group(SET_DECLS);
 }
 
+/// A set named in a pattern cell: a comment before the name, between the
+/// name and its `as`, between `as` and the binding, after the cell, and
+/// inside a qualified name's own path.
+const SET_CELLS: &[(&str, &str)] = &[
+    (
+        "set-cell/before-name",
+        "set s { 'a' }\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state go {\n    [ @C@\n    s] -> stop;\n    [*] -> stop;\n  }\n}\n",
+    ),
+    (
+        "set-cell/name-as",
+        "set s { 'a' }\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state go {\n    [s @C@\n    as v] -> write [{v}] stop;\n    [*] -> stop;\n  }\n}\n",
+    ),
+    (
+        "set-cell/as-binding",
+        "set s { 'a' }\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state go {\n    [s as @C@\n    v] -> write [{v}] stop;\n    [*] -> stop;\n  }\n}\n",
+    ),
+    (
+        "set-cell/after-cell",
+        "set s { 'a' }\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  tape u: ab;\n  entry state go {\n    [s, @C@\n    *] -> stop;\n    [*, *] -> stop;\n  }\n}\n",
+    ),
+    (
+        "set-cell/inside-qualified-name",
+        "namespace n {\n  set s { 'a' }\n}\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state go {\n    [n:: @C@\n    s] -> stop;\n    [*] -> stop;\n  }\n}\n",
+    ),
+];
+
+#[test]
+fn set_cell_comments_stay_where_written() {
+    run_group(SET_CELLS);
+}
+
 /// The remaining header families. Measured destinations: `namespace`,
 /// `machine`, `state` → own line inside the body (after the `{`);
 /// `routine`, `graft`, `bind` → riding the argument list's `(`;

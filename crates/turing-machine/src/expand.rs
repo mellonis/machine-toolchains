@@ -616,6 +616,40 @@ fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, Compi
             }
             Ok(opts)
         }
+        // One row per member, in the set's own member order — the order
+        // an alphabet body naming the set lists them in — and, like a
+        // range, a member the tape does not carry drops silently.
+        PatternCellKind::SetRef { name, resolved, .. } => {
+            let Some(resolved) = resolved else {
+                return Err(CompileError {
+                    span: cell.span,
+                    kind: CompileErrorKind::Internal(format!(
+                        "the set `{name}` in a pattern cell reached expansion unresolved"
+                    )),
+                });
+            };
+            let mut opts = Vec::new();
+            for member in &resolved.members {
+                if let Some(i) = ti.idx(&member.label) {
+                    let bv = binding.clone().map(|n| {
+                        let value = if member.numeric {
+                            member.label.parse::<i64>().ok()
+                        } else {
+                            None
+                        };
+                        (
+                            n,
+                            BoundVal {
+                                glyph: member.label.clone(),
+                                value,
+                            },
+                        )
+                    });
+                    opts.push((Cell::Sym(i), bv));
+                }
+            }
+            Ok(opts)
+        }
     }
 }
 

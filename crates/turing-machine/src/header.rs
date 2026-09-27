@@ -1007,6 +1007,19 @@ fn render_source(
         }
     }
 
+    // Every set a PRINTED graph body's pattern cells name, by the mangled
+    // name resolution stored on each cell — the one place a header prints
+    // a set NAME rather than a set's members, so the set it names must
+    // print too: the same "referenced, printed even if not itself
+    // exported" rule a map gets.
+    let mut referenced_sets: HashSet<&str> = HashSet::new();
+    for graph in &program.graphs {
+        if is_printed_graph(graph) {
+            let full = full_name(&graph.ns, &graph.name);
+            resolved_set_refs(worlds[full.as_str()], &mut referenced_sets);
+        }
+    }
+
     // Every alphabet an EXPORTED routine or a PRINTED graph's tape
     // parameter draws from, by its mangled name — printed even when the
     // alphabet itself is not exported (a plain `alphabet`, not `export
@@ -1060,8 +1073,9 @@ fn render_source(
         }
     }
     for set in &program.sets {
-        if set.exported {
-            printed_full_names.insert(full_name(&set.ns, &set.name));
+        let full = full_name(&set.ns, &set.name);
+        if set.exported || referenced_sets.contains(full.as_str()) {
+            printed_full_names.insert(full);
         }
     }
     for map in &program.maps {
@@ -1097,23 +1111,23 @@ fn render_source(
             alphabet_lines(&alphabet.name, glyphs, alphabet.exported),
         );
     }
-    // Named glyph sets: exported ones, printed as their EXPANDED members
-    // (docs/tmt/cli.md (interface)). Nothing else a header prints ever
-    // names a set — an alphabet and every contract clause print their
-    // resolved glyphs — so an unexported set is never needed, and a set
-    // built from other sets (this unit's or an imported one) reads back
-    // with no `use` line and no sibling declaration behind it.
+    // Named glyph sets: exported ones, and the ones a printed graph body's
+    // pattern cells name, printed as their EXPANDED members
+    // (docs/tmt/cli.md (interface)). An alphabet and every contract clause
+    // print their resolved glyphs, so a pattern cell is the only printed
+    // text that names a set; a set built from other sets (this unit's or
+    // an imported one) still reads back with no `use` line and no sibling
+    // declaration behind it.
     for set in &program.sets {
-        if !set.exported {
+        let full = full_name(&set.ns, &set.name);
+        if !set.exported && !referenced_sets.contains(full.as_str()) {
             continue;
         }
-        let full = full_name(&set.ns, &set.name);
-        let glyphs = &resolved
+        let resolved_set = resolved
             .sets
             .get(&full)
-            .expect("resolution guarantees every declared set is resolved")
-            .glyphs;
-        root.insert(&set.ns, set_lines(&set.name, glyphs));
+            .expect("resolution guarantees every declared set is resolved");
+        root.insert(&set.ns, set_lines(resolved_set, &set.name, set.exported));
     }
     // Named maps: exported, or referenced from a printed graph body — the
     // same rule an alphabet gets. A map an exported graph names but this
@@ -1360,7 +1374,8 @@ fn collect_sig_refs<'p>(sig: &'p Signature, out: &mut HashSet<&'p str>) {
 
 /// Every BARE (single-segment) reuse target a printed graph body spells
 /// unqualified — its top-level `graft`/`bind` instances, plus any `call`
-/// target inside a rule's transition. std.tmc's own exported graphs never
+/// target inside a rule's transition — and every bare set name a pattern
+/// cell spells. std.tmc's own exported graphs never
 /// exercise the `call` case (a graph carries no `call` in this library's
 /// design — see its own header comment — every cross-namespace call is a
 /// plain routine's), but the printer stays correct for one regardless: a
@@ -1381,6 +1396,15 @@ fn collect_graph_body_refs<'p>(graph: &'p Graph, out: &mut HashSet<&'p str>) {
     }
     for state in &graph.states {
         for rule in &state.rules {
+            // A bare set name in a pattern cell resolves through an import
+            // exactly as a bare graft target does.
+            for cell in &rule.pattern.cells {
+                if let PatternCellKind::SetRef { name, .. } = &cell.kind
+                    && !name.contains("::")
+                {
+                    out.insert(name.as_str());
+                }
+            }
             if let Transition::Call { target, args, .. } = &rule.transition {
                 if let [only] = target.segments.as_slice() {
                     out.insert(only.as_str());
@@ -1440,6 +1464,25 @@ fn resolved_map_refs<'a>(world: &'a ResolvedWorld, out: &mut HashSet<&'a str>) {
     }
 }
 
+/// Every set one RESOLVED world's pattern cells name, by the MANGLED name
+/// resolution stored on each cell — the set-cell counterpart of
+/// [`resolved_map_refs`], deciding whether a printed graph body's set name
+/// needs its declaration printed alongside it.
+fn resolved_set_refs<'a>(world: &'a ResolvedWorld, out: &mut HashSet<&'a str>) {
+    for state in &world.states {
+        for rule in &state.rules {
+            for cell in &rule.pattern.cells {
+                if let PatternCellKind::SetRef {
+                    resolved: Some(r), ..
+                } = &cell.kind
+                {
+                    out.insert(r.set.as_str());
+                }
+            }
+        }
+    }
+}
+
 fn alphabet_lines(name: &str, glyphs: &[String], exported: bool) -> Vec<String> {
     let keyword = if exported {
         "export alphabet"
@@ -1449,12 +1492,33 @@ fn alphabet_lines(name: &str, glyphs: &[String], exported: bool) -> Vec<String> 
     vec![format!("{keyword} {name} {}", braced_list(glyphs))]
 }
 
-/// An exported glyph set as its members — [`alphabet_lines`]' spelling
-/// with `set` in place of `alphabet`. Always `export`: only an exported set
-/// is ever printed. An empty set prints `{}`, which the strict reader reads
-/// back as the same empty set.
-fn set_lines(name: &str, glyphs: &[String]) -> Vec<String> {
-    vec![format!("export set {name} {}", braced_list(glyphs))]
+/// A glyph set as its members — [`alphabet_lines`]' spelling with `set` in
+/// place of `alphabet`: `export set` for an exported set, a plain `set` for
+/// one printed only because a printed graph body names it. A member the set
+/// spelled as a NUMBER prints bare, whatever its width: a pattern cell's
+/// binding may take fold arithmetic only over number members, so a header
+/// that quoted one would read back a set a printed graph body's own fold
+/// is refused over. An empty set prints `{}`, which the strict reader
+/// reads back as the same empty set.
+fn set_lines(set: &compiler::ResolvedSet, name: &str, exported: bool) -> Vec<String> {
+    let keyword = if exported { "export set" } else { "set" };
+    let members = if set.glyphs.is_empty() {
+        "{}".to_string()
+    } else {
+        let spelled: Vec<String> = set
+            .glyphs
+            .iter()
+            .map(|g| {
+                if set.numeric.contains(g) {
+                    g.clone()
+                } else {
+                    render_glyph_element(g)
+                }
+            })
+            .collect();
+        format!("{{ {} }}", spelled.join(", "))
+    };
+    vec![format!("{keyword} {name} {members}")]
 }
 
 /// `{ … }` with the elements space-padded, or the bare `{}` a genuinely
@@ -1822,6 +1886,9 @@ fn pattern_text(pattern: &Pattern) -> String {
                     PatternCellKind::Range { lo, hi } => {
                         format!("{}..{}", sym_lit_text(lo), sym_lit_text(hi))
                     }
+                    // The name as written; `render_source` prints the set
+                    // it names alongside, so the header reads back.
+                    PatternCellKind::SetRef { name, .. } => name.clone(),
                 };
                 match &cell.binding {
                     Some(b) => format!("{base} as {}", b.name),

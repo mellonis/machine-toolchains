@@ -204,7 +204,8 @@ fn alphabet<'a>(module: &'a Resolved, mangled: &str) -> Option<&'a [String]> {
 /// alphabet as a `String` and looking each one back up. That is the same
 /// answer by `cell_labels`' own first rule, it is by far the commonest cell,
 /// and it is on the hot path of a fixpoint — `the_two_cell_readings_agree`
-/// holds the two in step over every cell shape.
+/// holds the two in step over every cell shape. A set cell is never short
+/// cut: it answers its resolved members, like a range.
 fn cell_set(cell: &PatternCell, glyphs: &[String], card: u32) -> SymSet {
     if matches!(cell.kind, PatternCellKind::Wildcard) {
         return SymSet::full(card);
@@ -692,7 +693,7 @@ mod tests {
     use crate::compiler::analyze;
     use crate::declarations::Declarations;
     use crate::footprint::SymSet;
-    use crate::parser::{PatternCell, PatternCellKind, SymLit};
+    use crate::parser::{PatternCell, PatternCellKind, SetCellMembers, SetMember, SymLit};
     use crate::patterns::cell_labels;
 
     fn span() -> Span {
@@ -750,6 +751,22 @@ mod tests {
             PatternCellKind::Range {
                 lo: glyph("c"),
                 hi: glyph("a"),
+            },
+            // A resolved set cell, one member off the alphabet: its members
+            // on the tape, never the whole alphabet a wildcard stands for.
+            PatternCellKind::SetRef {
+                name: "s".to_string(),
+                name_span: span(),
+                resolved: Some(SetCellMembers {
+                    set: "s".to_string(),
+                    members: ["c", "z", "a"]
+                        .iter()
+                        .map(|g| SetMember {
+                            label: g.to_string(),
+                            numeric: false,
+                        })
+                        .collect(),
+                }),
             },
         ] {
             let c = cell(kind);

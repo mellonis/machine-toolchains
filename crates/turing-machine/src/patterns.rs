@@ -52,13 +52,18 @@ pub(crate) fn range_labels(lo: &SymLit, hi: &SymLit) -> Option<Vec<String>> {
 
 /// The glyph labels a pattern cell matches over `tape_glyphs` (its tape's
 /// alphabet, position order): a wildcard matches the whole alphabet, a single
-/// its one label, a range its enumerated labels. `None` when a range is
-/// unresolvable — the caller then declines to reason about the cell.
+/// its one label, a range its enumerated labels, a set its members as
+/// resolution filled them in. `None` when a range is unresolvable or a set
+/// cell is not yet resolved — the caller then declines to reason about the
+/// cell.
 pub(crate) fn cell_labels(cell: &PatternCell, tape_glyphs: &[String]) -> Option<Vec<String>> {
     match &cell.kind {
         PatternCellKind::Wildcard => Some(tape_glyphs.to_vec()),
         PatternCellKind::Single(s) => Some(vec![glyph_label(s)]),
         PatternCellKind::Range { lo, hi } => range_labels(lo, hi),
+        PatternCellKind::SetRef { resolved, .. } => resolved
+            .as_ref()
+            .map(|r| r.members.iter().map(|m| m.label.clone()).collect()),
     }
 }
 
