@@ -152,7 +152,7 @@ use mtc_core::formats::object::{
     ExportedAlphabet, ExportedGraph, Interface, ObjectFile, SymbolDef,
 };
 
-use crate::codegen::{render_glyph_element, render_glyph_list};
+use crate::codegen::{quote_glyph, render_glyph_element, render_glyph_list};
 use crate::compiler::{
     self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, WorldKind,
     clause_glyphs, full_name, published_writes, symset_glyphs,
@@ -1884,7 +1884,7 @@ fn pattern_text(pattern: &Pattern) -> String {
                     PatternCellKind::Wildcard => "*".to_string(),
                     PatternCellKind::Single(s) => sym_lit_text(s),
                     PatternCellKind::Range { lo, hi } => {
-                        format!("{}..{}", sym_lit_text(lo), sym_lit_text(hi))
+                        format!("{}..{}", range_end_text(lo), range_end_text(hi))
                     }
                     // The name as written; `render_source` prints the set
                     // it names alongside, so the header reads back.
@@ -1903,6 +1903,19 @@ fn pattern_text(pattern: &Pattern) -> String {
 fn sym_lit_text(sym: &SymLit) -> String {
     match sym {
         SymLit::Glyph { value, .. } => render_glyph_element(value),
+        SymLit::Number { value, .. } => value.to_string(),
+    }
+}
+
+/// A range endpoint in the kind it was written: a glyph always quoted,
+/// with none of [`sym_lit_text`]'s bare-number shortcut, and a number bare.
+/// A range's two endpoints must be the same kind to parse, and a pattern
+/// cell's range may have an endpoint of several characters
+/// (docs/tmt/language.md (pattern ranges)) — `'9'..'10'` — which that
+/// shortcut would print as `'9'..10`.
+fn range_end_text(sym: &SymLit) -> String {
+    match sym {
+        SymLit::Glyph { value, .. } => quote_glyph(value),
         SymLit::Number { value, .. } => value.to_string(),
     }
 }

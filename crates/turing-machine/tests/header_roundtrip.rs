@@ -710,6 +710,40 @@ export graph drive(tape t: five, state done) {
     );
 }
 
+/// A pattern-cell range walks the alphabet's declared order, so its
+/// endpoints may be glyphs of several characters — `'9'..'10'` — and a
+/// printed graph body must spell both in their written kind: the range's
+/// two endpoints must be the same kind to parse at all. Mutation: printing
+/// an endpoint the way a lone glyph prints, which spells the numeric label
+/// `10` bare — the header then reads `'9'..10` and is refused on read-back
+/// (`range-kind-mismatch`).
+#[test]
+fn a_graph_bodys_multi_character_range_round_trips() {
+    const RANGE_FIXTURE: &str = "\
+export alphabet a { '_', '9', '10' }
+
+export graph g(tape t: a, state d) {
+  entry state s {
+    ['9'..'10'] -> goto d;
+    [*] -> goto d;
+  }
+}
+";
+    let dir = scratch("header_multi_char_range");
+    let src_path = dir.join("g.tmc");
+    std::fs::write(&src_path, RANGE_FIXTURE).unwrap();
+    let first = run_interface(&src_path);
+    assert!(
+        first.stdout.contains("['9'..'10'] -> goto d;"),
+        "{}",
+        first.stdout
+    );
+    let header_path = dir.join("g.tmh");
+    std::fs::write(&header_path, &first.stdout).unwrap();
+    let second = run_interface(&header_path);
+    assert_eq!(first.stdout, second.stdout);
+}
+
 /// A routine whose tape is INFERRED opaque — every state reads it through
 /// a `*` cell, so the compiled object's `.param` line carries the
 /// `opaque` suffix — renders identically on both arms, and neither arm

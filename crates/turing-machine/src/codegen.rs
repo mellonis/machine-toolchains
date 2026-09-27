@@ -862,7 +862,7 @@ pub(crate) fn render_glyph_element(glyph: &str) -> String {
 /// a bare number there as an INDEX, not a label — so a label headed for
 /// that slot is always quoted through this function instead, never through
 /// `render_glyph_element` (`render_binding`, below).
-fn quote_glyph(glyph: &str) -> String {
+pub(crate) fn quote_glyph(glyph: &str) -> String {
     let mut out = String::with_capacity(glyph.len() + 2);
     out.push('\'');
     for c in glyph.chars() {

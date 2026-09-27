@@ -141,11 +141,15 @@ pub enum CompileErrorKind {
     /// caps at 127; the multi-byte symbol family is a recorded deviation —
     /// named as not-yet-implemented rather than silently selected.
     AlphabetTooLarge(usize),
-    /// A glyph range (`'a'..'c'`) whose endpoint is not a single Unicode
-    /// scalar — char ranges walk scalar succession and need scalar ends.
+    /// A glyph range (`'a'..'c'`) in an alphabet or set body whose endpoint
+    /// is not a single Unicode scalar — a body range walks scalar succession
+    /// and needs scalar ends. (A pattern-cell or clause range walks the
+    /// declared order instead, where any glyph is an endpoint.)
     RangeEndpointNotScalar,
-    /// A range whose low endpoint exceeds its high endpoint. Ranges are
-    /// inclusive both ends and ascending; there is no descending form.
+    /// A range in an alphabet or set body whose low endpoint exceeds its
+    /// high endpoint. Ranges are inclusive both ends and ascending; there is
+    /// no descending form. (A pattern-cell or clause range written against
+    /// the declared order is `RangeOutsideAlphabet`.)
     RangeDescending,
     /// A pattern cell's single symbol is not a symbol of the alphabet of the
     /// tape the cell reads — a rule that could never match it.
