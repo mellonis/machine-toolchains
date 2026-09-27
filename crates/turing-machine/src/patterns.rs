@@ -26,6 +26,13 @@ pub(crate) fn glyph_label(s: &SymLit) -> String {
 /// canonical decimal spelling of a value a number literal can denote — so
 /// `'7'` and `7`, one symbol with the label `7`, both name 7, while `'07'`,
 /// `'+7'` and `'x'` name none.
+///
+/// This is the whole of fold arithmetic's foldability rule: a bound symbol
+/// folds exactly when its label names a number, never by whether its
+/// literal was quoted (docs/tmt/language.md (substitution)). The parser,
+/// resolution (a set cell's members) and expansion (a bound symbol's value)
+/// each decide through this one function, and a completion or a header
+/// spells a symbol bare exactly when it answers.
 pub(crate) fn label_number(label: &str) -> Option<i64> {
     let value: u32 = label.parse().ok()?;
     (value.to_string() == label).then_some(i64::from(value))

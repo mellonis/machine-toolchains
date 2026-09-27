@@ -653,8 +653,8 @@ machine {
 
     // Cell 0 draws from `ctl`'s alphabet…
     let first = labels(&complete_typing(head, "*, *", tail));
-    assert!(first.contains(&"'0'".to_string()), "{first:?}");
-    assert!(first.contains(&"'1'".to_string()), "{first:?}");
+    assert!(first.contains(&"0".to_string()), "{first:?}");
+    assert!(first.contains(&"1".to_string()), "{first:?}");
     assert!(!first.contains(&"'a'".to_string()), "{first:?}");
     assert!(first.contains(&"*".to_string()), "{first:?}");
 
@@ -662,7 +662,7 @@ machine {
     let second = labels(&complete_typing(&format!("{head}'0', "), "*", tail));
     assert!(second.contains(&"'a'".to_string()), "{second:?}");
     assert!(second.contains(&"'b'".to_string()), "{second:?}");
-    assert!(!second.contains(&"'1'".to_string()), "{second:?}");
+    assert!(!second.contains(&"1".to_string()), "{second:?}");
 }
 
 #[test]
@@ -681,7 +681,7 @@ machine {
     let got = labels(&complete_typing(head, "'a'", tail));
     assert!(got.contains(&"-".to_string()), "{got:?}");
     assert!(got.contains(&"'a'".to_string()), "{got:?}");
-    assert!(!got.contains(&"'1'".to_string()), "{got:?}");
+    assert!(!got.contains(&"1".to_string()), "{got:?}");
 }
 
 #[test]
@@ -999,11 +999,11 @@ machine {
     // Left of the arrow: the HOST tape's alphabet (`data`, wide).
     let src_side = labels(&complete_typing(head, "'a' -> '1'", tail));
     assert!(src_side.contains(&"'a'".to_string()), "{src_side:?}");
-    assert!(!src_side.contains(&"'1'".to_string()), "{src_side:?}");
+    assert!(!src_side.contains(&"1".to_string()), "{src_side:?}");
 
     // Right of it: the CALLEE tape parameter's alphabet (`num`, bits).
     let dst_side = labels(&complete_typing(&format!("{head}'a' -> "), "'1'", tail));
-    assert!(dst_side.contains(&"'1'".to_string()), "{dst_side:?}");
+    assert!(dst_side.contains(&"1".to_string()), "{dst_side:?}");
     assert!(!dst_side.contains(&"'a'".to_string()), "{dst_side:?}");
 }
 
@@ -1115,7 +1115,7 @@ fn completions_survive_a_document_that_no_longer_resolves() {
     service.did_update(&uri, &broken);
     let pos = pos_after(&broken, "['1', *]", 1);
     let got = labels(&service.completion(&uri, pos));
-    assert!(got.contains(&"'0'".to_string()), "{got:?}");
+    assert!(got.contains(&"0".to_string()), "{got:?}");
 }
 
 #[test]
@@ -2933,7 +2933,7 @@ machine {
         vcell_tail,
     ));
     assert!(
-        vcell_got.contains(&"'1'".to_string()),
+        vcell_got.contains(&"1".to_string()),
         "local glyph control: {vcell_got:?}"
     );
     assert!(
@@ -2967,7 +2967,7 @@ machine {
         map_tail,
     ));
     assert!(
-        mapsrc_got.contains(&"'0'".to_string()),
+        mapsrc_got.contains(&"0".to_string()),
         "host alphabet control: {mapsrc_got:?}"
     );
     assert!(

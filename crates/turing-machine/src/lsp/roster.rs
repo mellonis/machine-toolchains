@@ -11,18 +11,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::compiler::{Resolved, Scopes, SetScope, WorldKind, full_name};
-use crate::parser::{AlphabetElem, Program, SymLit};
+use crate::compiler::{Resolved, WorldKind};
+use crate::parser::Program;
+use crate::patterns::label_number;
 
 /// One symbol of a resolved alphabet: the label the compiler compares on,
 /// plus how it must be SPELLED to be that symbol again in source.
 ///
-/// The two differ, and the difference matters: a resolved alphabet stores
-/// labels only, so `'0'` (a glyph) and `0` (a number) both arrive as the
-/// string `0`. Completing the wrong one produces a symbol the alphabet
-/// does not contain. The numeric flag is recovered from the alphabet's own
-/// source elements — the numeric singles and numeric ranges are exactly
-/// the labels that spell bare — so no range needs re-expanding here.
+/// A resolved alphabet stores labels only, so `'0'` and `0` both arrive as
+/// the label `0` — and they are one symbol, so either spelling completes to
+/// it. The one completion offers is bare exactly when the label names a
+/// number (`patterns::label_number`, fold arithmetic's own rule): the bare
+/// spelling says the symbol is one a fold may read. Any other label is
+/// quoted — `'07'` among them, a different symbol from `7`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GlyphEntry {
     pub(crate) label: String,
@@ -136,19 +137,17 @@ pub(crate) struct Roster {
 
 impl Roster {
     pub(crate) fn build(resolved: &Resolved, program: Option<&Program>) -> Roster {
-        let numeric = numeric_labels(resolved, program);
         let mut roster = Roster {
             alphabets: resolved
                 .alphabets
                 .iter()
                 .map(|(name, a)| {
-                    let bare = numeric.get(name);
                     let entries = a
                         .glyphs
                         .iter()
                         .map(|label| GlyphEntry {
                             label: label.clone(),
-                            numeric: bare.is_some_and(|set| set.contains(label)),
+                            numeric: label_number(label).is_some(),
                         })
                         .collect();
                     (name.clone(), entries)
@@ -283,64 +282,6 @@ impl Roster {
     }
 }
 
-/// Per mangled alphabet, the labels its source declared NUMERICALLY — the
-/// ones that spell as bare decimals rather than quoted glyphs. Numeric
-/// ranges contribute every value in the range without expanding any glyph
-/// range, since a glyph range's labels spell quoted either way. A named
-/// glyph set contributes the members IT spelled numerically
-/// (`ResolvedSet::numeric`, transitive through the sets it names), looked
-/// up through the same scope resolution the compiler expanded it with. Only
-/// this unit's own sets are consulted: a set imported from another unit
-/// arrives through its header, whose members are spelled as glyphs, so it
-/// carries no numeric spelling to recover.
-fn numeric_labels(
-    resolved: &Resolved,
-    program: Option<&Program>,
-) -> HashMap<String, std::collections::HashSet<String>> {
-    let mut out: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-    let Some(program) = program else {
-        return out;
-    };
-    let scopes = Scopes::build(program).ok();
-    let sets = scopes.as_ref().map(|scopes| SetScope {
-        scopes,
-        sets: &resolved.sets,
-        externals: &[],
-    });
-    for alphabet in &program.alphabets {
-        let mut labels = std::collections::HashSet::new();
-        for elem in &alphabet.elems {
-            match elem {
-                AlphabetElem::Single(SymLit::Number { value, .. }) => {
-                    labels.insert(value.to_string());
-                }
-                AlphabetElem::Range {
-                    lo: SymLit::Number { value: lo, .. },
-                    hi: SymLit::Number { value: hi, .. },
-                    ..
-                } => {
-                    for v in *lo..=*hi {
-                        labels.insert(v.to_string());
-                    }
-                }
-                AlphabetElem::SetRef { name, span } => {
-                    if let Some((_, set)) = sets
-                        .as_ref()
-                        .and_then(|s| s.lookup(name, *span, &alphabet.ns).ok())
-                    {
-                        labels.extend(set.numeric.iter().cloned());
-                    }
-                }
-                AlphabetElem::Single(SymLit::Glyph { .. }) | AlphabetElem::Range { .. } => {}
-            }
-        }
-        if !labels.is_empty() {
-            out.insert(full_name(&alphabet.ns, &alphabet.name), labels);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,9 +289,9 @@ mod tests {
 
     /// A glyph set's numeric members spell bare in the alphabet that
     /// names the set — through a set built into another set, too.
-    /// Mutation: the element walk ignoring a set reference (a catch-all
-    /// arm swallowing it) — the three digits then spell quoted, and a
-    /// completion offers symbols the alphabet does not contain.
+    /// Mutation: recovering the spelling from the alphabet body's written
+    /// elements, which name only the set — the three digits then spell
+    /// quoted.
     #[test]
     fn a_numeric_sets_members_spell_bare_in_the_alphabet_naming_it() {
         let a = analyze("set low { 0..1 }\nset nums { low, 2 }\nalphabet n { '_', nums }\n")
@@ -363,5 +304,25 @@ mod tests {
             .map(GlyphEntry::spelling)
             .collect();
         assert_eq!(spellings, ["'_'", "0", "1", "2"]);
+    }
+
+    /// A completion spells a symbol bare exactly when its label names a
+    /// number — the foldability rule — however the alphabet quoted it:
+    /// `'7'` and `7` are one symbol, so the bare spelling is that symbol,
+    /// while `'07'` (a different symbol from `7`) and `'x'` stay quoted.
+    /// Mutation: recovering the spelling from how the alphabet wrote it —
+    /// `'7'` completes quoted.
+    #[test]
+    fn a_label_naming_a_number_spells_bare_whatever_its_quotes() {
+        let a =
+            analyze("alphabet n { '_', '7', '07', 'x', 8 }\n").unwrap_or_else(|e| panic!("{e}"));
+        let roster = Roster::build(&a.resolved, Some(&a.program));
+        let spellings: Vec<String> = roster
+            .glyphs("n")
+            .expect("the alphabet is in the roster")
+            .iter()
+            .map(GlyphEntry::spelling)
+            .collect();
+        assert_eq!(spellings, ["'_'", "7", "'07'", "'x'", "8"]);
     }
 }

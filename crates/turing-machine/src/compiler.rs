@@ -32,7 +32,9 @@ use crate::parser::{
     SetMember, SigParamKind, State, SymLit, Transition, WriteCell, WriteCellKind,
     parse_green_from_tokens,
 };
-use crate::patterns::{DeclaredRangeMiss, accepted_glyphs, cell_labels, declared_range};
+use crate::patterns::{
+    DeclaredRangeMiss, accepted_glyphs, cell_labels, declared_range, label_number,
+};
 
 /// Fatal compile error at a real source span (1-based, char-counted,
 /// end-exclusive; see `mtc_core::diagnostics`).
@@ -1163,13 +1165,11 @@ pub(crate) struct ResolvedSet {
     pub name: String,
     pub name_span: Span,
     pub exported: bool,
-    /// Member labels in declaration order, each once.
+    /// Member labels in declaration order, each once. A label that names a
+    /// number (`patterns::label_number`) is a member fold arithmetic may
+    /// read and a header or completion spells bare, whatever quotes the
+    /// declaration gave it.
     pub glyphs: Vec<String>,
-    /// The members the declaration spelled NUMERICALLY (a number or a
-    /// numeric range, directly or through a set it names) — the labels a
-    /// completion must offer bare rather than quoted, carried here so no
-    /// consumer has to re-expand the set to learn it.
-    pub numeric: std::collections::BTreeSet<String>,
 }
 
 /// Where a set reference resolves: to one of this unit's own sets (by its
@@ -1273,14 +1273,10 @@ struct SetFrame<'p> {
     next: usize,
     glyphs: Vec<String>,
     seen: HashSet<String>,
-    numeric: std::collections::BTreeSet<String>,
 }
 
 impl SetFrame<'_> {
-    fn push(&mut self, label: String, numeric: bool) {
-        if numeric {
-            self.numeric.insert(label.clone());
-        }
+    fn push(&mut self, label: String) {
         if self.seen.insert(label.clone()) {
             self.glyphs.push(label);
         }
@@ -1312,7 +1308,6 @@ fn resolve_all_sets(
         next: 0,
         glyphs: Vec::new(),
         seen: HashSet::new(),
-        numeric: std::collections::BTreeSet::new(),
     };
     let mut out: HashMap<String, ResolvedSet> = HashMap::new();
     for root in &program.sets {
@@ -1332,19 +1327,18 @@ fn resolve_all_sets(
                         name_span: done.decl.name_span,
                         exported: done.decl.exported,
                         glyphs: done.glyphs,
-                        numeric: done.numeric,
                     },
                 );
                 continue;
             };
             match elem {
                 AlphabetElem::Single(s) => {
-                    top.push(glyph_label(s), !s.is_glyph());
+                    top.push(glyph_label(s));
                     top.next += 1;
                 }
                 AlphabetElem::Range { lo, hi, span } => {
                     for label in expand_range(lo, hi, *span)? {
-                        top.push(label, !lo.is_glyph());
+                        top.push(label);
                     }
                     top.next += 1;
                 }
@@ -1377,7 +1371,7 @@ fn resolve_all_sets(
                         };
                     let top = stack.last_mut().expect("the loop holds a top frame");
                     for label in &set.glyphs {
-                        top.push(label.clone(), set.numeric.contains(label));
+                        top.push(label.clone());
                     }
                     top.next += 1;
                     refs.insert(full);
@@ -3361,11 +3355,12 @@ fn resolve_world(
 /// name again, which is also what lets a graph body grafted into another
 /// unit carry its sets with it.
 ///
-/// A binding on a set cell may take fold arithmetic only when every member
-/// is a number — a range's rule, where a quoted range binds glyphs — so a
-/// fold over a set-bound name with any quoted member is the same
-/// `char-arithmetic` refusal the parser gives a glyph range's binding
-/// (docs/tmt/language.md (substitution)).
+/// A binding on a set cell may take fold arithmetic only when every
+/// member's label names a number (`patterns::label_number` — how the set
+/// quoted it does not matter), so a fold over a set-bound name with any
+/// other member is the same `char-arithmetic` refusal the parser gives a
+/// single symbol whose label names none (docs/tmt/language.md
+/// (substitution)).
 fn resolve_pattern_sets(
     states: &[State],
     ns: &[String],
@@ -3391,11 +3386,10 @@ fn resolve_pattern_sets(
                     .iter()
                     .map(|label| SetMember {
                         label: label.clone(),
-                        numeric: set.numeric.contains(label),
                     })
                     .collect();
                 if let Some(b) = &cell.binding
-                    && members.iter().any(|m| !m.numeric)
+                    && members.iter().any(|m| label_number(&m.label).is_none())
                 {
                     glyph_bound.push(b.name.clone());
                 }

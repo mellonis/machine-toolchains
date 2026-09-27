@@ -1494,12 +1494,12 @@ fn alphabet_lines(name: &str, glyphs: &[String], exported: bool) -> Vec<String> 
 
 /// A glyph set as its members — [`alphabet_lines`]' spelling with `set` in
 /// place of `alphabet`: `export set` for an exported set, a plain `set` for
-/// one printed only because a printed graph body names it. A member the set
-/// spelled as a NUMBER prints bare, whatever its width: a pattern cell's
-/// binding may take fold arithmetic only over number members, so a header
-/// that quoted one would read back a set a printed graph body's own fold
-/// is refused over. An empty set prints `{}`, which the strict reader
-/// reads back as the same empty set.
+/// one printed only because a printed graph body names it. A member whose
+/// label names a number (`patterns::label_number`, fold arithmetic's rule)
+/// prints bare, whatever its width and however the source quoted it — `'7'`
+/// and `7` are one symbol, and the bare spelling says it is one a fold may
+/// read. An empty set prints `{}`, which the strict reader reads back as
+/// the same empty set.
 fn set_lines(set: &compiler::ResolvedSet, name: &str, exported: bool) -> Vec<String> {
     let keyword = if exported { "export set" } else { "set" };
     let members = if set.glyphs.is_empty() {
@@ -1509,7 +1509,7 @@ fn set_lines(set: &compiler::ResolvedSet, name: &str, exported: bool) -> Vec<Str
             .glyphs
             .iter()
             .map(|g| {
-                if set.numeric.contains(g) {
+                if crate::patterns::label_number(g).is_some() {
                     g.clone()
                 } else {
                     render_glyph_element(g)

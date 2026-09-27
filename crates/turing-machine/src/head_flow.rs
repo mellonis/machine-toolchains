@@ -763,7 +763,6 @@ mod tests {
                         .iter()
                         .map(|g| SetMember {
                             label: g.to_string(),
-                            numeric: false,
                         })
                         .collect(),
                 }),

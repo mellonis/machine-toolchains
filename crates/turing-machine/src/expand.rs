@@ -514,8 +514,9 @@ impl TapeInfo {
 }
 
 /// A symbol bound by a pattern cell's `as v`. `glyph` is what a bare `{v}`
-/// passthrough writes; `value` is the number fold arithmetic reads (`None` for
-/// glyph bindings — the parser forbids arithmetic on those).
+/// passthrough writes; `value` is the number fold arithmetic reads — the
+/// number the label names (`label_number`), `None` when it names none, and a
+/// fold over such a binding is refused before any evaluation.
 #[derive(Debug, Clone)]
 struct BoundVal {
     glyph: String,
@@ -527,14 +528,6 @@ fn glyph_label(s: &SymLit) -> String {
     match s {
         SymLit::Glyph { value, .. } => value.clone(),
         SymLit::Number { value, .. } => value.to_string(),
-    }
-}
-
-/// A symbol literal's numeric value, if it is a number literal.
-fn numeric_value(s: &SymLit) -> Option<i64> {
-    match s {
-        SymLit::Number { value, .. } => Some(i64::from(*value)),
-        SymLit::Glyph { .. } => None,
     }
 }
 
@@ -576,7 +569,7 @@ fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, Compi
                     n,
                     BoundVal {
                         glyph: glyph.clone(),
-                        value: numeric_value(s),
+                        value: label_number(&glyph),
                     },
                 )
             });
@@ -595,9 +588,6 @@ fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, Compi
                     },
                 },
             })?;
-            // A number range's members fold when their labels name numbers;
-            // a glyph range binds glyphs.
-            let numeric = !lo.is_glyph();
             let mut opts = Vec::with_capacity(members.len());
             for glyph in members {
                 let i = lookup(glyph, &|| {
@@ -606,12 +596,11 @@ fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, Compi
                     ))
                 })?;
                 let bv = binding.clone().map(|n| {
-                    let value = if numeric { label_number(glyph) } else { None };
                     (
                         n,
                         BoundVal {
                             glyph: glyph.clone(),
-                            value,
+                            value: label_number(glyph),
                         },
                     )
                 });
@@ -644,16 +633,11 @@ fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, Compi
                     alphabet: ti.alphabet.clone(),
                 })?;
                 let bv = binding.clone().map(|n| {
-                    let value = if member.numeric {
-                        member.label.parse::<i64>().ok()
-                    } else {
-                        None
-                    };
                     (
                         n,
                         BoundVal {
                             glyph: member.label.clone(),
-                            value,
+                            value: label_number(&member.label),
                         },
                     )
                 });
@@ -2248,6 +2232,58 @@ machine {
             })
             .collect();
         assert_eq!(crate::patterns::cell_labels(cell, &glyphs), Some(expanded));
+    }
+
+    /// Three sites decide whether a bound symbol folds, and each is driven
+    /// here through its own real entry: the parser, refusing a fold over a
+    /// single-symbol cell; resolution, refusing one over a set cell from the
+    /// set's members; and expansion, giving a bound symbol the value fold
+    /// arithmetic reads (`eval_fold` only asserts it never meets one without
+    /// a value). All three must answer "the label names a number" — quotes
+    /// never matter, so `'7'`, `7` and `007` (all the label `7`) fold, while
+    /// `'07'`, `'+7'`, `'-1'`, an over-`u32` string and a letter do not.
+    /// Mutation: any one site deciding by quotes (`'7'` splits it from the
+    /// other two) or by a looser parse (`'+7'` or `'07'` does).
+    #[test]
+    fn the_three_foldability_sites_agree_on_every_spelling() {
+        let matrix: &[(&str, &str, Option<i64>)] = &[
+            ("'7'", "7", Some(7)),
+            ("7", "7", Some(7)),
+            ("007", "7", Some(7)),
+            ("'0'", "0", Some(0)),
+            ("'07'", "07", None),
+            ("'+7'", "+7", None),
+            ("'-1'", "-1", None),
+            ("'4294967296'", "4294967296", None),
+            ("'x'", "x", None),
+        ];
+        let program = |decls: &str, cell: &str, action: &str| {
+            format!(
+                "{decls}machine {{\n  tape t: w;\n  entry state s {{ [{cell} as d] -> {action}; }}\n}}\n"
+            )
+        };
+        for &(lit, label, number) in matrix {
+            let alphabet = format!("alphabet w {{ '_', {lit} }}\n");
+            let refused_as_glyph = |r: Result<(), CompileError>| match r {
+                Ok(()) => false,
+                Err(e) if e.kind == CompileErrorKind::CharArithmetic => true,
+                Err(e) => panic!("`{lit}`: {e}"),
+            };
+            let parser = !refused_as_glyph(
+                parse(&program(&alphabet, lit, "write [{d+0}] stop")).map(|_| ()),
+            );
+            let with_set = format!("set s {{ {lit} }}\n{alphabet}");
+            let resolution = !refused_as_glyph(
+                crate::compiler::analyze(&program(&with_set, "s", "write [{d+0}] stop"))
+                    .map(|_| ()),
+            );
+            let rules = machine_rules(&program(&alphabet, lit, "stop"), 0);
+            let opts = cell_options(&rules[0].pattern.cells[0], &ti(&["_", label])).unwrap();
+            let (_, bound) = opts[0].1.as_ref().expect("the cell binds `d`");
+            assert_eq!(bound.value, number, "`{lit}`: the expansion's value");
+            assert_eq!(parser, number.is_some(), "`{lit}`: the parser");
+            assert_eq!(resolution, number.is_some(), "`{lit}`: resolution");
+        }
     }
 
     #[test]

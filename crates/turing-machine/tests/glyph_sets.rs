@@ -357,8 +357,11 @@ fn run_interface(path: &Path) -> CliOutput {
 /// An exported set reaches the source-arm header as its expanded members
 /// (a set it was built from need not itself be exported), and that header
 /// reads back under the strict declarations-only reader byte for byte.
-/// Mutation: printing a set the strict reader cannot parse, or printing
-/// the written elements (the unexported `low` would then be unresolvable).
+/// The quoted digits print bare: a member whose label names a number is
+/// spelled as that number, whatever quotes the source gave it — the same
+/// symbol either way. Mutation: printing a set the strict reader cannot
+/// parse, or printing the written elements (the unexported `low` would
+/// then be unresolvable).
 #[test]
 fn an_exported_set_reaches_the_header_and_reads_back() {
     let dir = scratch("glyph_sets_header");
@@ -366,7 +369,7 @@ fn an_exported_set_reaches_the_header_and_reads_back() {
     let out = run_interface(&path);
     assert!(
         out.stdout
-            .contains("export set digits { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' }"),
+            .contains("export set digits { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }"),
         "{}",
         out.stdout
     );
@@ -766,7 +769,7 @@ fn a_graph_body_naming_a_set_reaches_the_header_and_grafts() {
     let lib_path = write(&dir, "lib.tmc", GRAPH_LIB_TMC);
     let header = run_interface(&lib_path).stdout;
     assert!(
-        header.contains("  set evens { '0', '2', '4', '6', '8' }")
+        header.contains("  set evens { 0, 2, 4, 6, 8 }")
             && header.contains("[evens] -> move [>] goto s;"),
         "{header}"
     );
@@ -800,11 +803,10 @@ fn assert_consumer_compiles(dir: &Path, consumer: &str, header_path: &Path) {
     assert_eq!(compiled.code, 0, "{}", compiled.stderr);
 }
 
-/// A set whose members are numbers prints them bare in a header, so a
+/// A set whose members are numbers prints them bare in a header, and a
 /// printed graph body folding over a binding on it reads back as the same
 /// fold. Mutation: printing a set's members the way an alphabet's are —
-/// single digits quoted — so the header's own set is glyph-bound on
-/// read-back and the fold is refused (`char-arithmetic`).
+/// single digits quoted — fails the printed-line assertion.
 #[test]
 fn a_number_sets_members_stay_numbers_through_a_header() {
     let lib = "\

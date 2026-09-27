@@ -176,3 +176,61 @@ machine {
 ";
     assert_eq!(compile_err(src).kind.code(), "fold-out-of-alphabet");
 }
+
+/// One of the decimal-increment probe programs, read from the repository.
+fn probe(name: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/superpowers/probes/2026-09-13-tmc-completeness/probe3-sets")
+        .join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// Whether a bound symbol folds is decided by its LABEL naming a number,
+/// never by how its literal was quoted (docs/tmt/language.md
+/// (substitution)): `'7'` and `7` are one symbol, so a quoted digit range
+/// folds exactly as a numeric one does. The glyph-spelled increment
+/// compiles and computes what the number-spelled one does — the two
+/// alphabets are the same symbols at the same indices ('_' 0, '0'..'9'
+/// 1..10). The number-spelled program also strips leading zeros, a no-op
+/// on these seeds, so only the cells are compared, not the head.
+/// Mutation: deciding foldability by quotes again — the glyph-spelled
+/// program is refused (`char-arithmetic`).
+#[test]
+fn a_glyph_spelled_digit_range_folds_like_a_numeric_one() {
+    let glyphs = probe("dec-glyph.tmc");
+    let numbers = probe("dec.tmc");
+    // (seed digits as indices, derived result): 199 + 1 = 200, 9 + 1 = 10
+    // (the carry grows the number one cell left), 41 + 1 = 42.
+    for (seed, expected) in [
+        (vec![2u8, 10, 10], vec![3u8, 1, 1]),
+        (vec![10], vec![2, 1]),
+        (vec![5, 2], vec![5, 3]),
+    ] {
+        let tape = snap(0, &seed, 0);
+        let (g_outcome, g_snaps) = compile_link_run(&glyphs, &[(tape.clone(), 13)]);
+        let (n_outcome, n_snaps) = compile_link_run(&numbers, &[(tape, 13)]);
+        assert_eq!(g_outcome, Outcome::Stopped);
+        assert_eq!(n_outcome, Outcome::Stopped);
+        // The number, left to right: every non-blank cell (a result has no
+        // interior blank).
+        let digits =
+            |s: &TapeSnapshot| -> Vec<u8> { s.cells.iter().copied().filter(|&c| c != 0).collect() };
+        assert_eq!(digits(&g_snaps[0]), expected, "glyph-spelled on {seed:?}");
+        assert_eq!(digits(&n_snaps[0]), expected, "number-spelled on {seed:?}");
+    }
+}
+
+/// The near miss: a label that names no number does not fold, however the
+/// range is spelled. Mutation: deciding foldability from the symbol's
+/// alphabet POSITION (every glyph has one) — this fold would then compile.
+#[test]
+fn a_fold_over_non_numeric_labels_is_still_char_arithmetic() {
+    let src = "\
+alphabet abc { '_', 'a'..'d' }
+machine {
+  tape t: abc;
+  entry state s { ['a'..'c' as d] -> write [{d+1}] stop; [*] -> stop; }
+}
+";
+    assert_eq!(compile_err(src).kind.code(), "char-arithmetic");
+}

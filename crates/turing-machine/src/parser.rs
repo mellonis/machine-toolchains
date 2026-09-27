@@ -22,6 +22,7 @@ use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
+use crate::patterns::{glyph_label, label_number};
 use crate::syntax::{self, GreenSink, TmcKind};
 
 /// The `.tmc` language acceptance-contract version (the spec's language
@@ -461,13 +462,12 @@ pub struct SetCellMembers {
     pub members: Vec<SetMember>,
 }
 
-/// One member of a set a pattern cell names: its glyph label, and whether
-/// the set spelled it as a number — a number member is what fold
-/// arithmetic may read, the same distinction a numeric range carries.
+/// One member of a set a pattern cell names: its glyph label. Whether a
+/// binding on the cell may fold over it is its label's own answer
+/// (`patterns::label_number`), never how the set spelled it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetMember {
     pub label: String,
-    pub numeric: bool,
 }
 
 /// Where a rule's write vector applies arithmetic to a glyph-bound name:
@@ -2250,15 +2250,20 @@ impl Parser<'_> {
         pattern: &Pattern,
         write: &Option<WriteVec>,
     ) -> Result<(), CompileError> {
+        // A binding folds only over symbols whose labels name numbers
+        // (`patterns::label_number`). A single symbol is decided here; a
+        // range, here when an endpoint already names none — the rest of its
+        // members depend on the alphabet's declared order, and expansion
+        // runs this same check over them; a set's members are unknown until
+        // resolution, which runs it over those.
+        let names_no_number = |s: &SymLit| label_number(&glyph_label(s)).is_none();
         let mut glyph_bound: Vec<&str> = Vec::new();
         for cell in &pattern.cells {
             if let Some(b) = &cell.binding {
                 let is_glyph = match &cell.kind {
-                    PatternCellKind::Single(s) => s.is_glyph(),
-                    PatternCellKind::Range { lo, .. } => lo.is_glyph(),
+                    PatternCellKind::Single(s) => names_no_number(s),
+                    PatternCellKind::Range { lo, hi } => names_no_number(lo) || names_no_number(hi),
                     PatternCellKind::Wildcard => false,
-                    // A set's members are unknown until resolution, which
-                    // runs this same check over them (`char_arithmetic_span`).
                     PatternCellKind::SetRef { .. } => false,
                 };
                 if is_glyph {
