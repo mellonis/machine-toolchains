@@ -864,3 +864,114 @@ namespace lib {
     let header_path = write(&dir, "lib.tmh", &header);
     assert_eq!(run_interface(&header_path).stdout, header);
 }
+
+/// A routine over `ab` whose one tape declares `clause`, with `decls`
+/// above it and `rules` in its entry state.
+fn clause_routine(decls: &str, clause: &str, rules: &str) -> String {
+    format!(
+        "{decls}alphabet ab {{ '_', 'a', 'b' }}\nroutine r(tape t: ab {clause}) {{\n  entry state s {{ {rules} }}\n}}\n"
+    )
+}
+
+/// The static `leaves` check reads a set cell's members: a ONE-member set
+/// pins the glyph a returning row leaves on the tape, exactly as a
+/// one-glyph pattern does, so a member outside the declared clause is
+/// refused; a two-member set does not pin it, so the check leaves the row
+/// to the runtime check, as it does a range. Mutation: `cell_labels`
+/// answering nothing for a set cell — the check then declines and the
+/// first source compiles.
+#[test]
+fn the_leaves_check_reads_a_set_cells_members() {
+    assert_eq!(
+        code(&clause_routine(
+            "set one { 'b' }\n",
+            "leaves { 'a' }",
+            "[one] -> return; [*] -> write ['a'] return;",
+        )),
+        "leaves-outside-contract"
+    );
+    compiles(&clause_routine(
+        "set two { 'a', 'b' }\n",
+        "leaves { 'a' }",
+        "[two] -> return; [*] -> write ['a'] return;",
+    ));
+}
+
+/// The static `enters` check reads a set cell's members: an entry state
+/// matching a set that covers every declared `enters` glyph accepts the
+/// clause; one whose set misses a declared glyph is refused. Mutation:
+/// `cell_labels` answering nothing for a set cell — the check then
+/// declines and the second source compiles.
+#[test]
+fn the_enters_check_reads_a_set_cells_members() {
+    compiles(&clause_routine(
+        "set both { 'a', 'b' }\n",
+        "enters { 'a', 'b' }",
+        "[both] -> return;",
+    ));
+    assert_eq!(
+        code(&clause_routine(
+            "set one { 'a' }\n",
+            "enters { 'a', 'b' }",
+            "[one] -> return;",
+        )),
+        "enters-not-accepted"
+    );
+}
+
+/// A library graph grafted through its header matches the members of the
+/// set its DECLARING unit names, even when the consumer declares a set of
+/// the same name with other members: the library's `pick` is `'a'`, the
+/// consumer's `pick` is `'b'`, and the spliced match row is `'a'`'s
+/// (index 1 on `ab`), never `'b'`'s (index 2). Mutation: filling a
+/// grafted graph's set cells from the consumer's own sets — the row then
+/// matches index 2.
+#[test]
+fn a_grafted_graph_matches_its_declaring_units_set() {
+    let lib = "\
+namespace lib {
+  export alphabet ab { '_', 'a', 'b', 'x' }
+  set pick { 'a' }
+  export graph mark(tape t: ab, state done) {
+    entry state s {
+      [pick] -> write ['x'] goto done;
+      [*] -> goto done;
+    }
+  }
+}
+";
+    let consumer = "\
+use lib::ab;
+set pick { 'b' }
+alphabet unused { '_', pick }
+machine {
+  tape main: ab;
+  entry graft lib::mark(t = main, done = fin) as i;
+  state fin { [*] -> stop; }
+}
+";
+    let dir = scratch("glyph_sets_graft_scope");
+    let lib_path = write(&dir, "lib.tmc", lib);
+    let header_path = write(&dir, "lib.tmh", &run_interface(&lib_path).stdout);
+    let consumer_path = write(&dir, "consumer.tmc", consumer);
+    let tma_path = dir.join("consumer.tma");
+    let compiled = execute(&args(&[
+        "compile",
+        "-O0",
+        "-S",
+        consumer_path.to_str().unwrap(),
+        "--extern",
+        header_path.to_str().unwrap(),
+        "-o",
+        tma_path.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile consumer: {e}"));
+    assert_eq!(compiled.code, 0, "{}", compiled.stderr);
+    let tma = std::fs::read_to_string(&tma_path).unwrap();
+    let rows: Vec<&str> = tma
+        .lines()
+        .filter(|l| l.contains(".row") && !l.contains("[*]"))
+        .map(str::trim)
+        .collect();
+    assert_eq!(rows, ["T0:     .row    [1]"], "{tma}");
+}
