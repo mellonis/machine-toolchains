@@ -2029,6 +2029,13 @@ fn stamp_elems(
                 stamp_sym(lo, seen);
                 stamp_sym(hi, seen);
             }
+            // The generator writes no glyph set, so this label is never
+            // stamped today; listed nowhere, it fails the tally's own
+            // "stamps labels REQUIRED_CONSTRUCTS does not list" check the
+            // day the generator starts writing set references.
+            mtc_turing_machine::parser::AlphabetElem::SetRef { .. } => {
+                seen.insert("alphabet.elem.set-ref");
+            }
         }
     }
 }

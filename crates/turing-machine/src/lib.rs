@@ -33,5 +33,5 @@ pub mod stdlib;
 pub mod syntax;
 
 pub use asm::{TM1_TMA_DIALECT_VERSION, tm1_syntax};
-pub use compiler::{AlphabetMiss, CompileError, CompileErrorKind, MapMiss};
+pub use compiler::{AlphabetMiss, CompileError, CompileErrorKind, MapMiss, SetMiss};
 pub use parser::TMC_LANG_VERSION;

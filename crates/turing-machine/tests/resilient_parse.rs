@@ -67,6 +67,21 @@ fn a_broken_declaration_leaves_a_following_map_declaration_parsed() {
     );
 }
 
+/// The same for a following `set` declaration: `set` is a recovery sync
+/// word. Mutation: dropping `set` from `Parser::skip_to_sync`'s word set —
+/// the broken region then swallows the set, and no SET_DECL survives.
+#[test]
+fn a_broken_declaration_leaves_a_following_set_declaration_parsed() {
+    let src = "alphabet { '_' }\nset digits { '0'..'9' }\n";
+    let (root, errors) = resilient(src);
+    assert_eq!(root.text(), src, "the tree lost source text");
+    assert_eq!(errors.len(), 1, "one recovery region, one error");
+    assert!(
+        root.children().any(|c| kind_name(c.kind()) == "SET_DECL"),
+        "the later set declaration still parses as a SET_DECL"
+    );
+}
+
 /// INNER recovery: a broken world item does not take its machine with
 /// it — the MACHINE node survives at top level with the error region
 /// wrapped inside its world, and the sibling state is untouched.

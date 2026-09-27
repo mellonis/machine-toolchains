@@ -238,6 +238,30 @@ fn alphabet_header_comments_stay_in_the_header() {
     run_group(ALPHABET_HEADER);
 }
 
+/// A `set` declaration: its header (between the keyword and the name,
+/// between the name and the `{`), its body (between two elements, before
+/// the `}`), and a set reference in an alphabet body — including inside a
+/// qualified reference's own path, the `use/inside-path` analog.
+const SET_DECLS: &[(&str, &str)] = &[
+    ("set/kw-name", "set @C@\n  s { 'a' }\n"),
+    ("set/name-brace", "set s @C@\n  { 'a' }\n"),
+    ("set/between-elems", "set s {\n  'a', @C@\n  'b' }\n"),
+    ("set/before-close", "set s {\n  'a'\n  @C@\n}\n"),
+    (
+        "set/ref-between-elems",
+        "set s { 'a' }\nalphabet ab {\n  '_', @C@\n  s }\n",
+    ),
+    (
+        "set/inside-qualified-ref",
+        "namespace n {\n  set s { 'a' }\n}\nalphabet ab {\n  '_', n:: @C@\n  s }\n",
+    ),
+];
+
+#[test]
+fn set_declaration_comments_stay_where_written() {
+    run_group(SET_DECLS);
+}
+
 /// The remaining header families. Measured destinations: `namespace`,
 /// `machine`, `state` → own line inside the body (after the `{`);
 /// `routine`, `graft`, `bind` → riding the argument list's `(`;

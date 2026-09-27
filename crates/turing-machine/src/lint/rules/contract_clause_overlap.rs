@@ -55,7 +55,7 @@
 
 use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
 
-use crate::compiler::full_name;
+use crate::compiler::{Scopes, SetScope, full_name};
 use crate::footprint::SymSet;
 use crate::lint::LintContext;
 use crate::parser::{AlphabetElem, ContractClause, Program, SigParam, SigParamKind};
@@ -67,18 +67,28 @@ fn elem_span(elem: &AlphabetElem) -> Span {
     match elem {
         AlphabetElem::Single(s) => s.span(),
         AlphabetElem::Range { span, .. } => *span,
+        AlphabetElem::SetRef { span, .. } => *span,
     }
 }
 
 /// `elem`'s own indices in the tape's alphabet frame: one for a single
-/// symbol, one per expanded glyph for a range. `None` only on a shape
-/// resolution would already have rejected (an unresolvable range, a glyph
-/// absent from the alphabet) — unreachable past a clean analysis, but the
-/// rule stays silent here rather than panicking on it.
-fn elem_indices(elem: &AlphabetElem, glyphs: &[String]) -> Option<Vec<u32>> {
+/// symbol, one per expanded glyph for a range, one per member for a named
+/// glyph set — looked up through the same set scope resolution expanded
+/// the clause with, from the declaring world's own namespace `ns`. `None`
+/// only on a shape resolution would already have rejected (an unresolvable
+/// range or set, a glyph absent from the alphabet) — unreachable past a
+/// clean analysis, but the rule stays silent here rather than panicking on
+/// it.
+fn elem_indices(
+    elem: &AlphabetElem,
+    glyphs: &[String],
+    sets: &SetScope,
+    ns: &[String],
+) -> Option<Vec<u32>> {
     let labels = match elem {
         AlphabetElem::Single(s) => vec![glyph_label(s)],
         AlphabetElem::Range { lo, hi, .. } => range_labels(lo, hi)?,
+        AlphabetElem::SetRef { name, span } => sets.lookup(name, *span, ns).ok()?.1.glyphs.clone(),
     };
     labels
         .into_iter()
@@ -114,19 +124,19 @@ fn quoted_list(glyphs: &[String]) -> String {
 /// source. `None` for a machine world: a machine tape declaration carries no
 /// contract grammar at all, so its tapes' `writes`/`preserves` are always
 /// `None` and never reach this lookup.
-fn world_sig<'a>(program: &'a Program, world_name: &str) -> Option<&'a [SigParam]> {
+fn world_sig<'a>(program: &'a Program, world_name: &str) -> Option<(&'a [SigParam], &'a [String])> {
     if let Some(r) = program
         .routines
         .iter()
         .find(|r| full_name(&r.ns, &r.name) == world_name)
     {
-        return Some(&r.sig.params);
+        return Some((&r.sig.params, &r.ns));
     }
     program
         .graphs
         .iter()
         .find(|g| full_name(&g.ns, &g.name) == world_name)
-        .map(|g| g.sig.params.as_slice())
+        .map(|g| (g.sig.params.as_slice(), g.ns.as_slice()))
 }
 
 /// The `writes` clause AST node of the tape parameter named `tape_name`, if
@@ -180,8 +190,19 @@ fn removal_fix(clause: &ContractClause, i: usize, named: &str) -> Fix {
 }
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
+    // The set scope a clause's set references resolve through — the same
+    // one resolution built, from the same program, sets and declarations.
+    let Ok(scopes) = Scopes::build(ctx.program) else {
+        return;
+    };
+    let ext_modules = ctx.externals.modules();
+    let sets = SetScope {
+        scopes: &scopes,
+        sets: &ctx.resolved.sets,
+        externals: &ext_modules,
+    };
     for world in &ctx.resolved.worlds {
-        let Some(params) = world_sig(ctx.program, &world.name) else {
+        let Some((params, ns)) = world_sig(ctx.program, &world.name) else {
             continue;
         };
         for tape in &world.tapes {
@@ -201,7 +222,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 continue;
             };
             for (i, elem) in clause.elems.iter().enumerate() {
-                let Some(indices) = elem_indices(elem, glyphs) else {
+                let Some(indices) = elem_indices(elem, glyphs, &sets, ns) else {
                     continue;
                 };
                 let overlapping: Vec<u32> = indices
@@ -330,6 +351,31 @@ routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
             "re-lint is clean: {:?}",
             findings(&fixed)
         );
+    }
+
+    /// A `writes` element that is a named glyph set is one source element
+    /// like any other: its members overlapping `preserves` still fire, at
+    /// the set reference's own span. Mutation: `elem_indices` answering
+    /// `None` for a set reference — which compiles, and silently switches
+    /// the rule off for every clause holding a set.
+    #[test]
+    fn a_set_in_writes_overlapping_preserves_still_fires() {
+        let src = "\
+alphabet bits { '_', '0', '1' }
+set ones { '1' }
+routine mark(tape t: bits writes {'0', ones} preserves {'1'}) {
+  entry state s { [*] -> write ['0'] return; }
+}
+";
+        let f = findings(src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].message,
+            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+        );
+        let start = byte_of(src, f[0].span.start);
+        let end = byte_of(src, f[0].span.end);
+        assert_eq!(&src[start..end], "ones");
     }
 
     #[test]

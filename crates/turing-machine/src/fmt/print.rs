@@ -192,12 +192,12 @@ use crate::parser::{
 };
 use crate::syntax::extract::{
     comment_from, extract_alphabet, extract_bind, extract_doc_items, extract_graft, extract_import,
-    extract_map_decl, extract_rule, sig_tokens,
+    extract_map_decl, extract_rule, extract_set_decl, sig_tokens,
 };
 use crate::syntax::{
     AlphabetView, BindView, DocRunView, GraftView, MachineView, MapDeclView, NamespaceView,
-    ReuseKind, ReuseView, RootView, RuleView, StateView, TapeView, TmcKind, TopView, UseView,
-    WorldView,
+    ReuseKind, ReuseView, RootView, RuleView, SetDeclView, StateView, TapeView, TmcKind, TopView,
+    UseView, WorldView,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -1019,6 +1019,7 @@ fn alphabet_elem_text(elem: &AlphabetElem) -> String {
     match elem {
         AlphabetElem::Single(sym) => sym_text(sym),
         AlphabetElem::Range { lo, hi, .. } => format!("{}..{}", sym_text(lo), sym_text(hi)),
+        AlphabetElem::SetRef { name, .. } => name.clone(),
     }
 }
 
@@ -2048,6 +2049,7 @@ fn render_top_item(unit: &Unit, indent: usize, source: &str, index: &TextLineInd
         {
             TopView::Use(v) => render_use(&v, unit, indent, index),
             TopView::Alphabet(v) => render_alphabet(&v, unit, indent, source, index),
+            TopView::SetDecl(v) => render_set_decl(&v, unit, indent, source, index),
             TopView::MapDecl(v) => render_map_decl(&v, unit, indent, source, index),
             TopView::Namespace(v) => render_namespace(&v, unit, indent, source, index),
             TopView::Reuse(v) => render_reuse(&v, unit, indent, source, index),
@@ -2157,22 +2159,75 @@ fn render_alphabet(
     index: &TextLineIndex,
 ) -> Rendered {
     let a = extract_alphabet(view, &[], source, index);
-    let open_trailing = trivia::open_trailing(view.syntax(), index);
+    let decl = ElementListDecl {
+        node: view.syntax(),
+        doc_run: view.doc_run(),
+        keyword: "alphabet",
+        name: &a.name,
+        exported: a.exported,
+        elems: &a.elems,
+    };
+    render_element_list_decl(&decl, unit, indent, source, index)
+}
+
+/// `export? set NAME { … }` — an alphabet's exact shape, keyword aside:
+/// the same header, the same flat element body, the same wrap and comment
+/// rules (docs/tmt/fmt.md (comments are never moved)).
+fn render_set_decl(
+    view: &SetDeclView,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let s = extract_set_decl(view, &[], source, index);
+    let decl = ElementListDecl {
+        node: view.syntax(),
+        doc_run: view.doc_run(),
+        keyword: "set",
+        name: &s.name,
+        exported: s.exported,
+        elems: &s.elems,
+    };
+    render_element_list_decl(&decl, unit, indent, source, index)
+}
+
+/// A top-level declaration whose body is a flat element list — an
+/// `alphabet` or a `set`: everything [`render_element_list_decl`] needs,
+/// already extracted.
+struct ElementListDecl<'a> {
+    node: &'a SyntaxNode,
+    doc_run: Option<DocRunView>,
+    keyword: &'static str,
+    name: &'a str,
+    exported: bool,
+    elems: &'a [AlphabetElem],
+}
+
+fn render_element_list_decl(
+    decl: &ElementListDecl,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let open_trailing = trivia::open_trailing(decl.node, index);
     let pad = " ".repeat(indent);
     let mut code = doc_run_text(
-        &doc_items(view.doc_run(), source, index),
+        &doc_items(decl.doc_run.clone(), source, index),
         indent,
-        trivia::blank_before_decl(view.syntax()),
+        trivia::blank_before_decl(decl.node),
     );
     // A header carrying comments prints them IN PLACE between its own
     // tokens (docs/tmt/fmt.md (comments are never moved)); the extracted
     // fast path below is byte-identical to what a comment-free header
     // always printed. Either way `head` ends with the `{`.
-    let head = head_through_open(view.syntax(), TmcKind::LBrace, &pad).unwrap_or_else(|| {
+    let head = head_through_open(decl.node, TmcKind::LBrace, &pad).unwrap_or_else(|| {
         format!(
-            "{pad}{}alphabet {} {{",
-            if a.exported { "export " } else { "" },
-            a.name
+            "{pad}{}{} {} {{",
+            if decl.exported { "export " } else { "" },
+            decl.keyword,
+            decl.name
         )
     });
     // Entries and boundary comments are derived TOGETHER: the alphabet
@@ -2187,7 +2242,7 @@ fn render_alphabet(
     // pre-brace comment is pending, is subtracted so two claimants
     // cannot both print a brace-riding comment.
     let (entries, body_interior) = {
-        let all: Vec<SyntaxElement> = view.syntax().children_with_tokens().collect();
+        let all: Vec<SyntaxElement> = decl.node.children_with_tokens().collect();
         let close_idx = all
             .iter()
             .rposition(|e| e.kind() == TmcKind::RBrace.into())
@@ -2240,7 +2295,7 @@ fn render_alphabet(
                 let text = if slice_has_comment(&slice) {
                     span_with_comments(&slice, "", &entry_cont, None).0
                 } else {
-                    alphabet_elem_text(&a.elems[entries.len()])
+                    alphabet_elem_text(&decl.elems[entries.len()])
                 };
                 entries.push(text);
             }
@@ -2251,7 +2306,14 @@ fn render_alphabet(
         (entries, pairs)
     };
     let interior = bucket(&body_interior, entries.len());
-    let one_line = format!("{head} {} }}", entries.join(", "));
+    // An empty body — legal for a set, which may name nothing — prints
+    // `{}`, the spelling an empty contract clause takes, rather than a
+    // brace pair padded around nothing.
+    let one_line = if entries.is_empty() {
+        format!("{head}}}")
+    } else {
+        format!("{head} {} }}", entries.join(", "))
+    };
     // The width check measures the LAST line: a line comment in the
     // header breaks `head` across lines, and only the line the body
     // lands on competes with the limit.
@@ -4485,6 +4547,40 @@ mod tests {
 
     /// A named map declaration — the same one-line canonical shape as an
     /// alphabet — round-trips and is idempotent.
+    /// A glyph set declaration prints in the alphabet's own one-line shape,
+    /// and a set reference — bare or qualified — prints verbatim wherever an
+    /// element list takes one: a set body, an alphabet body, a clause.
+    #[test]
+    fn a_set_declaration_and_its_references_round_trip() {
+        pins(
+            "set digits {'0'..'4',low}\n",
+            "set digits { '0'..'4', low }\n",
+        );
+        pins("export set s { 'a' }\n", "export set s { 'a' }\n");
+        pins("set none { }\n", "set none {}\n");
+        pins("set none {}\n", "set none {}\n");
+        pins(
+            "alphabet dec { '_', n::digits }\n",
+            "alphabet dec { '_', n::digits }\n",
+        );
+        pins(
+            "routine r(tape t: dec enters { digits }) {\n  entry state s { [*] -> return; }\n}\n",
+            "routine r(tape t: dec enters { digits }) {\n  entry state s { [*] -> return; }\n}\n",
+        );
+    }
+
+    /// A set declaration too wide for one line wraps like an alphabet body,
+    /// and the wrapped output is itself a fixed point.
+    #[test]
+    fn a_wide_set_declaration_wraps_and_is_idempotent() {
+        let src = "set aVeryLongSetNameForWrapping { 'a'..'e', someOtherLongSetName, \
+                   yetAnotherLongSetName, '0'..'9', finalReferencedSetName }\n";
+        let once = format(src).expect("the green printer formats");
+        assert!(once.lines().count() > 1, "wraps: {once}");
+        let twice = format(&once).expect("the green printer formats");
+        assert_eq!(once, twice, "wrapped output must itself be a fixed point");
+    }
+
     #[test]
     fn a_named_map_declaration_round_trips() {
         pins(

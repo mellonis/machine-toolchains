@@ -1,0 +1,27 @@
+? Named glyph sets: `digits` spells both the alphabet body and the
+? routine's `enters` clause; `low` is a set built into another set.
+
+set low { '0'..'4' }
+set digits { low, '5'..'9' }
+
+alphabet dec { '_', digits, '+' }
+
+? Walk right over a run of digits and return on the blank after it.
+routine skip(tape t: dec enters { digits }) {
+  entry state s {
+    ['0'..'9'] -> move [>] goto s;
+    ['_']      -> return;
+  }
+}
+
+machine {
+  tape main: dec;
+
+  entry state go {
+    ['0'..'9'] -> call skip(t = main) then mark;
+    [*]        -> stop;
+  }
+  state mark {
+    [*] -> write ['+'] stop;
+  }
+}

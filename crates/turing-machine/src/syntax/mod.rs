@@ -147,8 +147,8 @@ pub use layout::{SigLayout, layout};
 pub use views::{
     AlphabetView, AttrView, BindView, BindingArgView, ContractClauseView, DocRunView, GraftView,
     MachineView, MapDeclView, MoveVecView, NamespaceView, ReuseKind, ReuseView, RootView, RuleView,
-    SigParamKind, SigParamView, StateView, SymMapView, TapeView, TopView, TransitionView,
-    UsePathView, UseView, WorldView, WriteVecView,
+    SetDeclView, SigParamKind, SigParamView, StateView, SymMapView, TapeView, TopView,
+    TransitionView, UsePathView, UseView, WorldView, WriteVecView,
 };
 // `pub(crate)`, not `pub`: `token_kind` itself is `pub(crate)` (only the
 // parser's `bump()` needs it), so re-exporting it any wider than

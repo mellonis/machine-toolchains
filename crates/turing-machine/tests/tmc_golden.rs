@@ -10,6 +10,9 @@
 //! to the derived block. Goldens are regenerated FROM the derivation
 //! (`regen_goldens`, `#[ignore]`), never captured from run output.
 //!
+//! `glyph_sets.tmc` is beyond Appendix A too: the corpus's one named glyph
+//! set, spelling an alphabet body and an `enters` clause.
+//!
 //! A.5 is exercised THREE WAYS — a happy path plus the two holey-map trap
 //! seeds (`'a'` / `'b'` under the call, both `unmapped-read`) — across ALL
 //! THREE `--call-mech` modes. The compiler's object is mode-independent: one
@@ -321,6 +324,33 @@ fn nested_graft_two_levels_runs() {
     assert_eq!(snaps, [snap(0, &[1, 0], 1)]);
 }
 
+// ── named glyph sets (a set spelling an alphabet body and a clause) ─────────
+
+#[test]
+fn glyph_sets_walk_a_digit_run_and_mark_its_end() {
+    // dec = {'_'=0, '0'=1, '1'=2, …, '9'=10, '+'=11}: the body's `digits`
+    // (itself `low` = '0'..'4' then '5'..'9') lands in declaration order
+    // between the blank and '+'. `go` calls `skip` on a digit; `skip`
+    // walks right over digits and returns on the blank; `mark` writes '+'.
+    // Seed "12" (cells [2,3], head 0):
+    //   go[0]='1'   → call skip
+    //   skip[0]='1' → >              ⇒ head 1
+    //   skip[1]='2' → >              ⇒ head 2
+    //   skip[2]='_' → return, then mark
+    //   mark[2]='_' → write '+'(11)  ⇒ cell2=11, stop, head 2
+    let exe = link_with(&object("glyph_sets.tmc"), LinkOptions::default());
+    let (outcome, snaps) = run(&exe, &[(snap(0, &[2, 3], 0), 12)]);
+    assert_eq!(outcome, Outcome::Stopped);
+    let derived = [snap(0, &[2, 3, 11], 2)];
+    assert_eq!(snaps, derived);
+    assert_golden("glyph_sets.expected.tmt", &block(&derived, &[12]));
+
+    // No digit under the head: `go`'s catch-all stops, the tape unchanged.
+    let (outcome, snaps) = run(&exe, &[(snap(0, &[11], 0), 12)]);
+    assert_eq!(outcome, Outcome::Stopped);
+    assert_eq!(snaps, [snap(0, &[11], 0)]);
+}
+
 // ── golden regeneration (derivation-first; explicit) ─────────────────────────
 
 /// Regenerate the committed `.tmt` goldens FROM THE HAND DERIVATIONS (never
@@ -360,5 +390,9 @@ fn regen_goldens() {
     write(
         "nested_graft.expected.tmt",
         &block(&[snap(0, &[1, 0], 1)], &[3]),
+    );
+    write(
+        "glyph_sets.expected.tmt",
+        &block(&[snap(0, &[2, 3, 11], 2)], &[12]),
     );
 }

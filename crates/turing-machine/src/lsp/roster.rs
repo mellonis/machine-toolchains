@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::compiler::{Resolved, WorldKind, full_name};
+use crate::compiler::{Resolved, Scopes, SetScope, WorldKind, full_name};
 use crate::parser::{AlphabetElem, Program, SymLit};
 
 /// One symbol of a resolved alphabet: the label the compiler compares on,
@@ -136,7 +136,7 @@ pub(crate) struct Roster {
 
 impl Roster {
     pub(crate) fn build(resolved: &Resolved, program: Option<&Program>) -> Roster {
-        let numeric = numeric_labels(program);
+        let numeric = numeric_labels(resolved, program);
         let mut roster = Roster {
             alphabets: resolved
                 .alphabets
@@ -286,12 +286,27 @@ impl Roster {
 /// Per mangled alphabet, the labels its source declared NUMERICALLY — the
 /// ones that spell as bare decimals rather than quoted glyphs. Numeric
 /// ranges contribute every value in the range without expanding any glyph
-/// range, since a glyph range's labels spell quoted either way.
-fn numeric_labels(program: Option<&Program>) -> HashMap<String, std::collections::HashSet<String>> {
+/// range, since a glyph range's labels spell quoted either way. A named
+/// glyph set contributes the members IT spelled numerically
+/// (`ResolvedSet::numeric`, transitive through the sets it names), looked
+/// up through the same scope resolution the compiler expanded it with. Only
+/// this unit's own sets are consulted: a set imported from another unit
+/// arrives through its header, whose members are spelled as glyphs, so it
+/// carries no numeric spelling to recover.
+fn numeric_labels(
+    resolved: &Resolved,
+    program: Option<&Program>,
+) -> HashMap<String, std::collections::HashSet<String>> {
     let mut out: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let Some(program) = program else {
         return out;
     };
+    let scopes = Scopes::build(program).ok();
+    let sets = scopes.as_ref().map(|scopes| SetScope {
+        scopes,
+        sets: &resolved.sets,
+        externals: &[],
+    });
     for alphabet in &program.alphabets {
         let mut labels = std::collections::HashSet::new();
         for elem in &alphabet.elems {
@@ -308,7 +323,15 @@ fn numeric_labels(program: Option<&Program>) -> HashMap<String, std::collections
                         labels.insert(v.to_string());
                     }
                 }
-                _ => {}
+                AlphabetElem::SetRef { name, span } => {
+                    if let Some((_, set)) = sets
+                        .as_ref()
+                        .and_then(|s| s.lookup(name, *span, &alphabet.ns).ok())
+                    {
+                        labels.extend(set.numeric.iter().cloned());
+                    }
+                }
+                AlphabetElem::Single(SymLit::Glyph { .. }) | AlphabetElem::Range { .. } => {}
             }
         }
         if !labels.is_empty() {
@@ -316,4 +339,29 @@ fn numeric_labels(program: Option<&Program>) -> HashMap<String, std::collections
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::analyze;
+
+    /// A glyph set's numeric members spell bare in the alphabet that
+    /// names the set — through a set built into another set, too.
+    /// Mutation: the element walk ignoring a set reference (a catch-all
+    /// arm swallowing it) — the three digits then spell quoted, and a
+    /// completion offers symbols the alphabet does not contain.
+    #[test]
+    fn a_numeric_sets_members_spell_bare_in_the_alphabet_naming_it() {
+        let a = analyze("set low { 0..1 }\nset nums { low, 2 }\nalphabet n { '_', nums }\n")
+            .unwrap_or_else(|e| panic!("{e}"));
+        let roster = Roster::build(&a.resolved, Some(&a.program));
+        let spellings: Vec<String> = roster
+            .glyphs("n")
+            .expect("the alphabet is in the roster")
+            .iter()
+            .map(GlyphEntry::spelling)
+            .collect();
+        assert_eq!(spellings, ["'_'", "0", "1", "2"]);
+    }
 }

@@ -62,12 +62,12 @@ use mtc_core::syntax::{
 use super::kinds::TmcKind;
 use super::views::{
     AlphabetView, BindView, DocRunView, GraftView, MachineView, MapDeclView, ReuseKind, ReuseView,
-    RootView, RuleView, StateView, TapeView, TopView, UsePathView, WorldView,
+    RootView, RuleView, SetDeclView, StateView, TapeView, TopView, UsePathView, WorldView,
 };
 use crate::lexer::{Comment, CommentKind, GLYPH_ESCAPES, Token, TokenKind, normalize_doc_payload};
 use crate::parser::{
     Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, MapDecl, Program, Routine, Rule,
-    Signature, State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems,
+    SetDecl, Signature, State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems,
     reparse_binding_arg, reparse_doc_items, reparse_map_pairs, reparse_move_vec, reparse_pattern,
     reparse_qual_name, reparse_sig_param, reparse_transition, reparse_write_vec,
 };
@@ -678,6 +678,29 @@ pub(crate) fn extract_alphabet(
     }
 }
 
+/// One `export? set NAME { … }` — [`extract_alphabet`]'s shape exactly,
+/// the same two normalisations included (`line` the NAME's, `col` the
+/// HEADER's), its body reparsed through the same element production.
+pub(crate) fn extract_set_decl(
+    view: &SetDeclView,
+    ns: &[String],
+    source: &str,
+    index: &TextLineIndex,
+) -> SetDecl {
+    let name = view.name_token();
+    let header = header_token(view.syntax());
+    SetDecl {
+        name: name.text().to_string(),
+        name_span: index.span(name.text_range()),
+        line: index.line_col(name.text_range().start).0,
+        col: index.line_col(header.text_range().start).1,
+        exported: view.exported(),
+        ns: ns.to_vec(),
+        elems: reparse_alphabet_elems(&sig_tokens(view.syntax(), index)),
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
 /// One `export? map NAME: SRC -> DST { pairs }` — mirrors
 /// [`extract_alphabet`]'s own shape: `line` is the NAME's line, `col` the
 /// HEADER's column, `src`/`dst` the two alphabet references' own spans
@@ -1118,6 +1141,7 @@ fn extract_items(
             TopView::Alphabet(a) => program
                 .alphabets
                 .push(extract_alphabet(&a, ns, source, index)),
+            TopView::SetDecl(s) => program.sets.push(extract_set_decl(&s, ns, source, index)),
             TopView::MapDecl(m) => program.maps.push(extract_map_decl(&m, ns, source, index)),
             TopView::Namespace(nsv) => {
                 let mut child = ns.to_vec();
@@ -1173,6 +1197,7 @@ pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
     let mut program = Program {
         imports: Vec::new(),
         alphabets: Vec::new(),
+        sets: Vec::new(),
         maps: Vec::new(),
         routines: Vec::new(),
         graphs: Vec::new(),
@@ -1652,6 +1677,42 @@ mod tests {
     /// The expected values are literals captured from the retired
     /// hand-written-CST lowering of this fixture while that path was
     /// still callable.
+    /// A `set` declaration extracts to the written-out `SetDecl` below: the
+    /// NAME's line with the HEADER's column (`export`, not `set`), its
+    /// namespace path, and its body through the shared element production —
+    /// a literal and a qualified set reference, each with its own span.
+    /// Mutation: a `TopView::SetDecl` arm that drops the declaration (or a
+    /// view reading the wrong header IDENT as the name) — `program.sets`
+    /// then differs from the literal.
+    #[test]
+    fn a_set_declaration_extracts_to_the_expected_set_decl() {
+        let src = "namespace n {\n  ? d\n  export set s { 'a', m::t }\n}\n";
+        let program = crate::parser::parse(src).expect("parses");
+        assert_eq!(program.sets.len(), 1, "{:?}", program.sets);
+        let got = &program.sets[0];
+        assert!(got.doc.is_some(), "the bound doc run is carried");
+        let expected = SetDecl {
+            name: "s".to_string(),
+            name_span: Span::new(3, 14, 3, 15),
+            line: 3,
+            col: 3,
+            exported: true,
+            ns: vec!["n".to_string()],
+            elems: vec![
+                crate::parser::AlphabetElem::Single(SymLit::Glyph {
+                    value: "a".to_string(),
+                    span: Span::new(3, 18, 3, 21),
+                }),
+                crate::parser::AlphabetElem::SetRef {
+                    name: "m::t".to_string(),
+                    span: Span::new(3, 23, 3, 27),
+                },
+            ],
+            doc: got.doc.clone(),
+        };
+        assert_eq!(*got, expected);
+    }
+
     #[test]
     fn reparsed_sig_param_equals_the_expected_sig_param_for_both_shapes() {
         let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \

@@ -28,8 +28,8 @@ use crate::lexer::{LexMode, Token, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
-    Graft, Machine, MoveDir, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
-    Transition, WriteCell, WriteCellKind, parse_green_from_tokens,
+    Graft, Machine, MoveDir, PatternCellKind, Program, QualName, Rule, SetDecl, SigParamKind,
+    State, SymLit, Transition, WriteCell, WriteCellKind, parse_green_from_tokens,
 };
 use crate::patterns::{accepted_glyphs, cell_labels};
 
@@ -178,8 +178,9 @@ pub enum CompileErrorKind {
     /// `goto`, a continuation, or a state argument naming a name that is not
     /// a state (or graft instance) in the world.
     UndefinedState(String),
-    /// A `call`/`graft`/`bind` target resolves to the wrong entity kind.
-    /// `expected` is the noun phrase for the required kind.
+    /// A `call`/`graft`/`bind` target, or a set reference, resolves to the
+    /// wrong entity kind. `expected` is the noun phrase for the required
+    /// kind.
     WrongTargetKind {
         name: String,
         expected: &'static str,
@@ -187,6 +188,16 @@ pub enum CompileErrorKind {
     /// A `graft` target names no graph in scope. A graft needs the graph's
     /// source, so an unresolved graft target is fatal (unlike a `call`).
     UndefinedGraph(GraphMiss),
+    /// A set reference — in an alphabet body, a set body, or a contract
+    /// clause — names nothing at all: the named-set analog of
+    /// [`AlphabetMiss`], split the same two ways. A name that resolves to
+    /// something OTHER than a set is [`CompileErrorKind::WrongTargetKind`]
+    /// instead.
+    UndefinedSet(SetMiss),
+    /// A set's body reaches the set itself, directly or through a chain of
+    /// other sets, so its members have no finite expansion. `name` is the
+    /// set whose reference closes the cycle (mangled).
+    SetCycle(String),
     /// A binding argument names a parameter the signature does not declare.
     UnknownArg(String),
     /// Two binding arguments share one parameter name.
@@ -427,6 +438,18 @@ pub enum MapMiss {
     DeclarationsNotGiven(String),
 }
 
+/// [`AlphabetMiss`]'s named-set analog (`CompileErrorKind::UndefinedSet`) —
+/// same two readings, same split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetMiss {
+    /// Nothing in scope resolves the name and nothing declares it anywhere
+    /// reachable.
+    NoSuchSet(String),
+    /// Reached through `use` or a qualified path, but no declarations
+    /// module given to this compile declares it.
+    DeclarationsNotGiven(String),
+}
+
 /// [`AlphabetMiss`]'s graft-target analog (`CompileErrorKind::UndefinedGraph`)
 /// — same two readings, same split. A graft needs the graph's SOURCE, so the
 /// declarations-not-given reading resolves the same way an alphabet's does:
@@ -511,6 +534,8 @@ impl CompileErrorKind {
         CompileErrorKind::UndefinedState(_) => "undefined-state",
         CompileErrorKind::WrongTargetKind { .. } => "wrong-target-kind",
         CompileErrorKind::UndefinedGraph(_) => "undefined-graph",
+        CompileErrorKind::UndefinedSet(_) => "undefined-set",
+        CompileErrorKind::SetCycle(_) => "set-cycle",
         CompileErrorKind::UnknownArg(_) => "unknown-arg",
         CompileErrorKind::DuplicateArg(_) => "duplicate-arg",
         CompileErrorKind::MissingArg(_) => "missing-arg",
@@ -770,6 +795,25 @@ impl std::fmt::Display for CompileErrorKind {
                      library, whichever this command reads)"
                 )
             }
+            CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet(n)) => {
+                write!(f, "unknown glyph set `{n}`")
+            }
+            CompileErrorKind::UndefinedSet(SetMiss::DeclarationsNotGiven(n)) => {
+                write!(
+                    f,
+                    "glyph set `{n}` is declared by `use` (or named by a qualified path), \
+                     but its declarations were not given — declare it locally, or supply its \
+                     declarations to this compile (an `--extern` file, a sibling source, or a \
+                     library, whichever this command reads)"
+                )
+            }
+            CompileErrorKind::SetCycle(n) => {
+                write!(
+                    f,
+                    "glyph set `{n}` reaches itself through its own body — a set built from sets \
+                     must bottom out in literals and ranges"
+                )
+            }
             CompileErrorKind::UnknownArg(n) => {
                 write!(f, "`{n}` is not a parameter of this signature")
             }
@@ -1027,19 +1071,250 @@ pub(crate) struct ResolvedMapDecl {
     pub span: Span,
 }
 
+/// A resolved named glyph set (`set NAME { … }`): its members, fully
+/// expanded — literals, ranges and every set it names, in declaration
+/// order, a repeat absorbed at its first occurrence. A set is
+/// data for the two element-list sites that name it, never a tape type, so
+/// nothing past resolution sees a set name: an alphabet body and a
+/// contract clause both receive these labels in its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedSet {
+    /// Mangled name; a key into `Resolved.sets`.
+    pub name: String,
+    pub name_span: Span,
+    pub exported: bool,
+    /// Member labels in declaration order, each once.
+    pub glyphs: Vec<String>,
+    /// The members the declaration spelled NUMERICALLY (a number or a
+    /// numeric range, directly or through a set it names) — the labels a
+    /// completion must offer bare rather than quoted, carried here so no
+    /// consumer has to re-expand the set to learn it.
+    pub numeric: std::collections::BTreeSet<String>,
+}
+
+/// Where a set reference resolves: to one of this unit's own sets (by its
+/// mangled name), or to a set a declarations module carries.
+enum SetTarget<'e> {
+    Local(String),
+    External(String, &'e ResolvedSet),
+}
+
+/// Resolve one set reference as written, from namespace `ns`, the same
+/// local/cross-unit split [`resolve_tape_alphabet`] gives an alphabet
+/// reference: a local [`DefKind::Set`] answers by its mangled name; a name
+/// reached only through `use` or an absolute path is looked up among the
+/// declarations modules; a name resolving to another kind of declaration
+/// is `wrong-target-kind`; nothing at all is `undefined-set`.
+fn resolve_set_ref<'e>(
+    name: &str,
+    span: Span,
+    ns: &[String],
+    scopes: &Scopes,
+    externals: &[&'e Resolved],
+) -> Result<SetTarget<'e>, CompileError> {
+    match scopes.resolve(name, ns) {
+        Some(r) if r.kind == Some(DefKind::Set) => Ok(SetTarget::Local(r.full)),
+        Some(r) if r.kind.is_some() => Err(CompileError {
+            span,
+            kind: CompileErrorKind::WrongTargetKind {
+                name: name.to_string(),
+                expected: "a set",
+            },
+        }),
+        Some(r) => match externals.iter().find_map(|m| m.sets.get(&r.full)) {
+            Some(set) => Ok(SetTarget::External(r.full, set)),
+            None => Err(CompileError {
+                span,
+                kind: CompileErrorKind::UndefinedSet(SetMiss::DeclarationsNotGiven(r.full)),
+            }),
+        },
+        None => Err(CompileError {
+            span,
+            kind: CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet(name.to_string())),
+        }),
+    }
+}
+
+/// Everything a set reference resolves against once every set of this
+/// unit is resolved: the scope substrate, the unit's own sets, and the
+/// declarations modules. [`SetScope::members`] is the one entry an
+/// element-list site calls to consume a set name.
+pub(crate) struct SetScope<'a> {
+    pub scopes: &'a Scopes,
+    pub sets: &'a HashMap<String, ResolvedSet>,
+    pub externals: &'a [&'a Resolved],
+}
+
+impl<'a> SetScope<'a> {
+    /// The set a reference written as `name` from namespace `ns` names —
+    /// and the one place an EXPANSION records such a reference as consumed:
+    /// its mangled name joins `refs` (`Resolved.set_refs`) before the set
+    /// is handed back.
+    pub(crate) fn members(
+        &self,
+        name: &str,
+        span: Span,
+        ns: &[String],
+        refs: &mut HashSet<String>,
+    ) -> Result<&'a ResolvedSet, CompileError> {
+        let (full, set) = self.lookup(name, span, ns)?;
+        refs.insert(full);
+        Ok(set)
+    }
+
+    /// [`Self::members`] without the recording: the set a reference names
+    /// and its mangled name, for a reader that re-derives a clause's
+    /// members after resolution (a lint rule) rather than expanding one.
+    pub(crate) fn lookup(
+        &self,
+        name: &str,
+        span: Span,
+        ns: &[String],
+    ) -> Result<(String, &'a ResolvedSet), CompileError> {
+        Ok(
+            match resolve_set_ref(name, span, ns, self.scopes, self.externals)? {
+                SetTarget::Local(full) => {
+                    let set = self
+                        .sets
+                        .get(&full)
+                        .expect("every local set is resolved before any element list reads one");
+                    (full, set)
+                }
+                SetTarget::External(full, set) => (full, set),
+            },
+        )
+    }
+}
+
+/// One set body in progress on [`resolve_all_sets`]' explicit stack.
+struct SetFrame<'p> {
+    full: String,
+    decl: &'p SetDecl,
+    next: usize,
+    glyphs: Vec<String>,
+    seen: HashSet<String>,
+    numeric: std::collections::BTreeSet<String>,
+}
+
+impl SetFrame<'_> {
+    fn push(&mut self, label: String, numeric: bool) {
+        if numeric {
+            self.numeric.insert(label.clone());
+        }
+        if self.seen.insert(label.clone()) {
+            self.glyphs.push(label);
+        }
+    }
+}
+
+/// Resolve every set this unit declares, keyed by mangled name. A set's
+/// body may name other sets, local or imported, declared before or after
+/// it; the walk is depth-first over an EXPLICIT stack — never recursion,
+/// so a long chain of sets cannot overflow the thread's stack — and a
+/// reference to a set already on that stack is a [`CompileErrorKind::
+/// SetCycle`] at the reference, rather than a walk that never ends. Every
+/// set is resolved whether or not anything names it, the way every
+/// alphabet is. Each set reference a body consumes is recorded in `refs`.
+fn resolve_all_sets(
+    program: &Program,
+    scopes: &Scopes,
+    externals: &[&Resolved],
+    refs: &mut HashSet<String>,
+) -> Result<HashMap<String, ResolvedSet>, CompileError> {
+    let decls: HashMap<String, &SetDecl> = program
+        .sets
+        .iter()
+        .map(|s| (full_name(&s.ns, &s.name), s))
+        .collect();
+    let frame = |full: String, decl| SetFrame {
+        full,
+        decl,
+        next: 0,
+        glyphs: Vec::new(),
+        seen: HashSet::new(),
+        numeric: std::collections::BTreeSet::new(),
+    };
+    let mut out: HashMap<String, ResolvedSet> = HashMap::new();
+    for root in &program.sets {
+        let root_full = full_name(&root.ns, &root.name);
+        if out.contains_key(&root_full) {
+            continue;
+        }
+        let mut stack: Vec<SetFrame> = vec![frame(root_full, root)];
+        while let Some(top) = stack.last_mut() {
+            let decl: &SetDecl = top.decl;
+            let Some(elem) = decl.elems.get(top.next) else {
+                let done = stack.pop().expect("the loop holds a top frame");
+                out.insert(
+                    done.full.clone(),
+                    ResolvedSet {
+                        name: done.full,
+                        name_span: done.decl.name_span,
+                        exported: done.decl.exported,
+                        glyphs: done.glyphs,
+                        numeric: done.numeric,
+                    },
+                );
+                continue;
+            };
+            match elem {
+                AlphabetElem::Single(s) => {
+                    top.push(glyph_label(s), !s.is_glyph());
+                    top.next += 1;
+                }
+                AlphabetElem::Range { lo, hi, span } => {
+                    for label in expand_range(lo, hi, *span)? {
+                        top.push(label, !lo.is_glyph());
+                    }
+                    top.next += 1;
+                }
+                AlphabetElem::SetRef { name, span } => {
+                    let (full, set) =
+                        match resolve_set_ref(name, *span, &decl.ns, scopes, externals)? {
+                            SetTarget::External(full, set) => (full, set.clone()),
+                            SetTarget::Local(full) => match out.get(&full) {
+                                Some(set) => (full, set.clone()),
+                                None => {
+                                    if stack.iter().any(|f| f.full == full) {
+                                        return Err(CompileError {
+                                            span: *span,
+                                            kind: CompileErrorKind::SetCycle(full),
+                                        });
+                                    }
+                                    let named = decls[&full];
+                                    // The reference is re-read once the named
+                                    // set is resolved: `next` does not advance.
+                                    stack.push(frame(full, named));
+                                    continue;
+                                }
+                            },
+                        };
+                    let top = stack.last_mut().expect("the loop holds a top frame");
+                    for label in &set.glyphs {
+                        top.push(label.clone(), set.numeric.contains(label));
+                    }
+                    top.next += 1;
+                    refs.insert(full);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Resolve one alphabet's elements into its glyph vector, or fail with the
 /// first offending element's span. Char ranges expand by scalar succession
 /// (single-scalar endpoints required); numeric ranges mint decimal-string
-/// glyphs of each value; glyphs are unique; blank is position 0 by
-/// construction (the first element); an empty alphabet or one resolving to
-/// more than 127 symbols is rejected.
-fn resolve_alphabet_glyphs(a: &Alphabet) -> Result<Vec<String>, CompileError> {
-    if a.elems.is_empty() {
-        return Err(CompileError {
-            span: a.name_span,
-            kind: CompileErrorKind::EmptyAlphabet,
-        });
-    }
+/// glyphs of each value; a set reference contributes the set's members in
+/// order; glyphs are unique; blank is position 0 by construction (the first
+/// element); an empty alphabet or one resolving to more than 127 symbols is
+/// rejected. Emptiness is judged on the EXPANSION, not the written
+/// elements: a body naming only an empty set is as empty as `{ }`.
+fn resolve_alphabet_glyphs(
+    a: &Alphabet,
+    sets: &SetScope,
+    refs: &mut HashSet<String>,
+) -> Result<Vec<String>, CompileError> {
     let mut glyphs: Vec<String> = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
     for elem in &a.elems {
@@ -1052,7 +1327,18 @@ fn resolve_alphabet_glyphs(a: &Alphabet) -> Result<Vec<String>, CompileError> {
                     push_glyph(&mut glyphs, &mut seen, label, *span)?;
                 }
             }
+            AlphabetElem::SetRef { name, span } => {
+                for label in &sets.members(name, *span, &a.ns, refs)?.glyphs {
+                    push_glyph(&mut glyphs, &mut seen, label.clone(), *span)?;
+                }
+            }
         }
+    }
+    if glyphs.is_empty() {
+        return Err(CompileError {
+            span: a.name_span,
+            kind: CompileErrorKind::EmptyAlphabet,
+        });
     }
     if glyphs.len() > 127 {
         return Err(CompileError {
@@ -1164,6 +1450,17 @@ fn push_glyph(
 pub(crate) struct Resolved {
     /// Resolved alphabets, keyed by mangled name → glyph vector.
     pub alphabets: HashMap<String, ResolvedAlphabet>,
+    /// This unit's OWN named glyph sets, keyed by mangled name, each with
+    /// its declaration's `name_span`. Unlike `alphabets`, a set reached from
+    /// a declarations module is never copied in here: this table is exactly
+    /// what the unit declares.
+    pub sets: HashMap<String, ResolvedSet>,
+    /// The mangled name of every set some element list consumed — a set
+    /// body, an alphabet body, or a contract clause — recorded by
+    /// [`SetScope::members`] (and, for a set body, by `resolve_all_sets`)
+    /// at the one point each expansion reads a set name. A set of this
+    /// unit absent from here is named by nothing.
+    pub set_refs: HashSet<String>,
     /// Resolved named map declarations, keyed by mangled name — the four
     /// declaration checks already passed by the time a `Resolved` exists.
     pub maps: HashMap<String, ResolvedMapDecl>,
@@ -1451,8 +1748,16 @@ fn resolve_program(
     check_declarations_shape(program, mode)?;
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
-    let alphabets = resolve_all_alphabets(program, &scopes)?;
-    let mut resolved = resolve_module(program, &scopes, alphabets, externals)?;
+    let ext_modules = externals.modules();
+    let mut set_refs: HashSet<String> = HashSet::new();
+    let sets = resolve_all_sets(program, &scopes, &ext_modules, &mut set_refs)?;
+    let set_scope = SetScope {
+        scopes: &scopes,
+        sets: &sets,
+        externals: &ext_modules,
+    };
+    let alphabets = resolve_all_alphabets(program, &set_scope, &mut set_refs)?;
+    let mut resolved = resolve_module(program, &scopes, alphabets, sets, set_refs, externals)?;
     let mut ctx = WorldCtx {
         scopes: &scopes,
         imports_used: vec![false; program.imports.len()],
@@ -2373,6 +2678,7 @@ fn has_body(program: &Program, world: &ResolvedWorld) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DefKind {
     Alphabet,
+    Set,
     Map,
     Routine,
     Graph,
@@ -2382,6 +2688,7 @@ impl DefKind {
     fn noun(self) -> &'static str {
         match self {
             DefKind::Alphabet => "an alphabet",
+            DefKind::Set => "a glyph set",
             DefKind::Map => "a named map",
             DefKind::Routine => "a routine",
             DefKind::Graph => "a graph",
@@ -2445,6 +2752,14 @@ impl Scopes {
                 name: &a.name,
                 kind: DefKind::Alphabet,
                 name_span: a.name_span,
+            });
+        }
+        for s in &program.sets {
+            ents.push(Ent {
+                ns: &s.ns,
+                name: &s.name,
+                kind: DefKind::Set,
+                name_span: s.name_span,
             });
         }
         for m in &program.maps {
@@ -2667,14 +2982,16 @@ impl Scopes {
     }
 }
 
-/// Resolve every alphabet's glyph vector, keyed by mangled name.
+/// Resolve every alphabet's glyph vector, keyed by mangled name. Runs after
+/// every set is resolved, since an alphabet body may name one.
 fn resolve_all_alphabets(
     program: &Program,
-    _scopes: &Scopes,
+    sets: &SetScope,
+    set_refs: &mut HashSet<String>,
 ) -> Result<HashMap<String, ResolvedAlphabet>, CompileError> {
     let mut out = HashMap::new();
     for a in &program.alphabets {
-        let glyphs = resolve_alphabet_glyphs(a)?;
+        let glyphs = resolve_alphabet_glyphs(a, sets, set_refs)?;
         let full = full_name(&a.ns, &a.name);
         out.insert(
             full.clone(),
@@ -2694,12 +3011,25 @@ fn resolve_module(
     program: &Program,
     scopes: &Scopes,
     mut alphabets: HashMap<String, ResolvedAlphabet>,
+    sets: HashMap<String, ResolvedSet>,
+    mut set_refs: HashSet<String>,
     externals: &Declarations,
 ) -> Result<Resolved, CompileError> {
+    let ext_modules = externals.modules();
+    let set_scope = SetScope {
+        scopes,
+        sets: &sets,
+        externals: &ext_modules,
+    };
     let mut docs: HashMap<String, Doc> = HashMap::new();
     for a in &program.alphabets {
         if let Some(d) = &a.doc {
             docs.insert(full_name(&a.ns, &a.name), d.clone());
+        }
+    }
+    for s in &program.sets {
+        if let Some(d) = &s.doc {
+            docs.insert(full_name(&s.ns, &s.name), d.clone());
         }
     }
     let maps = resolve_all_maps(program, scopes, &mut alphabets, externals, &mut docs)?;
@@ -2729,6 +3059,8 @@ fn resolve_module(
             &r.binds,
             scopes,
             &mut alphabets,
+            &set_scope,
+            &mut set_refs,
             externals,
         )?);
     }
@@ -2748,6 +3080,8 @@ fn resolve_module(
             &g.binds,
             scopes,
             &mut alphabets,
+            &set_scope,
+            &mut set_refs,
             externals,
         )?);
     }
@@ -2759,6 +3093,8 @@ fn resolve_module(
 
     Ok(Resolved {
         alphabets,
+        sets,
+        set_refs,
         maps,
         worlds,
         entry_world,
@@ -2823,6 +3159,8 @@ fn resolve_world(
     binds: &[Bind],
     scopes: &Scopes,
     alphabets: &mut HashMap<String, ResolvedAlphabet>,
+    sets: &SetScope,
+    set_refs: &mut HashSet<String>,
     externals: &Declarations,
 ) -> Result<ResolvedWorld, CompileError> {
     // Tapes: from the signature's tape params (routine/graph).
@@ -2850,8 +3188,20 @@ fn resolve_world(
                 // the parameter's own alphabet — and, like them, the
                 // resolved set is carried on `ResolvedTape` for `ir::lower`
                 // and the source arm of `tmt interface` to read.
-                let enters = resolve_contract_clause(enters.as_deref(), "enters", glyphs, &full)?;
-                let leaves = resolve_contract_clause(leaves.as_deref(), "leaves", glyphs, &full)?;
+                let mut clause = |c: Option<&ContractClause>, which: &'static str| {
+                    let frame = ClauseFrame {
+                        which,
+                        glyphs,
+                        alphabet: &full,
+                        ns,
+                        sets,
+                    };
+                    resolve_contract_clause(c, &frame, set_refs)
+                };
+                let enters = clause(enters.as_deref(), "enters")?;
+                let leaves = clause(leaves.as_deref(), "leaves")?;
+                let writes = clause(writes.as_ref(), "writes")?;
+                let preserves = clause(preserves.as_ref(), "preserves")?;
                 tapes.push(ResolvedTape {
                     name: p.name.clone(),
                     name_span: p.name_span,
@@ -2859,13 +3209,8 @@ fn resolve_world(
                     cardinality: card,
                     span: p.span,
                     volatile: *volatile,
-                    writes: resolve_contract_clause(writes.as_ref(), "writes", glyphs, &full)?,
-                    preserves: resolve_contract_clause(
-                        preserves.as_ref(),
-                        "preserves",
-                        glyphs,
-                        &full,
-                    )?,
+                    writes,
+                    preserves,
                     enters,
                     leaves,
                 });
@@ -3138,18 +3483,24 @@ pub(crate) fn find_external_graph<'a>(
 /// A clause body is the alphabet-body element grammar, so it resolves the same
 /// way: a range expands by [`expand_range`] (inheriting its ascending and
 /// single-scalar-endpoint rules) and every resulting label must name a symbol
-/// of the alphabet. A repeat is harmless — a set absorbs it.
+/// of the alphabet. A repeat is harmless — a set absorbs it. A named glyph
+/// set expands in place to its members,
+/// each held to the same membership rule at the reference's own span, so a
+/// set name never reaches the resolved clause — only its members' indices.
+///
+/// An `enters`/`leaves` clause states a head position, which an empty set
+/// does not: the parser refuses one written empty, and this refuses one
+/// whose set references expand to nothing, under the same code.
 fn resolve_contract_clause(
     clause: Option<&ContractClause>,
-    which: &'static str,
-    glyphs: &[String],
-    alphabet: &str,
+    frame: &ClauseFrame,
+    set_refs: &mut HashSet<String>,
 ) -> Result<Option<SymSet>, CompileError> {
     let Some(clause) = clause else {
         return Ok(None);
     };
     let mut set = SymSet::empty();
-    let mut take = |label: String, span: Span| match glyphs.iter().position(|g| *g == label) {
+    let mut take = |label: String, span: Span| match frame.glyphs.iter().position(|g| *g == label) {
         Some(index) => {
             set.insert(index as u32);
             Ok(())
@@ -3158,8 +3509,8 @@ fn resolve_contract_clause(
             span,
             kind: CompileErrorKind::ContractSymbolUnknown {
                 glyph: label,
-                clause: which,
-                alphabet: alphabet.to_string(),
+                clause: frame.which,
+                alphabet: frame.alphabet.to_string(),
             },
         }),
     };
@@ -3171,9 +3522,32 @@ fn resolve_contract_clause(
                     take(label, *span)?;
                 }
             }
+            AlphabetElem::SetRef { name, span } => {
+                for label in &frame.sets.members(name, *span, frame.ns, set_refs)?.glyphs {
+                    take(label.clone(), *span)?;
+                }
+            }
         }
     }
+    if matches!(frame.which, "enters" | "leaves") && set == SymSet::empty() {
+        return Err(CompileError {
+            span: clause.span,
+            kind: CompileErrorKind::EmptyHeadClause,
+        });
+    }
     Ok(Some(set))
+}
+
+/// What one contract clause resolves against: which clause it is (for the
+/// diagnostics), its tape's alphabet (the frame every element must name a
+/// symbol of), and the declaring namespace plus the set scope a set
+/// reference inside it resolves through.
+struct ClauseFrame<'a> {
+    which: &'static str,
+    glyphs: &'a [String],
+    alphabet: &'a str,
+    ns: &'a [String],
+    sets: &'a SetScope<'a>,
 }
 
 /// Resolve a world's graft targets (to mangled graph names) and bind targets
@@ -3770,13 +4144,55 @@ impl WorldCtx<'_> {
             mark(&m.src, &m.ns, self);
             mark(&m.dst, &m.ns, self);
         }
+        // A set reference is a reference like any other, wherever an
+        // element list can carry one: a set body, an alphabet body, and
+        // the four contract clauses of a signature tape parameter. An
+        // import whose sole use is one of them is load-bearing (deleting
+        // it is `undefined-set`).
+        let mark_elems = |elems: &[AlphabetElem], ns: &[String], ctx: &mut Self| {
+            for e in elems {
+                if let AlphabetElem::SetRef { name, .. } = e {
+                    mark(name, ns, ctx);
+                }
+            }
+        };
+        let mark_clauses = |sig: &crate::parser::Signature, ns: &[String], ctx: &mut Self| {
+            for p in &sig.params {
+                if let SigParamKind::Tape {
+                    writes,
+                    preserves,
+                    enters,
+                    leaves,
+                    ..
+                } = &p.kind
+                {
+                    let clauses = [
+                        writes.as_ref(),
+                        preserves.as_ref(),
+                        enters.as_deref(),
+                        leaves.as_deref(),
+                    ];
+                    for c in clauses.into_iter().flatten() {
+                        mark_elems(&c.elems, ns, ctx);
+                    }
+                }
+            }
+        };
+        for s in &program.sets {
+            mark_elems(&s.elems, &s.ns, self);
+        }
+        for a in &program.alphabets {
+            mark_elems(&a.elems, &a.ns, self);
+        }
         for r in &program.routines {
             let alphas: Vec<&str> = tape_alphabet_refs(&r.sig);
             mark_world(&alphas, &r.states, &r.grafts, &r.binds, &r.ns, self);
+            mark_clauses(&r.sig, &r.ns, self);
         }
         for g in &program.graphs {
             let alphas: Vec<&str> = tape_alphabet_refs(&g.sig);
             mark_world(&alphas, &g.states, &g.grafts, &g.binds, &g.ns, self);
+            mark_clauses(&g.sig, &g.ns, self);
         }
         if let Some(m) = &program.machine {
             let alphas: Vec<&str> = m.tapes.iter().map(|t| t.alphabet.as_str()).collect();
@@ -4450,6 +4866,8 @@ mod tests {
                 expected: "a routine",
             },
             CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph("x".into())),
+            CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet("x".into())),
+            CompileErrorKind::SetCycle("x".into()),
             CompileErrorKind::UnknownArg("x".into()),
             CompileErrorKind::DuplicateArg("x".into()),
             CompileErrorKind::MissingArg("x".into()),

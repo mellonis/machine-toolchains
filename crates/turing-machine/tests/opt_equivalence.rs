@@ -316,6 +316,16 @@ fn nested_graft_is_equivalent() {
     );
 }
 
+#[test]
+fn glyph_sets_is_equivalent() {
+    // A digit run (seed "12", the call walks it and '+' is written) and a
+    // non-digit start (seed "+", stop at once).
+    assert_equivalent(
+        &golden_src("glyph_sets.tmc"),
+        &[&[(&[2, 3], 0)], &[(&[11], 0)]],
+    );
+}
+
 // ── the brk barrier ─────────────────────────────────────────────────────────
 
 /// A forwarder state that carries a `debugger` (`brk`) row. It has the shape a

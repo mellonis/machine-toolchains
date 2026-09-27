@@ -42,8 +42,9 @@ ast_node!(pub struct TransitionView: TmcKind::Transition.into());
 ast_node!(pub struct BindingArgView: TmcKind::BindingArg.into());
 ast_node!(pub struct SymMapView: TmcKind::SymMap.into());
 ast_node!(pub struct MapDeclView: TmcKind::MapDecl.into());
+ast_node!(pub struct SetDeclView: TmcKind::SetDecl.into());
 
-/// One item that can appear at file level: `use`, `alphabet`,
+/// One item that can appear at file level: `use`, `alphabet`, `set`, `map`,
 /// `machine`, `namespace`, and `reuse` (both `routine` and `graph` —
 /// the two reusable-graph carriers — parse to the same `REUSE` node
 /// kind, distinguished by their own header token, not by kind). A
@@ -55,13 +56,13 @@ ast_node!(pub struct MapDeclView: TmcKind::MapDecl.into());
 /// be nested in a namespace), found `machine`" —
 /// `extract_items`'s own `TopView::Machine` arm at namespace level is
 /// therefore unreachable in practice; kept as a total match rather
-/// than an unreachable panic, since a total match over a closed
-/// five-variant enum costs nothing and stays correct if the grammar
-/// ever changes.
+/// than an unreachable panic, since a total match over a closed enum
+/// costs nothing and stays correct if the grammar ever changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopView {
     Use(UseView),
     Alphabet(AlphabetView),
+    SetDecl(SetDeclView),
     MapDecl(MapDeclView),
     Reuse(ReuseView),
     Machine(MachineView),
@@ -75,6 +76,7 @@ impl TopView {
         UseView::cast(node.clone())
             .map(TopView::Use)
             .or_else(|| AlphabetView::cast(node.clone()).map(TopView::Alphabet))
+            .or_else(|| SetDeclView::cast(node.clone()).map(TopView::SetDecl))
             .or_else(|| MapDeclView::cast(node.clone()).map(TopView::MapDecl))
             .or_else(|| ReuseView::cast(node.clone()).map(TopView::Reuse))
             .or_else(|| MachineView::cast(node.clone()).map(TopView::Machine))
@@ -89,6 +91,7 @@ impl TopView {
         match self {
             TopView::Use(v) => v.syntax(),
             TopView::Alphabet(v) => v.syntax(),
+            TopView::SetDecl(v) => v.syntax(),
             TopView::MapDecl(v) => v.syntax(),
             TopView::Reuse(v) => v.syntax(),
             TopView::Machine(v) => v.syntax(),
@@ -106,6 +109,7 @@ impl TopView {
         match self {
             TopView::Use(_) => TmcKind::Use,
             TopView::Alphabet(_) => TmcKind::Alphabet,
+            TopView::SetDecl(_) => TmcKind::SetDecl,
             TopView::MapDecl(_) => TmcKind::MapDecl,
             TopView::Reuse(_) => TmcKind::Reuse,
             TopView::Machine(_) => TmcKind::Machine,
@@ -149,7 +153,8 @@ impl TopView {
 /// `ROOT` needs no such skip and gets none: a doc run at file level
 /// binds to the declaration that follows it, and one that binds to
 /// nothing is a `DanglingDocRun` parse error, so ROOT's children are
-/// only USE / ALPHABET / REUSE / MACHINE / NAMESPACE.
+/// only USE / ALPHABET / SET_DECL / MAP_DECL / REUSE / MACHINE /
+/// NAMESPACE.
 fn top_items(node: &SyntaxNode) -> impl Iterator<Item = TopView> + '_ {
     node.children()
         .filter(|child| {
@@ -318,6 +323,34 @@ impl AlphabetView {
     /// The doc run this declaration retro-wraps, when one was written —
     /// the alphabet's own first child node (docs/core.md (syntax
     /// trees)).
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
+    }
+}
+
+/// A `SET_DECL`'s header is `export? set NAME` then the mandatory `{` —
+/// exactly `ALPHABET`'s shape with `set` in place of `alphabet` — so both
+/// accessors read the same `alphabet_header_idents` walk, and the same
+/// "last header IDENT is the name" / "first is `export`" rules hold for the
+/// same reason (`set` is a reserved word, so `Parser::name()` refuses it as
+/// the name).
+impl SetDeclView {
+    /// The set's name: the LAST header IDENT before `{`.
+    pub fn name_token(&self) -> SyntaxToken {
+        alphabet_header_idents(self.syntax())
+            .into_iter()
+            .next_back()
+            .expect("SET_DECL always carries a name IDENT before its `{`")
+    }
+
+    /// Whether `export` was written — the first header IDENT's text.
+    pub fn exported(&self) -> bool {
+        alphabet_header_idents(self.syntax())
+            .first()
+            .is_some_and(|t| t.text() == "export")
+    }
+
+    /// The doc run this declaration retro-wraps, when one was written.
     pub fn doc_run(&self) -> Option<DocRunView> {
         child(self.syntax())
     }

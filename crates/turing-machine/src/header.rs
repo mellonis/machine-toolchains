@@ -551,6 +551,8 @@ pub(crate) fn resolve_declarations(
 fn empty_resolved() -> Resolved {
     Resolved {
         alphabets: HashMap::new(),
+        sets: HashMap::new(),
+        set_refs: HashSet::new(),
         maps: HashMap::new(),
         worlds: Vec::new(),
         entry_world: None,
@@ -1057,6 +1059,11 @@ fn render_source(
             printed_full_names.insert(full);
         }
     }
+    for set in &program.sets {
+        if set.exported {
+            printed_full_names.insert(full_name(&set.ns, &set.name));
+        }
+    }
     for map in &program.maps {
         let full = full_name(&map.ns, &map.name);
         if map.exported || referenced_maps.contains(full.as_str()) {
@@ -1089,6 +1096,24 @@ fn render_source(
             &alphabet.ns,
             alphabet_lines(&alphabet.name, glyphs, alphabet.exported),
         );
+    }
+    // Named glyph sets: exported ones, printed as their EXPANDED members
+    // (docs/tmt/cli.md (interface)). Nothing else a header prints ever
+    // names a set — an alphabet and every contract clause print their
+    // resolved glyphs — so an unexported set is never needed, and a set
+    // built from other sets (this unit's or an imported one) reads back
+    // with no `use` line and no sibling declaration behind it.
+    for set in &program.sets {
+        if !set.exported {
+            continue;
+        }
+        let full = full_name(&set.ns, &set.name);
+        let glyphs = &resolved
+            .sets
+            .get(&full)
+            .expect("resolution guarantees every declared set is resolved")
+            .glyphs;
+        root.insert(&set.ns, set_lines(&set.name, glyphs));
     }
     // Named maps: exported, or referenced from a printed graph body — the
     // same rule an alphabet gets. A map an exported graph names but this
@@ -1160,6 +1185,7 @@ fn render_source(
         .alphabets
         .iter()
         .map(|a| full_name(&a.ns, &a.name))
+        .chain(program.sets.iter().map(|s| full_name(&s.ns, &s.name)))
         .chain(program.maps.iter().map(|m| full_name(&m.ns, &m.name)))
         .chain(program.routines.iter().map(|r| full_name(&r.ns, &r.name)))
         .chain(program.graphs.iter().map(|g| full_name(&g.ns, &g.name)))
@@ -1421,6 +1447,14 @@ fn alphabet_lines(name: &str, glyphs: &[String], exported: bool) -> Vec<String> 
         "alphabet"
     };
     vec![format!("{keyword} {name} {}", braced_list(glyphs))]
+}
+
+/// An exported glyph set as its members — [`alphabet_lines`]' spelling
+/// with `set` in place of `alphabet`. Always `export`: only an exported set
+/// is ever printed. An empty set prints `{}`, which the strict reader reads
+/// back as the same empty set.
+fn set_lines(name: &str, glyphs: &[String]) -> Vec<String> {
+    vec![format!("export set {name} {}", braced_list(glyphs))]
 }
 
 /// `{ … }` with the elements space-padded, or the bare `{}` a genuinely

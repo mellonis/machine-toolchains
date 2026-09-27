@@ -431,7 +431,7 @@ fn one(src: String) -> Vec<String> {
 
 // ── the committed `.tmc` corpus ─────────────────────────────────────────────
 //
-// The seven sources under `tests/golden/`, on the same seeds `opt_equivalence.rs`
+// The eight sources under `tests/golden/`, on the same seeds `opt_equivalence.rs`
 // runs them on (a local copy of that roster, per the no-shared-helpers
 // convention). Each seed comment states what the seed makes the program do.
 
@@ -517,6 +517,18 @@ fn nested_graft_over_approximates() {
 }
 
 #[test]
+fn glyph_sets_over_approximates() {
+    // A digit run ("12", cells [2,3]) walked by `skip`, then '+' (11) written
+    // on the blank after it; and a non-digit start ('+', cells [11]) that
+    // stops at once with nothing written.
+    assert_over_approximates(
+        "glyph_sets",
+        &one(golden_src("glyph_sets.tmc")),
+        &[&[(&[2, 3], 0)], &[(&[11], 0)]],
+    );
+}
+
+#[test]
 fn every_committed_tmc_fixture_is_in_the_corpus() {
     // A drift guard: a `.tmc` fixture added to `tests/golden/` must join this
     // corpus or fail here. Without it a new program could sit uncovered while
@@ -538,6 +550,7 @@ fn every_committed_tmc_fixture_is_in_the_corpus() {
             "a4_byte_increment.tmc",
             "a5_call_across_alphabets.tmc",
             "a6_graph_graft_multi_exit.tmc",
+            "glyph_sets.tmc",
             "nested_graft.tmc",
         ],
         "the committed `.tmc` corpus grew or shrank: add the new fixture above"

@@ -131,6 +131,13 @@ pub enum TmcKind {
     /// it unbracketed — the same "no dedicated node for a comma-separated
     /// element" choice `ALPHABET`'s own elements make.
     MapDecl = 55,
+    /// `export? set NAME { … }` — a named glyph set, appended after
+    /// `MapDecl` so no existing discriminant moves. The same
+    /// keyword-decided extent as `ALPHABET` (opens at `export` or `set`,
+    /// closes at the body's `}`), and the same flat body: an element's
+    /// tokens — a set reference's `::`-joined IDENTs included — sit
+    /// directly under it with no node of their own.
+    SetDecl = 56,
 }
 
 impl From<TmcKind> for SyntaxKind {
@@ -146,7 +153,7 @@ impl From<TmcKind> for SyntaxKind {
 /// means exactly `31`, the gap between the trivia run and the node run.
 /// Every OCCUPIED discriminant is guaranteed a real name:
 /// `tests::kind_name_never_falls_through_for_an_occupied_discriminant`
-/// walks `0..=30` and `32..=53` and fails on a fallback, so an arm
+/// walks `0..=30` and `32..=56` and fails on a fallback, so an arm
 /// missing for a kind that exists is a bug this module's own tests
 /// catch rather than a tolerated degradation.
 pub fn kind_name(kind: SyntaxKind) -> &'static str {
@@ -206,6 +213,7 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
         k if k == TmcKind::SymMap.into() => "SYM_MAP",
         k if k == TmcKind::Error.into() => "ERROR",
         k if k == TmcKind::MapDecl.into() => "MAP_DECL",
+        k if k == TmcKind::SetDecl.into() => "SET_DECL",
         _ => "?",
     }
 }
@@ -393,19 +401,19 @@ mod tests {
     /// (measured: all seven of this round's arms removed, the walk still
     /// green). What bites is asserting the name is not the FALLBACK,
     /// over the two occupied discriminant runs spelled as literals:
-    /// `0..=30` (significant tokens then trivia) and `32..=53` (nodes).
+    /// `0..=30` (significant tokens then trivia) and `32..=56` (nodes).
     /// `31` is the one gap between them — a deliberate hole no kind
     /// occupies, so `"?"` is its correct answer and it is asserted to BE
     /// `"?"`, which is what keeps the two runs from silently being
     /// widened into one.
     ///
     /// Still not a completeness check on the kind SPACE: a variant
-    /// appended at 54 with no arm sits outside both literals. That blind
+    /// appended at 57 with no arm sits outside both literals. That blind
     /// spot is the same one the significant-token census above carries,
     /// by the same argument.
     #[test]
     fn kind_name_never_falls_through_for_an_occupied_discriminant() {
-        for raw in (0u16..=30).chain(32u16..=55) {
+        for raw in (0u16..=30).chain(32u16..=56) {
             let name = kind_name(SyntaxKind(raw));
             assert!(!name.is_empty(), "kind {raw} has no name");
             assert_ne!(name, "?", "kind {raw} has no `kind_name` arm");

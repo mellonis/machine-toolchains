@@ -292,6 +292,8 @@ subsection.
 | `undefined-state` | `goto`, a continuation, or a state argument names no state (or graft instance) in the world. |
 | `wrong-target-kind` | A `call`/`graft`/`bind` target resolves to the wrong entity kind. |
 | `undefined-graph` | A `graft` target names no graph — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose unit's declarations were not given (declare it locally, or supply its declarations to this compile). |
+| `undefined-set` | A set reference — in an alphabet body, a set body, or a contract clause — names no glyph set: either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). A name that resolves to something other than a set is `wrong-target-kind`. |
+| `set-cycle` | A glyph set's body reaches the set itself, directly or through other sets, so it has no finite expansion. |
 | `unknown-arg` | A binding argument names a parameter the signature does not declare. |
 | `duplicate-arg` | Two binding arguments share one parameter name. |
 | `missing-arg` | A signature parameter has no binding argument. |

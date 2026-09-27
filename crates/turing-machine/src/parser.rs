@@ -45,6 +45,8 @@ pub const TMC_LANG_VERSION: &str = "0.2";
 pub struct Program {
     pub imports: Vec<Import>,
     pub alphabets: Vec<Alphabet>,
+    /// Named glyph sets (`set NAME { … }`), in source order.
+    pub sets: Vec<SetDecl>,
     pub maps: Vec<MapDecl>,
     pub routines: Vec<Routine>,
     pub graphs: Vec<Graph>,
@@ -129,12 +131,41 @@ pub struct Alphabet {
     pub doc: Option<Doc>,
 }
 
-/// One alphabet element: a single symbol, or an inclusive `lo..hi` range whose
-/// endpoints are the same kind (`glyph..glyph` or `number..number`).
+/// One alphabet element: a single symbol, an inclusive `lo..hi` range whose
+/// endpoints are the same kind (`glyph..glyph` or `number..number`), or a
+/// reference to a named glyph set, bare or qualified, which expands in place
+/// to the set's members, in the set's own order. The same element
+/// grammar serves an alphabet body, a set body and every contract clause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlphabetElem {
     Single(SymLit),
-    Range { lo: SymLit, hi: SymLit, span: Span },
+    Range {
+        lo: SymLit,
+        hi: SymLit,
+        span: Span,
+    },
+    /// `name` is the reference as written, `::`-joined when qualified;
+    /// `span` covers the first segment's start through the last one's end.
+    SetRef {
+        name: String,
+        span: Span,
+    },
+}
+
+/// An `export? set NAME { … }` declaration — a named glyph set, its body the
+/// alphabet-body element grammar, so a set may name other sets. The
+/// same field shape as [`Alphabet`]: a set is a top-level declaration like
+/// one, namespaced, exportable and importable, but it is never a tape type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub line: u32,
+    pub col: u32,
+    pub exported: bool,
+    pub ns: Vec<String>,
+    pub elems: Vec<AlphabetElem>,
+    pub doc: Option<Doc>,
 }
 
 /// An `export? map NAME: SRC -> DST { pairs }` declaration — a reusable,
@@ -1239,7 +1270,8 @@ impl Parser<'_> {
     fn next_is_top_doc_accepting(&self) -> bool {
         matches!(&self.peek().kind, TokenKind::Ident(w)
             if matches!(w.as_str(),
-                "export" | "alphabet" | "map" | "routine" | "graph" | "machine" | "namespace"))
+                "export" | "alphabet" | "set" | "map" | "routine" | "graph" | "machine"
+                    | "namespace"))
     }
 
     /// One namespace level's item loop — the recovery seam
@@ -1319,6 +1351,7 @@ impl Parser<'_> {
                     w.as_str(),
                     "use"
                         | "alphabet"
+                        | "set"
                         | "map"
                         | "routine"
                         | "graph"
@@ -1405,6 +1438,11 @@ impl Parser<'_> {
                         self.parse_alphabet()?;
                         self.g_finish(); // Alphabet
                     }
+                    "set" => {
+                        self.g_start_at(cp, TmcKind::SetDecl);
+                        self.parse_set_decl()?;
+                        self.g_finish(); // SetDecl
+                    }
                     "map" => {
                         self.g_start_at(cp, TmcKind::MapDecl);
                         self.parse_map_decl()?;
@@ -1452,6 +1490,11 @@ impl Parser<'_> {
                                 self.parse_alphabet()?;
                                 self.g_finish(); // Alphabet — `export` included
                             }
+                            TokenKind::Ident(w2) if w2 == "set" => {
+                                self.g_start_at(cp, TmcKind::SetDecl);
+                                self.parse_set_decl()?;
+                                self.g_finish(); // SetDecl — `export` included
+                            }
                             TokenKind::Ident(w2) if w2 == "map" => {
                                 self.g_start_at(cp, TmcKind::MapDecl);
                                 self.parse_map_decl()?;
@@ -1470,7 +1513,7 @@ impl Parser<'_> {
                             _ => {
                                 return Err(Self::expected(
                                     &t2,
-                                    "`alphabet`, `map`, `routine`, or `graph` after `export`",
+                                    "`alphabet`, `set`, `map`, `routine`, or `graph` after `export`",
                                 ));
                             }
                         }
@@ -1545,7 +1588,29 @@ impl Parser<'_> {
         Ok(elems)
     }
 
+    /// `set NAME { … }`, the current token already the `set` keyword — the
+    /// same header-then-body shape [`Self::parse_alphabet`] parses, over the
+    /// same [`Self::alphabet_elems`] body loop.
+    fn parse_set_decl(&mut self) -> Result<(), CompileError> {
+        self.bump(); // `set`
+        self.name("a set name")?;
+        self.expect(&TokenKind::LBrace, "`{` to open the set body")?;
+        self.alphabet_elems()?;
+        self.expect(&TokenKind::RBrace, "`}` to close the set body")?;
+        Ok(())
+    }
+
+    /// One element of an alphabet body, a set body or a contract clause. An
+    /// identifier starts a set reference (a name, bare or `::`-qualified);
+    /// anything else is a symbol literal or a range of them.
     fn alphabet_elem(&mut self) -> Result<AlphabetElem, CompileError> {
+        if matches!(self.peek().kind, TokenKind::Ident(_)) {
+            let q = self.qual_name("a set name")?;
+            return Ok(AlphabetElem::SetRef {
+                name: q.joined(),
+                span: q.span,
+            });
+        }
         let (lo, hi) = self.sym_or_range()?;
         Ok(match hi {
             None => AlphabetElem::Single(lo),
@@ -2949,6 +3014,11 @@ pub(crate) fn reparse_binding_arg(tokens: &[Token]) -> BindingArg {
 /// the body's opener. Doing the slice here rather than at the call site
 /// keeps "where an alphabet body begins" next to the production that
 /// decides it.
+///
+/// A SET_DECL node reads its body through this same shim: its run is
+/// `DocLine|AttentionLine* export? set NAME { … }`, which carries no
+/// `LBrace` before the body's own either, and [`Parser::parse_set_decl`]
+/// runs the same [`Parser::alphabet_elems`] loop.
 pub(crate) fn reparse_alphabet_elems(tokens: &[Token]) -> Vec<AlphabetElem> {
     let mut p = bare_parser(tokens);
     while !matches!(p.peek().kind, TokenKind::LBrace | TokenKind::Eof) {
