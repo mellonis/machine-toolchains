@@ -177,28 +177,84 @@ machine {
     assert_eq!(compile_err(src).kind.code(), "fold-out-of-alphabet");
 }
 
-/// One of the decimal-increment probe programs, read from the repository.
-fn probe(name: &str) -> String {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/superpowers/probes/2026-09-13-tmc-completeness/probe3-sets")
-        .join(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+/// A decimal increment spelled with glyph literals: a quoted digit range
+/// bound with `as` and folded with `{d+1}`.
+const DEC_GLYPHS: &str = "\
+alphabet dec { '_', '0'..'9', '+', '=' }
+
+namespace decimal {
+  export routine plusOne(tape num: dec) {
+    entry state toEnd {
+      ['0'..'9'] -> move [>] goto toEnd;
+      [*]        -> move [<] goto inc;
+    }
+    state inc {
+      ['0'..'8' as d] -> write [{d+1}] goto toLast;
+      ['9']           -> write ['0'] move [<] goto inc;
+      [*]             -> write ['1'] goto toLast;
+    }
+    state toLast {
+      ['0'..'9'] -> move [>] goto toLast;
+      [*]        -> move [<] return;
+    }
+  }
 }
+
+machine {
+  tape num: dec;
+  entry state s { [*] -> call decimal::plusOne(num = num) then done; }
+  state done    { [*] -> stop; }
+}
+";
+
+/// The same increment spelled with number literals and written out row by
+/// row — no fold at all, so it is the reference the folded one must match.
+const DEC_NUMBERS: &str = "\
+alphabet dec { '_', 0..9, '+', '=' }
+
+namespace decimal {
+  export routine plusOne(tape num: dec) {
+    entry state toEnd {
+      [0..9] -> move [>] goto toEnd;
+      [*]    -> move [<] goto inc;
+    }
+    state inc {
+      [0] -> write [1] goto toLast;
+      [1] -> write [2] goto toLast;
+      [2] -> write [3] goto toLast;
+      [3] -> write [4] goto toLast;
+      [4] -> write [5] goto toLast;
+      [5] -> write [6] goto toLast;
+      [6] -> write [7] goto toLast;
+      [7] -> write [8] goto toLast;
+      [8] -> write [9] goto toLast;
+      [9] -> write [0] move [<] goto inc;
+      [*] -> write [1] goto toLast;
+    }
+    state toLast {
+      [0..9] -> move [>] goto toLast;
+      [*]    -> move [<] return;
+    }
+  }
+}
+
+machine {
+  tape num: dec;
+  entry state s { [*] -> call decimal::plusOne(num = num) then done; }
+  state done    { [*] -> stop; }
+}
+";
 
 /// Whether a bound symbol folds is decided by its LABEL naming a number,
 /// never by how its literal was quoted (docs/tmt/language.md
 /// (substitution)): `'7'` and `7` are one symbol, so a quoted digit range
 /// folds exactly as a numeric one does. The glyph-spelled increment
-/// compiles and computes what the number-spelled one does — the two
+/// compiles and leaves exactly the tape the row-by-row one does — the two
 /// alphabets are the same symbols at the same indices ('_' 0, '0'..'9'
-/// 1..10). The number-spelled program also strips leading zeros, a no-op
-/// on these seeds, so only the cells are compared, not the head.
-/// Mutation: deciding foldability by quotes again — the glyph-spelled
-/// program is refused (`char-arithmetic`).
+/// 1..10). Mutation: deciding foldability by quotes again — the
+/// glyph-spelled program is refused (`char-arithmetic`).
 #[test]
 fn a_glyph_spelled_digit_range_folds_like_a_numeric_one() {
-    let glyphs = probe("dec-glyph.tmc");
-    let numbers = probe("dec.tmc");
     // (seed digits as indices, derived result): 199 + 1 = 200, 9 + 1 = 10
     // (the carry grows the number one cell left), 41 + 1 = 42.
     for (seed, expected) in [
@@ -207,8 +263,8 @@ fn a_glyph_spelled_digit_range_folds_like_a_numeric_one() {
         (vec![5, 2], vec![5, 3]),
     ] {
         let tape = snap(0, &seed, 0);
-        let (g_outcome, g_snaps) = compile_link_run(&glyphs, &[(tape.clone(), 13)]);
-        let (n_outcome, n_snaps) = compile_link_run(&numbers, &[(tape, 13)]);
+        let (g_outcome, g_snaps) = compile_link_run(DEC_GLYPHS, &[(tape.clone(), 13)]);
+        let (n_outcome, n_snaps) = compile_link_run(DEC_NUMBERS, &[(tape, 13)]);
         assert_eq!(g_outcome, Outcome::Stopped);
         assert_eq!(n_outcome, Outcome::Stopped);
         // The number, left to right: every non-blank cell (a result has no
@@ -216,7 +272,10 @@ fn a_glyph_spelled_digit_range_folds_like_a_numeric_one() {
         let digits =
             |s: &TapeSnapshot| -> Vec<u8> { s.cells.iter().copied().filter(|&c| c != 0).collect() };
         assert_eq!(digits(&g_snaps[0]), expected, "glyph-spelled on {seed:?}");
-        assert_eq!(digits(&n_snaps[0]), expected, "number-spelled on {seed:?}");
+        assert_eq!(
+            g_snaps, n_snaps,
+            "the two spellings leave one tape on {seed:?}"
+        );
     }
 }
 

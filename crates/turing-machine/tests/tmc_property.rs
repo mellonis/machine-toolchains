@@ -294,9 +294,9 @@ fn gen_sym(cur: &mut Cursor, em: &mut Emitted) -> (String, bool) {
 }
 
 /// A same-kind low/high pair for a range endpoint, matching `lo`'s kind —
-/// the parser rejects only a KIND mismatch (`RangeKindMismatch`), never an
-/// out-of-order or improbable-looking pair (that check is a later semantic
-/// one; see the module doc), so any same-kind `hi` is grammar-valid.
+/// the parser rejects no endpoint pair (a mixed-kind body range and an
+/// out-of-order or improbable-looking pair are later semantic checks; see
+/// the module doc), so any same-kind `hi` is grammar-valid.
 fn gen_range_hi(cur: &mut Cursor, em: &mut Emitted, lo_is_glyph: bool) -> String {
     if lo_is_glyph {
         em.mark("sym.glyph");

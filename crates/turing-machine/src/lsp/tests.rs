@@ -665,6 +665,29 @@ machine {
     assert!(!second.contains(&"1".to_string()), "{second:?}");
 }
 
+/// After `['0'..` in a quoted-digit alphabet the high endpoint completes
+/// bare (the label names a number), and accepting it yields `['0'..9]` —
+/// which must compile: a cell range looks its endpoints up by label, so
+/// the mixed spelling is the same walk as `'0'..'9'`. Mutation: a
+/// completion inserting text that no longer compiles — the mixed pair
+/// refused in a cell.
+#[test]
+fn a_range_high_endpoint_completion_compiles_when_accepted() {
+    let head = "\
+alphabet d { '_', '0'..'9' }
+
+machine {
+  tape t: d;
+  entry state s {
+    ['0'..";
+    let tail = "] -> stop;\n    [*] -> halt;\n  }\n}\n";
+    let got = labels(&complete_typing(head, "'9'", tail));
+    assert!(got.contains(&"9".to_string()), "{got:?}");
+    let accepted = format!("{head}9{tail}");
+    crate::compiler::compile(&accepted, crate::compiler::CompileOptions::default())
+        .unwrap_or_else(|e| panic!("the accepted completion must compile: {e}"));
+}
+
 #[test]
 fn a_write_cell_offers_the_same_alphabet_plus_the_keep_marker() {
     let head = "\

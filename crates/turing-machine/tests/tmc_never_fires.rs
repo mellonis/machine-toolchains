@@ -105,7 +105,10 @@ fn a_range_its_own_tape_lacks_is_an_error_not_an_empty_expansion() {
     // `small` has no numeric labels, so `[0..5]` names symbols its own tape
     // does not carry. That rule could never fire, and the author can see so
     // at the rule itself — an error at authoring time, never a rule dropped
-    // with a warning while the rest of the state compiles.
+    // with a warning while the rest of the state compiles. What this pins,
+    // beside the strictness tests' own endpoint fixture, is that the error
+    // holds even when the state keeps a working rule: nothing of the old
+    // "drop the dead rule, warn, compile the rest" path survives.
     let src = "\
 alphabet small { '_', 'a', 'b' }
 machine {

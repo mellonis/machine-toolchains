@@ -23,6 +23,15 @@ use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
 use crate::patterns::{glyph_label, label_number};
+
+/// What the parser wanted where a set name stood before `..`: a set is
+/// written on its own, never as a range endpoint.
+const SET_ON_ITS_OWN: &str =
+    "a set name on its own — a range endpoint is a glyph or a number, never a set";
+
+/// What the parser wanted where a set name stood after `..`.
+const SET_AS_ENDPOINT: &str =
+    "a glyph or number to end the range — a range endpoint is never a set";
 use crate::syntax::{self, GreenSink, TmcKind};
 
 /// The `.tmc` language acceptance-contract version (the spec's language
@@ -110,12 +119,6 @@ impl SymLit {
         match self {
             SymLit::Glyph { span, .. } | SymLit::Number { span, .. } => *span,
         }
-    }
-
-    /// True for a glyph literal, false for a numeric one — the kind a range's
-    /// two endpoints must agree on, and the kind a pattern binding takes.
-    pub fn is_glyph(&self) -> bool {
-        matches!(self, SymLit::Glyph { .. })
     }
 }
 
@@ -1664,6 +1667,9 @@ impl Parser<'_> {
     fn alphabet_elem(&mut self) -> Result<AlphabetElem, CompileError> {
         if matches!(self.peek().kind, TokenKind::Ident(_)) {
             let q = self.qual_name("a set name")?;
+            if matches!(self.peek().kind, TokenKind::DotDot) {
+                return Err(Self::expected(self.peek(), SET_ON_ITS_OWN));
+            }
             return Ok(AlphabetElem::SetRef {
                 name: q.joined(),
                 span: q.span,
@@ -2325,6 +2331,9 @@ impl Parser<'_> {
             // alphabet body (`alphabet_elem`).
             TokenKind::Ident(_) => {
                 let q = self.qual_name("a set name")?;
+                if matches!(self.peek().kind, TokenKind::DotDot) {
+                    return Err(Self::expected(self.peek(), SET_ON_ITS_OWN));
+                }
                 (
                     PatternCellKind::SetRef {
                         name: q.joined(),
@@ -2359,18 +2368,19 @@ impl Parser<'_> {
         })
     }
 
-    /// A single symbol, or the low end plus a same-kind high end after `..`.
+    /// A single symbol, or the low end plus a high end after `..`. The two
+    /// ends may be spelled differently: a pattern-cell or clause range looks
+    /// each up by its label, so `'0'..9` is `'0'..'9'`; only a body range,
+    /// which walks succession, needs one kind, and resolution refuses a
+    /// mixed one there (`range-kind-mismatch`).
     fn sym_or_range(&mut self) -> Result<(SymLit, Option<SymLit>), CompileError> {
         let lo = self.sym_lit()?;
         if matches!(self.peek().kind, TokenKind::DotDot) {
             self.bump();
-            let hi = self.sym_lit()?;
-            if lo.is_glyph() != hi.is_glyph() {
-                return Err(CompileError {
-                    span: join(lo.span(), hi.span()),
-                    kind: CompileErrorKind::RangeKindMismatch,
-                });
+            if matches!(self.peek().kind, TokenKind::Ident(_)) {
+                return Err(Self::expected(self.peek(), SET_AS_ENDPOINT));
             }
+            let hi = self.sym_lit()?;
             Ok((lo, Some(hi)))
         } else {
             Ok((lo, None))

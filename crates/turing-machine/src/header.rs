@@ -152,7 +152,7 @@ use mtc_core::formats::object::{
     ExportedAlphabet, ExportedGraph, Interface, ObjectFile, SymbolDef,
 };
 
-use crate::codegen::{quote_glyph, render_glyph_element, render_glyph_list};
+use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
     self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, WorldKind,
     clause_glyphs, full_name, published_writes, symset_glyphs,
@@ -1508,13 +1508,7 @@ fn set_lines(set: &compiler::ResolvedSet, name: &str, exported: bool) -> Vec<Str
         let spelled: Vec<String> = set
             .glyphs
             .iter()
-            .map(|g| {
-                if crate::patterns::label_number(g).is_some() {
-                    g.clone()
-                } else {
-                    render_glyph_element(g)
-                }
-            })
+            .map(|g| crate::patterns::label_spelling(g))
             .collect();
         format!("{{ {} }}", spelled.join(", "))
     };
@@ -1907,17 +1901,14 @@ fn sym_lit_text(sym: &SymLit) -> String {
     }
 }
 
-/// A range endpoint in the kind it was written: a glyph always quoted,
-/// with none of [`sym_lit_text`]'s bare-number shortcut, and a number bare.
-/// A range's two endpoints must be the same kind to parse, and a pattern
-/// cell's range may have an endpoint of several characters
-/// (docs/tmt/language.md (pattern ranges)) — `'9'..'10'` — which that
-/// shortcut would print as `'9'..10`.
+/// A range endpoint as it was written (`patterns::written_spelling`): a
+/// glyph always quoted, with none of [`sym_lit_text`]'s bare-number
+/// shortcut, and a number bare. A pattern cell's range may have an endpoint
+/// of several characters (docs/tmt/language.md (pattern ranges)) —
+/// `'9'..'10'` — which that shortcut would restyle as `'9'..10`, and a body
+/// range needs its two endpoints to keep one kind.
 fn range_end_text(sym: &SymLit) -> String {
-    match sym {
-        SymLit::Glyph { value, .. } => quote_glyph(value),
-        SymLit::Number { value, .. } => value.to_string(),
-    }
+    crate::patterns::written_spelling(sym)
 }
 
 /// A write-cell fold expression, precedence-climbed so parentheses appear

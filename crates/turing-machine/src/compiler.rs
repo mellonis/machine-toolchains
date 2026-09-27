@@ -87,8 +87,11 @@ pub enum CompileErrorKind {
     /// cheapest row to alphabet size; write the range explicitly so the cost
     /// is visible.
     WildcardBinding,
-    /// A range whose two endpoints are not the same kind (`'a'..3`). A range
-    /// is `glyph..glyph` or `number..number`; there is no count form.
+    /// A range in an alphabet or set body whose two endpoints are not the
+    /// same kind (`'a'..3`): a body range walks succession, which is
+    /// `glyph..glyph` or `number..number`; there is no count form. (A
+    /// pattern-cell or clause range looks its endpoints up by label, so
+    /// `'0'..9` is `'0'..'9'` there.)
     RangeKindMismatch,
     /// Arithmetic on a glyph-bound substitution (`{c+1}`). Char arithmetic is
     /// deliberately absent in 0.1; only numeric bindings fold (`{v±k}`).
@@ -152,10 +155,13 @@ pub enum CompileErrorKind {
     /// the declared order is `RangeOutsideAlphabet`.)
     RangeDescending,
     /// A pattern cell's single symbol is not a symbol of the alphabet of the
-    /// tape the cell reads — a rule that could never match it.
+    /// tape the cell reads — a rule that could never match it. In this
+    /// variant and the next two, a symbol field holds its source SPELLING
+    /// (`patterns::written_spelling`): a number bare, a glyph quoted.
     SymbolOutsideAlphabet { glyph: String, alphabet: String },
     /// A member of the glyph set a pattern cell names is not a symbol of the
-    /// alphabet of the tape the cell reads.
+    /// alphabet of the tape the cell reads (spelled bare when its label
+    /// names a number, the way a header prints a set member).
     SetOutsideAlphabet {
         glyph: String,
         set: String,
@@ -675,7 +681,7 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::RangeKindMismatch => {
                 write!(
                     f,
-                    "a range must be `glyph..glyph` or `number..number` — mixed endpoints and the count form (`'a'..3`) are not supported"
+                    "a range in an alphabet or set body must be `glyph..glyph` or `number..number` — mixed endpoints and the count form (`'a'..3`) are not supported there"
                 )
             }
             CompileErrorKind::CharArithmetic => {
@@ -753,7 +759,7 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::SymbolOutsideAlphabet { glyph, alphabet } => {
                 write!(
                     f,
-                    "'{glyph}' in this pattern cell is not a symbol of alphabet `{alphabet}`"
+                    "{glyph} in this pattern cell is not a symbol of alphabet `{alphabet}`"
                 )
             }
             CompileErrorKind::SetOutsideAlphabet {
@@ -763,7 +769,7 @@ impl std::fmt::Display for CompileErrorKind {
             } => {
                 write!(
                     f,
-                    "'{glyph}', a member of set `{set}`, is not a symbol of alphabet `{alphabet}`"
+                    "{glyph}, a member of set `{set}`, is not a symbol of alphabet `{alphabet}`"
                 )
             }
             CompileErrorKind::RangeOutsideAlphabet {
@@ -774,7 +780,7 @@ impl std::fmt::Display for CompileErrorKind {
             } => {
                 write!(
                     f,
-                    "'{glyph}', an endpoint of the range '{lo}'..'{hi}', is not a symbol of alphabet `{alphabet}`"
+                    "{glyph}, an endpoint of the range {lo}..{hi}, is not a symbol of alphabet `{alphabet}`"
                 )
             }
             CompileErrorKind::RangeOutsideAlphabet {
@@ -785,7 +791,7 @@ impl std::fmt::Display for CompileErrorKind {
             } => {
                 write!(
                     f,
-                    "'{hi}' comes before '{lo}' in alphabet `{alphabet}` — a range here walks the alphabet's declared order, so write it '{hi}'..'{lo}'"
+                    "{hi} comes before {lo} in alphabet `{alphabet}` — a range here walks the alphabet's declared order, so write it {hi}..{lo}"
                 )
             }
             CompileErrorKind::EmptySetInPattern(set) => {
@@ -1482,11 +1488,12 @@ pub(crate) fn expand_range(
                 .map(|c| c.to_string())
                 .collect())
         }
-        // Mixed-kind endpoints are a parse-time `RangeKindMismatch`; this arm
-        // is unreachable from parsed input.
+        // A body range walks succession, which needs one kind at both ends.
+        // (A cell or clause range looks endpoints up by label and takes a
+        // mixed pair; it never comes here.)
         _ => Err(CompileError {
             span,
-            kind: CompileErrorKind::RangeEndpointNotScalar,
+            kind: CompileErrorKind::RangeKindMismatch,
         }),
     }
 }
@@ -3693,8 +3700,8 @@ fn resolve_contract_clause(
                     return Err(CompileError {
                         span: *span,
                         kind: CompileErrorKind::RangeOutsideAlphabet {
-                            lo: glyph_label(lo),
-                            hi: glyph_label(hi),
+                            lo: crate::patterns::written_spelling(lo),
+                            hi: crate::patterns::written_spelling(hi),
                             alphabet: frame.alphabet.to_string(),
                             missing: None,
                         },

@@ -234,3 +234,105 @@ fn a_fold_over_a_number_range_with_a_glyph_inside_is_char_arithmetic() {
     assert_eq!(code, "char-arithmetic", "{message}");
     compiles(&program("'_', 0..10"));
 }
+
+/// Quotes never change which symbol a label names, and a cell or clause
+/// range only looks its endpoints up by label, so `'0'..9` is the same
+/// walk as `'0'..'9'` — the same compiled object. A BODY range walks
+/// Unicode succession, which needs both endpoints of one kind, so there
+/// the mixed pair is still refused. Mutation: keeping the refusal in the
+/// grammar every position shares — the cell and the clause are refused
+/// too.
+#[test]
+fn a_mixed_spelling_range_is_one_walk_in_a_cell_or_clause_but_not_in_a_body() {
+    let cell = |range: &str| {
+        compiles(&one_tape(
+            "'_', '0'..'9'",
+            &format!("    [{range}] -> stop;\n    [*] -> halt;"),
+        ))
+        .object
+    };
+    assert_eq!(cell("'0'..9"), cell("'0'..'9'"));
+    compiles(
+        "alphabet w { '_', '0'..'9' }\n\
+         export routine r(tape t: w writes { '0'..9 }) {\n\
+           entry state s { [*] -> write ['5'] return; }\n\
+         }\n",
+    );
+    let (code, message) = refused(&one_tape("'_', '0'..9", "    [*] -> stop;"));
+    assert_eq!(code, "range-kind-mismatch", "{message}");
+}
+
+/// The static `enters` check reads a cell through the same declared-order
+/// walk: over `'_', 'a', 'z', 'b'`, an entry state whose only rule is
+/// `['a'..'z']` accepts `'a'` and `'z'` but not `'b'`, so an `enters`
+/// clause naming `'b'` is refused and one naming `'z'` compiles. Mutation:
+/// the source-level cell reading walking Unicode succession — `'b'` then
+/// counts as accepted and the refusal disappears.
+#[test]
+fn the_static_enters_check_reads_a_cell_range_in_declared_order() {
+    let routine = |entered: &str| {
+        format!(
+            "alphabet w {{ '_', 'a', 'z', 'b' }}\n\
+             export routine r(tape t: w enters {{ {entered} }}) {{\n\
+               entry state s {{ ['a'..'z'] -> return; }}\n\
+             }}\n"
+        )
+    };
+    let (code, message) = refused(&routine("'b'"));
+    assert_eq!(code, "enters-not-accepted", "{message}");
+    compiles(&routine("'z'"));
+}
+
+/// A message spells a symbol the way the source wrote it: a number bare,
+/// a glyph quoted — the header's rule for a range endpoint.
+/// Mutation: always quoting — `[5]` reads back as `'5'`.
+#[test]
+fn a_message_spells_each_symbol_in_its_written_kind() {
+    let (_, message) = refused(&one_tape("'_', 'a'", "    [5] -> stop;\n    [*] -> stop;"));
+    assert!(message.contains("5 in this pattern cell"), "{message}");
+    let (_, message) = refused(&one_tape(
+        "'_', 'a'",
+        "    ['z'] -> stop;\n    [*] -> stop;",
+    ));
+    assert!(message.contains("'z' in this pattern cell"), "{message}");
+    let (_, message) = refused(&one_tape(
+        "'_', 0..9",
+        "    [9..0] -> stop;\n    [*] -> stop;",
+    ));
+    assert!(
+        message.contains("0 comes before 9") && message.contains("write it 0..9"),
+        "{message}"
+    );
+    let (_, message) = refused(&one_tape(
+        "'_', 0..9",
+        "    [0..'x'] -> stop;\n    [*] -> stop;",
+    ));
+    assert!(
+        message.contains("'x', an endpoint of the range 0..'x'"),
+        "{message}"
+    );
+}
+
+/// A set name is written on its own, never as a range endpoint, and the
+/// refusal says so — in a pattern cell and in an alphabet body, at either
+/// end. Mutation: the generic "expected `,` or `]`" refusal.
+#[test]
+fn a_set_name_as_a_range_endpoint_is_refused_with_a_reason() {
+    let sets = "set lo { 'a' }\nset hi { 'b' }\n";
+    for src in [
+        format!(
+            "{sets}{}",
+            one_tape("'_', 'a', 'b'", "    [lo..'b'] -> stop;")
+        ),
+        format!(
+            "{sets}{}",
+            one_tape("'_', 'a', 'b'", "    ['a'..hi] -> stop;")
+        ),
+        format!("{sets}alphabet w {{ '_', lo..'b' }}\n"),
+        format!("{sets}alphabet w {{ '_', 'a'..hi }}\n"),
+    ] {
+        let (code, message) = refused(&src);
+        assert_eq!(code, "unexpected-token", "{src}: {message}");
+        assert!(message.contains("never a set"), "{src}: {message}");
+    }
+}

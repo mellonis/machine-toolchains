@@ -262,7 +262,7 @@ subsection.
 | `routine-body-in-declarations` | A routine carries a body in a declarations-only reading — a header states its signature only. |
 | `naked-pattern` | A rule pattern written without its enclosing `[ … ]` — bare single-tape patterns are not supported. |
 | `wildcard-binding` | `* as v` — a wildcard cannot bind; write the range explicitly so the expansion cost is visible. |
-| `range-kind-mismatch` | A range whose endpoints are not the same kind (`'a'..3`) — `glyph..glyph` or `number..number` only. |
+| `range-kind-mismatch` | A range in an alphabet or set body whose endpoints are not the same kind (`'a'..3`) — a body range is `glyph..glyph` or `number..number` only. |
 | `char-arithmetic` | Arithmetic on a glyph-bound substitution (`{c+1}`) — only numeric bindings fold. |
 | `graft-needs-name` | A non-`entry` `graft` with no `as name` — an unreferenced unnamed instance would be dead. |
 | `state-redirect` | The `state name;` redirect form — a state always has a `{ … }` body. |

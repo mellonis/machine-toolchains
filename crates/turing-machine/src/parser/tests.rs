@@ -400,15 +400,15 @@ fn wildcard_binding_is_rejected() {
     );
 }
 
+/// A mixed-spelling range (`'a'..3`) is grammar in every position: a cell
+/// or clause range looks each endpoint up by label, and a body range's
+/// need for one kind is resolution's refusal (`range-kind-mismatch`,
+/// pinned in `tests/alphabet_strictness.rs`), not the parser's. Mutation:
+/// the parser refusing a mixed pair again — both parses fail.
 #[test]
-fn count_form_range_is_rejected() {
-    // `'a'..3` — a mixed glyph/number range (there is no count form).
-    assert_eq!(err_code("alphabet x { 'a'..3 }"), "range-kind-mismatch");
-    // Also in a pattern position.
-    assert_eq!(
-        err_code("machine { entry state s { ['a'..3] -> stop; } }"),
-        "range-kind-mismatch"
-    );
+fn a_mixed_spelling_range_parses() {
+    parse("alphabet x { 'a'..3 }").expect("a body range parses");
+    parse("machine { entry state s { ['a'..3] -> stop; } }").expect("a cell range parses");
 }
 
 #[test]

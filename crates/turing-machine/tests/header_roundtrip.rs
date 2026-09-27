@@ -712,11 +712,10 @@ export graph drive(tape t: five, state done) {
 
 /// A pattern-cell range walks the alphabet's declared order, so its
 /// endpoints may be glyphs of several characters — `'9'..'10'` — and a
-/// printed graph body must spell both in their written kind: the range's
-/// two endpoints must be the same kind to parse at all. Mutation: printing
-/// an endpoint the way a lone glyph prints, which spells the numeric label
-/// `10` bare — the header then reads `'9'..10` and is refused on read-back
-/// (`range-kind-mismatch`).
+/// printed graph body spells both as written, then reads back as itself.
+/// Mutation: printing an endpoint the way a lone glyph prints, which
+/// restyles the numeric label `10` bare — the header then reads
+/// `'9'..10`.
 #[test]
 fn a_graph_bodys_multi_character_range_round_trips() {
     const RANGE_FIXTURE: &str = "\

@@ -42,7 +42,9 @@ use crate::parser::{
     MoveDir, MoveVec, PatternCell, PatternCellKind, Rule, SymLit, SymMap as SrcSymMap, TermKind,
     Transition, WriteCell, WriteCellKind, WriteVec, char_arithmetic_span,
 };
-use crate::patterns::{DeclaredRangeMiss, declared_range, label_number};
+use crate::patterns::{
+    DeclaredRangeMiss, declared_range, label_number, label_spelling, written_spelling,
+};
 
 // ---------------------------------------------------------------------------
 // Output — the concrete, index-resolved module the IR lowering stage consumes.
@@ -561,7 +563,7 @@ fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, Compi
         PatternCellKind::Single(s) => {
             let glyph = glyph_label(s);
             let i = lookup(&glyph, &|| CompileErrorKind::SymbolOutsideAlphabet {
-                glyph: glyph.clone(),
+                glyph: written_spelling(s),
                 alphabet: ti.alphabet.clone(),
             })?;
             let bv = binding.map(|n| {
@@ -579,11 +581,15 @@ fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, Compi
             let members = declared_range(lo, hi, &ti.glyphs).map_err(|miss| CompileError {
                 span: cell.span,
                 kind: CompileErrorKind::RangeOutsideAlphabet {
-                    lo: glyph_label(lo),
-                    hi: glyph_label(hi),
+                    lo: written_spelling(lo),
+                    hi: written_spelling(hi),
                     alphabet: ti.alphabet.clone(),
                     missing: match miss {
-                        DeclaredRangeMiss::Endpoint(glyph) => Some(glyph),
+                        DeclaredRangeMiss::Endpoint(label) => Some(if glyph_label(lo) == label {
+                            written_spelling(lo)
+                        } else {
+                            written_spelling(hi)
+                        }),
                         DeclaredRangeMiss::Reversed => None,
                     },
                 },
@@ -628,7 +634,7 @@ fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, Compi
             let mut opts = Vec::with_capacity(resolved.members.len());
             for member in &resolved.members {
                 let i = lookup(&member.label, &|| CompileErrorKind::SetOutsideAlphabet {
-                    glyph: member.label.clone(),
+                    glyph: label_spelling(&member.label),
                     set: resolved.set.clone(),
                     alphabet: ti.alphabet.clone(),
                 })?;

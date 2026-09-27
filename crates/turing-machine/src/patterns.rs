@@ -38,6 +38,26 @@ pub(crate) fn label_number(label: &str) -> Option<i64> {
     (value.to_string() == label).then_some(i64::from(value))
 }
 
+/// A symbol literal spelled in the kind it was written: a glyph always
+/// quoted, a number bare. A header prints a range endpoint this way, and a
+/// diagnostic names a symbol this way, so neither restyles the source.
+pub(crate) fn written_spelling(s: &SymLit) -> String {
+    match s {
+        SymLit::Glyph { value, .. } => crate::codegen::quote_glyph(value),
+        SymLit::Number { value, .. } => value.to_string(),
+    }
+}
+
+/// A symbol known only by its label (a set member), spelled the way a
+/// header prints one: bare when the label names a number, quoted otherwise.
+pub(crate) fn label_spelling(label: &str) -> String {
+    if label_number(label).is_some() {
+        label.to_string()
+    } else {
+        crate::codegen::quote_glyph(label)
+    }
+}
+
 /// Why a range written in a pattern cell or a contract clause has no walk
 /// over the alphabet it is written against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,7 +224,8 @@ mod tests {
 
     /// The two failures: an endpoint the alphabet lacks, named, and a pair
     /// the declared order reverses — including one Unicode succession would
-    /// call ascending.
+    /// call ascending. Mutation: comparing the two positions by code point
+    /// instead — `'a'..'b'` over `'_', 'b', 'a'` then walks.
     #[test]
     fn a_missing_endpoint_or_a_reversed_pair_has_no_walk() {
         let alphabet = labels(&["_", "b", "a"]);
@@ -224,7 +245,8 @@ mod tests {
 
     /// No succession is walked, so an endpoint of several characters is a
     /// symbol like any other, and a number endpoint is looked up by its
-    /// label (`05` is the symbol `5`).
+    /// label (`05` is the symbol `5`). Mutation: looking a number endpoint
+    /// up by its written text — `05` is then not found.
     #[test]
     fn multi_character_and_numeric_endpoints_are_looked_up_by_label() {
         let alphabet = labels(&["_", "ab", "cd", "ef"]);
