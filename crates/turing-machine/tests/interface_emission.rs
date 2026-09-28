@@ -67,10 +67,11 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
         stdlib::SOURCE,
         CompileOptions {
             opt_level: OptLevel::O0,
-            // The plain build, not the release preset — no contract-check
-            // states to strip here either way, spelled out so this byte
-            // pin's premise cannot drift silently.
-            strip_asserts: false,
+            // Stripped, like every shipped stdlib build: the library
+            // declares `leaves` clauses, so an unstripped build plants
+            // their check states, and those are not the code this pin
+            // holds still (docs/tmt/cli.md (compile)).
+            strip_asserts: true,
             ..CompileOptions::default()
         },
     )
@@ -89,9 +90,9 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
     .expect("the embedded stdlib compiles at the release preset")
     .object;
 
-    // Captured from HEAD eba68db (pre-Task-3, before codegen emitted any
-    // `.param` line) — the code blobs alone, so an interface-section-only
-    // change to the whole object cannot move this.
+    // Captured before codegen emitted any `.param` line, and unmoved by
+    // the stdlib's `leaves` clauses — the code blobs alone, so an
+    // interface-section-only change to the whole object cannot move this.
     assert_eq!(
         fingerprint(&blobs_bytes(&o0)),
         (1740, 1487017377),
@@ -132,15 +133,24 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
 /// (docs/formats.md (routine interfaces)); only the checksums move. A
 /// length that moves here alongside the checksum is therefore a DIFFERENT
 /// change wearing this one's clothes, and the pin says so.
+///
+/// Re-pinned again when every stdlib tape parameter gained a `leaves`
+/// clause: each prints on its `.param` line and moves its graph's digest,
+/// so both objects grow by exactly 180 bytes of interface section (-O0
+/// 7825 → 8005, -O1 7765 → 7945). Both builds strip contract-check
+/// states, so the code blobs above do not move, and
+/// `stdlib_header.rs::the_head_clauses_move_the_interface_and_never_the_code`
+/// proves everything outside the interface section identical.
 #[test]
 fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
     let o0 = compile(
         stdlib::SOURCE,
         CompileOptions {
             opt_level: OptLevel::O0,
-            // The plain build, not the release preset — spelled out so
-            // this byte pin's premise cannot drift silently.
-            strip_asserts: false,
+            // Stripped, like every shipped stdlib build: the library
+            // declares `leaves` clauses, so an unstripped build would
+            // plant their check states in the code as well.
+            strip_asserts: true,
             ..CompileOptions::default()
         },
     )
@@ -163,12 +173,12 @@ fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
 
     assert_eq!(
         fingerprint(&o0),
-        (7825, 2785484549),
+        (8005, 3792320392),
         "the -O0 stdlib object's bytes moved"
     );
     assert_eq!(
         fingerprint(&o1),
-        (7765, 358730058),
+        (7945, 3976837933),
         "the -O1 (release preset) stdlib object's bytes moved"
     );
 }

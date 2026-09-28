@@ -572,10 +572,12 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
     // Non-vacuity for a signature the formatter wraps on both arms:
     // compared line by line, `minusOneFast` would reduce to its first line,
     // `export routine minusOneFast(`, on each side and agree over nothing.
+    // Its `leaves` clause is part of the line on both arms: a declared
+    // clause travels through the object's interface section.
     for routines in [&source_routines, &object_routines] {
         assert_eq!(
             routines["std::binaryNumbers::minusOneFast"],
-            "export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' });"
+            "export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' } leaves { '_', '$' });"
         );
     }
 

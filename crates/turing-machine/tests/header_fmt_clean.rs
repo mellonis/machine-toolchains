@@ -159,24 +159,26 @@ fn every_shipped_object_header_is_fmt_clean() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
-/// Every graph the embedded stdlib exports, with its graft digest as it
-/// stood before the printed header was made canonical. The digest is the
-/// CRC-32 of the header module's own graph rendering, never of the printed
-/// header, so reflowing the printed text must leave every value here
-/// untouched.
+/// Every graph the embedded stdlib exports, with its graft digest. The
+/// digest is the CRC-32 of the header module's own graph rendering, never
+/// of the printed header, so reflowing the printed text must leave every
+/// value here untouched. The rendering does cover the graph's signature,
+/// so a declared clause is part of it: the values were re-taken when each
+/// graph's tape parameter gained its `leaves` clause (docs/formats.md
+/// (routine interfaces)), and a reflow still moves none of them.
 const STD_GRAPH_DIGESTS: &[(&str, u32)] = &[
-    ("std::binaryNumbers::goToNumberGraph", 1947376082),
-    ("std::binaryNumbers::goToNumbersStartGraph", 1199676487),
-    ("std::binaryNumbers::goToNextNumberGraph", 2031540922),
-    ("std::binaryNumbers::goToPreviousNumberGraph", 136265794),
-    ("std::binaryNumbers::deleteNumberGraph", 2038397937),
-    ("std::binaryNumbers::normalizeNumberGraph", 2441865979),
-    ("std::binaryNumbers::plusOneGraph", 3409371336),
-    ("std::binaryNumbers::minusOneFastGraph", 2739636279),
-    ("std::binaryNumbersBare::plusOneGraph", 1534365543),
-    ("std::binaryNumbersBare::minusOneGraph", 1297817732),
-    ("std::binaryNumbersBare::invertNumberGraph", 4047895182),
-    ("std::binaryNumbersBare::normalizeNumberGraph", 3663279565),
+    ("std::binaryNumbers::goToNumberGraph", 2800156793),
+    ("std::binaryNumbers::goToNumbersStartGraph", 553620967),
+    ("std::binaryNumbers::goToNextNumberGraph", 4114293331),
+    ("std::binaryNumbers::goToPreviousNumberGraph", 2573355874),
+    ("std::binaryNumbers::deleteNumberGraph", 1750554584),
+    ("std::binaryNumbers::normalizeNumberGraph", 2111348676),
+    ("std::binaryNumbers::plusOneGraph", 1369402796),
+    ("std::binaryNumbers::minusOneFastGraph", 2460668743),
+    ("std::binaryNumbersBare::plusOneGraph", 81519859),
+    ("std::binaryNumbersBare::minusOneGraph", 565278662),
+    ("std::binaryNumbersBare::invertNumberGraph", 579301745),
+    ("std::binaryNumbersBare::normalizeNumberGraph", 609241632),
 ];
 
 /// The exporting side: compiling the stdlib source records exactly the

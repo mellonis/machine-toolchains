@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mtc_turing_machine::cli::execute;
+use mtc_turing_machine::compiler::{CompileOptions, Declarations, compile};
+use mtc_turing_machine::optimizer::OptLevel;
 use mtc_turing_machine::stdlib;
 
 fn args(list: &[&str]) -> Vec<String> {
@@ -140,6 +142,14 @@ fn write_set_suffix(line: &str) -> &str {
     line.find("writes").map(|i| &line[i..]).unwrap_or(line)
 }
 
+/// One head-position clause of a rendered signature line — `keyword { … }`
+/// through its closing brace — or `None` when the line declares none.
+fn head_clause<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let at = line.find(&format!("{keyword} {{"))?;
+    let close = line[at..].find('}')? + at;
+    Some(&line[at..=close])
+}
+
 /// The byte pin: `std.tmh` is committed, derived output, and this is the
 /// standing proof it is exactly `tmt interface`'s own printer output over
 /// `std.tmc` (plus the generated notice) — never hand-edited. Mutation:
@@ -220,6 +230,41 @@ fn the_header_and_the_source_agree_on_every_declared_contract() {
             write_set_suffix(header_line),
             "write sets disagree for `{name}`:\n source: {source_line}\n header: {header_line}"
         );
+        // The head-position clauses, compared on their own rather than
+        // only as part of the suffix above: a header printing them in a
+        // different place would still move the suffix, but a header
+        // DROPPING both clauses on both arms would not, and neither would
+        // one agreeing on a clause the source never declared.
+        for keyword in ["enters", "leaves"] {
+            assert_eq!(
+                head_clause(source_line, keyword),
+                head_clause(header_line, keyword),
+                "`{keyword}` disagrees for `{name}`:\n source: {source_line}\n header: {header_line}"
+            );
+        }
+    }
+
+    // Non-vacuity for the head-position clauses: every stdlib routine
+    // declares where its head leaves and none where it enters (every entry
+    // state matches every glyph), on both arms; and one two-glyph clause is
+    // pinned outright, so the agreement cannot be over a clause both arms
+    // print wrong. Mutation: the printer dropping `leaves` (both arms lose
+    // it, the per-routine comparison stays green, this census goes red).
+    for routines in [&source_routines, &header_routines] {
+        for (name, line) in routines.iter() {
+            assert!(
+                head_clause(line, "leaves").is_some(),
+                "`{name}` has no leaves: {line}"
+            );
+            assert!(
+                head_clause(line, "enters").is_none(),
+                "`{name}` has an enters: {line}"
+            );
+        }
+        assert_eq!(
+            head_clause(&routines["std::binaryNumbers::normalizeNumber"], "leaves"),
+            Some("leaves { '_', '$' }")
+        );
     }
 
     // Non-vacuity for a signature the formatter wraps: `minusOneFast`'s
@@ -230,7 +275,7 @@ fn the_header_and_the_source_agree_on_every_declared_contract() {
     for routines in [&source_routines, &header_routines] {
         assert_eq!(
             routines["std::binaryNumbers::minusOneFast"],
-            "export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' });"
+            "export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' } leaves { '_', '$' });"
         );
     }
 
@@ -290,9 +335,12 @@ fn every_exported_stdlib_graph_is_in_the_header_with_its_body() {
         .count();
     assert_eq!(count, 12, "expected 12 exported stdlib graphs");
 
+    // Its `leaves` clause carries the signature past the width limit, so
+    // the printer wraps it one parameter per line.
     assert!(
-        source_text
-            .contains("export graph goToNumberGraph(tape num: symbols writes {}, state done) {"),
+        source_text.contains(
+            "export graph goToNumberGraph(\n      tape num: symbols writes {} leaves { '$' },\n      state done\n    ) {"
+        ),
         "goToNumberGraph's signature is missing or reformatted"
     );
     assert!(
@@ -303,4 +351,86 @@ fn every_exported_stdlib_graph_is_in_the_header_with_its_body() {
         source_text.contains("['$'] -> goto done;"),
         "goToNumberGraph's body (its rule) is missing"
     );
+}
+
+/// `SOURCE` with every head-position clause (`enters { … }`, `leaves { … }`)
+/// cut out, one leading space included — `writes {} leaves { '$' },`
+/// becomes `writes {},`. A clause's element list holds only quoted glyphs,
+/// never a `}`, so the first `}` after the keyword closes it.
+fn without_head_clauses(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    loop {
+        let next = [" enters {", " leaves {"]
+            .iter()
+            .filter_map(|k| rest.find(k))
+            .min();
+        let Some(at) = next else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..at]);
+        let close = rest[at..].find('}').expect("an unclosed head clause") + at;
+        rest = &rest[close + 1..];
+    }
+}
+
+/// The shipped preset at `level`, spelled as `stdlib::object` spells it:
+/// `brk` and the contract-check states stripped, no external declarations
+/// believed (docs/tmt/cli.md (compile)).
+fn stdlib_preset(level: OptLevel) -> CompileOptions {
+    CompileOptions {
+        opt_level: level,
+        strip_debugger: true,
+        strip_asserts: true,
+        externals: Declarations::none(),
+        ..Default::default()
+    }
+}
+
+/// The stdlib's head-position clauses are interface, never code: compiled
+/// under the shipped preset, `std.tmc` and the same source with every
+/// `enters`/`leaves` clause cut out produce objects identical in
+/// everything but their interface section — code blobs, table blobs,
+/// relocations, symbols and the rest — at both opt levels. The interface
+/// itself must differ, since a declared clause prints on its `.param` line
+/// and moves an exported graph's digest (docs/formats.md (routine
+/// interfaces)); that is the non-vacuity half. The clause census pins what
+/// the annotation derived from the bodies: every one of the 40 tape
+/// parameters (28 routines, 12 graphs) declares where its head leaves, and
+/// none declares where it enters, because every entry state matches every
+/// glyph of its alphabet — the body-derived `enters` would be the whole
+/// alphabet, which promises nothing.
+///
+/// Mutation: build the annotated side with `strip_asserts: false` (a
+/// preset that no longer strips) — the planted check states grow the code
+/// blobs and the object comparison goes red. Also caught: an `enters`
+/// transcribed from the narrower prose (the census), and a deleted clause
+/// (the census).
+#[test]
+fn the_head_clauses_move_the_interface_and_never_the_code() {
+    let stripped = without_head_clauses(stdlib::SOURCE);
+    assert_eq!(stdlib::SOURCE.matches(" leaves {").count(), 40);
+    assert_eq!(stdlib::SOURCE.matches(" enters {").count(), 0);
+    assert!(!stripped.contains(" leaves {"));
+
+    for level in [OptLevel::O0, OptLevel::O1] {
+        let mut annotated = compile(stdlib::SOURCE, stdlib_preset(level))
+            .expect("the embedded stdlib compiles")
+            .object;
+        let mut bare = compile(&stripped, stdlib_preset(level))
+            .expect("the clause-free stdlib compiles")
+            .object;
+        assert_ne!(
+            annotated.interface, bare.interface,
+            "{level:?}: the clauses reach the interface"
+        );
+        annotated.interface = None;
+        bare.interface = None;
+        assert_eq!(
+            annotated.to_bytes(),
+            bare.to_bytes(),
+            "{level:?}: a head clause moved something besides the interface"
+        );
+    }
 }
