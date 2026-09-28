@@ -26,7 +26,7 @@ use mtc_core::linker::{CallMech, LinkOptions};
 use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, Trap, WideTape};
 use mtc_turing_machine::arch::Tm1;
 use mtc_turing_machine::asm::link;
-use mtc_turing_machine::compiler::{CompileOptions, CompileOutput, compile};
+use mtc_turing_machine::compiler::{CompileOptions, CompileOutput, Declarations, compile};
 use mtc_turing_machine::ir::IrTransition;
 use mtc_turing_machine::optimizer::{OptLevel, pass_names};
 use mtc_turing_machine::stdlib;
@@ -1215,6 +1215,49 @@ fn stdlib_object_bytes(level: OptLevel) -> Vec<u8> {
     .expect("the embedded stdlib compiles")
     .object
     .to_bytes()
+}
+
+/// [`stdlib::object()`] caches ONE compile, built from a `CompileOptions`
+/// literal in `stdlib/mod.rs` — this test is the TM crate's own guard that
+/// the shipped preset stays that same one. The literal below is copied
+/// field-for-field from `stdlib/mod.rs`'s `object()`, spelled out rather
+/// than `..Default::default()` so it reads as a line-by-line match against
+/// the shipped preset (a `..Default::default()` tail would hide which
+/// fields the shipped preset actually pins) and so a new `CompileOptions`
+/// field breaks THIS build too, forcing the copy to stay current. A change
+/// to any field that reaches the object's bytes turns this red. Watched
+/// fail on `strip_asserts: false` (the wasm crate's twin preset is
+/// currently the only thing that would otherwise catch a flip here, and
+/// gate-cost discipline runs this crate alone far more often than the
+/// workspace-wide suite).
+#[test]
+fn stdlib_object_matches_the_shipped_preset() {
+    let shipped = stdlib::object().to_bytes();
+    let rebuilt = compile(
+        stdlib::SOURCE,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            strip_debugger: true,
+            strip_asserts: true,
+            externals: Declarations::none(),
+            debug_info: false,
+            disabled_passes: Vec::new(),
+            capture_ir: false,
+            outline: false,
+            stamped_asm: false,
+            inline_cap: None,
+        },
+    )
+    .expect("the embedded stdlib compiles")
+    .object
+    .to_bytes();
+    assert_eq!(
+        shipped, rebuilt,
+        "stdlib::object()'s cached bytes must match a fresh compile of \
+         stdlib::SOURCE under the same preset stdlib/mod.rs::object() ships \
+         — a diff here means the shipped preset and this test's copy of it \
+         have drifted"
+    );
 }
 
 /// THE PHASE-6b MILESTONE. One test that aggregates the whole optimizer

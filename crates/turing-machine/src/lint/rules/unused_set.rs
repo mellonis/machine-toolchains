@@ -1,19 +1,30 @@
 //! `unused-set`: a `set` declaration (docs/tmt/language.md (glyph sets))
-//! no alphabet body, contract clause or pattern cell references.
-//! Export-independent, mirroring `unused-alphabet` and `unused-map`: the
-//! rule sees this unit only, so an exported set that another unit imports
-//! through this unit's header and uses is still reported, and a library
-//! silences it with the allow list rather than applying the deletion fix
-//! (docs/tmt/lint.md (unused-set)). Detected source-level over `Resolved`.
+//! no alphabet body, contract clause, pattern cell, or other set's body
+//! references. Export-independent, mirroring `unused-alphabet` and
+//! `unused-map`: the rule sees this unit only, so an exported set that
+//! another unit imports through this unit's header and uses is still
+//! reported, and a library silences it with the allow list rather than
+//! applying the deletion fix (docs/tmt/lint.md (unused-set)). Detected
+//! source-level over `Resolved`.
 //!
-//! Usage is decided by `Resolved.set_refs`, the one recording built for
-//! exactly this purpose: `SetScope::members` inserts a referenced set's
-//! mangled name into it at each of the three sites — an alphabet body (via
+//! Usage is decided by `Resolved.set_refs`, recorded at FOUR sites, not a
+//! single uniform one: `SetScope::members` inserts a referenced set's
+//! mangled name into it at three of them — an alphabet body (via
 //! `resolve_alphabet_glyphs`), a contract clause, and a pattern cell (via
-//! `resolve_pattern_sets`) — so this rule is a single membership test over
-//! `Resolved.sets`, the `unused-alphabet` shape (one uniform source), not
-//! `unused-map`'s three hand-rolled walks: that recording exists precisely
-//! so this rule does not hand-roll a fourth.
+//! `resolve_pattern_sets`) — and `resolve_all_sets` records the fourth
+//! with the same `refs.insert`, when a set's OWN body names another set:
+//! that walk builds `Resolved.sets` itself, so it cannot go through
+//! `SetScope::members`'s lookup into the very map it is constructing. This
+//! rule is still a single membership test over `Resolved.sets`, the
+//! `unused-alphabet` shape (one recorded namespace), not `unused-map`'s
+//! hand-rolled walks.
+//!
+//! **Consequence: a set named only inside another set's body counts as
+//! used for as long as that other set is DECLARED — even while the other
+//! set is itself reported unused.** The rule reads recorded references,
+//! not reachability from a live use, so an inner set stays silent until
+//! the outer set's own declaration is actually deleted; the outer set's
+//! finding firing does not, by itself, surface the inner one.
 //!
 //! `Resolved.sets` holds only this unit's OWN declarations — a set reached
 //! only through a declarations module has no local declaration to delete

@@ -72,8 +72,11 @@ pub fn object() -> &'static ObjectFile {
                 opt_level: OptLevel::O1,
                 strip_debugger: true,
                 // The shipped preset strips contract-check states too, so
-                // the embedded object never moves when the stdlib is later
-                // annotated with them — only the header pin does
+                // annotating the stdlib with head contracts never moves the
+                // embedded object's CODE or table bytes — only its
+                // published interface section (the `.param`/`.graph`
+                // clauses a `leaves`/`enters` annotation adds) moves, and
+                // the header pin is what tracks that
                 // (docs/tmt/cli.md (compile)).
                 strip_asserts: true,
                 // The library vouches for nobody but itself — and must not

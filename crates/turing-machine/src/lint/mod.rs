@@ -205,6 +205,18 @@ pub(crate) const OPT_IN_RULES: &[(&str, Rule)] = &[
 /// normal shape, not dead code. What stays on reads only what a header
 /// itself owns — its imports and its signatures' contract clauses. Every
 /// entry names a registered rule (guarded below).
+///
+/// A header is read declarations-only (`ReadMode::DeclarationsOnly`): a
+/// routine carries no body and therefore no entry state. A rule that
+/// reaches the expansion step over that input can fault on it — `expand`'s
+/// `world_entry` asserts every world has exactly one entry, a routine's own
+/// state or its entry graft's, and a bodiless routine supplies neither. A
+/// rule must stay off this list unless it is known not to call `expand`
+/// (directly, or through a helper that does): today that excludes
+/// `unreachable-continuation`, the one rule in [`RULES`] that builds its
+/// own `Expanded` to check a callee's inferred `noreturn` fact. This list
+/// itself is the guard — nothing here re-checks a candidate rule's call
+/// graph before running it on a header.
 pub(crate) const HEADER_RULES: &[&str] = &["unused-import", "contract-clause-overlap"];
 
 /// True when `code` names any rule in this crate's `.tmc` tables, its `.tma`

@@ -362,11 +362,19 @@ run, mirroring `unused-alphabet`'s own fix.
 
 A `set NAME { … }` declaration (`docs/tmt/language.md (glyph sets)`) —
 a named glyph set, expanded in place wherever an alphabet body, a
-contract clause, or a pattern cell names it — that none of those three
-sites names. Export-independent, exactly as `unused-alphabet` and
-`unused-map` are: an exported set another unit imports and uses is still
-reported here, since the rule sees this unit only — silence it with
-`--allow unused-set` or `lint.allow` rather than applying the fix.
+contract clause, a pattern cell, or another set's own body names it —
+that none of those four sites names. Export-independent, exactly as
+`unused-alphabet` and `unused-map` are: an exported set another unit
+imports and uses is still reported here, since the rule sees this unit
+only — silence it with `--allow unused-set` or `lint.allow` rather than
+applying the fix.
+
+A set named only inside another set's body counts as used for as long as
+that other set is DECLARED — even while the other set is itself reported
+unused. The rule reads recorded references, not reachability from a live
+use, so the inner set stays silent until the outer set's declaration is
+actually deleted; deleting it is what surfaces the inner one in its turn,
+one report at a time.
 
 ```
 b.tmc:1:5: lint: set `dead` is never used by any alphabet, contract or pattern
