@@ -2,8 +2,9 @@
 //! formatters. The `.tma` side wires core's canonical-grid printer
 //! (`mtc_core::asm::format_asm_with` under `tm1_syntax()`'s caps, so
 //! sections / table directives / `.rept` blocks / frame descriptors /
-//! vector operands all normalize); the `.tmc` side wires the crate's own
-//! green-tree printer ([`crate::fmt::format`]). Both are whitespace-only,
+//! vector operands all normalize); the `.tmc` side — a `.tmh` header too,
+//! being `.tmc` grammar — wires the crate's own green-tree printer
+//! ([`crate::fmt::format`]). Both are whitespace-only,
 //! and idempotent bar one `.tmc` shape — a comment written between a
 //! declaration keyword and its name settles only on the second pass when
 //! the declaration is an `alphabet` (`docs/tmt/fmt.md (comments the
@@ -31,16 +32,18 @@ pub(super) const FMT_USAGE: &str = "\
 USAGE: tmt fmt PATH... [--exclude PATH]... [--check]
        tmt fmt - [--check] [--lang tmc|tma]
 
-PATH is a .tmc or .tma file, or a directory; directories are walked
-recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). Omitting PATH uses the nearest manifest's declared
-source set (docs/tmt/project.md (the declared source set)); requires a
-`tmt.json` project. `-` reads one source from stdin and writes the
-result to stdout; it cannot be combined with PATH arguments.
+PATH is a .tmc, .tmh or .tma file, or a directory; directories are
+walked recursively for *.tmc, *.tmh and *.tma (sorted order, symlinks
+not followed, dot-entries skipped). Omitting PATH uses the nearest
+manifest's declared source set (docs/tmt/project.md (the declared source
+set)); requires a `tmt.json` project. `-` reads one source from stdin
+and writes the result to stdout; it cannot be combined with PATH
+arguments.
 
 .tma sources format through the canonical assembly grid; .tmc sources
-through the language's own canonical form (the state-block grid, the
-80-column argument-list threshold). Both rewrites are whitespace-only.
+and .tmh headers through the language's own canonical form (the
+state-block grid, the 80-column argument-list threshold). Both rewrites
+are whitespace-only.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -144,7 +147,7 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     for p in &paths {
         let found = collect_sources(Path::new(p), &excludes, &mut files)?;
         if found == 0 {
-            return Err(format!("{p}: no .tmc or .tma files found"));
+            return Err(format!("{p}: no .tmc, .tmh or .tma files found"));
         }
     }
 
@@ -160,7 +163,10 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
             fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
         let formatted = match file.extension().and_then(|x| x.to_str()) {
             Some("tma") => Some(format_tma(&source)),
-            Some("tmc") => Some(format_tmc(&source)),
+            // A header is `.tmc` grammar; the printer never runs the
+            // compiler's declarations-only shape rule, so it formats one as
+            // it stands.
+            Some("tmc" | "tmh") => Some(format_tmc(&source)),
             _ => None,
         };
         match formatted {
@@ -182,11 +188,11 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
             }
             None => {
                 // Only reachable for an explicitly listed file — the directory
-                // walk only ever collects `.tmc`/`.tma` extensions.
+                // walk only ever collects `.tmc`/`.tmh`/`.tma` extensions.
                 had_error = true;
                 let _ = writeln!(
                     stderr,
-                    "{}: error: unknown source extension (expected .tmc or .tma)",
+                    "{}: error: unknown source extension (expected .tmc, .tmh or .tma)",
                     file.display()
                 );
             }

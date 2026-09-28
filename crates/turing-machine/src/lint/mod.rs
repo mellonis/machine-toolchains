@@ -38,7 +38,7 @@ use std::rc::Rc;
 use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::syntax::{SyntaxNode, TextLineIndex};
 
-use crate::compiler::{self, CompileError, Resolved};
+use crate::compiler::{self, CompileError, ReadMode, Resolved};
 use crate::declarations::Declarations;
 use crate::lexer::Token;
 use crate::parser::Program;
@@ -196,6 +196,17 @@ pub(crate) const OPT_IN_RULES: &[(&str, Rule)] = &[
     ("index-identity-map", rules::index_identity_map::check),
 ];
 
+/// The rules that also run on a `.tmh` header ([`lint_header`];
+/// docs/tmt/lint.md (linting a header)) — every other code in [`RULES`] and
+/// [`OPT_IN_RULES`] is off there. A header is the list of what a unit
+/// offers its consumers: its routines carry no body, its graphs' bodies are
+/// copies of the library's own source (linted where they are written), and
+/// an exported declaration nothing in the header names is a header's
+/// normal shape, not dead code. What stays on reads only what a header
+/// itself owns — its imports and its signatures' contract clauses. Every
+/// entry names a registered rule (guarded below).
+pub(crate) const HEADER_RULES: &[&str] = &["unused-import", "contract-clause-overlap"];
+
 /// True when `code` names any rule in this crate's `.tmc` tables, its `.tma`
 /// additions ([`tma::TMA_RULES`]), core's arch-agnostic asm rule table
 /// (`mtc_core::asm::lint::RULES`), OR core's link-warning catalog
@@ -233,15 +244,26 @@ pub fn validate_allow(codes: &[String]) -> Result<(), LintError> {
 /// editor service can lint an `Analysis` it already has, instead of re-running
 /// `compiler::analyze`.
 pub(crate) fn run_rules(ctx: &LintContext, allow: &[String], warn: &[String]) -> Vec<Diagnostic> {
+    run_rules_where(ctx, allow, warn, |_| true)
+}
+
+/// [`run_rules`] restricted to the codes `applies` accepts — every code for
+/// a source, [`HEADER_RULES`] for a header.
+fn run_rules_where(
+    ctx: &LintContext,
+    allow: &[String],
+    warn: &[String],
+    applies: impl Fn(&str) -> bool,
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
     for (code, rule) in RULES {
-        if allow.iter().any(|a| a == code) {
+        if !applies(code) || allow.iter().any(|a| a == code) {
             continue;
         }
         rule(ctx, &mut diagnostics);
     }
     for (code, rule) in OPT_IN_RULES {
-        if !warn.iter().any(|w| w == code) || allow.iter().any(|a| a == code) {
+        if !applies(code) || !warn.iter().any(|w| w == code) || allow.iter().any(|a| a == code) {
             continue;
         }
         rule(ctx, &mut diagnostics);
@@ -284,15 +306,33 @@ pub(crate) fn alphabet_glyphs<'a>(resolved: &'a Resolved, mangled: &str) -> Opti
 }
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
+    lint_in_mode(source, options, ReadMode::Program)
+}
+
+/// Lint a `.tmh` header: the source is read declarations-only
+/// (docs/tmt/language.md (headers)), so a `machine` block, a bodied
+/// routine or a bodiless graph is the same kind of fatal a `.tmc` parse
+/// error is, and only [`HEADER_RULES`] run (docs/tmt/lint.md (linting a
+/// header)). `allow`/`warn` validate over the whole shared namespace as for
+/// a source; naming a rule that does not run on a header is not an error.
+pub fn lint_header(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
+    lint_in_mode(source, options, ReadMode::DeclarationsOnly)
+}
+
+fn lint_in_mode(
+    source: &str,
+    options: LintOptions,
+    mode: ReadMode,
+) -> Result<LintReport, LintError> {
     validate_allow(&options.allow)?;
     validate_allow(&options.warn)?;
-    // `compiler::analyze` resolves against `Declarations::stdlib()`, its
-    // own fixed default (batch lint takes no `--extern`) — reconstructed
-    // here rather than threaded out of `analyze`, since `Analysis` does
-    // not retain the `Declarations` it resolved with (the identical choice
+    // Resolved against `Declarations::stdlib()`, `compiler::analyze`'s own
+    // fixed default (batch lint takes no `--extern`) — built here and
+    // passed in, since the rules read it too and `Analysis` does not retain
+    // the `Declarations` it resolved with (the identical choice
     // `header::render_from_source` makes for `tmt interface`).
     let externals = Declarations::stdlib();
-    let analysis = compiler::analyze(source)?;
+    let analysis = compiler::analyze_with_mode(source, &externals, mode)?;
     // `analyze` lexes WithComments (the green parse needs the trivia); that
     // one stream is the guard's comment channel, and the tree it parsed
     // into is where every quickfix span comes from — the editor path
@@ -308,7 +348,12 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
         comment_tokens: &analysis.tokens,
         externals: &externals,
     };
-    let diagnostics = run_rules(&ctx, &options.allow, &options.warn);
+    let diagnostics = match mode {
+        ReadMode::Program => run_rules(&ctx, &options.allow, &options.warn),
+        ReadMode::DeclarationsOnly => run_rules_where(&ctx, &options.allow, &options.warn, |c| {
+            HEADER_RULES.contains(&c)
+        }),
+    };
     Ok(LintReport { diagnostics })
 }
 
@@ -391,6 +436,102 @@ machine {
                 .any(|(c, _)| *c == "unreachable-code")
         );
         assert!(validate_allow(&["unreachable-code".to_string()]).is_ok());
+    }
+
+    /// A header whose one set nothing names: `unused-set` would flag it in
+    /// a `.tmc`. The bodiless routine keeps it a header — the program read
+    /// rejects it.
+    const HEADER_UNUSED_SET: &str = "\
+alphabet bit { '_', '1' }
+
+export set ones { '1' }
+
+export routine clear(tape t: bit writes { '_' });
+";
+
+    /// Every [`HEADER_RULES`] entry names a registered rule. Mutation it
+    /// catches: a typo'd or retired code left in the header list, which
+    /// would silently run nothing on a header while reading as enabled.
+    #[test]
+    fn every_header_rule_names_a_registered_rule() {
+        for code in HEADER_RULES {
+            assert!(
+                RULES.iter().chain(OPT_IN_RULES).any(|(c, _)| c == code),
+                "{code} is not a registered .tmc rule"
+            );
+        }
+    }
+
+    /// A construct a body rule flags stays silent in a header. The first
+    /// half is the positive control: `unused-set` itself, run over the same
+    /// declarations-only analysis, DOES flag the set — so the silence below
+    /// is the header flag's doing, not the rule's. Mutation it catches: a
+    /// header flag declared but never consulted (the header path running
+    /// the full rule table).
+    #[test]
+    fn a_body_rule_construct_in_a_header_is_silent() {
+        let externals = Declarations::stdlib();
+        let analysis =
+            compiler::analyze_with_mode(HEADER_UNUSED_SET, &externals, ReadMode::DeclarationsOnly)
+                .expect("the fixture reads as a header");
+        let root = SyntaxNode::new_root(Rc::clone(&analysis.green));
+        let index = TextLineIndex::new(HEADER_UNUSED_SET);
+        let ctx = LintContext {
+            resolved: &analysis.resolved,
+            diagnostics: &analysis.diagnostics,
+            program: &analysis.program,
+            root: &root,
+            index: &index,
+            comment_tokens: &analysis.tokens,
+            externals: &externals,
+        };
+        let mut control = Vec::new();
+        rules::unused_set::check(&ctx, &mut control);
+        assert_eq!(
+            control.iter().map(|d| d.code).collect::<Vec<_>>(),
+            ["unused-set"],
+            "positive control: the rule fires on this analysis"
+        );
+        assert!(!HEADER_RULES.contains(&"unused-set"));
+
+        let report = lint_header(HEADER_UNUSED_SET, LintOptions::default()).unwrap();
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    }
+
+    /// Constructs a header rule flags do report in a header: an unused
+    /// import, and a `writes`/`preserves` overlap in a bodiless signature.
+    /// Mutation it catches: a header flag that suppresses everything (an
+    /// empty [`HEADER_RULES`], or a filter that never admits a code).
+    #[test]
+    fn a_header_rule_construct_in_a_header_reports() {
+        let src = "\
+use lib::helper;
+
+alphabet bits { '_', '0', '1' }
+
+export routine mark(tape t: bits writes { '0', '1' } preserves { '1' });
+";
+        let report = lint_header(src, LintOptions::default()).unwrap();
+        let codes: Vec<&str> = report.diagnostics.iter().map(|d| d.code).collect();
+        assert_eq!(codes, ["unused-import", "contract-clause-overlap"]);
+    }
+
+    /// A header is read declarations-only: the bodiless routine the
+    /// fixtures above carry is a program-read fatal, and a `machine` block
+    /// is a header-read one. Mutation it catches: `lint_header` analyzing
+    /// in the program read mode.
+    #[test]
+    fn a_header_is_read_declarations_only() {
+        assert!(lint(HEADER_UNUSED_SET, LintOptions::default()).is_err());
+        let err = lint_header(
+            "alphabet b { '_' }\nmachine { tape t: b; entry state s { [*] -> stop; } }\n",
+            LintOptions::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, LintError::Compile(e) if e.kind.code() == "machine-in-declarations"),
+            "{err}"
+        );
     }
 
     /// The fifth surface of the allow namespace: a link-warning code is a

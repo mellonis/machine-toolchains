@@ -9,10 +9,14 @@
 //! so an external integration test cannot see them without first widening
 //! that visibility, which this guard does not need.
 //!
-//! Two catalogs are covered: the `.tmc` rules (`## The \`.tmc\` rules`,
-//! [`super::RULES`] union [`super::OPT_IN_RULES`]) and the `.tmc` crate's
-//! own `.tma` ADDITIONS (`## The \`.tma\` additions`, [`super::tma::TMA_RULES`]).
-//! The page's THIRD section, `## The arch-agnostic rules on \`.tma\``, is
+//! Three lists are covered: the `.tmc` rules (`## The \`.tmc\` rules`,
+//! [`super::RULES`] union [`super::OPT_IN_RULES`]), the `.tmc` crate's
+//! own `.tma` ADDITIONS (`## The \`.tma\` additions`, [`super::tma::TMA_RULES`]),
+//! and the header subset (`## Linting a header`, [`super::HEADER_RULES`]) —
+//! a bullet list rather than headings, each code already documented under
+//! the `.tmc` rules.
+//!
+//! The page's `## The arch-agnostic rules on \`.tma\`` section is
 //! deliberately NOT covered: it is core's shared assembly-lint catalog,
 //! described here in prose (one heading, `unused-label`, naming a
 //! cross-cutting behavior rather than tabulating core's own rule-by-rule
@@ -24,7 +28,7 @@
 #[cfg(test)]
 mod tests {
     use crate::lint::tma::TMA_RULES;
-    use crate::lint::{OPT_IN_RULES, RULES};
+    use crate::lint::{HEADER_RULES, OPT_IN_RULES, RULES};
 
     fn doc() -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/tmt/lint.md");
@@ -84,6 +88,28 @@ mod tests {
         assert_eq!(
             documented, registered,
             "docs/tmt/lint.md (## The `.tmc` rules) and RULES/OPT_IN_RULES disagree"
+        );
+    }
+
+    /// The `## Linting a header` bullet list — one `` - `CODE` `` line per
+    /// rule that runs on a `.tmh` — against [`HEADER_RULES`]. Mutation it
+    /// catches: turning a rule on or off for headers without the page
+    /// saying so, in either direction.
+    #[test]
+    fn the_header_rule_list_matches_the_header_flag_both_directions() {
+        let doc = doc();
+        let mut documented: Vec<String> = section(&doc, "## Linting a header")
+            .iter()
+            .filter_map(|l| l.strip_prefix("- `"))
+            .map(|l| l.split('`').next().expect("a code").to_string())
+            .collect();
+        documented.sort_unstable();
+        let mut registered: Vec<String> = HEADER_RULES.iter().map(|c| c.to_string()).collect();
+        registered.sort_unstable();
+        assert!(!registered.is_empty());
+        assert_eq!(
+            documented, registered,
+            "docs/tmt/lint.md (## Linting a header) and HEADER_RULES disagree"
         );
     }
 

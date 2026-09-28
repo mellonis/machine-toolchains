@@ -1247,14 +1247,16 @@ tmt: duplicate world `main` in dup.ir.json
 ```
 USAGE: tmt lint PATH... [--exclude PATH]... [--allow CODE]... [--warn CODE]... [--no-config]
 
-PATH is a .tmc or .tma file, or a directory; directories are walked
-recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). Omitting PATH uses the nearest manifest's declared
-source set (docs/tmt/project.md (the declared source set)); requires a
-`tmt.json` project and is incompatible with --no-config. .tmc sources
-lint through the .tmc rule table; .tma sources through the five
-arch-agnostic asm rules plus the TM-1 additions (shadowed rows, retx
-exit bounds, unused rept vars, duplicate map source).
+PATH is a .tmc, .tmh or .tma file, or a directory; directories are
+walked recursively for *.tmc, *.tmh and *.tma (sorted order, symlinks
+not followed, dot-entries skipped). Omitting PATH uses the nearest
+manifest's declared source set (docs/tmt/project.md (the declared source
+set)); requires a `tmt.json` project and is incompatible with
+--no-config. .tmc sources lint through the .tmc rule table; .tmh
+headers through that table's header subset (docs/tmt/lint.md (linting
+a header)); .tma sources through the five arch-agnostic asm rules plus
+the TM-1 additions (shadowed rows, retx exit bounds, unused rept vars,
+duplicate map source).
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -1267,28 +1269,28 @@ FLAGS:
   --no-config     ignore tmt.json project files
 ```
 
-PATH is a `.tmc` or `.tma` file, or a directory. Directories are walked
-recursively for `*.tmc` and `*.tma` in sorted order; symlinks are never
-followed and dot-entries (`.git`, editor scratch) are skipped. A PATH that
-yields no `.tmc` / `.tma` files is an error. `--exclude PATH` (repeatable)
+PATH is a `.tmc`, `.tmh` or `.tma` file, or a directory. Directories are
+walked recursively for `*.tmc`, `*.tmh` and `*.tma` in sorted order;
+symlinks are never followed and dot-entries (`.git`, editor scratch) are
+skipped. A PATH that yields no `.tmc` / `.tmh` / `.tma` files is an error. `--exclude PATH` (repeatable)
 skips a file or prunes a subtree; paths are compared as spelled, with no
 globs — the shell covers the include side — and exclusion wins even over an
 explicitly listed file.
 
-Each file's extension picks its rule table, and the two tables share one
-allow namespace, so a single allow-list works across a batch mixing both
+Each file's extension picks its rule table, and the tables share one
+allow namespace, so a single allow-list works across a batch mixing
 languages. The rule catalog is `docs/tmt/lint.md`. An explicitly listed file
-with neither extension is a per-file error and the batch continues; the
-directory walk itself never collects any other extension, so this only fires
-for a file named directly on the command line.
+with none of the three extensions is a per-file error
+(`error: unknown source extension (expected .tmc, .tmh or .tma)`) and the
+batch continues; the directory walk itself never collects any other
+extension, so this only fires for a file named directly on the command line.
 
-**A `.tmh` header is one of those files.** `tmt lint` and `tmt fmt` both
-refuse it — `error: unknown source extension (expected .tmc or .tma)`,
-exit 1 — and that is deliberate rather than an oversight. A header is
-*produced* by `tmt interface` and *consumed* by `tmt compile --extern`
-and `tmt build`; it is not a file the other tools open, since linting one
-would need every rule to say whether it applies to a bodiless declaration
-and formatting one would compete with the generator that writes it.
+**A `.tmh` header lints as a header**, whether named directly or found by
+the directory walk. It is read the way `tmt compile --extern` reads it —
+declarations only — so a `machine` block or a routine with a body is a
+per-file fatal, and only the rules that mean something on bodiless
+declarations run over it; `docs/tmt/lint.md (linting a header)` lists
+them.
 
 Files lint independently: one that fails to parse is reported on stderr as a
 fatal error line with its bracketed code, and the batch keeps going.
@@ -1336,16 +1338,18 @@ where a fix exists it surfaces through the editor's code actions
 USAGE: tmt fmt PATH... [--exclude PATH]... [--check]
        tmt fmt - [--check] [--lang tmc|tma]
 
-PATH is a .tmc or .tma file, or a directory; directories are walked
-recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). Omitting PATH uses the nearest manifest's declared
-source set (docs/tmt/project.md (the declared source set)); requires a
-`tmt.json` project. `-` reads one source from stdin and writes the
-result to stdout; it cannot be combined with PATH arguments.
+PATH is a .tmc, .tmh or .tma file, or a directory; directories are
+walked recursively for *.tmc, *.tmh and *.tma (sorted order, symlinks
+not followed, dot-entries skipped). Omitting PATH uses the nearest
+manifest's declared source set (docs/tmt/project.md (the declared source
+set)); requires a `tmt.json` project. `-` reads one source from stdin
+and writes the result to stdout; it cannot be combined with PATH
+arguments.
 
 .tma sources format through the canonical assembly grid; .tmc sources
-through the language's own canonical form (the state-block grid, the
-80-column argument-list threshold). Both rewrites are whitespace-only.
+and .tmh headers through the language's own canonical form (the
+state-block grid, the 80-column argument-list threshold). Both rewrites
+are whitespace-only.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -1385,17 +1389,16 @@ Exit codes follow `tmt lint`'s convention: 0 = success (every input already
 canonical, or rewritten in place); 1 = under `--check` at least one input
 would change, or a lex/parse error occurred anywhere in the batch.
 
-**A `.tmh` header is refused by extension**, exactly as `tmt lint`
-refuses one — `error: unknown source extension (expected .tmc or .tma)`,
-exit 1 — and for the reason stated there: a header is written by `tmt
-interface` and read by `tmt compile --extern` and `tmt build`, not
-edited by hand. A consequence worth stating plainly, since a header is
-`.tmc` syntax and could be fed to stdin: **what `tmt interface` prints
+**A `.tmh` header formats through the `.tmc` printer** — a header is
+`.tmc` syntax — whether named directly or found by the directory walk;
+on stdin it is `--lang tmc`. One caveat: **what `tmt interface` prints
 is canonical for the header printer, not for `tmt fmt`.** The two are
-separate printers, and a generated header run through `tmt fmt - --lang
-tmc --check` can report that it would change. That is not a defect in
-either one — neither output is ever read by the other — but it does mean
-a `.tmh` must not be put into a formatted source set.
+separate printers, and a generated header run through `tmt fmt --check`
+can report that it would change. That is not a defect in either one —
+neither output is ever read by the other — but since a directory walk
+collects headers, a directory holding a generated header should
+`--exclude` it (or regenerate it after formatting) rather than let the
+two printers take turns rewriting it.
 
 Unlike `tmt lint`, `tmt fmt` takes no **configuration** from `tmt.json` —
 formatting has no configurable surface for a project file to set, and there

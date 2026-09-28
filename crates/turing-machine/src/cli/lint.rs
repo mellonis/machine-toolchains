@@ -5,7 +5,8 @@
 //! with two `.tmc`-family differences: a `--warn` flag turns on the opt-in
 //! rules, and there is no `--fix` (no `.tmc` or `.tma` rule emits a
 //! machine-applicable fix — the fix surface is the PM-1 crate's for now).
-//! Both languages lint by extension: `.tmc` through the `.tmc` rule table,
+//! Each file lints by extension: `.tmc` through the `.tmc` rule table,
+//! a `.tmh` header through its declarations-only subset of that table, and
 //! `.tma` through core's five arch-agnostic asm rules plus the TM-1
 //! additions.
 
@@ -16,21 +17,23 @@ use std::path::{Path, PathBuf};
 use mtc_core::diagnostics::{Diagnostic, Span};
 
 use crate::config;
-use crate::lint::{LintError, LintOptions, lint as lint_source};
+use crate::lint::{LintError, LintOptions, lint as lint_source, lint_header};
 
 use super::{Args, CliOutput};
 
 pub(super) const LINT_USAGE: &str = "\
 USAGE: tmt lint PATH... [--exclude PATH]... [--allow CODE]... [--warn CODE]... [--no-config]
 
-PATH is a .tmc or .tma file, or a directory; directories are walked
-recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). Omitting PATH uses the nearest manifest's declared
-source set (docs/tmt/project.md (the declared source set)); requires a
-`tmt.json` project and is incompatible with --no-config. .tmc sources
-lint through the .tmc rule table; .tma sources through the five
-arch-agnostic asm rules plus the TM-1 additions (shadowed rows, retx
-exit bounds, unused rept vars, duplicate map source).
+PATH is a .tmc, .tmh or .tma file, or a directory; directories are
+walked recursively for *.tmc, *.tmh and *.tma (sorted order, symlinks
+not followed, dot-entries skipped). Omitting PATH uses the nearest
+manifest's declared source set (docs/tmt/project.md (the declared source
+set)); requires a `tmt.json` project and is incompatible with
+--no-config. .tmc sources lint through the .tmc rule table; .tmh
+headers through that table's header subset (docs/tmt/lint.md (linting
+a header)); .tma sources through the five arch-agnostic asm rules plus
+the TM-1 additions (shadowed rows, retx exit bounds, unused rept vars,
+duplicate map source).
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -101,7 +104,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
     for p in &paths {
         let found = collect_sources(Path::new(p), &excludes, &mut files)?;
         if found == 0 {
-            return Err(format!("{p}: no .tmc or .tma files found"));
+            return Err(format!("{p}: no .tmc, .tmh or .tma files found"));
         }
     }
 
@@ -134,26 +137,34 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
             fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
 
         match file.extension().and_then(|x| x.to_str()) {
-            Some("tmc") => match lint_source(
-                &source,
-                LintOptions {
+            // A header is `.tmc` grammar read declarations-only, and runs
+            // only the rules that mean something on declarations
+            // (docs/tmt/lint.md (linting a header)).
+            Some(ext @ ("tmc" | "tmh")) => {
+                let options = LintOptions {
                     allow: effective_allow.clone(),
                     warn: warn.clone(),
-                },
-            ) {
-                Ok(report) => {
-                    if !report.diagnostics.is_empty() {
-                        any = true;
+                };
+                let result = if ext == "tmh" {
+                    lint_header(&source, options)
+                } else {
+                    lint_source(&source, options)
+                };
+                match result {
+                    Ok(report) => {
+                        if !report.diagnostics.is_empty() {
+                            any = true;
+                        }
+                        render_findings(&mut stdout, file, &report.diagnostics);
                     }
-                    render_findings(&mut stdout, file, &report.diagnostics);
+                    Err(LintError::Compile(e)) => {
+                        // Per-file fatal: report, keep going (batch model).
+                        any = true;
+                        render_fatal(&mut stderr, file, e.span, &e.kind, e.kind.code());
+                    }
+                    Err(e @ LintError::UnknownAllowCode(_)) => return Err(e.to_string()),
                 }
-                Err(LintError::Compile(e)) => {
-                    // Per-file fatal: report, keep going (batch model).
-                    any = true;
-                    render_fatal(&mut stderr, file, e.span, &e.kind, e.kind.code());
-                }
-                Err(e @ LintError::UnknownAllowCode(_)) => return Err(e.to_string()),
-            },
+            }
             Some("tma") => {
                 // Cheap per-file re-check over the shared namespace: the flag
                 // allow was validated once up front, but a per-file `tmt.json`
@@ -180,11 +191,11 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
             }
             _ => {
                 // Only reachable for an explicitly listed file — the directory
-                // walk only ever collects `.tmc`/`.tma` extensions.
+                // walk only ever collects `.tmc`/`.tmh`/`.tma` extensions.
                 any = true;
                 let _ = writeln!(
                     stderr,
-                    "{}: error: unknown source extension (expected .tmc or .tma)",
+                    "{}: error: unknown source extension (expected .tmc, .tmh or .tma)",
                     file.display()
                 );
             }
@@ -197,10 +208,11 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
     })
 }
 
-/// Walk one PATH argument. Returns how many `.tmc`/`.tma` files the PATH
-/// yielded BEFORE exclusion (zero = the caller's typo error); excluded files
-/// are counted but not collected. Mirrors `pmt lint`'s walk. Shared with
-/// `tmt fmt` (`super::fmt`), which walks the same `.tmc`/`.tma` set.
+/// Walk one PATH argument. Returns how many `.tmc`/`.tmh`/`.tma` files the
+/// PATH yielded BEFORE exclusion (zero = the caller's typo error); excluded
+/// files are counted but not collected. Mirrors `pmt lint`'s walk. Shared
+/// with `tmt fmt` (`super::fmt`), which walks the same `.tmc`/`.tmh`/`.tma`
+/// set.
 pub(super) fn collect_sources(
     path: &Path,
     excludes: &[PathBuf],
@@ -241,7 +253,10 @@ pub(super) fn collect_sources(
         }
         if meta.is_dir() {
             found += collect_sources(&child, excludes, out)?;
-        } else if child.extension().is_some_and(|x| x == "tmc" || x == "tma") {
+        } else if child
+            .extension()
+            .is_some_and(|x| x == "tmc" || x == "tmh" || x == "tma")
+        {
             found += 1;
             if !excluded(&child) {
                 out.push(child);

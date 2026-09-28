@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use mtc_core::asm::format_asm_with;
 use mtc_core::linker::{CallMech, LinkOptions};
@@ -387,6 +388,82 @@ fn fmt_directory_walks_both_extensions() {
     assert!(out.stdout.contains("a.tma"), "stdout: {}", out.stdout);
     assert!(out.stdout.contains("m.tmc"), "stdout: {}", out.stdout);
     assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
+}
+
+// -- `.tmh` headers ---------------------------------------------------------
+
+/// A per-call fixture directory named by process id plus an atomic counter,
+/// so concurrent test processes sharing `CARGO_TARGET_TMPDIR` never write
+/// into one another's directory.
+fn unique_scratch(name: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    scratch(&format!("{name}-{}-{n}", std::process::id()))
+}
+
+/// A small header in the `.tmc` printer's canonical form, with a BODILESS
+/// routine — the shape only a header carries (docs/tmt/language.md
+/// (headers)). The parser accepts a bodiless routine in any file; the
+/// declarations-only shape rule lives in the compiler, which `tmt fmt`
+/// never runs, so the `.tmc` printer formats a header as it stands.
+const TMH_CANONICAL: &str = "\
+alphabet bit { '_', '1' }
+
+export routine clear(tape t: bit writes { '_' });
+";
+
+/// `tmt fmt --check` accepts a `.tmh` and finds a canonical one clean.
+/// Mutation it catches: the per-file extension arm never gaining a `tmh`
+/// case — the header is refused by extension, exit 1.
+#[test]
+fn fmt_check_accepts_a_canonical_header() {
+    let dir = unique_scratch("tmh-canonical");
+    let f = write(&dir, "lib.tmh", TMH_CANONICAL);
+    let out = execute(&args(&["fmt", "--check", f.to_str().unwrap()])).unwrap();
+    assert_eq!(
+        (out.code, out.stdout.as_str(), out.stderr.as_str()),
+        (0, "", ""),
+        "a canonical header is accepted and clean"
+    );
+    assert_eq!(fs::read_to_string(&f).unwrap(), TMH_CANONICAL);
+}
+
+/// A directory scan finds a header the way the explicit form does.
+/// Mutation it catches: the per-file arm fixed but `collect_sources`'
+/// shared directory filter left at `.tmc`/`.tma` — the scan skips the
+/// off-grid header and `--check` exits 0.
+#[test]
+fn fmt_check_finds_an_off_grid_header_by_directory_scan() {
+    let dir = unique_scratch("tmh-scan");
+    let f = write(
+        &dir,
+        "lib.tmh",
+        "alphabet bit{'_','1'}\nexport routine clear(tape t:bit writes {'_'});\n",
+    );
+    let out = execute(&args(&["fmt", "--check", dir.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert_eq!(out.stdout, format!("{}\n", f.display()));
+    assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
+}
+
+/// The near miss: an object is still no source. Mutation it catches:
+/// widening the extension match to "anything but the known object and
+/// executable extensions" (or a bare catch-all) — a `.tmo` would then be
+/// fed to a printer instead of refused.
+#[test]
+fn fmt_still_refuses_an_object_file() {
+    let dir = unique_scratch("tmo");
+    let f = write(&dir, "lib.tmo", TMH_CANONICAL);
+    let out = execute(&args(&["fmt", "--check", f.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+    assert_eq!(
+        out.stderr,
+        format!(
+            "{}: error: unknown source extension (expected .tmc, .tmh or .tma)\n",
+            f.display()
+        )
+    );
 }
 
 #[test]

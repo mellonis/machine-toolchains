@@ -826,3 +826,77 @@ fn the_flagship_brainfuck_utm_lints_free_of_false_unused_labels() {
         unused.len()
     );
 }
+
+// -- `.tmh` headers ---------------------------------------------------------
+
+/// A header (docs/tmt/language.md (headers)) carrying one header-rule
+/// finding — the `use` names nothing the header references. The bodiless
+/// routine is load-bearing: a `.tmh` routed through the PROGRAM read would
+/// fatal on it (a routine with no entry state) instead of reporting the
+/// import, so a header that reaches `tmt lint` under the wrong read mode
+/// fails these tests too.
+const HEADER_UNUSED_IMPORT: &str = "\
+use lib::helper;
+
+alphabet bit { '_', '1' }
+
+export routine clear(tape t: bit writes { '_' });
+";
+
+/// A header lints the same whether it is named on the command line or
+/// found by a directory scan. Mutation it catches: giving the per-file
+/// extension arm a `tmh` case but leaving `collect_sources`' directory
+/// filter at `.tmc`/`.tma` — the explicit form reports the finding, the
+/// scan form silently reports nothing (and with neither edit, the explicit
+/// form is refused by extension).
+#[test]
+fn a_header_lints_identically_named_or_found_by_a_directory_scan() {
+    let dir = scratch("tmh-scan");
+    let f = write(&dir, "lib.tmh", HEADER_UNUSED_IMPORT);
+    let explicit = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
+    assert_eq!(
+        explicit.code, 1,
+        "stdout: {} stderr: {}",
+        explicit.stdout, explicit.stderr
+    );
+    assert!(explicit.stderr.is_empty(), "stderr: {}", explicit.stderr);
+    assert!(
+        explicit.stdout.contains("lib.tmh:1:") && explicit.stdout.contains("helper"),
+        "stdout: {}",
+        explicit.stdout
+    );
+    let scanned = execute(&args(&["lint", dir.to_str().unwrap()])).unwrap();
+    assert_eq!(
+        (scanned.code, &scanned.stdout, &scanned.stderr),
+        (explicit.code, &explicit.stdout, &explicit.stderr),
+        "the scan form must report exactly what the explicit form reports"
+    );
+}
+
+/// The strict declarations-only read's own diagnostics surface through the
+/// per-file fatal channel `.tmc` sources use. Mutation it catches: routing
+/// a `.tmh` through the PROGRAM read, which accepts a `machine` block and
+/// reports this header clean.
+#[test]
+fn a_header_with_a_machine_block_reports_the_strict_read_fatal() {
+    let dir = scratch("tmh-machine");
+    let f = write(
+        &dir,
+        "lib.tmh",
+        "\
+alphabet bit { '_', '1' }
+machine {
+  tape t: bit;
+  entry state s { [*] -> stop; }
+}
+",
+    );
+    let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains("lib.tmh:2:") && out.stderr.contains("[machine-in-declarations]"),
+        "stderr: {}",
+        out.stderr
+    );
+}

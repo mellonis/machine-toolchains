@@ -507,7 +507,7 @@ mod tests {
             "dis takes .tmo/.tmx:\n{s}"
         );
         assert!(
-            s.contains("__tmt_files \"$cur\" tmc tma\n"),
+            s.contains("__tmt_files \"$cur\" tmc tmh tma\n"),
             "lint/fmt take sources:\n{s}"
         );
     }

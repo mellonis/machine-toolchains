@@ -227,14 +227,26 @@ fn positionals_offer_matching_files_and_directories() {
     fs::write(dir.join("b.tma"), "").unwrap();
     fs::write(dir.join("c.txt"), "").unwrap();
     fs::write(dir.join("d.tmx"), "").unwrap();
+    fs::write(dir.join("e.tmh"), "").unwrap();
     fs::create_dir_all(dir.join("sub")).unwrap();
     assert_eq!(candidates(&dir, "tmt compile "), vec!["a.tmc", "sub"]);
-    assert_eq!(candidates(&dir, "tmt lint "), vec!["a.tmc", "b.tma", "sub"]);
+    // A header is a `lint`/`fmt` source too — red if the registry's
+    // `source_or_dir` extension list drops `tmh`.
+    assert_eq!(
+        candidates(&dir, "tmt lint "),
+        vec!["a.tmc", "b.tma", "e.tmh", "sub"]
+    );
+    assert_eq!(
+        candidates(&dir, "tmt fmt "),
+        vec!["a.tmc", "b.tma", "e.tmh", "sub"]
+    );
     assert_eq!(candidates(&dir, "tmt run "), vec!["d.tmx", "sub"]);
     // `-o` takes any path.
     assert_eq!(
         candidates(&dir, "tmt compile -o "),
-        vec!["a.tmc", "b.tma", "c.txt", "d.tmx", "sub", "tmt.bash"]
+        vec![
+            "a.tmc", "b.tma", "c.txt", "d.tmx", "e.tmh", "sub", "tmt.bash"
+        ]
     );
     // `-L` takes directories only.
     assert_eq!(candidates(&dir, "tmt link -L "), vec!["sub"]);

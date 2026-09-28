@@ -5,9 +5,10 @@ deliberately do not refuse. Each input's extension picks its rule table:
 a `.tmc` file runs the compiler's analysis (through resolution, no code
 generation) against the `.tmc` catalog below; a `.tma` file runs a full
 assemble against the arch-agnostic assembly rules (`docs/core.md`) plus
-the TM-1 additions further down this page. Either way a finding prints
-as `FILE:LINE:COL: lint: MESSAGE`. Exit code 0 means every file is
-clean, 1 means findings or errors somewhere. The command surface — the
+the TM-1 additions further down this page; a `.tmh` header runs a
+subset of the `.tmc` catalog (see Linting a header). Whichever table
+runs, a finding prints as `FILE:LINE:COL: lint: MESSAGE`. Exit code 0
+means every file is clean, 1 means findings or errors somewhere. The command surface — the
 directory walk, `--exclude`, the per-file fatal that keeps a batch
 going — is `docs/tmt/cli.md`.
 
@@ -859,6 +860,29 @@ gap: the same hazard across a link boundary is the linker's own
 they run — `glyph-mismatch` is default-ON, because at the link boundary a
 re-labelling is far likelier to be an accident than an intention, while
 this rule stays opt-in for exactly the opposite reason inside one unit.
+
+## Linting a header
+
+A `.tmh` header lints with a subset of the `.tmc` rules above. It is
+first read the way `tmt compile --extern` reads it — declarations only
+(`docs/tmt/language.md (headers)`) — so a `machine` block, a routine
+with a body, or a graph without one is a per-file fatal, reported the
+same way a `.tmc` parse error is. Past that read, only these rules run:
+
+- `unused-import`
+- `contract-clause-overlap`
+
+Every other rule is off on a header, including the opt-in ones whatever
+`--warn` names. A routine in a header has no body for the body and
+rule-grid rules to read, and a graph's body is a copy of the library's
+own source, linted where it is written. The `unused-*` declaration rules
+(`unused-graph`, `unused-alphabet`, `unused-map`, `unused-set`, …) are
+off for a different reason: a header is the list of what a unit offers
+its consumers, so an exported declaration nothing else in the header
+names is its normal shape — the shipped stdlib header's graphs are
+exactly that — not dead code. `--allow` and `tmt.json`'s `lint.allow`
+apply as for any other file, and naming a code that does not run on a
+header is not an error.
 
 ## The `.tma` additions
 

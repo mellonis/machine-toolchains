@@ -430,12 +430,12 @@ fn build_spec() -> CommandSpec {
     }
 }
 
-/// A `.tmc`/`.tma`-filtered `FileHint` that ALSO accepts directories:
-/// `lint` and `fmt` both walk directories recursively for `*.tmc` and
-/// `*.tma`.
+/// A `.tmc`/`.tmh`/`.tma`-filtered `FileHint` that ALSO accepts
+/// directories: `lint` and `fmt` both walk directories recursively for
+/// `*.tmc`, `*.tmh` and `*.tma`.
 fn source_or_dir() -> FileHint {
     FileHint {
-        extensions: strings(&["tmc", "tma"]),
+        extensions: strings(&["tmc", "tmh", "tma"]),
         dirs: true,
     }
 }
