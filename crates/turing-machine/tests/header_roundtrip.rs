@@ -2465,11 +2465,17 @@ namespace a {
 /// is asserted against a floor: without it a defect that made the
 /// printer reject EVERYTHING would leave this test green.
 ///
+/// The `use` lines are held to the other half of the same rule: every one
+/// printed is needed, so deleting it alone makes the header unreadable.
+///
 /// Mutation: make `header::needed_imports` return an empty vector (print
 /// no `use` line at all) — the embedded standard library's volatile-twin
 /// namespaces import their representation alphabet from a sibling
 /// namespace, so `std.tmc`'s own header stops reading back, with
-/// `unresolved-alphabet`.
+/// `unresolved-alphabet`. Mutation: drop `needed_imports`' `used`
+/// filter (print every import unconditionally) — the twins' graph imports,
+/// needed only by bodies a header never prints, then appear, and the
+/// header reads back without them.
 #[test]
 fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader() {
     // The same three directories `tests/syntax_green.rs::corpus` walks
@@ -2501,6 +2507,7 @@ fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader(
 
     let dir = scratch("header_corpus_roundtrip");
     let mut accepted = 0usize;
+    let mut uses = 0usize;
     for (i, path) in sources.iter().enumerate() {
         // A source `tmt interface` cannot render — one needing
         // declarations this walk does not supply — comes back as the
@@ -2535,6 +2542,34 @@ fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader(
             "{}: the header did not reprint to itself",
             path.display()
         );
+
+        // And nothing unneeded: every `use` line the printer emits must be
+        // load-bearing, so the header WITHOUT it no longer reads back.
+        let lines: Vec<&str> = printed.stdout.lines().collect();
+        for (k, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("use ") {
+                continue;
+            }
+            uses += 1;
+            let pruned: String = lines
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != k)
+                .map(|(_, l)| format!("{l}\n"))
+                .collect();
+            let pruned_path = dir.join(format!("corpus{i}_without_use{k}.tmh"));
+            std::fs::write(&pruned_path, &pruned).unwrap();
+            let refused = match execute(&args(&["interface", pruned_path.to_str().unwrap()])) {
+                Err(_) => true,
+                Ok(out) => out.code != 0,
+            };
+            assert!(
+                refused,
+                "{}: the printed `{}` is not needed — the header reads back without it",
+                path.display(),
+                line.trim()
+            );
+        }
     }
     // The floor: every shipped source is accepted today, so a drop means
     // the printer started refusing them rather than that the corpus
@@ -2542,5 +2577,12 @@ fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader(
     assert!(
         accepted >= 14,
         "only {accepted} shipped sources were accepted — the printer may be rejecting them"
+    );
+    // The `use`-line half's own floor: the standard library's twin
+    // namespaces and the foreign-alphabet map fixture print imports today,
+    // so the check above is never over an empty set.
+    assert!(
+        uses >= 3,
+        "only {uses} printed `use` lines were checked — the minimality half is vacuous"
     );
 }

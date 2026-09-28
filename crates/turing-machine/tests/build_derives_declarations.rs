@@ -1078,6 +1078,69 @@ fn a_mutual_pair_of_siblings_names_both_and_notes_the_cycle_b_first() {
     );
 }
 
+/// The same cycle through the note's OTHER arm: each file's routine names
+/// the OTHER file's alphabet in its own signature, so each declarations-
+/// only read fails with `unresolved-alphabet` — one of the four
+/// declarations-missing codes, not `writes-outside-contract` — and the
+/// pair above never reaches that code.
+const AA_NAMES_BB_ALPHABET: &str = "\
+namespace aa {
+  export alphabet t { '_', '0' }
+
+  export routine ra(tape x: bb::u writes {}) {
+    entry state s { [*] -> return; }
+  }
+}
+";
+
+const BB_NAMES_AA_ALPHABET: &str = "\
+namespace bb {
+  export alphabet u { '_', '1' }
+
+  export routine rb(tape x: aa::t writes {}) {
+    entry state s { [*] -> return; }
+  }
+}
+";
+
+/// Mutation: narrowing the note's condition to `writes-outside-contract`
+/// alone (dropping `is_declarations_missing` from `render_unresolved`'s
+/// `may_be_a_missing_peer_symptom`) — both files are still named, but the
+/// note disappears.
+#[test]
+fn a_mutual_pair_missing_each_others_alphabets_notes_the_cycle() {
+    let dir = scratch("mutual_pair_alphabets");
+    write(&dir, "a.tmc", AA_NAMES_BB_ALPHABET);
+    write(&dir, "b.tmc", BB_NAMES_AA_ALPHABET);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "targets": { "ab": {
+            "sources": ["a.tmc", "b.tmc"]
+        } } } }"#,
+    );
+
+    let out = build_in(&dir, &[]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("a.tmc") && stderr.contains("bb::u"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("b.tmc") && stderr.contains("aa::t"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("unresolved-alphabet") && !stderr.contains("writes-outside-contract"),
+        "both sides fail on the declarations-missing arm: {stderr}"
+    );
+    assert!(
+        stderr.contains("note:") && stderr.contains("depend on each other"),
+        "the mutual-dependency note must be appended: {stderr}"
+    );
+}
+
 // ── a peer shadowing a stdlib name is believed over the built-in ────────
 
 /// `libs/mystd.tmh` declares `std::binaryNumbers::minusOne` itself, under

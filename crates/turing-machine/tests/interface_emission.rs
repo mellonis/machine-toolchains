@@ -313,6 +313,8 @@ machine {
 }
 
 /// The pair with [`the_writes_suffix_is_absent_only_when_the_routine_writes_nothing`].
+/// Mutation: publishing the whole alphabet for a declared `writes` clause
+/// instead of its effective set — `writes[0]` becomes `['_', '0', '1']`.
 #[test]
 fn the_writes_suffix_lists_the_effective_set() {
     let src = "\

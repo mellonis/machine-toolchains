@@ -1,0 +1,42 @@
+? A named map whose two alphabets are both declared elsewhere: its source
+? is reached through a `use` import, its destination through a qualified
+? name. Exported, so the unit's header carries it.
+
+namespace delimited {
+  export alphabet sym { '_', '^', '$', '0', '1' }
+}
+
+namespace bare {
+  export alphabet bits { '_', '0', '1' }
+
+  ? Flip every bit of a run of digits, stopping on the blank after it.
+  export routine invert(tape num: bits preserves { '_' } leaves { '_' }) {
+    entry state sweep {
+      ['0'] -> write ['1'] move [>] goto sweep;
+      ['1'] -> write ['0'] move [>] goto sweep;
+      ['_'] -> return;
+    }
+  }
+}
+
+use delimited::sym;
+
+? The delimited markers collapse onto the bare blank; the digits carry.
+export map collapse: sym -> bare::bits {
+  '^' => '_',
+  '$' => '_',
+  '0' -> '0',
+  '1' -> '1'
+}
+
+machine {
+  tape num: sym;
+
+  entry state toDigits {
+    ['^'] -> move [>] goto flip;
+    [*]   -> move [<] goto toDigits;
+  }
+  state flip {
+    [*] -> call bare::invert(num = num with map collapse) then stop;
+  }
+}

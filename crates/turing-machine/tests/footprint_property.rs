@@ -431,7 +431,7 @@ fn one(src: String) -> Vec<String> {
 
 // ── the committed `.tmc` corpus ─────────────────────────────────────────────
 //
-// The eight sources under `tests/golden/`, on the same seeds `opt_equivalence.rs`
+// The nine sources under `tests/golden/`, on the same seeds `opt_equivalence.rs`
 // runs them on (a local copy of that roster, per the no-shared-helpers
 // convention). Each seed comment states what the seed makes the program do.
 
@@ -529,6 +529,18 @@ fn glyph_sets_over_approximates() {
 }
 
 #[test]
+fn named_map_foreign_alphabets_over_approximates() {
+    // "^10$" (cells [1,4,3,2]) inverted to "^01$" through the named map
+    // (the markers read as the callee's blank); and the same number entered
+    // from its '$' (head 3), which walks back to the '^' first.
+    assert_over_approximates(
+        "named_map_foreign_alphabets",
+        &one(golden_src("named_map_foreign_alphabets.tmc")),
+        &[&[(&[1, 4, 3, 2], 0)], &[(&[1, 4, 3, 2], 3)]],
+    );
+}
+
+#[test]
 fn every_committed_tmc_fixture_is_in_the_corpus() {
     // A drift guard: a `.tmc` fixture added to `tests/golden/` must join this
     // corpus or fail here. Without it a new program could sit uncovered while
@@ -551,6 +563,7 @@ fn every_committed_tmc_fixture_is_in_the_corpus() {
             "a5_call_across_alphabets.tmc",
             "a6_graph_graft_multi_exit.tmc",
             "glyph_sets.tmc",
+            "named_map_foreign_alphabets.tmc",
             "nested_graft.tmc",
         ],
         "the committed `.tmc` corpus grew or shrank: add the new fixture above"

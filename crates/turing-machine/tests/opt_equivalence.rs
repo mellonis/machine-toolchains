@@ -326,6 +326,16 @@ fn glyph_sets_is_equivalent() {
     );
 }
 
+#[test]
+fn named_map_foreign_alphabets_is_equivalent() {
+    // "^10$" inverted through the named map, entered from the '^' and
+    // from the '$'.
+    assert_equivalent(
+        &golden_src("named_map_foreign_alphabets.tmc"),
+        &[&[(&[1, 4, 3, 2], 0)], &[(&[1, 4, 3, 2], 3)]],
+    );
+}
+
 // ── the brk barrier ─────────────────────────────────────────────────────────
 
 /// A forwarder state that carries a `debugger` (`brk`) row. It has the shape a

@@ -41,7 +41,10 @@
 //!   `unused-graft-instance` documents), so a blind rewrite risks
 //!   renaming what is actually a tape name — withheld rather than guessed.
 //! - **The surviving instance carries no `as` name** while some `goto`
-//!   still names the removed one — there is nothing to redirect onto.
+//!   still names the removed one — there is nothing to redirect onto. A
+//!   valid program reaches this: only an `entry graft` may omit its `as`
+//!   name (docs/tmt/language.md (graft)), so an anonymous entry graft
+//!   survives any later, named duplicate a `goto` reaches.
 //! - **Any computed span is `None`**, or the comment guard
 //!   (`crate::lint::run_rules`) finds a comment inside one — the shared
 //!   chokepoint every rule's fix goes through, pinned here the same way
@@ -345,6 +348,64 @@ machine {
 ";
         let f = findings(src);
         assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].fix.is_none(), "{:?}", f[0]);
+    }
+
+    #[test]
+    fn a_removed_name_bound_as_a_graft_continuation_withholds_the_fix() {
+        // `two` is reached only as ANOTHER graft's binding argument
+        // (`done = two`), never a bare `goto` — the binding-argument branch
+        // of `other_reference_exists`. Mutation this guards: dropping that
+        // branch's `world.grafts` scan would offer a fix deleting `two`
+        // and leave `done = two` naming nothing.
+        let src = "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+graph pass(tape t: marks, state done) {
+  entry state s { [*] -> done; }
+}
+machine {
+  tape work: marks;
+  graft findX(t = work, found = win, missing = lose) as one;
+  graft findX(t = work, found = win, missing = lose) as two;
+  graft pass(t = work, done = two) as hop;
+  entry state go { ['x'] -> goto one; [*] -> goto hop; }
+  state win  { [*] -> stop; }
+  state lose { [*] -> halt; }
+}
+";
+        let f = findings(src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("two"), "{:?}", f[0].message);
+        assert!(f[0].fix.is_none(), "{:?}", f[0]);
+    }
+
+    #[test]
+    fn an_unnamed_entry_survivor_withholds_the_fix() {
+        // The survivor is an anonymous `entry graft` — legal, since only an
+        // entry graft may omit `as` — and the later duplicate `two` is
+        // reached by a `goto`: there is no name to redirect that `goto`
+        // onto. Mutation this guards: a fix builder that deletes the
+        // duplicate without the survivor-name check (or redirects onto an
+        // empty name) would offer a fix leaving `goto two` dangling.
+        let src = "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  entry graft findX(t = work, found = win, missing = retry);
+  graft findX(t = work, found = win, missing = retry) as two;
+  state retry { ['x'] -> goto two; [*] -> halt; }
+  state win   { [*] -> stop; }
+}
+";
+        let f = findings(src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("two"), "{:?}", f[0].message);
         assert!(f[0].fix.is_none(), "{:?}", f[0]);
     }
 }

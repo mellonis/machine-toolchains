@@ -635,7 +635,12 @@ fn in_range_holes_trap_kinds_are_pinned() {
 /// two binding tapes may not name one caller tape. A hand-assembled `.tma`
 /// object carries binding records without ever passing the `.tmc` compiler,
 /// so the rejection has to exist at the composition choke point as well —
-/// this is the only layer such an object meets.
+/// this is the only layer such an object meets. It is also the whole of
+/// the check an alias at an EXTERNAL bound site meets, the compiler's own
+/// `duplicate-tape-target` covering in-unit callees only: an alias at an
+/// external bound site is a hard link error under all three mechanisms
+/// (`AliasedCallerTape` reported as a bad binding); its message names
+/// tape indices, not parameter names.
 ///
 /// The shape is the one that proved the mechanisms disagree: a 3-arity
 /// callee whose first two tapes both land on caller tape 0, across UNEQUAL

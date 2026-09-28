@@ -12,6 +12,8 @@
 //!
 //! `glyph_sets.tmc` is beyond Appendix A too: the corpus's one named glyph
 //! set, spelling an alphabet body and an `enters` clause.
+//! `named_map_foreign_alphabets.tmc` exports a named map whose source
+//! alphabet is imported and whose destination is qualified.
 //!
 //! A.5 is exercised THREE WAYS — a happy path plus the two holey-map trap
 //! seeds (`'a'` / `'b'` under the call, both `unmapped-read`) — across ALL
@@ -351,6 +353,39 @@ fn glyph_sets_walk_a_digit_run_and_mark_its_end() {
     assert_eq!(snaps, [snap(0, &[11], 0)]);
 }
 
+// ── a named map over two foreign alphabets ───────────────────────────────────
+
+#[test]
+fn named_map_foreign_alphabets_inverts_through_the_map() {
+    // sym = {'_'=0, '^'=1, '$'=2, '0'=3, '1'=4}; the callee's bits =
+    // {'_', '0', '1'}. `collapse` reads '^' and '$' as the callee's blank
+    // and carries the digits both ways. Seed "^10$" (cells [1,4,3,2]):
+    //   toDigits[0]='^' → >          ⇒ head 1
+    //   flip[1] → call invert (callee sees '1','0','_')
+    //     sweep[1]='1' → write '0'(3) >   ⇒ cell1=3, head 2
+    //     sweep[2]='0' → write '1'(4) >   ⇒ cell2=4, head 3
+    //     sweep[3]='$' reads '_' → return
+    //   then stop                     ⇒ cells [1,3,4,2], head 3
+    let exe = link_with(
+        &object("named_map_foreign_alphabets.tmc"),
+        LinkOptions::default(),
+    );
+    let (outcome, snaps) = run(&exe, &[(snap(0, &[1, 4, 3, 2], 0), 5)]);
+    assert_eq!(outcome, Outcome::Stopped);
+    let derived = [snap(0, &[1, 3, 4, 2], 3)];
+    assert_eq!(snaps, derived);
+    assert_golden(
+        "named_map_foreign_alphabets.expected.tmt",
+        &block(&derived, &[5]),
+    );
+
+    // Entered from the '$' (head 3): `toDigits` walks left over '0', '1'
+    // to the '^', steps right, and the same inversion follows.
+    let (outcome, snaps) = run(&exe, &[(snap(0, &[1, 4, 3, 2], 3), 5)]);
+    assert_eq!(outcome, Outcome::Stopped);
+    assert_eq!(snaps, derived);
+}
+
 // ── golden regeneration (derivation-first; explicit) ─────────────────────────
 
 /// Regenerate the committed `.tmt` goldens FROM THE HAND DERIVATIONS (never
@@ -394,5 +429,9 @@ fn regen_goldens() {
     write(
         "glyph_sets.expected.tmt",
         &block(&[snap(0, &[2, 3, 11], 2)], &[12]),
+    );
+    write(
+        "named_map_foreign_alphabets.expected.tmt",
+        &block(&[snap(0, &[1, 3, 4, 2], 3)], &[5]),
     );
 }
