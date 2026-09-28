@@ -424,7 +424,10 @@ machine {
 ///
 /// Mutation it catches: grade every multi-exit return regardless of its
 /// index, and the control turns this red — the shipped corpus alone
-/// would not, since none of it reaches a `retx`.
+/// would not, since none of it reaches a `retx`. And let the control
+/// stop compiling or linking (it would be skipped like any other
+/// program), and the named check on it turns this red, where the floor
+/// alone would not once one more shipped program links.
 #[test]
 fn no_shipped_program_returns_through_an_undeclared_exit() {
     use mtc_core::linker::{CallMech, LinkOptions, link};
@@ -434,6 +437,7 @@ fn no_shipped_program_returns_through_an_undeclared_exit() {
     let stdlib = mtc_turing_machine::stdlib::object().clone();
     let syntax = tm1_syntax();
     let mut linked = 0usize;
+    let mut control_linked = false;
     let mut findings = Vec::new();
     let control = std::path::PathBuf::from("<compiled two-exit control>.tmc");
     for path in corpus().into_iter().chain([control.clone()]) {
@@ -465,6 +469,7 @@ fn no_shipped_program_returns_through_an_undeclared_exit() {
             continue;
         };
         linked += 1;
+        control_linked |= path == control;
         findings.extend(
             out.report
                 .diagnostics
@@ -476,6 +481,10 @@ fn no_shipped_program_returns_through_an_undeclared_exit() {
     assert!(
         linked >= 16,
         "the corpus sweep linked only {linked} programs"
+    );
+    assert!(
+        control_linked,
+        "the compiled two-exit control did not link, so the sweep reached no `retx`"
     );
     assert!(findings.is_empty(), "{findings:#?}");
 }

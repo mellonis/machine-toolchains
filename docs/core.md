@@ -908,9 +908,12 @@ independent of any call site.** A body that returns through an exit
 index at or above the exit count its interface declares is
 `undeclared-exit`, named at that return instruction: no call site's
 exit vector has an entry for the index, so under FRAMES the return
-traps at run time, while MONO — and HYBRID wherever it copies the body
-into a site — already refuses the link outright, so the warning is
-what a framed link reports for the same body. The dialect needs no
+traps at run time. A copying mechanism — MONO, and HYBRID wherever it
+copies the body into an exit-bearing bound site — refuses that link
+outright instead. A link with no bound call anywhere lowers nothing
+under any mechanism, so there the warning is the only link-time signal
+whichever mechanism is chosen, and the return traps at run time as a
+profile violation. The dialect needs no
 table of its own for this: an exit return is the instruction whose
 operand is an `Imm8` exit index and whose flow is `Stop`, the same
 reading the copy path's rewrite of each exit return into a jump
@@ -937,7 +940,7 @@ Codes are permanent identifiers: they never change meaning.
 | `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
 | `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
 | `tail-call-no-continuation` | A call site is the last instruction of its function, or is immediately followed by the dialect's own trap, into a callee that can return: an honest return either falls through into whatever the linker places next, or lands on the trap in place of a continuation the source never wrote. |
-| `undeclared-exit` | A routine's body returns through an exit index at or above the exit count its signature declares, so no call site's exit vector has an entry for it: a framed call traps there at run time, and a mechanism that copies the body into the site refuses the link instead. |
+| `undeclared-exit` | A routine's body returns through an exit index at or above the exit count its signature declares, so no call site's exit vector has an entry for it: a framed call, or any call in a link with no bound call, traps there at run time; a mechanism that copies the body into an exit-bearing site refuses the link instead. |
 
 Errors are outside this catalog and cannot be suppressed.
 
