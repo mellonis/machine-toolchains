@@ -1,10 +1,10 @@
-//! `unused-set`: a `set` declaration no alphabet body, contract clause or
-//! pattern cell references. Export-independent, mirroring `unused-alphabet`
-//! and `unused-map`: a set has no cross-module consumers to protect either,
-//! since a set is data for the three element-list sites that name it — an
-//! alphabet body, a contract clause, a pattern cell — never a tape type in
-//! its own right, so an exported-but-unused set is as dead as a private
-//! one. New on the lint channel, detected source-level over `Resolved`.
+//! `unused-set`: a `set` declaration (docs/tmt/language.md (glyph sets))
+//! no alphabet body, contract clause or pattern cell references.
+//! Export-independent, mirroring `unused-alphabet` and `unused-map`: the
+//! rule sees this unit only, so an exported set that another unit imports
+//! through this unit's header and uses is still reported, and a library
+//! silences it with the allow list rather than applying the deletion fix
+//! (docs/tmt/lint.md (unused-set)). Detected source-level over `Resolved`.
 //!
 //! Usage is decided by `Resolved.set_refs`, the one recording built for
 //! exactly this purpose: `SetScope::members` inserts a referenced set's

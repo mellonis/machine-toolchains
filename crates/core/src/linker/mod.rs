@@ -390,9 +390,10 @@ pub const DIAGNOSTIC_CODES: &[(&str, &str)] = &[
         "undeclared-exit",
         "A routine's body returns through an exit index at or above the exit \
          count its signature declares, so no call site's exit vector has an entry \
-         for it: a framed call, or any call in a link with no bound call, traps \
-         there at run time; a mechanism that copies the body into an exit-bearing \
-         site refuses the link instead.",
+         for it: MONO and HYBRID refuse the link only where they copy the body \
+         into an exit-bearing bound site; every other call into the body — a \
+         framed call, a plain call — links with this warning as the only signal \
+         and traps there at run time.",
     ),
 ];
 

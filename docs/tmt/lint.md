@@ -326,9 +326,14 @@ instance carries no `as` name for a `goto` to redirect onto.
 An `alphabet` declaration no tape draws on — neither a machine `tape`
 declaration nor a routine/graph signature tape parameter names it. Unlike
 `unused-routine`/`unused-graph`, an **exported** alphabet is flagged too:
-a tape may draw only on a locally-defined alphabet, so an alphabet has no
-cross-object references in this language version to protect — an
-exported-but-undrawn-on alphabet is as dead as a private one.
+the rule is export-independent by design, and it sees one compilation unit
+only. Another unit CAN use an exported alphabet — it imports it through
+this unit's header or sibling source (`docs/tmt/language.md (alphabets,
+maps and graphs across units)`) — and the rule cannot see that use, so a
+library that exports an alphabet for its consumers and draws no tape on it
+itself is reported. There, the finding is expected and its deletion fix
+must not be applied: silence it with `--allow unused-alphabet` or the
+project file's `lint.allow` ("Project file", above).
 
 ```
 b.tmc:2:10: lint: alphabet `dead` is never used by any tape
@@ -341,10 +346,10 @@ alphabet it documents.
 ### unused-map
 
 A named `map` declaration (`docs/tmt/language.md` (named maps)) nothing
-names with `with map NAME`. Export-independent, the same reasoning as
-`unused-alphabet`: a `with map NAME` site is the only way a map is ever
-reached, so an exported-but-unused declaration is as dead as a private
-one.
+names with `with map NAME`. Export-independent, exactly as
+`unused-alphabet` is: an exported map another unit imports and uses is
+still reported here, since the rule sees this unit only — silence it the
+same way rather than applying the fix.
 
 ```
 b.tmc:3:5: lint: map `dead` is never used by any binding
@@ -358,10 +363,10 @@ run, mirroring `unused-alphabet`'s own fix.
 A `set NAME { … }` declaration (`docs/tmt/language.md (glyph sets)`) —
 a named glyph set, expanded in place wherever an alphabet body, a
 contract clause, or a pattern cell names it — that none of those three
-sites names. Export-independent, the same
-reasoning as `unused-alphabet`/`unused-map`: a set is data for those three
-element-list sites, never a tape type in its own right, so an
-exported-but-unused declaration is as dead as a private one.
+sites names. Export-independent, exactly as `unused-alphabet` and
+`unused-map` are: an exported set another unit imports and uses is still
+reported here, since the rule sees this unit only — silence it with
+`--allow unused-set` or `lint.allow` rather than applying the fix.
 
 ```
 b.tmc:1:5: lint: set `dead` is never used by any alphabet, contract or pattern

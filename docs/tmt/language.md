@@ -1977,8 +1977,7 @@ text, and it remains available as an ordinary identifier.
     `never writes { … }` ("Contract clauses") — the same symbols, the
     same effective-set arithmetic, the same diagnostics, under a name
     that no longer suggests a promise about cells, which the checker
-    could never verify (the old name stays free for a clause that might
-    one day make that promise). A 0.1 program writing `preserves` stops
+    could never verify (the old name is left free). A 0.1 program writing `preserves` stops
     compiling, at a parse error that names the new spelling;
   - a pattern cell naming a symbol its tape's alphabet lacks — a lone
     glyph, or a range endpoint — is an error (`symbol-outside-alphabet`,
@@ -1986,7 +1985,10 @@ text, and it remains available as an ordinary identifier.
     and warned `empty-expansion` only when a rule lost every alternative.
     Contract clauses were already strict in 0.1 (`contract-symbol-unknown`)
     and stay so. `empty-expansion` now describes only a grafted rule that
-    maps to no host symbol at its splice ("Pattern ranges");
+    maps to no host symbol at its splice ("Pattern ranges"). No program
+    this toolchain ships — the examples, the test fixtures, the standard
+    library — named such a symbol (measured), so the change reaches only
+    source written against the old, permissive reading;
   - a range in a pattern cell or a contract clause walks the alphabet's
     declared order, where 0.1 walked Unicode succession and kept the
     symbols the tape had: over an alphabet listed out of Unicode order,
@@ -2016,7 +2018,11 @@ text, and it remains available as an ordinary identifier.
     been parsed again before it was written
     (`docs/tmt/cli.md (interface)`);
   - the `enters-unmet` and `unused-set` lint rules, and the
-    `undeclared-exit` link warning (`docs/tmt/cli.md (link warnings)`);
+    `undeclared-exit` link warning: `mono` and `hybrid` refuse the link
+    only where they copy the body into an exit-bearing bound site, and
+    every other call into such a body — a framed call, a plain call —
+    links with this warning as the only signal and traps at run time
+    (`docs/tmt/cli.md (link warnings)`);
   - `leaves` clauses on every tape parameter of the standard library,
     whose prose was corrected in four places where it described the head
     on exit more narrowly than the bodies behave (`docs/tmt/stdlib.md`).

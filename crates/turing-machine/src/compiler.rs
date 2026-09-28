@@ -1228,7 +1228,8 @@ fn resolve_set_ref<'e>(
 /// Everything a set reference resolves against once every set of this
 /// unit is resolved: the scope substrate, the unit's own sets, and the
 /// declarations modules. [`SetScope::members`] is the one entry an
-/// element-list site calls to consume a set name.
+/// element-list site calls to consume a set name
+/// (docs/tmt/language.md (glyph sets)).
 pub(crate) struct SetScope<'a> {
     pub scopes: &'a Scopes,
     pub sets: &'a HashMap<String, ResolvedSet>,
@@ -1293,7 +1294,8 @@ impl SetFrame<'_> {
     }
 }
 
-/// Resolve every set this unit declares, keyed by mangled name. A set's
+/// Resolve every set this unit declares, keyed by mangled name
+/// (docs/tmt/language.md (glyph sets)). A set's
 /// body may name other sets, local or imported, declared before or after
 /// it; the walk is depth-first over an EXPLICIT stack — never recursion,
 /// so a long chain of sets cannot overflow the thread's stack — and a

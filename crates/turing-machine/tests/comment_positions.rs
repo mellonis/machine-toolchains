@@ -4,19 +4,19 @@
 //! around it, never which tokens it sits between
 //! (docs/tmt/fmt.md (comments are never moved)).
 //!
-//! One template per grammatical position a comment can occupy — 61 of them,
-//! each with a `@C@` slot run in BOTH flavours (`/* c */` and `// c`), ported
-//! from the measured 2026-08-30 audit
-//! (docs/superpowers/specs/2026-08-30-tmc-comment-audit.md). Each case runs
+//! One template per grammatical position a comment can occupy — 81 of them:
+//! the 61 of the measured 2026-08-30 audit, two for the `noreturn` clause,
+//! and eighteen for the head-position clauses, `never writes`, the open-map
+//! `*` and glyph sets — each with a `@C@` slot run in BOTH flavours
+//! (`/* c */` and `// c`). Each case runs
 //! three mechanical gates: the comment's significant-token NEIGHBOURS are
 //! unchanged, the significant-token stream is unchanged (fmt is
 //! whitespace-only), and the output is a fixed point.
 //!
-//! The groups mirror the work plan: `ALREADY_CORRECT` is the regression
-//! guard — 33 positions where the current printer already satisfies the rule
-//! — and each `#[ignore]`d group is one task's work list, its ignore reason
-//! recording the MEASURED destination the comment moves to today.
-//! Un-ignoring a group is how its task proves its surface.
+//! `ALREADY_CORRECT` is the regression guard — the positions the printer
+//! satisfied from the start — and every other group was once an
+//! `#[ignore]`d work list whose ignore reason recorded where the comment
+//! moved; none is ignored any longer.
 //!
 //! Baseline facts, measured on this harness at the branch base: no comment
 //! is ever lost, no fixture fails to parse, and the only non-idempotent
@@ -92,7 +92,7 @@ fn run_group(group: &[(&str, &str)]) {
 }
 
 // ---------------------------------------------------------------------------
-// The regression guard: 33 positions the current printer already gets right.
+// The regression guard: 35 positions the printer already got right.
 // These pass at the branch base and must never stop passing.
 // ---------------------------------------------------------------------------
 
@@ -221,8 +221,8 @@ fn already_correct_positions_stay() {
 }
 
 // ---------------------------------------------------------------------------
-// The work lists. Each group is one task; its ignore reason records the
-// measured destination. Un-ignoring the group is how its task proves itself.
+// The former work lists, one group per construct family, all live now. Each
+// group's doc records where the comment used to land before its fix.
 // ---------------------------------------------------------------------------
 
 /// The `alphabet` header — the worst destination and the only unstable one:

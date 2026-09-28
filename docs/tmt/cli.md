@@ -498,14 +498,14 @@ tail-call-no-continuation` silences.
 `undeclared-exit` fires on a hand-written `.tma` routine whose body
 carries a `retx #k` with `k` at or above the `exits=` count on its
 `.routine` line; a `.tmc` source never produces one, since the compiler
-numbers each exit by its `state` parameter's position. Under
-`--call-mech frames` that `retx` traps at run time. `mono`, and `hybrid`
-wherever it copies the body into an exit-bearing bound call site (a
-lone such site, under the default), refuse the same body as a bad
-binding instead. A link with no bound call anywhere lowers nothing
-under any mechanism, so there the warning is the only link-time signal
-whichever `--call-mech` is chosen, and the `retx` traps at run time
-(`docs/core.md (link warnings)`).
+numbers each exit by its `state` parameter's position. `mono` and
+`hybrid` refuse the link, as a bad binding, only where they copy the
+body into an exit-bearing bound call site (under the default `hybrid`,
+a lone such site is copied). Every other call into the body — a framed
+call under `--call-mech frames`, or a plain `call` under any mechanism,
+even in a link whose other bound calls are lowered — copies nothing:
+the warning is the only link-time signal and the `retx` traps at run
+time (`docs/core.md (link warnings)`).
 
 In manifest mode `-Werror`'s promotion is per TARGET, not per build: a
 strict refusal stops the build where it stands, and the targets already
@@ -517,7 +517,7 @@ on a later target behaves.
 | `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
 | `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
 | `tail-call-no-continuation` | A call site is the last instruction of its function, or is immediately followed by the dialect's own trap, into a callee that can return: an honest return either falls through into whatever the linker places next, or lands on the trap in place of a continuation the source never wrote. |
-| `undeclared-exit` | A routine's body returns through an exit index at or above the exit count its signature declares, so no call site's exit vector has an entry for it: a framed call, or any call in a link with no bound call, traps there at run time; a mechanism that copies the body into an exit-bearing site refuses the link instead. |
+| `undeclared-exit` | A routine's body returns through an exit index at or above the exit count its signature declares, so no call site's exit vector has an entry for it: MONO and HYBRID refuse the link only where they copy the body into an exit-bearing bound site; every other call into the body — a framed call, a plain call — links with this warning as the only signal and traps there at run time. |
 
 ## `tmt build`
 
