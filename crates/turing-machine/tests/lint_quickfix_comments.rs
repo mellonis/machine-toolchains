@@ -1,6 +1,6 @@
 //! Pins the APPLIED TEXT of every quickfix whose edit span comes from
 //! `lint/rules/spans.rs` (`docs/tmt/lint.md` (quickfix availability)) —
-//! the seven span queries over the green tree:
+//! the eight span queries over the green tree:
 //!
 //! | query | rules | what it answers |
 //! |---|---|---|
@@ -11,6 +11,7 @@
 //! | `as_clause_span` | `unused-graft-name` | from the `)` to the instance name, inside the GRAFT node |
 //! | `marker_span` | `leftover-debugger` | the `debugger` token to the next element, inside the RULE node |
 //! | `arrow_span` | `dead-map-pair` | the pair's arrow token |
+//! | `then_clause_span` | `unreachable-continuation` | from the call's closing `)` to the end of the transition, inside the TRANSITION node |
 //!
 //! Every query is a RANGE query — the innermost node of a kind containing
 //! an anchor the resolved module keeps, then that node's range or a token
@@ -748,4 +749,50 @@ fn dead_map_pair_fix_is_unaffected_by_an_adjacent_comment() {
         apply_fix(DEAD_MAP_PAIR_COMMENT, &fix.edits),
         DEAD_MAP_PAIR_COMMENT_FIXED
     );
+}
+
+// -- unreachable-continuation / then_clause_span ---------------------------
+
+const THEN_CLAUSE_CLEAN: &str = "\
+alphabet ab { '_', 'a' }
+routine forever(tape t: ab) noreturn {
+  entry state s { [*] -> goto s; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call forever(t = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+/// The ` then done` clause is gone; the call becomes a plain statement
+/// (`call forever(t = t);`) and everything else — the routine, the tape
+/// declaration, and `done`'s own now-unreached state — is byte-identical
+/// to the input.
+const THEN_CLAUSE_FIXED: &str = "\
+alphabet ab { '_', 'a' }
+routine forever(tape t: ab) noreturn {
+  entry state s { [*] -> goto s; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call forever(t = t); }
+  state done { [*] -> stop; }
+}
+";
+
+/// Mutation: an edit span that eats part of the call's own argument list or
+/// leaves a dangling continuation keyword — either would show up here as a
+/// mismatch against `THEN_CLAUSE_FIXED`.
+#[test]
+fn unreachable_continuation_fix_drops_the_then_clause() {
+    let ds = findings_for(THEN_CLAUSE_CLEAN, "unreachable-continuation");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    let fix = ds
+        .into_iter()
+        .next()
+        .unwrap()
+        .fix
+        .expect("then_clause_span found the clause");
+    assert_eq!(apply_fix(THEN_CLAUSE_CLEAN, &fix.edits), THEN_CLAUSE_FIXED);
 }
