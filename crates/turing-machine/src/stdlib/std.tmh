@@ -46,7 +46,9 @@ namespace std {
     ? the head is on the number; on exit it rests on '$' with no leading
     ? zero. Zero stays zero ('^$' − 1 → '^$'). A head not on a number leaves
     ? the tape untouched.
-    export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' });
+    export routine minusOneFast(
+      tape num: symbols writes { '_', '^', '0', '1' }
+    );
     ? Flip every bit of a number, implemented ACROSS representations: it
     ? walks to the first digit and calls std::binaryNumbersBare::invertNumber
     ? with the markers collapsed one-way onto the callee's blank
@@ -66,15 +68,18 @@ namespace std {
     export graph goToNumberGraph(tape num: symbols writes {}, state done) {
       entry state walk {
         ['$'] -> goto done;
-        [*] -> move [>] goto walk;
+        [*]   -> move [>] goto walk;
       }
     }
     ? Behavior graph for goToNumbersStart: walk left until the first '^',
     ? then leave via `done` with the head on that '^'.
-    export graph goToNumbersStartGraph(tape num: symbols writes {}, state done) {
+    export graph goToNumbersStartGraph(
+      tape num: symbols writes {},
+      state done
+    ) {
       entry state walk {
         ['^'] -> goto done;
-        [*] -> move [<] goto walk;
+        [*]   -> move [<] goto walk;
       }
     }
     ? Behavior graph for goToNextNumber: step one cell right, then walk right
@@ -88,26 +93,32 @@ namespace std {
     }
     ? Behavior graph for goToPreviousNumber: step one cell left, then walk
     ? left to the previous number's '$'. Exits via `done` on that '$'.
-    export graph goToPreviousNumberGraph(tape num: symbols writes {}, state done) {
+    export graph goToPreviousNumberGraph(
+      tape num: symbols writes {},
+      state done
+    ) {
       entry state step {
         [*] -> move [<] goto scan;
       }
       state scan {
         ['$'] -> goto done;
-        [*] -> move [<] goto scan;
+        [*]   -> move [<] goto scan;
       }
     }
     ? Behavior graph for deleteNumber. On a number cell it goes to the '^'
     ? and sweeps right erasing '^', digits, and '$' (writing blanks) until
     ? the number is gone; on a blank it does nothing. Exits via `done`.
-    export graph deleteNumberGraph(tape num: symbols writes { '_' }, state done) {
+    export graph deleteNumberGraph(
+      tape num: symbols writes { '_' },
+      state done
+    ) {
       entry state dispatch {
         ['_'] -> goto done;
-        [*] -> goto toStart;
+        [*]   -> goto toStart;
       }
       state erase {
         ['$'] -> write ['_'] goto done;
-        [*] -> write ['_'] move [>] goto erase;
+        [*]   -> write ['_'] move [>] goto erase;
       }
       graft goToNumbersStartGraph(num = num, done = erase) as toStart;
     }
@@ -116,16 +127,19 @@ namespace std {
     ? just before the first '1' (or before '$' when the number was all
     ? zeros, preserving 0 as '^$'), and walks right to '$'. On a blank it
     ? does nothing. Exits via `done` on the '$'.
-    export graph normalizeNumberGraph(tape num: symbols writes { '_', '^' }, state done) {
+    export graph normalizeNumberGraph(
+      tape num: symbols writes { '_', '^' },
+      state done
+    ) {
       entry state dispatch {
         ['_'] -> goto done;
-        [*] -> goto toStart;
+        [*]   -> goto toStart;
       }
       state moveStart {
         ['^'] -> write ['_'] move [>] goto moveStart;
         ['0'] -> write ['_'] move [>] goto moveStart;
-        ['1'] -> move [<] goto putNewStart;
-        ['$'] -> move [<] goto putNewStart;
+        ['1'] ->             move [<] goto putNewStart;
+        ['$'] ->             move [<] goto putNewStart;
       }
       state putNewStart {
         ['_'] -> write ['^'] goto scan;
@@ -139,7 +153,10 @@ namespace std {
     ? '1', a fresh '^' is planted one cell further left, and the old leading
     ? '1's are rewritten to '0'. On a blank the graph does nothing. Exits via
     ? `done` on the '$'.
-    export graph plusOneGraph(tape num: symbols writes { '^', '0', '1' }, state done) {
+    export graph plusOneGraph(
+      tape num: symbols writes { '^', '0', '1' },
+      state done
+    ) {
       entry state seek {
         ['^'] -> move [>] goto seek;
         ['0'] -> move [>] goto seek;
@@ -149,7 +166,7 @@ namespace std {
       }
       state carry {
         ['0'] -> write ['1'] move [>] goto fill;
-        ['1'] -> move [<] goto carry;
+        ['1'] ->             move [<] goto carry;
         ['^'] -> write ['1'] move [<] goto addStart;
       }
       state fill {
@@ -158,7 +175,7 @@ namespace std {
       }
       state addStart {
         ['_'] -> write ['^'] move [>] goto addStart;
-        ['1'] -> move [>] goto fill;
+        ['1'] ->             move [>] goto fill;
       }
     }
     ? Behavior graph for minusOneFast: the direct-borrow subtractor. Walk
@@ -167,7 +184,10 @@ namespace std {
     ? It then falls into normalizeNumberGraph to strip the leading zero a
     ? borrow chain leaves behind ('^1000$' − 1 → '^0111$' → '^111$'). On a
     ? blank the graph does nothing. Exits via `done` on the '$'.
-    export graph minusOneFastGraph(tape num: symbols writes { '_', '^', '0', '1' }, state done) {
+    export graph minusOneFastGraph(
+      tape num: symbols writes { '_', '^', '0', '1' },
+      state done
+    ) {
       entry state seek {
         ['^'] -> move [>] goto seek;
         ['0'] -> move [>] goto seek;
@@ -210,7 +230,10 @@ namespace std {
     ? onto the least significant digit, and carry left: '1' → '0' and keep
     ? carrying, '0' → '1' (done), blank → '1' (done, overflow extends the
     ? number one cell to the left). Exits via `done`.
-    export graph plusOneGraph(tape num: symbols writes { '0', '1' }, state done) {
+    export graph plusOneGraph(
+      tape num: symbols writes { '0', '1' },
+      state done
+    ) {
       entry state seek {
         ['0'] -> move [>] goto seek;
         ['1'] -> move [>] goto seek;
@@ -226,7 +249,10 @@ namespace std {
     ? left onto the least significant digit, and borrow left: '0' → '1' and
     ? keep borrowing, '1' → '0' (done), blank → done (underflow: the region
     ? was empty). Exits via `done`.
-    export graph minusOneGraph(tape num: symbols writes { '0', '1' }, state done) {
+    export graph minusOneGraph(
+      tape num: symbols writes { '0', '1' },
+      state done
+    ) {
       entry state seek {
         ['0'] -> move [>] goto seek;
         ['1'] -> move [>] goto seek;
@@ -240,7 +266,10 @@ namespace std {
     }
     ? Behavior graph for invertNumber: sweep right flipping each bit, halt at
     ? the trailing blank. Exits via `done` on that blank.
-    export graph invertNumberGraph(tape num: symbols writes { '0', '1' }, state done) {
+    export graph invertNumberGraph(
+      tape num: symbols writes { '0', '1' },
+      state done
+    ) {
       entry state sweep {
         ['0'] -> write ['1'] move [>] goto sweep;
         ['1'] -> write ['0'] move [>] goto sweep;
@@ -250,7 +279,10 @@ namespace std {
     ? Behavior graph for normalizeNumber: erase leading '0's moving right
     ? until a '1'; if the whole number was zeros, restore a single '0' so the
     ? value zero keeps its representation. Exits via `done`.
-    export graph normalizeNumberGraph(tape num: symbols writes { '_', '0' }, state done) {
+    export graph normalizeNumberGraph(
+      tape num: symbols writes { '_', '0' },
+      state done
+    ) {
       entry state sweep {
         ['0'] -> write ['_'] move [>] goto sweep;
         ['1'] -> goto done;
@@ -275,7 +307,9 @@ namespace std {
     ? std::binaryNumbers::plusOne's contract, over a volatile tape.
     export routine plusOne(tape num: symbols writes { '^', '0', '1' });
     ? std::binaryNumbers::minusOneFast's contract, over a volatile tape.
-    export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' });
+    export routine minusOneFast(
+      tape num: symbols writes { '_', '^', '0', '1' }
+    );
     ? std::binaryNumbers::invertNumber's contract, over a volatile tape. The
     ? cross-representation call goes to the bare namespace's OWN twin, so the
     ? tape stays volatile on the far side of the representation boundary.

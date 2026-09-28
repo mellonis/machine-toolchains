@@ -39,7 +39,11 @@
 //! of the input's whitespace and comments — which is why it renders from
 //! parsed/resolved data structures throughout, never by slicing or
 //! echoing source text. That independence is what lets a later graph
-//! digest be computed over this printer's own output. Two determinism
+//! digest be computed over this printer's own output. The digest is
+//! taken over [`graph_body_lines`], BEFORE the one layout step the
+//! printed header alone goes through — [`canonical`], which hands the
+//! assembled text to the `.tmc` formatter so that `tmt fmt --check`
+//! accepts a generated header unchanged. Two determinism
 //! hazards worth naming because they are easy to reintroduce: this module
 //! never iterates `Resolved::alphabets` (a `HashMap`) directly — the
 //! source arm walks the flat, source-order `Program::alphabets` /
@@ -147,6 +151,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use mtc_core::diagnostics::Span;
 use mtc_core::formats::crc32::crc32;
 use mtc_core::formats::object::{
     ExportedAlphabet, ExportedGraph, Interface, ObjectFile, SymbolDef,
@@ -154,8 +159,8 @@ use mtc_core::formats::object::{
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
-    self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, WorldKind,
-    clause_glyphs, full_name, published_writes, symset_glyphs,
+    self, CompileError, CompileErrorKind, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld,
+    WorldKind, clause_glyphs, full_name, published_writes, symset_glyphs,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -250,13 +255,45 @@ fn render_from_source(
     // unreachable in practice, `analyze_with_mode` having just succeeded
     // through the identical call.
     let scopes = compiler::Scopes::build(&analysis.program)?;
-    Ok(render_source(
+    let text = render_source(
         &analysis.program,
         &analysis.resolved,
         &scopes,
         &footprint,
         &returns,
-    ))
+    );
+    // The renderer's own spans point into the header it just printed, not
+    // into `source`, so a failure is reported without one: it is a printer
+    // bug, never a fault in the input.
+    canonical(&text).map_err(|message| CompileError {
+        span: Span::point(0, 0),
+        kind: CompileErrorKind::Internal(message),
+    })
+}
+
+/// The printed header's canonical layout: the assembled text passed once
+/// through `crate::fmt::format`, the same function `tmt fmt` runs, so a
+/// generated header is `fmt`-clean by construction rather than by a second
+/// printer imitating the formatter's grid and wrapping (docs/tmt/fmt.md
+/// (the state-block grid), docs/tmt/fmt.md (argument lists and the width
+/// threshold)).
+/// Both arms end here — [`render_from_source`] and [`from_object`].
+///
+/// Only the PRINTED text goes through it. [`graph_digest`] hashes
+/// [`graph_body_lines`]' own rendering and never this output, so a change
+/// in the formatter's layout never moves a graft digest.
+///
+/// A header carries no comments, so the formatter's comment-sensitive
+/// layout rules never arise. An error here means the renderer produced
+/// text the `.tmc` grammar rejects — surfaced, never papered over by
+/// printing the unformatted text.
+fn canonical(text: &str) -> Result<String, String> {
+    crate::fmt::format(text).map_err(|e| {
+        format!(
+            "the generated header does not re-read at {}:{}: {}",
+            e.span.start.line, e.span.start.col, e.kind
+        )
+    })
 }
 
 /// Read one text declaration source's own shape — a `.tmc`/`.tmh` file
@@ -687,7 +724,7 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
 
     let mut out = String::new();
     root.render(0, &mut out);
-    Ok(out)
+    canonical(&out)
 }
 
 /// One tape's alphabet identifier on the object arm — the first rule that

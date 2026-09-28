@@ -457,9 +457,13 @@ fn an_exported_map_reaches_the_header() {
     let dir = scratch("named_maps_header");
     let path = write(&dir, "lib.tmc", LIB_TMC);
     let out = run_interface(&path);
+    // The printed header is `tmt fmt`'s canonical form, and this map's
+    // one-line pair list crosses the formatter's width limit, so it prints
+    // one pair per line.
     assert!(
         out.stdout.contains(
-            "export map wideToBits: wide -> bits { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }"
+            "  export map wideToBits: wide -> bits {\n    '^' => '_',\n    '$' => '_',\n    \
+             '0' -> '0',\n    '1' -> '1'\n  }\n"
         ),
         "{}",
         out.stdout

@@ -437,8 +437,24 @@ namespace mylib { // trailing comment
 fn qualified_routines(header: &str) -> BTreeMap<String, String> {
     let mut stack: Vec<Option<String>> = Vec::new();
     let mut out = BTreeMap::new();
+    // A signature `tmt fmt` wrapped past its width limit (the printer
+    // hands its text to the formatter) spans several lines: they are
+    // gathered up to the closing `;` and rejoined as the one-line form,
+    // so a wrapped routine compares its whole signature — `writes`
+    // clause included — rather than its first line alone.
+    let mut pending: Option<(String, String)> = None;
     for raw in header.lines() {
         let trimmed = raw.trim();
+        if let Some((qualified, mut text)) = pending.take() {
+            text.push(' ');
+            text.push_str(trimmed);
+            if trimmed.ends_with(';') {
+                out.insert(qualified, text.replace("( ", "(").replace(" )", ")"));
+            } else {
+                pending = Some((qualified, text));
+            }
+            continue;
+        }
         if trimmed.is_empty() {
             continue;
         }
@@ -461,13 +477,18 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
             } else {
                 format!("{}::{name}", ns.join("::"))
             };
-            out.insert(qualified, trimmed.to_string());
+            if trimmed.ends_with(';') {
+                out.insert(qualified, trimmed.to_string());
+            } else {
+                pending = Some((qualified, trimmed.to_string()));
+            }
             continue;
         }
         if trimmed.ends_with('{') {
             stack.push(None);
         }
     }
+    assert!(pending.is_none(), "an unterminated signature: {pending:?}");
     out
 }
 
@@ -547,6 +568,15 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
     for (name, source_line) in &source_routines {
         let object_line = &object_routines[name];
         assert_eq!(source_line, object_line, "`{name}`: the two arms disagree");
+    }
+    // Non-vacuity for a signature the formatter wraps on both arms:
+    // compared line by line, `minusOneFast` would reduce to its first line,
+    // `export routine minusOneFast(`, on each side and agree over nothing.
+    for routines in [&source_routines, &object_routines] {
+        assert_eq!(
+            routines["std::binaryNumbers::minusOneFast"],
+            "export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' });"
+        );
     }
 
     // The two arms' `use` lines agree too — both print exactly the same

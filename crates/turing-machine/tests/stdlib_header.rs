@@ -79,8 +79,24 @@ fn std_tmh_path() -> std::path::PathBuf {
 fn qualified_routines(header: &str) -> BTreeMap<String, String> {
     let mut stack: Vec<Option<String>> = Vec::new();
     let mut out = BTreeMap::new();
+    // A signature `tmt fmt` wrapped past its width limit (the printer
+    // hands its text to the formatter) spans several lines: they are
+    // gathered up to the closing `;` and rejoined as the one-line form,
+    // so a wrapped routine compares its whole signature — `writes`
+    // clause included — rather than its first line alone.
+    let mut pending: Option<(String, String)> = None;
     for raw in header.lines() {
         let trimmed = raw.trim();
+        if let Some((qualified, mut text)) = pending.take() {
+            text.push(' ');
+            text.push_str(trimmed);
+            if trimmed.ends_with(';') {
+                out.insert(qualified, text.replace("( ", "(").replace(" )", ")"));
+            } else {
+                pending = Some((qualified, text));
+            }
+            continue;
+        }
         if trimmed.is_empty() {
             continue;
         }
@@ -103,13 +119,18 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
             } else {
                 format!("{}::{name}", ns.join("::"))
             };
-            out.insert(qualified, trimmed.to_string());
+            if trimmed.ends_with(';') {
+                out.insert(qualified, trimmed.to_string());
+            } else {
+                pending = Some((qualified, trimmed.to_string()));
+            }
             continue;
         }
         if trimmed.ends_with('{') {
             stack.push(None);
         }
     }
+    assert!(pending.is_none(), "an unterminated signature: {pending:?}");
     out
 }
 
@@ -198,6 +219,18 @@ fn the_header_and_the_source_agree_on_every_declared_contract() {
             write_set_suffix(source_line),
             write_set_suffix(header_line),
             "write sets disagree for `{name}`:\n source: {source_line}\n header: {header_line}"
+        );
+    }
+
+    // Non-vacuity for a signature the formatter wraps: `minusOneFast`'s
+    // four-glyph `writes` clause puts it past the width limit, so it spans
+    // three lines in both texts. Compared line by line, both sides would
+    // extract only `export routine minusOneFast(` — no `writes` at all —
+    // and agree over nothing; the extraction must rejoin the whole clause.
+    for routines in [&source_routines, &header_routines] {
+        assert_eq!(
+            routines["std::binaryNumbers::minusOneFast"],
+            "export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' });"
         );
     }
 
