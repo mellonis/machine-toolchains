@@ -352,6 +352,22 @@ b.tmc:3:5: lint: map `dead` is never used by any binding
 The fix deletes the whole declaration, including any leading doc/attention
 run, mirroring `unused-alphabet`'s own fix.
 
+### unused-set
+
+A `set NAME { … }` declaration — a named glyph set, expanded in place
+wherever an alphabet body, a contract clause, or a pattern cell names it —
+that none of those three sites names. Export-independent, the same
+reasoning as `unused-alphabet`/`unused-map`: a set is data for those three
+element-list sites, never a tape type in its own right, so an
+exported-but-unused declaration is as dead as a private one.
+
+```
+b.tmc:1:5: lint: set `dead` is never used by any alphabet, contract or pattern
+```
+
+The fix deletes the whole declaration, including any leading doc/attention
+run, mirroring `unused-alphabet`'s own fix.
+
 ### unused-tape
 
 A machine `tape` no rule ever reads, writes, or moves, and no reuse ever

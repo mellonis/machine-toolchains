@@ -159,6 +159,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ),
     ("unused-alphabet", rules::unused_alphabet::check),
     ("unused-map", rules::unused_map::check),
+    ("unused-set", rules::unused_set::check),
     ("unused-tape", rules::unused_tape::check),
     ("unused-exit", rules::unused_exit::check),
     ("deprecated-call", rules::deprecated_call::check),

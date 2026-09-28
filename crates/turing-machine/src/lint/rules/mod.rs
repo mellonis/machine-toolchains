@@ -24,5 +24,6 @@ pub(crate) mod unused_graph;
 pub(crate) mod unused_import;
 pub(crate) mod unused_map;
 pub(crate) mod unused_routine;
+pub(crate) mod unused_set;
 pub(crate) mod unused_tape;
 pub(crate) mod writes_through_collapse;

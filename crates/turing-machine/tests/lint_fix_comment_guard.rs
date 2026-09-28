@@ -11,14 +11,14 @@
 //! trigger a fix at all — a fixture that never produced a fix would pass the
 //! withhold assertion vacuously.
 //!
-//! Roster: eleven rules emit a `Fix`. Nine are pinned here; the other two
+//! Roster: twelve rules emit a `Fix`. Ten are pinned here; the other two
 //! are accounted for rather than skipped. `contract-clause-overlap` — the rule
 //! the guard was hoisted out of — keeps its withhold test in its own unit
 //! tests. `dead-map-pair` is exempt BY MECHANISM: its one edit replaces the
 //! pair's `->` arrow token with `=>`, and a span covering a single token can
 //! never contain a comment, so the guard has nothing to withhold there.
-//! `unused-map` (whole-declaration delete, same shape as `unused-alphabet`)
-//! is pinned here alongside its siblings.
+//! `unused-map` and `unused-set` (whole-declaration deletes, the same shape
+//! as `unused-alphabet`) are pinned here alongside their siblings.
 //!
 //! Comment placement is free: every span is a node range read off the
 //! green tree (`lint/rules/spans.rs`), so a comment anywhere inside a
@@ -214,6 +214,26 @@ machine {
 ",
         "'1' -> '1' }",
         "unused-map",
+    );
+}
+
+/// Mutation: an edit span narrower than the declaration (e.g. `set.name_span`
+/// alone) — the comment would then sit outside the span, and the guard
+/// would ship a fix that deletes the name but leaves the comment orphaned
+/// mid-declaration instead of withholding it.
+#[test]
+fn unused_set_withholds_the_fix_when_the_declaration_holds_a_comment() {
+    assert_guard_pair(
+        "\
+set dead { '_', 'x' }
+alphabet ab { '_', 'x' }
+machine {
+  tape t: ab;
+  entry state s { [*] -> stop; }
+}
+",
+        "'x' }",
+        "unused-set",
     );
 }
 

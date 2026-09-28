@@ -1,10 +1,11 @@
 //! Pins the APPLIED TEXT of every quickfix whose edit span comes from
 //! `lint/rules/spans.rs` (`docs/tmt/lint.md` (quickfix availability)) —
-//! the six span queries over the green tree:
+//! the seven span queries over the green tree:
 //!
 //! | query | rules | what it answers |
 //! |---|---|---|
 //! | `decl_span::<AlphabetView>` | `unused-alphabet` | the declaration node's range |
+//! | `decl_span::<SetDeclView>` | `unused-set` | the declaration node's range |
 //! | `decl_span::<ReuseView>` | `unused-routine`, `unused-graph` | the declaration node's range |
 //! | `decl_span::<GraftView>` / `::<BindView>` | `unused-graft-instance`, `unused-binding` | the statement node's range |
 //! | `as_clause_span` | `unused-graft-name` | from the `)` to the instance name, inside the GRAFT node |
@@ -183,6 +184,45 @@ fn unused_alphabet_doc_run_fix_is_withheld_not_truncated() {
         ds[0].fix.is_none(),
         "a fix spanning a comment must be withheld"
     );
+}
+
+// -- unused-set / decl_span::<SetDeclView> ---------------------------------
+
+const SET_CLEAN: &str = "\
+set dead { '_' }
+
+alphabet ab { '_' }
+
+machine {
+  tape main: ab;
+  entry state s { [*] -> move [>] stop; }
+}
+";
+
+/// The `set dead { '_' }` line is gone entirely (its own newline stays,
+/// producing the leading blank line); `ab`, the `machine`, and the blank
+/// line between the two declarations are byte-identical to the input —
+/// mirrors `ALPHABET_FIXED`'s own shape.
+const SET_FIXED: &str = "\n\nalphabet ab { '_' }\n\nmachine {\n  tape main: ab;\n  entry state s { [*] -> move [>] stop; }\n}\n";
+
+/// Mutation: an edit span that eats the following declaration or leaves a
+/// blank line — either would show up here as a mismatch against
+/// `SET_FIXED`.
+#[test]
+fn unused_set_fix_deletes_the_declaration() {
+    let ds = findings_for(SET_CLEAN, "unused-set");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(
+        ds[0].message,
+        "set `dead` is never used by any alphabet, contract or pattern"
+    );
+    let fix = ds
+        .into_iter()
+        .next()
+        .unwrap()
+        .fix
+        .expect("decl_span found the declaration");
+    assert_eq!(apply_fix(SET_CLEAN, &fix.edits), SET_FIXED);
 }
 
 // -- unused-routine / decl_span::<ReuseView> -------------------------------
