@@ -451,8 +451,9 @@ a header-only library is a `tmt build` concept only.
 
 A link warning names a site the linker can see is suspect but will not
 refuse — a callee whose alphabet is narrower than the caller's band, one
-whose glyphs differ at the same width, or a call with no continuation
-into a callee that can return. It prints always, in the same format a
+whose glyphs differ at the same width, a call with no continuation
+into a callee that can return, or a routine body returning through an
+exit its signature does not declare. It prints always, in the same format a
 compile warning does, and carries a bracketed code:
 
 ```
@@ -486,6 +487,15 @@ deliberate `trap` placed for some other reason reads the same way and
 warns too — the accepted false positive `--allow
 tail-call-no-continuation` silences.
 
+`undeclared-exit` fires on a hand-written `.tma` routine whose body
+carries a `retx #k` with `k` at or above the `exits=` count on its
+`.routine` line; a `.tmc` source never produces one, since the compiler
+numbers each exit by its `state` parameter's position. The warning is
+what a `--call-mech frames` link reports, where that `retx` traps at run
+time. `mono`, and `hybrid` wherever it copies the body into a call site
+(a lone exit-bearing site, under the default), refuse the same body as
+a bad binding instead (`docs/core.md (link warnings)`).
+
 In manifest mode `-Werror`'s promotion is per TARGET, not per build: a
 strict refusal stops the build where it stands, and the targets already
 linked keep the artifacts they wrote — the same way a plain link error
@@ -496,6 +506,7 @@ on a later target behaves.
 | `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
 | `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
 | `tail-call-no-continuation` | A call site is the last instruction of its function, or is immediately followed by the dialect's own trap, into a callee that can return: an honest return either falls through into whatever the linker places next, or lands on the trap in place of a continuation the source never wrote. |
+| `undeclared-exit` | A routine's body returns through an exit index at or above the exit count its signature declares, so no call site's exit vector has an entry for it: a framed call traps there at run time, and a mechanism that copies the body into the site refuses the link instead. |
 
 ## `tmt build`
 

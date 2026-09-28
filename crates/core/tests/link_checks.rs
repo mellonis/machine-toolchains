@@ -18,7 +18,9 @@ const ARCH: u8 = 0x7E;
 /// lowers into, the read/write/move/trap surface mono stamping projects,
 /// and an unconditional `jmp` — a relocated tail jump is a
 /// `SiteKind::Plain` site exactly like a relocated call, so the
-/// exit-count tests need one to reach a callee that way too.
+/// exit-count tests need one to reach a callee that way too. `retx` is
+/// the multi-exit return: an `Imm8` operand like `trap`, told apart from
+/// it only by its `Stop` flow (docs/core.md (link warnings)).
 fn fake_syntax() -> ArchSyntax {
     use Flow::{Call, FallThrough as FT, Jump, Stop};
     ArchSyntax {
@@ -82,6 +84,12 @@ fn fake_syntax() -> ArchSyntax {
                 mnemonic: "trap",
                 operand: OperandKind::Imm8,
                 flow: FT,
+            },
+            SyntaxEntry {
+                opcode: 0x19,
+                mnemonic: "retx",
+                operand: OperandKind::Imm8,
+                flow: Stop,
             },
             SyntaxEntry {
                 opcode: 0x0E,
@@ -1038,6 +1046,150 @@ won:    nop
             .diagnostics
             .iter()
             .all(|d| d.code != "tail-call-no-continuation"),
+        "{:?}",
+        out.report.diagnostics
+    );
+}
+
+/// A callee declaring TWO exits whose body's last instruction is `last`
+/// — the one line the undeclared-exit fixtures vary, so all three put it
+/// at the same blob offset (the assembler's `ent` and `rd` are one byte
+/// each, `retx #0` two).
+fn two_exit_callee(last: &str) -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=2
+.param p, ('_', '0', '1')
+.section code
+.func main
+        call    sub [0] exits=(hit, miss)
+        stp
+hit:    stp
+miss:   stp
+.func sub
+        rd
+        retx    #0
+        {last}
+"
+    )
+}
+
+/// The blob offset `two_exit_callee` puts its varied instruction at.
+const VARIED_OFFSET: u32 = 4;
+
+fn undeclared_exits(out: &mtc_core::linker::LinkOutput) -> Vec<&mtc_core::linker::LinkDiagnostic> {
+    out.report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "undeclared-exit")
+        .collect()
+}
+
+/// A body returning through exit 2 of a callee that declares two: the
+/// FRAMES link succeeds (at run time the return traps) and the warning
+/// names the callee, the index and the instruction's own offset. A
+/// copying mechanism already refuses the same body outright, so the mono
+/// half pins that the warning never has to carry that case.
+///
+/// Mutation it catches: drop the scan (or compare `k > exits` instead of
+/// `k >= exits`) and the frames link reports nothing.
+#[test]
+fn a_return_through_an_undeclared_exit_warns() {
+    let src = two_exit_callee("retx    #2");
+    let out = link(&fake_syntax(), &[asm(&src)], &[], opts(CallMech::Frames))
+        .expect("a warning does not stop the link");
+    let ds = undeclared_exits(&out);
+    assert_eq!(ds.len(), 1, "{:?}", out.report.diagnostics);
+    assert_eq!(ds[0].function, "sub");
+    assert_eq!(ds[0].offset, VARIED_OFFSET);
+    assert!(
+        ds[0].message.contains("`sub`") && ds[0].message.contains("exit 2"),
+        "{}",
+        ds[0].message
+    );
+
+    let err = link(&fake_syntax(), &[asm(&src)], &[], opts(CallMech::Mono))
+        .expect_err("a copying mechanism refuses the same body");
+    assert!(matches!(err, LinkError::BadBinding { .. }), "{err:?}");
+}
+
+/// The in-range near miss: exit 1 of two is declared.
+///
+/// Mutation it catches: an off-by-one bound (`k + 1 >= exits`) and this
+/// honest body warns.
+#[test]
+fn a_return_through_a_declared_exit_is_silent() {
+    let src = two_exit_callee("retx    #1");
+    for mech in MECHS {
+        let out = link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("links");
+        assert!(
+            undeclared_exits(&out).is_empty(),
+            "{mech}: {:?}",
+            out.report.diagnostics
+        );
+    }
+}
+
+/// The operand-kind near miss: `trap #2` shares `retx`'s `Imm8` operand
+/// and sits at the same offset, but falls through rather than returning.
+///
+/// Mutation it catches: classifying an exit return by operand kind alone
+/// (every `Imm8` instruction) and this trap reads as exit 2.
+#[test]
+fn a_trap_with_the_same_immediate_is_not_an_exit() {
+    let src = two_exit_callee("trap    #2");
+    for mech in MECHS {
+        let out = link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("links");
+        assert!(
+            undeclared_exits(&out).is_empty(),
+            "{mech}: {:?}",
+            out.report.diagnostics
+        );
+    }
+}
+
+/// A body whose interface declares no exits at all yet reaches
+/// `retx #0`, ahead of a narrow plain call later in the same blob: both
+/// findings land in `sub`, and they come out in blob-offset order even
+/// though the site grading and the body scan are two separate walks.
+///
+/// Mutation it catches: append the body scan's findings after the site
+/// grading's without ordering them, and the call's warning (offset 3)
+/// comes out ahead of the return's (offset 1, behind the `ent`).
+#[test]
+fn an_undeclared_exit_merges_with_site_warnings_in_offset_order() {
+    const SRC: &str = "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3)
+.param p, ('_', '0', '1')
+.routine leaf, tapes=1, alpha=(2)
+.param q, ('_', '0')
+.section code
+.func main
+        call    sub
+        stp
+.func sub
+        retx    #0
+        call    leaf
+        ret
+.func leaf
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames))
+        .expect("warnings do not stop the link");
+    let in_sub: Vec<_> = out
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.function == "sub")
+        .map(|d| (d.offset, d.code))
+        .collect();
+    assert_eq!(
+        in_sub,
+        vec![(1, "undeclared-exit"), (3, "narrow-alphabet")],
         "{:?}",
         out.report.diagnostics
     );

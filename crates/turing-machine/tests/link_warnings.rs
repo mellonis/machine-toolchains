@@ -269,3 +269,213 @@ fn manifest_mode_prints_the_warning_and_still_succeeds_by_default() {
     assert!(dir.join("app.tmx").is_file());
     assert!(dir.join("app.tmx.map").is_file());
 }
+
+// --- undeclared-exit -----------------------------------------------------
+
+/// A hand-written callee declaring two exits whose second branch returns
+/// through exit 2 — what `tmt compile -S` prints for a two-exit routine,
+/// with its `retx #1` edited to `retx #2`.
+const UNDECLARED_EXIT: &str = "\
+.section tables
+T0:     .row    [0]
+        .row    [*]
+D0:     .targets s__0, s__1
+.section code
+.routine sub, tapes=1, alpha=(3), exits=2, noreturn
+.param t, ('_', '0', '1'), opaque
+.func sub local
+        rd
+        mtc     T0
+        djmp    D0
+s__0:
+        retx    #0
+s__1:
+        retx    #2
+.routine main, tapes=2, alpha=(3, 3)
+.param d, ('_', '0', '1')
+.param out, ('_', '0', '1')
+.func main
+        call    sub [0] exits=(won, lost)
+        jmp     done
+won:
+        wrmv    [-, 1], [., .]
+        stp
+lost:
+        wrmv    [-, 2], [., .]
+        stp
+done:
+        hlt
+";
+
+/// End to end on the CLI: a FRAMES link of the body above succeeds and
+/// prints the `undeclared-exit` warning naming the callee and the index.
+/// Frames is passed explicitly because the default mechanism copies a
+/// lone exit-bearing site into its caller, and a copy of this body is
+/// already refused outright.
+///
+/// Mutation it catches: drop the body scan from the linker, or leave the
+/// code out of the registry the CLI renders from, and nothing prints.
+#[test]
+fn a_return_through_an_undeclared_exit_warns_on_the_cli() {
+    let dir = scratch("link_warnings_undeclared_exit");
+    let src = dir.join("fire.tma");
+    std::fs::write(&src, UNDECLARED_EXIT).unwrap();
+    let obj = dir.join("fire.tmo");
+    execute(&args(&[
+        "asm",
+        src.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .expect("assembles");
+    let out = execute(&args(&[
+        "link",
+        obj.to_str().unwrap(),
+        "--nostdlib",
+        "--call-mech",
+        "frames",
+        "-o",
+        dir.join("a.tmx").to_str().unwrap(),
+    ]))
+    .expect("a warning does not stop the link");
+    assert_eq!(out.code, 0, "a warning does not fail the link");
+    assert!(
+        out.stderr.contains("[undeclared-exit]")
+            && out.stderr.contains("`sub`")
+            && out.stderr.contains("exit 2"),
+        "{}",
+        out.stderr
+    );
+}
+
+/// Every `.tmc` and `.tma` the repository ships, recursively, under the
+/// three roots that hold real programs — the same roots
+/// `plain_site_sweep.rs` measures.
+fn corpus() -> Vec<std::path::PathBuf> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let mut out = Vec::new();
+    for dir in [
+        root.join("docs/examples"),
+        root.join("crates/turing-machine/tests/golden"),
+        root.join("crates/turing-machine/src/stdlib"),
+    ] {
+        collect(&dir, &mut out);
+    }
+    out.sort();
+    out
+}
+
+fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect(&p, out);
+        } else if matches!(
+            p.extension().and_then(|s| s.to_str()),
+            Some("tmc") | Some("tma")
+        ) {
+            out.push(p);
+        }
+    }
+}
+
+/// The control the corpus sweep carries: a routine with two `state`
+/// parameters, which the compiler lowers to `retx #0` and `retx #1`.
+/// No shipped program declares an exit-bearing ROUTINE today — every
+/// shipped `state` parameter belongs to a graph, which is spliced into
+/// its host and returns through nothing — so without this control the
+/// sweep would never reach a body the scan grades.
+const COMPILED_TWO_EXITS: &str = "\
+alphabet ab { '_', '0', '1' }
+
+routine sub(tape t: ab, state hit, state miss) {
+  entry state s {
+    ['_'] -> goto hit;
+    [*]   -> goto miss;
+  }
+}
+
+machine {
+  tape d: ab;
+  tape out: ab;
+  entry state go { [*, *] -> call sub(t = d, hit = won, miss = lost) then done; }
+  state won  { [*, *] -> write [-, '0'] stop; }
+  state lost { [*, *] -> write [-, '1'] stop; }
+  state done { [*, *] -> halt; }
+}
+";
+
+/// Every shipped program that builds standalone, plus the compiled
+/// control above, links against the embedded stdlib with no
+/// `undeclared-exit` finding: the compiler lowers a state parameter to
+/// the exit its own position names, so an honest body never trips the
+/// scan. The scan runs once, before any mechanism lowers anything, so
+/// one mechanism covers it — FRAMES, the one that never refuses an
+/// exit-bearing body a copying mechanism would. Programs that do not
+/// build standalone (the stdlib itself, a multi-unit target's pieces)
+/// are skipped; the floor keeps the sweep from passing vacuously.
+///
+/// Mutation it catches: grade every multi-exit return regardless of its
+/// index, and the control turns this red — the shipped corpus alone
+/// would not, since none of it reaches a `retx`.
+#[test]
+fn no_shipped_program_returns_through_an_undeclared_exit() {
+    use mtc_core::linker::{CallMech, LinkOptions, link};
+    use mtc_turing_machine::asm::{assemble, tm1_syntax};
+    use mtc_turing_machine::compiler::{CompileOptions, compile};
+
+    let stdlib = mtc_turing_machine::stdlib::object().clone();
+    let syntax = tm1_syntax();
+    let mut linked = 0usize;
+    let mut findings = Vec::new();
+    let control = std::path::PathBuf::from("<compiled two-exit control>.tmc");
+    for path in corpus().into_iter().chain([control.clone()]) {
+        let src = if path == control {
+            COMPILED_TWO_EXITS.to_string()
+        } else {
+            std::fs::read_to_string(&path).unwrap()
+        };
+        let obj = if path.extension().and_then(|s| s.to_str()) == Some("tma") {
+            match assemble(&src, false) {
+                Ok(o) => o,
+                Err(_) => continue,
+            }
+        } else {
+            match compile(&src, CompileOptions::default()) {
+                Ok(out) => out.object,
+                Err(_) => continue,
+            }
+        };
+        let Ok(out) = link(
+            &syntax,
+            std::slice::from_ref(&obj),
+            std::slice::from_ref(&stdlib),
+            LinkOptions {
+                call_mech: CallMech::Frames,
+                ..Default::default()
+            },
+        ) else {
+            continue;
+        };
+        linked += 1;
+        findings.extend(
+            out.report
+                .diagnostics
+                .into_iter()
+                .filter(|d| d.code == "undeclared-exit")
+                .map(|d| format!("{}: {}", path.display(), d.message)),
+        );
+    }
+    assert!(
+        linked >= 16,
+        "the corpus sweep linked only {linked} programs"
+    );
+    assert!(findings.is_empty(), "{findings:#?}");
+}

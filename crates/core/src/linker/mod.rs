@@ -386,6 +386,13 @@ pub const DIAGNOSTIC_CODES: &[(&str, &str)] = &[
          honest return either falls through into whatever the linker places next, \
          or lands on the trap in place of a continuation the source never wrote.",
     ),
+    (
+        "undeclared-exit",
+        "A routine's body returns through an exit index at or above the exit \
+         count its signature declares, so no call site's exit vector has an entry \
+         for it: a framed call traps there at run time, and a mechanism that \
+         copies the body into the site refuses the link instead.",
+    ),
 ];
 
 /// One hybrid exit-bearing fold decision, for the link report

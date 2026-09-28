@@ -776,7 +776,9 @@ pub(super) fn scan_sites<'a>(
 /// `decode::decode_stream` front to back), so iterating `sites` in
 /// index order with each function's list in its own order already
 /// yields diagnostics in (function order, then blob offset) — the order
-/// `LinkReport.diagnostics` promises.
+/// `LinkReport.diagnostics` promises. Each function's own body is scanned
+/// here too, for returns through exits it never declared
+/// ([`undeclared_exits`]), and merged into that order.
 pub(super) fn check_sites(
     syntax: &ArchSyntax,
     order: &[FuncRef],
@@ -786,6 +788,7 @@ pub(super) fn check_sites(
     let mut out = Vec::new();
     for (fi, func_sites) in sites.iter().enumerate() {
         let caller_sig = order[fi].signature.unwrap_or(machine_sig);
+        let first = out.len();
         for site in func_sites {
             match site {
                 SiteKind::Plain { addr, callee } => {
@@ -870,8 +873,50 @@ pub(super) fn check_sites(
                 SiteKind::RawCallM { .. } => {}
             }
         }
+        undeclared_exits(syntax, order, fi, &mut out);
+        // The body scan is a second walk over the same function, so its
+        // findings are merged into the site grading's by offset. A stable
+        // sort keeps two findings at one site (two graded tapes) in the
+        // order they were raised.
+        out[first..].sort_by_key(|d| d.offset);
     }
     Ok(out)
+}
+
+/// The `undeclared-exit` link warning (docs/core.md (link warnings)):
+/// every multi-exit return in function `fi`'s body whose index is at or
+/// above the exit count its interface declares. No call site's exit
+/// vector has an entry for such an index — a framed call traps on it at
+/// run time, and a copy spliced into a site is refused outright.
+///
+/// Reads the function's ORIGINAL record: this runs before any lowering,
+/// and a stamped copy carries no interface to compare against. A
+/// function with no interface declares nothing and is not graded — a
+/// hand-authored frame descriptor, not a signature, supplies the exits
+/// such a body returns through.
+fn undeclared_exits(
+    syntax: &ArchSyntax,
+    order: &[FuncRef],
+    fi: usize,
+    out: &mut Vec<super::LinkDiagnostic>,
+) {
+    let Some(interface) = order[fi].interface else {
+        return;
+    };
+    for (offset, k) in super::stamp::body_exits(syntax, &order[fi].blob) {
+        if k >= interface.exits {
+            out.push(diag_at(
+                order,
+                fi,
+                offset,
+                "undeclared-exit",
+                format!(
+                    "`{}` returns through exit {k}, but its signature declares {} exit(s)",
+                    order[fi].name, interface.exits
+                ),
+            ));
+        }
+    }
 }
 
 /// The `tail-call-no-continuation` link warning (docs/core.md (link
