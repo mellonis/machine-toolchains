@@ -3,7 +3,7 @@
 //! writes, subtracted from its `writes` set (or from the whole alphabet when
 //! there is no `writes` clause). Two tokens — the reserved word `never`, then
 //! `writes` — in the canonical slot between `writes` and `enters`. The clause
-//! was spelled `never writes` in `.tmc` 0.1; that spelling is no longer a
+//! was spelled `preserves` in `.tmc` 0.1; that spelling is no longer a
 //! keyword, and a program still writing it gets a parse error that names
 //! the new spelling.
 //!

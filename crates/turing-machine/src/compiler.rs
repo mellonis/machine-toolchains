@@ -2182,10 +2182,10 @@ pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
     let declared = tape
         .writes
         .unwrap_or_else(|| SymSet::full(tape.cardinality as u32));
-    let preserved = tape.never_writes.unwrap_or_else(SymSet::empty);
+    let excluded = tape.never_writes.unwrap_or_else(SymSet::empty);
     let mut allowed = SymSet::empty();
     for index in declared.iter() {
-        if !preserved.contains(index) {
+        if !excluded.contains(index) {
             allowed.insert(index);
         }
     }

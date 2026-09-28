@@ -818,10 +818,12 @@ impl StateView {
 ///
 /// That exclusion is a CONSEQUENCE of bracketing the clauses, not the
 /// reason for it, and the accessors below do not depend on it. Measured
-/// with the `CONTRACT_CLAUSE` bracket removed, on a `volatile tape a: x`
-/// carrying a `writes { '0' }` clause and a second, one-word clause: this
-/// run became six IDENTs (`volatile`, `tape`, `a`, `x` and the two clause
-/// keywords), and every positional accessor still answered correctly
+/// with the `CONTRACT_CLAUSE` bracket removed, on
+/// `volatile tape a: x writes { '0' } preserves { '1' }` (the second
+/// clause in its `.tmc` 0.1 spelling; any one-word clause keyword, e.g.
+/// `enters { '1' }`, gives the same count): this run became six IDENTs
+/// (`volatile`, `tape`, `a`, `x`, `writes`, `preserves`), and every
+/// positional accessor still answered correctly
 /// — `volatile()` true, `kind()` `Tape`, `name_token()` `a`,
 /// `alphabet_token()` `Some("x")` — because a clause keyword can only
 /// ever sit AFTER the alphabet. The single thing that breaks is
