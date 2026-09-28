@@ -379,7 +379,10 @@ case, which is exactly the case that forces version 4.
 
 Digests are content addresses, not offsets: a `u32` CRC-32 — the same
 checksum the containers themselves use — of the graph body being
-addressed, matched like a short hash and never decoded. Assembly text
+addressed, matched like a short hash and never decoded. The TM-1
+compiler digests the body as its header printer renders it, before any
+formatting of the printed header, so a change to how `tmt fmt` lays a
+header out never moves a digest. Assembly text
 spells one as an unsigned decimal number (the assembly lexer has no
 hexadecimal literal).
 
@@ -668,8 +671,12 @@ as an empty one. What each says:
   written-but-empty `enters=()`/`leaves=()` is **rejected** — a clause
   lists at least one glyph, and the way to say "no clause" is to omit the
   suffix. Every glyph listed must be one of the tape's own;
-- `opaque` marks a tape every state reads as a wildcard: the routine
-  never discriminates its glyphs.
+- `opaque` marks a tape the routine can read the opaque index on
+  without that index ever deciding whether a rule matches — the property
+  an open binding (the `*` of a call operand's pair list, "Bound calls"
+  below) requires of its callee tape, and which the linker checks before
+  it accepts one. The `.tmc` compiler infers it and has no spelling for
+  it; the rule it infers by is `docs/tmt/language.md (symbol maps)`.
 
 Placement is strict, because the record it builds is per-function and
 positional. A `.param` is legal in the **code section only**, it follows

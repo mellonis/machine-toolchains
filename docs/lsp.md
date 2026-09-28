@@ -252,15 +252,17 @@ than the syntax tree — a document being typed into is a document that
 does not parse, and anchoring on the tree would switch completions off
 exactly when they are wanted. Its contexts:
 
-- **Top-level and world-item position** — the reserved words legal there
-  (`alphabet`, `export`, `graph`, `machine`, `namespace`, `routine`,
-  `use`; inside a world `bind`, `entry`, `graft`, `state`, and `tape` in
-  the machine block).
+- **Top-level and world-item position** — reserved words legal there
+  (`alphabet`, `export`, `graph`, `machine`, `map`, `namespace`,
+  `routine`, `use`; inside a world `bind`, `entry`, `graft`, `state`, and
+  `tape` and `volatile` in the machine block). `set` is not offered.
 - **`use` paths** — the importable alphabet and world names.
 - **An alphabet reference** — the declared alphabet names.
 - **A vector cell** — the enclosing world's tape at *that* vector
-  position supplies its alphabet's symbols, spelled the way source spells
-  them, alongside the vector's own literal vocabulary: `*` in a pattern,
+  position supplies its alphabet's symbols — a symbol whose label names a
+  number spelled bare whatever quotes the alphabet gave it (`'7'` and `7`
+  are one symbol), a member a glyph set brought in included, and every
+  other symbol quoted — alongside the vector's own literal vocabulary: `*` in a pattern,
   `-` in a write vector, and the closed, tape-independent `<` / `>` / `.`
   in a move vector.
 - **An action, a `goto` target, or a continuation** — the enclosing
@@ -562,8 +564,10 @@ The outline, structural in every service and never gated on resolution.
 
 - **`.pmc`** — namespace blocks (reopened blocks stay separate siblings,
   as in source) containing functions, with nested functions as children.
-- **`.tmc`** — alphabets, namespaces (their items as children), routines
-  and graphs (their world items as children), and the machine block.
+- **`.tmc`** — alphabets, glyph sets and named maps, namespaces (their
+  items as children), routines and graphs (their world items as
+  children), and the machine block. A set is a leaf, like an alphabet;
+  hover and go-to-definition do not resolve a reference to a set.
 - **`.pma`** — functions with their own labels as children.
 - **`.tma`** — one node per function with its code labels as children, one
   per `.routine` signature, and one per labeled table or frame descriptor.

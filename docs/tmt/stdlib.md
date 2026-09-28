@@ -141,6 +141,41 @@ guarantee that holds on only one input shape cannot be written as one.
 Their `writes` clause states which symbols a run may write; their doc-line
 prose remains the only statement of the conditional part, by design.
 
+**Head contracts.** Every tape parameter in the library — each routine's
+and each graph's — also declares a `leaves` clause
+(`docs/tmt/language.md (head-position clauses)`): the glyphs the head may
+be on when the routine returns, or when the graph leaves through `done`.
+The Contract column below carries it beside `writes`, and `std.tmh` ("The
+shipped header") is the authority for every one. Each clause was taken
+from the routine's body, not from its prose, and it is the body's full
+answer: where a routine accepts a head on a blank and leaves it there,
+the blank is in the clause.
+
+No routine declares `enters`. Every entry state in the library accepts
+every glyph — the prose says what each routine does from a head that is
+not on a number, usually "leaves the tape untouched" — so the clause a
+body supports is the whole alphabet, which promises no more than no
+clause at all. A narrower `enters` would be worse than none: a debug
+build of a caller would plant a check that traps a caller the routine
+serves correctly today.
+
+The library is built with its contract checks stripped (`--strip-asserts`,
+`docs/tmt/cli.md (compile)`), both in the object `tmt` links and in the
+browser bundle's twin, so a clause is never a run-time check inside the
+library. It is two other things. Where a body pins the leaving glyph to
+one symbol, the compiler checks the clause against that body when the
+library is built: for a routine that is a single `graft` of its graph —
+the facade shape ("Anatomy: a graph and its facade", below) — that is
+the graph's own clause, since the facade has no exit rows of its own.
+And it is a promise callers read: a header carries it, and the
+`enters-unmet` lint believes it at a caller's `then`
+(`docs/tmt/lint.md (enters-unmet)`).
+
+`invertNumber` and `minusOne` in the delimited namespace promise
+`leaves { '$' }` for a well-formed `'^'`…`'$'` number, which is what the
+delimited representation is; their bodies walk to a `'^'` first, so a
+head that is not on such a number is outside what either routine is for.
+
 ### `std::binaryNumbers` — the delimited representation
 
 Every routine takes a single tape parameter, `num`, typed by the namespace's
@@ -149,16 +184,16 @@ routine's `writes` clause.
 
 | Routine | On entry | Effect | Head on exit | Contract |
 |---|---|---|---|---|
-| `goToNumber()` | head on the number, any cell up to and including its `'$'` | tape unchanged | that `'$'` | `writes {}` |
-| `goToNumbersStart()` | head on the number, any cell from its `'^'` rightward | tape unchanged | that `'^'` | `writes {}` |
-| `goToNextNumber()` | head on the current number's `'$'`, or the blank gap after it | tape unchanged | the next number's `'$'` | `writes {}` |
-| `goToPreviousNumber()` | head on the current number's `'$'` | tape unchanged | the previous number's `'$'` | `writes {}` |
-| `deleteNumber()` | head on the number, any cell | every cell of `'^'`…`'$'` becomes blank | the cell where the `'$'` was | `writes { '_' }` |
-| `normalizeNumber()` | head on the number | leading `'0'`s stripped; the `'^'` relocates rightward. Zero keeps its form `'^$'` | the `'$'` | `writes { '_', '^' }` |
-| `plusOne()` | head on the number | adds one; on overflow the number grows one cell left (`'^111$'` → `'^1000$'`) | the `'$'` | `writes { '^', '0', '1' }` |
-| `minusOneFast()` | head on the number | subtracts one by direct borrow, then normalizes. Zero stays zero (`'^$'` − 1 → `'^$'`) | the `'$'` | `writes { '_', '^', '0', '1' }` |
-| `invertNumber()` | head on the number | flips every bit | the `'$'` | `writes { '0', '1' }` |
-| `minusOne()` | head on the number | subtracts one via `x − 1 == ~(~x + 1)`; result normalized (`'^1$'` − 1 → `'^$'`) | the `'$'` | `writes { '_', '^', '0', '1' }` |
+| `goToNumber()` | head on the number, any cell up to and including its `'$'` | tape unchanged | that `'$'` | `writes {}` `leaves { '$' }` |
+| `goToNumbersStart()` | head on the number, any cell from its `'^'` rightward | tape unchanged | that `'^'` | `writes {}` `leaves { '^' }` |
+| `goToNextNumber()` | head on the current number's `'$'`, or the blank gap after it | tape unchanged | the next number's `'$'` | `writes {}` `leaves { '$' }` |
+| `goToPreviousNumber()` | head on the current number's `'$'` | tape unchanged | the previous number's `'$'` | `writes {}` `leaves { '$' }` |
+| `deleteNumber()` | head on the number, any cell | every cell of `'^'`…`'$'` becomes blank | the cell where the `'$'` was, now blank | `writes { '_' }` `leaves { '_' }` |
+| `normalizeNumber()` | head on the number | leading `'0'`s stripped; the `'^'` relocates rightward. Zero keeps its form `'^$'` | the `'$'`; entered on a blank, that blank | `writes { '_', '^' }` `leaves { '_', '$' }` |
+| `plusOne()` | head on the number | adds one; on overflow the number grows one cell left (`'^111$'` → `'^1000$'`) | the `'$'`; entered on a blank, that blank | `writes { '^', '0', '1' }` `leaves { '_', '$' }` |
+| `minusOneFast()` | head on the number | subtracts one by direct borrow, then normalizes. Zero stays zero (`'^$'` − 1 → `'^$'`) | the `'$'`; entered on a blank, that blank | `writes { '_', '^', '0', '1' }` `leaves { '_', '$' }` |
+| `invertNumber()` | head on the number | flips every bit | the `'$'` | `writes { '0', '1' }` `leaves { '$' }` |
+| `minusOne()` | head on the number | subtracts one via `x − 1 == ~(~x + 1)`; result normalized (`'^1$'` − 1 → `'^$'`) | the `'$'` | `writes { '_', '^', '0', '1' }` `leaves { '$' }` |
 
 `deleteNumber`, `normalizeNumber`, `plusOne`, and `minusOneFast` treat a
 head on a blank as a no-op and leave the tape untouched. `invertNumber` and
@@ -186,10 +221,10 @@ routine's clause; `invertNumber` states its as a `never writes` clause.
 
 | Routine | Effect | Head on exit | Contract |
 |---|---|---|---|
-| `plusOne()` | adds one; on overflow the number grows one cell left (`'111'` → `'1000'`) | data-dependent: the digit the carry settled on — the cell that flipped `'0'` → `'1'`, which on overflow is the new leading `'1'` | `writes { '0', '1' }` |
-| `minusOne()` | subtracts one; the result is **not** normalized, so a borrow that reaches the most significant digit leaves a leading zero (`'1000'` − 1 → `'0111'`) | data-dependent: the cell that flipped `'1'` → `'0'`. On underflow (an empty region) the tape is unchanged and the head sits one cell left, on a blank | `writes { '0', '1' }` |
-| `invertNumber()` | flips every bit | the trailing blank | `never writes { '_' }` |
-| `normalizeNumber()` | strips leading zeros. All-zeros restores a single `'0'`, so zero keeps its representation | the first `'1'`, or that restored `'0'` | `writes { '_', '0' }` |
+| `plusOne()` | adds one; on overflow the number grows one cell left (`'111'` → `'1000'`) | data-dependent: the digit the carry settled on — the cell that flipped `'0'` → `'1'`, which on overflow is the new leading `'1'` | `writes { '0', '1' }` `leaves { '1' }` |
+| `minusOne()` | subtracts one; the result is **not** normalized, so a borrow that reaches the most significant digit leaves a leading zero (`'1000'` − 1 → `'0111'`) | data-dependent: the cell that flipped `'1'` → `'0'`. On underflow — an empty region, or an all-zero number, whose every `'0'` the borrow rewrites to `'1'` (`'000'` → `'111'`) — the head sits one cell left of the region, on a blank | `writes { '0', '1' }` `leaves { '_', '0' }` |
+| `invertNumber()` | flips every bit | the trailing blank | `never writes { '_' }` `leaves { '_' }` |
+| `normalizeNumber()` | strips leading zeros. All-zeros restores a single `'0'`, so zero keeps its representation | the first `'1'`, or that restored `'0'` | `writes { '_', '0' }` `leaves { '0', '1' }` |
 
 The bare exit positions are the sharp edge of this namespace: only
 `invertNumber` lands somewhere fixed. Chaining two bare routines generally
@@ -393,8 +428,10 @@ your own on exactly the same terms as the routine it mirrors.
 The library ships a header of its own, `std.tmh`, embedded in the toolchain
 binary beside the source. It is the declarations form of the same library
 (`docs/tmt/language.md (headers)`): every exported alphabet, every exported
-routine's signature with its published write set and its `?` doc lines, and
-every exported graph's body in full.
+routine's signature with its published write set, its `leaves` clause and
+its `?` doc lines, and every exported graph's body in full. Like every
+header `tmt interface` prints, it is canonical `tmt fmt` output, opening
+notice included, so `tmt fmt --check` passes over it unchanged.
 
 It is **generated, not maintained**: `tmt interface` prints it from
 `std.tmc`, a test holds the committed file byte-for-byte against what the

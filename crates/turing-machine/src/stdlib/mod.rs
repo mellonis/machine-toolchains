@@ -45,7 +45,8 @@ use crate::compiler::{
 use crate::optimizer::OptLevel;
 use crate::parser::Doc;
 
-/// The embedded standard-library source, in the `.tmc` 0.1 grammar.
+/// The embedded standard-library source, in the `.tmc` 0.2 grammar (it
+/// declares `leaves` head contracts and spells `never writes`).
 pub const SOURCE: &str = include_str!("std.tmc");
 
 /// The embedded standard library's own committed header — derived output,

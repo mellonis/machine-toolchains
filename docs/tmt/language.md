@@ -150,10 +150,11 @@ way. A `then` written anyway against a known `noreturn` callee is the
 `unreachable-continuation` lint finding (`docs/tmt/lint.md`).
 
 A call written without `then` compiles to the call followed by an
-explicit trap (`docs/tmt/isa.md (explicit traps)`). An honest program
-never reaches it — the callee never returns. A declaration that *lied*
-turns what would otherwise be a silent fall-through into whatever the
-linker placed next into a controlled stop, and the linker reports the lie
+explicit contract trap, `trap #2` (`docs/tmt/isa.md (explicit traps)`).
+An honest program never reaches it — the callee never returns. A
+declaration that *lied* turns what would otherwise be a silent
+fall-through into whatever the linker placed next into a controlled
+stop, reported as a broken contract, and the linker reports the lie
 where it becomes observable: the `tail-call-no-continuation` warning
 (`docs/tmt/cli.md (link warnings)`), raised when the linked callee can
 return after all.
@@ -222,7 +223,15 @@ A range element `lo..hi` expands in place, inclusive and ascending.
 Numeric ranges mint one symbol per value; glyph ranges walk Unicode
 scalar succession and therefore require single-scalar endpoints
 (`'a'..'e'` is fine, `'ab'..'az'` is not). Descending or mixed-kind
-endpoints are rejected.
+endpoints are rejected (`range-descending`, `range-kind-mismatch`,
+`range-endpoint-not-scalar`). That is a rule about ranges in an
+alphabet body (and in a set body, "Glyph sets" below), where a range
+*defines* a sequence of new symbols. A range written in a pattern cell
+or a contract clause *uses* an alphabet's sequence instead, walking it
+in declared order; see "Pattern ranges".
+
+An element may also name a glyph set, which expands in place to the
+set's members ("Glyph sets").
 
 Every symbol carries a **glyph label**, and labels must be unique within
 an alphabet. A numeric literal's label is its value's decimal string, so
@@ -243,6 +252,79 @@ so a wider alphabet has symbols no instruction could mention
 
 Alphabets may be declared inside namespaces and `export`ed like any other
 item.
+
+## Glyph sets
+
+A `set` declaration names a list of symbols once so that several places
+can use it:
+
+```
+namespace n {
+  export set digits { '0'..'3' }
+  set marks { '^', '$' }
+}
+
+use n::digits;
+
+alphabet sym { '_', n::marks, digits } // '_', '^', '$', '0', '1', '2', '3'
+
+routine skip(tape t: sym writes {} enters { digits } leaves { n::marks, '_' }) {
+  entry state s {
+    [digits] -> move [>] goto s;
+    [*]      -> return;
+  }
+}
+```
+
+A set's body takes an alphabet body's elements — glyph and numeric
+literals, ranges (under the body-range rules of "Alphabets"), and other
+sets by name, bare or qualified. It may be empty: `set none {}` is a
+legal declaration. A set is declared, namespaced, `export`ed and
+`use`-imported exactly as an alphabet is, and it travels through a
+`.tmh` header the same way ("Headers").
+
+A set's **members** are its body's elements expanded in order, a symbol
+that turns up twice kept at its first occurrence: with `set low { '0',
+'1' }`, `set s { '1', low, '2' }` has the members `'1', '0', '2'`.
+
+A set is data, never a type. It is legal in three positions, and in
+each it **expands in place** to its members, in that order:
+
+- **an alphabet body** (and another set's body) — the members become
+  symbols of the alphabet, at the position the set is named. An
+  alphabet's own rules still apply across the expansion: a member the
+  body already lists is `duplicate-glyph`, and a body that expands to
+  nothing is `empty-alphabet`.
+- **a contract clause** — `writes`, `never writes`, `enters` and
+  `leaves` alike ("Contract clauses"). A head-position clause that
+  expands to nothing is `empty-head-clause`.
+- **a pattern cell**, with or without `as` ("Pattern cells"). The cell
+  matches each member, one expanded row per member.
+
+Three positions refuse a set name. A tape's alphabet must be an
+`alphabet` (`tape t: digits` is `unresolved-alphabet`); a write cell
+takes one symbol, so `write [digits]` is a parse error; and a range
+endpoint is a glyph or a number, never a set, so `[lo..'1']` is a parse
+error that says so.
+
+A set whose body reaches itself, directly or through other sets, has no
+finite expansion; the `set-cycle` error names the whole chain:
+
+```
+error: glyph sets form a cycle: `a` -> `b` -> `a` — a set built from sets must bottom out in literals and ranges [set-cycle]
+```
+
+A set name that resolves to nothing is `undefined-set`, split the same
+two ways an unresolved alphabet is ("Alphabets, maps and graphs across
+units"); a name that resolves to an alphabet, a map or a world instead is
+`wrong-target-kind`.
+
+A set never survives resolution. An alphabet receives the member
+glyphs, a clause the member indices, and a compiled object's `.param`
+line the member glyphs (`docs/formats.md (routine interfaces)`): nothing
+past the compiler's front end ever sees a set's name. A declaration no
+alphabet, clause or pattern cell names is the `unused-set` lint finding
+(`docs/tmt/lint.md (unused-set)`).
 
 ## Tapes and heads
 
@@ -355,10 +437,14 @@ reserved — and `never` on its own, or followed by anything but
 `writes`, is a parse error naming the `writes` it needs. (`.tmc` 0.1
 spelled this clause `preserves`; see "Grammar version history".)
 
-`writes { … }` and `never writes { … }` each take an alphabet-body element
-list — single glyphs and ascending ranges, the same grammar an
-`alphabet` body uses (see "Alphabets"), except that a clause's list may
-be empty where a bare `alphabet` body may not. Both clauses are
+`writes { … }` and `never writes { … }` each take an element list of
+the shape an `alphabet` body has — single glyphs, ranges, and glyph
+sets by name ("Glyph sets") — except that a clause's list may be empty
+where a bare `alphabet` body may not. A clause *uses* the parameter's
+alphabet rather than defining one, so a range in it walks that
+alphabet's declared order, exactly as a pattern-cell range does
+("Pattern ranges"), not the Unicode succession of an alphabet body's
+range. Both clauses are
 optional, and the order between them is fixed when both appear: `writes`
 first, `never writes` second. Both are parse errors: writing `never writes`
 before `writes` is the `contract-clause-order` error; a second `writes`
@@ -412,8 +498,12 @@ the host's footprint is taken from it directly.
 Declaring either clause is checked in two independent steps, at two
 different spans. First, while a clause resolves, each glyph it names
 must be a symbol of the parameter's own alphabet — a glyph that is not
-is `contract-symbol-unknown`, reported at that glyph's own span inside
-the clause. Once every declared clause resolves cleanly, one further
+is `contract-symbol-unknown`, reported at that element's own span inside
+the clause, in any of the four clauses and whether the glyph is written
+alone, as a range endpoint, or as a member of a named set; a range whose
+second endpoint comes first in the alphabet is `range-outside-alphabet`.
+Once every
+declared clause resolves cleanly, one further
 check runs once per compile, after the whole module resolves: the
 world's own INFERRED write footprint on that tape must be a subset of
 the effective set, or the parameter that declared the contract is named
@@ -455,38 +545,123 @@ escapes this today; the honest remedy is to drop the clause from a
 parameter whose body writes through a substitution rather than declare a
 promise the checker can never confirm.
 
-A signature tape parameter may also declare a head-position clause —
-`enters { … }` / `leaves { … }`, each the same alphabet-body element list
-`writes`/`never writes` take, in the same canonical order after them
-(`writes` < `never writes` < `enters` < `leaves`; out of order is the same
-`contract-clause-order` error). Unlike `writes {}`, an empty
-`enters {}`/`leaves {}` has no meaning — there is no symbol-less moment
-for the head to be at — so it is its own `empty-head-clause` error; an
+#### Head-position clauses
+
+A signature tape parameter may also declare where its head stands at the
+routine's boundary — `enters { … }` and `leaves { … }`, each the same
+element list `writes`/`never writes` take (glyphs, declared-order ranges,
+set names), in the same canonical order after them (`writes` <
+`never writes` < `enters` < `leaves`; out of order is the same
+`contract-clause-order` error, and a second clause of one kind the same
+`duplicate-contract-clause`):
+
+```
+alphabet sym { '_', 'a', 'b' }
+
+routine walk(tape num: sym enters { '_' } leaves { 'b' }) {
+  entry state go {
+    [*] -> move [>] return;
+  }
+}
+```
+
+`enters` promises the glyph the head is on when a call transfers control
+INTO the parameter's tape; `leaves` promises the glyph it is on when
+control returns. Unlike `writes {}`, an empty `enters {}`/`leaves {}` has
+no meaning — there is no symbol-less moment for the head to be at — so it
+is its own `empty-head-clause` error. Both clauses are optional, and an
 absent clause states nothing, exactly as an absent `writes`/`never writes`
-does. `enters` promises the glyph the head is on when a call transfers
-control INTO the parameter's tape; `leaves` promises the glyph it is on
-when control returns. Both are checked statically against the world's
-own body alone — never a call graph or a footprint fixpoint the way
-`writes`/`never writes` are. `enters` is checked against the world's entry
-state: every glyph the clause names must be one some rule of that state
-matches, or the state traps on exactly the input the clause promises a
-caller may hand it — `enters-not-accepted`, naming the entry state, the
-tape, and the unaccepted glyph. `leaves` is checked against the world's
-own EXIT rows — a routine leaves through `return`; a graph leaves
-through a `goto` onto one of its own `state` (exit) parameters, and a
-routine's own exit parameters are not `leaves` rows, only `return` is —
-and only where the leaving glyph is known to be exactly ONE glyph: a
-literal write, or an unwritten (`Keep`) cell whose pattern matches
-exactly one glyph of the tape's own alphabet. Neither a literal write
-nor a `Keep` cell counts, either, when the row's own pattern cell on
-that tape names no glyph the tape's alphabet actually carries — such a
-row can never fire, so it has no leaving glyph to name. A move on the
-declaring tape, a `{expr}` substitution write, and a `Keep` cell that
-is a wildcard or a range naming more than one glyph are all left
-unchecked rather than guessed at — none of them pins the leaving glyph
-down to a single symbol, so none of them can be compared against the
-declared set — `leaves-outside-contract`, naming the row's state, the
-tape, and the glyph.
+does: neither clause is ever inferred. A clause is published with the
+routine's signature — in a compiled object's `.param` line and in a
+header — in the alphabet's band order, duplicates collapsed ("Headers").
+
+A head-position clause is checked in two halves: statically, where the
+body pins the answer down, and at run time in a debug build, everywhere
+else.
+
+**The static half** reads the world's own body alone — never a call
+graph or a footprint fixpoint the way `writes`/`never writes` are.
+`enters` is checked against the world's entry state: every glyph the
+clause names must be one some rule of that state matches, or the state
+traps on exactly the input the clause promises a caller may hand it —
+`enters-not-accepted`, naming the entry state, the tape, and the
+unaccepted glyph. A world whose entry is a `graft` instance has no entry
+state of its own to read, and its `enters` is not checked statically.
+`leaves` is checked against the world's own EXIT rows — a routine leaves
+through `return`; a graph leaves through a `goto` onto one of its own
+`state` (exit) parameters, and a routine's own exit parameters are not
+`leaves` rows, only `return` is — and only where the leaving glyph is
+known to be exactly ONE glyph: a literal write, or an unwritten (`Keep`)
+cell whose pattern matches exactly one glyph of the tape's own alphabet
+(a one-member set included). A move on the declaring tape, a `{expr}`
+substitution write, and a `Keep` cell that is a wildcard, a range or a
+set naming more than one glyph are all left to the run-time half rather
+than guessed at — none of them pins the leaving glyph down to a single
+symbol, so none of them can be compared against the declared set —
+`leaves-outside-contract`, naming the row's state, the tape, and the
+glyph:
+
+```
+error: entry state `s` has no rule for 'b' on tape `t`, which its `enters` clause declares [enters-not-accepted]
+error: this exit row in state `s` may leave 'a' on tape `t`, which its `leaves` clause forbids [leaves-outside-contract]
+```
+
+A routine whose body is a single `graft` — the facade shape the
+standard library uses ("`graft`") — has no exit rows of its own, so its
+`leaves` has nothing to be checked against statically; the grafted
+graph's own clause is what the static half reads, on that graph's own,
+pre-splice body. Both static checks apply to a graph's clauses exactly as to a
+routine's where the graph is the world being checked.
+
+**The run-time half** is a check the compiler plants in a debug build
+of a ROUTINE: one check state per declared clause on each tape
+parameter. The `enters` check is the routine's first state, so it runs
+when a call enters the routine and not when the body's own `goto` comes
+back to its old entry state; the `leaves` check stands before every
+`return` — a rule's own and a call's `then return` alike — and reads the
+cell after any move the row made. Several contracted tapes chain, one
+check after another, each costing one row per glyph its clause names
+plus one. A check that fails raises the contract trap, `trap #2`
+(`docs/tmt/isa.md (explicit traps)`), and `tmt run` names what broke —
+under `-g`, the routine, the tape, the clause and the signature's line;
+without it, the routine alone (`docs/tmt/cli.md (run)`):
+
+```
+outcome: contract broken at 0x00000026 in `walk`: tape `num` broke its `leaves` clause (walk.tmc:3)
+```
+
+The check states are ordinary states of the routine and show up by
+name wherever states do — in `tmt compile -S`, in `tmt dis`, in a
+`--trace` listing and on a debugger's stack — as `enters_<tape>` and
+`leaves_<tape>` (suffixed `_1`, `_2`, … if the source already uses the
+name) and the per-row blocks code generation gives every state:
+
+```
+enters_num__0:
+        jmp     go
+enters_num__1:
+        trap    #2
+```
+
+What the run-time half does NOT check: a graph's clauses (a graph is
+spliced into its host before anything is lowered, so it has no world of
+its own to plant a check in; its clauses are checked statically and
+published), a routine's exit parameters (a `goto <state parameter>` is
+not a `leaves` row at run time either), and `stop`/`halt`.
+
+`--strip-asserts` builds none of the check states, and `--release`
+implies it (`docs/tmt/cli.md (compile)`). Stripping removes the check,
+never the promise: a stripped object still publishes the same
+`enters=`/`leaves=` suffixes on its `.param` lines, and callers still
+read them. The embedded standard library is built with its checks
+stripped (`docs/tmt/stdlib.md`).
+
+A call site cannot always be proven to satisfy its callee's `enters`
+either. That is a lint finding rather than an error — `enters-unmet`
+(`docs/tmt/lint.md (enters-unmet)`), the static companion of the
+run-time check: it reports a site where the caller's own analysis says
+the head MAY be on a glyph outside the callee's `enters`, and the check a
+debug build plants remains the authority on what a given run does.
 
 A machine's own `tape` declaration carries no contract grammar at all —
 `writes`/`never writes`/`enters`/`leaves` are legal only on a signature
@@ -533,8 +708,21 @@ one of:
 | Cell | Matches |
 |---|---|
 | `'a'` or `7` | exactly that symbol |
-| `'a'..'d'` or `1..125` | every symbol in that inclusive range |
+| `'a'..'d'` or `1..125` | every symbol from the first endpoint to the second, in the tape alphabet's declared order ("Pattern ranges") |
+| `digits` or `n::digits` | every member of that glyph set ("Glyph sets") |
 | `*` | every symbol on that tape — a wildcard |
+
+Every symbol a cell names must be a symbol of the tape's alphabet: a
+lone glyph the alphabet lacks is `symbol-outside-alphabet`, a set member
+it lacks is `set-outside-alphabet`, and a range it cannot walk is
+`range-outside-alphabet` ("Pattern ranges"). A cell naming a set with no
+members could never match and is `empty-set-in-pattern`:
+
+```
+error: 'q' in this pattern cell is not a symbol of alphabet `bits` [symbol-outside-alphabet]
+error: 2, a member of set `digits`, is not a symbol of alphabet `bits` [set-outside-alphabet]
+error: set `none` has no members, so a pattern cell naming it can never match [empty-set-in-pattern]
+```
 
 A cell may bind what it matched with `as NAME`, making the matched symbol
 available to the write vector as a substitution (see "Range expansion and
@@ -881,6 +1069,14 @@ qualified path where the printer would print a bare name — digests
 differently and trips the drift check at link. Doc lines, comments,
 whitespace and unrelated declarations do not move it.
 
+The digest covers what the body SPELLS, which has one limit worth
+knowing: a body that names a glyph set in a pattern cell, or a named map
+at a `graft` inside it, digests that NAME, not the set's members
+or the map's pairs. Changing a set's members or a map's pairs, with the
+body's own text untouched, leaves the digest where it was and raises no
+drift at link — regenerate a library's header and rebuild its consumers
+after such a change.
+
 ### `bind`
 
 `bind` declares a named, pre-bound call target: the argument list is
@@ -1057,6 +1253,77 @@ An explicitly written identity pair is not a hole: `'0' -> '0'` keeps `0`
 mapped even under the closed rule, which is why the example above lists
 the digits rather than relying on their indices lining up.
 
+### Open maps: `*`
+
+A `call`'s or a `bind`'s map may end with `*`, which leaves the rest of
+the map **open**: every caller symbol the pairs do not name reads, in the
+callee, as the callee tape's **opaque index** — a symbol the callee's own
+alphabet does not have, and so one its rules can only ever match with a
+wildcard. There is no hole and no identity completion for an unlisted
+symbol, whatever the two cardinalities. The blank stays pinned, and the
+WRITE direction stays closed: the callee can write back only what the
+pairs map.
+
+```
+alphabet wide { '_', '^', '$', '0', '1' }
+alphabet bits { '_', '0', '1' }
+
+routine skip(tape t: bits) {
+  entry state s {
+    ['_'] -> return;
+    [*]   -> move [>] goto s;
+  }
+}
+
+machine {
+  tape w: wide;
+  entry state go {
+    [*] -> call skip(t = w with map { '0' -> '0', '1' -> '1', * }) then done;
+  }
+  state done { [*] -> stop; }
+}
+```
+
+The markers `'^'` and `'$'` are neither holes nor collapsed onto a
+callee symbol here: `skip` reads each as its opaque index and walks past
+it on the `[*]` row.
+
+`*` is the map's LAST entry, with or without a trailing comma; anywhere
+else it is a parse error. It is a site's marker, so a top-level `map`
+declaration refuses it (a parse error), and so does a `graft`'s map
+(`open-graft-unsupported`) — a graft splices the graph's rules onto the
+host's own tapes, so there is no callee alphabet with an opaque index for
+an unlisted symbol to read as. A pattern cell's `* as v` stays the
+`wildcard-binding` error, which is what keeps a substitution from ever
+copying the opaque index into a write.
+
+**Opacity is inferred, never written.** The linker accepts an open
+binding only into a callee tape that is **opaque** — one whose routine
+can read the opaque index without that index ever deciding whether a
+rule matches — and refuses any other, naming the callee and the
+parameter. `.tmc` has no spelling for the property: the compiler infers
+it per routine tape and publishes it on the compiled object's `.param`
+line (`docs/formats.md (routine interfaces)`). A tape is opaque when
+every state that reads it (a state with at least one rule) reads it that
+way: for each of the state's rows, some single row with `*` at that tape's
+position matches everything the first row matches at every OTHER
+position, so the opaque index can never be why no row matches — a
+catch-all row covers everything. A row that merely FORWARDS the tape into
+a nested call or bind is not a wildcard read. The forward keeps the tape
+opaque only when it lands on a callee tape in the same compilation unit
+that is itself opaque and has the same cardinality; any other forward
+closes it, and a forward into another unit always does, so a routine
+making a transparent call into another unit is opaque on no tape. A
+machine's own tapes publish no opacity, and a header does not carry it
+either — the grammar has no spelling for it.
+
+A caller that binds with an open map into a callee declaring `enters`
+is checked by `enters-unmet` like any other site: an unlisted symbol that
+may reach the call is reported as "a symbol this open map sends to the
+callee's opaque index" (`docs/tmt/lint.md (enters-unmet)`). The
+optimizer's `inline` never splices a site whose binding is open; the
+link engine composes it (`docs/tmt/optimizer.md (inline)`).
+
 ### Named maps
 
 A map used at several sites can be declared once and referenced by name,
@@ -1117,16 +1384,62 @@ them survives into the machine.
 
 ### Pattern ranges
 
-A ranged or bound cell expands to one row per symbol it matches. Across
-several such cells the expansion is cartesian, with the leftmost tape
-varying slowest. A range value with no glyph on that tape simply drops
-that alternative rather than failing.
+A ranged, set-naming or bound cell expands to one row per symbol it
+matches. Across several such cells the expansion is cartesian, with the
+leftmost tape varying slowest.
 
-When *every* alternative drops — an all-off-alphabet range, or a single
-glyph the tape's alphabet lacks — the rule expands to no rows at all. That
-is the `empty-expansion` compile warning, not an error: the rule
-contributes nothing and vanishes, and a state left with zero rows is
-still valid — it traps on entry.
+A range in a pattern cell — and in a contract clause, which reads the
+same way — walks the tape alphabet's **declared order**: it is the run of
+symbols from `lo`'s position to `hi`'s, inclusive. Both endpoints must be
+symbols of that alphabet and `lo` must come first in it; otherwise the
+range has no walk and is `range-outside-alphabet`. Nothing in the run
+can fall outside the alphabet, so nothing is ever dropped from it.
+
+That is a different rule from the one an alphabet or set body uses, on
+purpose: a body range DEFINES a sequence, a cell range USES one. A body
+range walks Unicode succession over single scalars, because there is no
+alphabet yet to walk; a cell range walks the alphabet the body built.
+The two agree whenever an alphabet lists its glyphs in Unicode order,
+and part where it does not:
+
+```
+alphabet odd { '_', 'a', 'z', 'b' }
+
+machine {
+  tape t: odd;
+  entry state s {
+    ['a'..'z' as c] -> write [{c}] move [>] goto s; // c is 'a' or 'z'
+    [*]             -> stop;
+  }
+}
+```
+
+Here `['a'..'z']` is two rows — `'a'`, then `'z'`, the run between them in
+`odd` — where `'a'..'z'` in an alphabet body would be twenty-six glyphs.
+The same rule makes a multi-character glyph a legal endpoint in a cell
+(`['one'..'two']`), and it makes the spelling of an endpoint irrelevant:
+quotes never change which symbol a literal names, so `'0'..9` in a cell is
+the same walk as `'0'..'9'`. The body-only errors — `range-descending`,
+`range-kind-mismatch` and `range-endpoint-not-scalar` — do not apply to
+a cell or a clause range; there, the one refusal is:
+
+```
+error: 'a' comes before 'b' in alphabet `odd` — a range here walks the alphabet's declared order, so write it 'a'..'b' [range-outside-alphabet]
+error: '5', an endpoint of the range '0'..'5', is not a symbol of alphabet `bits` [range-outside-alphabet]
+```
+
+A cell naming a glyph the tape's alphabet lacks — a lone glyph, or a
+member of a named set — is an error too ("Pattern cells"), so a rule
+written against its own world's tapes always expands to at least one row.
+
+One case of a rule expanding to nothing remains, and it is the only one
+the `empty-expansion` compile warning now describes: a rule of a
+**grafted** graph whose match cells map to no symbol of the host's tapes
+at the splice — a generic graph body reused against a host binding that
+covers none of that rule's symbols. The graph's author cannot know that
+at the graph's definition, so it is a warning at the splice, not an
+error: the spliced rule contributes nothing and vanishes, and a state
+left with zero rows is still valid — it traps on entry.
 
 Expansion is a product, and a large one is a lint finding
 (`docs/tmt/lint.md`) rather than an error.
@@ -1167,6 +1480,33 @@ it arithmetic. A body that **applies an operator** is a fold, and a fold
 is numeric-only: an operator on a glyph binding is the `char-arithmetic`
 error (`{c+1}` where `c` bound a glyph), because a glyph carries no
 numeric value to fold.
+
+What makes a binding numeric is the bound symbol's **label**, never the
+quotes it was written with. `'7'` and `7` are one symbol ("Alphabets"),
+so a symbol folds exactly when its label is the canonical decimal of a
+number: `'7'`, `7` and `007` all fold (the last is the label `7`), while
+`'07'` and `'+7'` are glyphs whose labels are not a number's canonical
+spelling, and do not. The rule is the same for a single symbol, a range
+and a set cell: a binding folds only when every symbol the cell can bind
+passes it, so a range whose declared run holds a non-numeric label, or a
+set with one non-numeric member, is `char-arithmetic` too. Over a digit
+alphabet written with quotes, then, the arithmetic works as it would over
+bare numbers:
+
+```
+alphabet digits { '_', '0'..'9' }
+
+machine {
+  tape t: digits;
+  entry state s {
+    ['0'..'8' as d] -> write [{d+1}] stop; // '0' becomes '1', … '8' becomes '9'
+    [*]             -> halt;
+  }
+}
+```
+
+A bare `{v}` passthrough applies no operator, so it is legal on any
+binding — a glyph, a mixed range, or any set.
 
 Because `%` binds tighter than `+`, a modular increment needs explicit
 parentheses. `{(v+1)%127}` folds as `(v+1) mod 127`; `{v+1%127}` would
@@ -1244,11 +1584,14 @@ references is a lint finding.
 
 ### Alphabets, maps and graphs across units
 
-An alphabet, a named map and a graph are **source-level** declarations:
-none of them is a linkable symbol, so naming one that lives in another
-unit means having that unit's declarations at hand ("Declarations and
-headers", below). Given them, all three are named exactly like a routine
-— by a qualified path, or by a `use` that binds the short name:
+An alphabet, a glyph set, a named map and a graph are **source-level**
+declarations: none of them is a linkable symbol, so naming one that lives
+in another unit means having that unit's declarations at hand
+("Declarations and headers", below); a set, like a named map or a graph
+body, travels only as source, in a header or a sibling source, never
+inside a compiled object. Given them,
+all four are named exactly like a routine — by a qualified path, or by a
+`use` that binds the short name:
 
 ```
 use lib::bits;          // an alphabet, by import
@@ -1290,7 +1633,7 @@ message says which one it found:
   it. The remedy is to declare the alphabet locally or to give the
   compile those declarations.
 
-`undefined-graph` and `undefined-map` split the same two ways, for the
+`undefined-graph`, `undefined-map` and `undefined-set` split the same two ways, for the
 same reason.
 
 ## Declarations and headers
@@ -1303,8 +1646,9 @@ reach a graph defined elsewhere.
 
 ### Declarations
 
-A declarations reading yields: exported alphabets, exported named maps,
-exported graphs *with their bodies*, and exported routine signatures —
+A declarations reading yields: exported alphabets, exported glyph sets,
+exported named maps, exported graphs *with their bodies*, and exported
+routine signatures —
 each routine's tapes with their glyph lists, declared effective write
 set, and declared `enters`/`leaves` head-position clauses (when
 written), its `state` parameter count, and its declared `noreturn`
@@ -1417,7 +1761,48 @@ What it carries follows from that:
 - **Private alphabets are still named.** A routine over an alphabet that
   is not itself exported is legal; the header prints that alphabet as a
   plain `alphabet` declaration (no `export`) so the signature can name
-  it.
+  it. The same holds for a private glyph set or named map that a printed
+  graph body names: it prints as a plain `set` or `map`, and a consumer
+  given the header can name it from then on, exactly as it can such an
+  alphabet.
+- **An exported glyph set prints with its members spelled out.** The
+  body is the set's expanded member list, not the author's ranges and set
+  references, and a member whose label is a number prints bare, so a
+  fold over it reads back as a fold: `export set digits { '0'..'2' }`
+  prints as `export set digits { 0, 1, 2 }`. A graph body keeps naming a
+  set by name in a pattern cell, and the header carries whatever `use`
+  line that name resolves through.
+- **`opaque` never appears**, since the grammar has no spelling for it;
+  an open map inside a printed graph body prints its `*` as written.
+
+A printed header is canonical `tmt fmt` output: whatever `tmt interface`
+prints passes `tmt fmt --check` unchanged, so a generated header can sit
+in a formatted directory. A unit with nothing to export prints a header
+that is a single newline — the canonical form of an empty file.
+
+```
+namespace lib {
+  export alphabet sym { '_', '^', '$', '0', '1', '2' }
+  export set digits { 0, 1, 2 }
+  set marks { '^', '$' }
+  ? Walk right over digits; leave on the first non-digit.
+  export graph skipDigits(
+    tape t: sym writes {} leaves { '_', '^', '$' },
+    state done
+  ) {
+    entry state s {
+      [digits] -> move [>] goto s;
+      [marks]  -> goto done;
+      ['_']    -> goto done;
+    }
+  }
+}
+```
+
+That is the header of a source declaring `export set digits { '0'..'2' }`,
+a private `set marks { '^', '$' }` and `export alphabet sym { '_', marks,
+digits }`: the alphabet and the exported set print expanded, and `marks`
+prints as a plain `set` because the graph's body names it.
 
 A header printed from a compiled OBJECT rather than from source is
 narrower, because an object carries less: routine signatures and
@@ -1548,26 +1933,90 @@ text, and it remains available as an ordinary identifier.
 
 - **0.1** — the language's first cut, and the baseline the version
   scheme measures from.
-- **0.2** — declarations and headers. A unit can be read for its
-  declarations alone, and `.tmh` is the file that carries them
-  ("Declarations and headers"). With them in hand: a `call`/`bind` may
-  bind tapes into a routine defined in another unit ("Calls across
-  units"), an alphabet, a named map or a graph may be named across a unit
-  boundary ("Alphabets, maps and graphs across units"), and a graph from
-  another unit may be grafted. New grammar: `state` parameters on a
-  `routine` signature
-  ("`state` parameters"), the `noreturn` clause and the optional `then`
-  it licenses ("Routines"), and `map NAME: SRC -> DST { … }` declarations
-  with `with map NAME` sites ("Named maps"). Two acceptance changes go
-  the other way: `noreturn` joins the reserved words as the
-  twenty-eighth, so a 0.1 program using it as a name no longer compiles;
-  and `main` is reserved for the entry world in a library as well as in a
-  program ("Program structure"). One rename is breaking too: the contract
-  clause 0.1 spelled `preserves { … }` is spelled `never writes { … }`
-  ("Contract clauses") — the same symbols, the same effective-set
-  arithmetic, the same diagnostics, under a name that no longer suggests
-  it preserves cells. A 0.1 program writing `preserves` stops compiling,
-  at a parse error that names the new spelling; `never` joins the
-  reserved words, so a 0.1 program using it as a name stops compiling
-  too, while `preserves` leaves them and is an ordinary name again.
+- **0.2** — declarations and headers, head contracts, glyph sets and
+  open maps. A unit can be read for its declarations alone, and `.tmh`
+  is the file that carries them ("Declarations and headers"). With them
+  in hand: a `call`/`bind` may bind tapes into a routine defined in
+  another unit ("Calls across units"), an alphabet, a glyph set, a named
+  map or a graph may be named across a unit boundary ("Alphabets, maps
+  and graphs across units"), and a graph from another unit may be
+  grafted.
+
+  **New grammar:**
+
+  - `state` parameters on a `routine` signature ("`state` parameters");
+  - the `noreturn` clause and the optional `then` it licenses
+    ("Routines");
+  - `map NAME: SRC -> DST { … }` declarations with `with map NAME` sites
+    ("Named maps");
+  - the head-position clauses `enters { … }` and `leaves { … }` on a
+    signature tape parameter ("Head-position clauses");
+  - `set NAME { … }` declarations, and a set's name as an element of an
+    alphabet body, a set body, a contract clause or a pattern cell
+    ("Glyph sets");
+  - `*` as the last entry of a `call`'s or a `bind`'s map, leaving it
+    open ("Open maps: `*`");
+  - in a pattern cell or a contract clause, a range whose endpoints are
+    multi-character glyphs or are spelled one quoted and one bare
+    (`'0'..9`) ("Pattern ranges");
+  - a fold over a symbol whose label is a number however it is quoted —
+    `['0'..'8' as d] -> write [{d+1}]` folds exactly as `[0..8 as d]`
+    does, where 0.1 refused it as `char-arithmetic` ("Substitution").
+
+  **Acceptance changes** — source 0.1 accepted that 0.2 refuses or reads
+  differently:
+
+  - the reserved words go from twenty-seven to thirty-one: `noreturn`,
+    `enters`, `leaves`, `set` and `never` join them, and `preserves`
+    leaves them and is an ordinary name again ("Reserved keywords"). A
+    0.1 program using any of the five as a tape, state, world, namespace,
+    alias, binding or graft-instance name no longer compiles;
+  - `main` is reserved for the entry world in a library as well as in a
+    program ("Program structure");
+  - the contract clause 0.1 spelled `preserves { … }` is spelled
+    `never writes { … }` ("Contract clauses") — the same symbols, the
+    same effective-set arithmetic, the same diagnostics, under a name
+    that no longer suggests a promise about cells, which the checker
+    could never verify (the old name stays free for a clause that might
+    one day make that promise). A 0.1 program writing `preserves` stops
+    compiling, at a parse error that names the new spelling;
+  - a pattern cell naming a symbol its tape's alphabet lacks — a lone
+    glyph, or a range endpoint — is an error (`symbol-outside-alphabet`,
+    `range-outside-alphabet`) where 0.1 dropped the alternative silently
+    and warned `empty-expansion` only when a rule lost every alternative.
+    Contract clauses were already strict in 0.1 (`contract-symbol-unknown`)
+    and stay so. `empty-expansion` now describes only a grafted rule that
+    maps to no host symbol at its splice ("Pattern ranges");
+  - a range in a pattern cell or a contract clause walks the alphabet's
+    declared order, where 0.1 walked Unicode succession and kept the
+    symbols the tape had: over an alphabet listed out of Unicode order,
+    `'a'..'z'` now names the declared run between the two endpoints, and
+    a range whose second endpoint comes first in the alphabet is
+    `range-outside-alphabet` ("Pattern ranges"). Over an alphabet listed
+    in Unicode order nothing changes.
+
   Everything else 0.1 accepted, 0.2 accepts.
+
+  **Alongside 0.2, with no grammar change of its own**, the toolchain
+  gained:
+
+  - the contract trap kind, `trap #2`, which the compiler plants for a
+    head-contract check in a debug build and after a `call` written
+    without `then`, and which `tmt run` and `tmt dap` report as a broken
+    contract (`docs/tmt/isa.md (explicit traps)`);
+  - `--strip-asserts` on `tmt compile` and `tmt build`, with `--release`
+    now `-O1 --strip-debugger --strip-asserts`, and the matching
+    `strip-asserts` profile key that takes `tmt.json`'s `project` schema
+    to 0.3 (`docs/tmt/cli.md (compile)`, `docs/tmt/project.md`);
+  - `tmt interface`, which prints a unit's header, and `tmt fmt` and
+    `tmt lint` over a `.tmh` header, named directly or found by a
+    directory walk — a header lints by its own rule subset
+    (`docs/tmt/lint.md (linting a header)`), and every header
+    `tmt interface` prints is already canonical under `tmt fmt` and has
+    been parsed again before it was written
+    (`docs/tmt/cli.md (interface)`);
+  - the `enters-unmet` and `unused-set` lint rules, and the
+    `undeclared-exit` link warning (`docs/tmt/cli.md (link warnings)`);
+  - `leaves` clauses on every tape parameter of the standard library,
+    whose prose was corrected in four places where it described the head
+    on exit more narrowly than the bodies behave (`docs/tmt/stdlib.md`).

@@ -328,14 +328,19 @@ keeps the mechanisms below interchangeable.
 
 `#2` says something else entirely: a claim the program made about
 itself was false where a compiler-planted check tested it. The `.tmc`
-compiler emits one for a `call` written without a continuation — legal
-only against a callee the source believed could never return
-(`docs/tmt/language.md (routines)`). An honest program never reaches
-that trap. A program whose belief was wrong, because the declaration it
-trusted did not match the linked body, stops there in a controlled way
-instead of falling through into whatever the linker placed next, and
-the kind reports the broken declaration rather than a map fault that
-never happened.
+compiler plants it in two places. One is after a `call` written without
+a continuation — legal only against a callee the source believed could
+never return (`docs/tmt/language.md (routines)`). An honest program
+never reaches that trap; a program whose belief was wrong, because the
+declaration it trusted did not match the linked body, stops there in a
+controlled way instead of falling through into whatever the linker
+placed next, and the kind reports the broken declaration rather than a
+map fault that never happened. The other is the head-contract check a
+debug build plants for a routine's `enters`/`leaves` clause: a dispatch
+over the head's glyph whose rows for the declared glyphs continue and
+whose catch-all row is `trap #2` (`docs/tmt/language.md (head-position
+clauses)`). `--strip-asserts` removes those checks, never the trap after
+a continuation-less call.
 
 ## Call mechanisms
 
@@ -454,7 +459,7 @@ the full taxonomy):
 | `TableOutOfBounds` | a match walk or descriptor load ran past the table ROM, or a table header is malformed |
 | `DispatchOutOfRange` | MR indexed past the dispatch table's entries |
 | `UnmappedRead` / `UnmappedWrite` | a crossed map hole under a frame, or an explicit `trap #0` / `trap #1` |
-| `Contract` | an explicit `trap #2` — a check reached the declaration it tested was false, such as a callee declared never to return that returned |
+| `Contract` | an explicit `trap #2` — a compiler-planted check found the declaration it tested false: a head outside a routine's `enters`/`leaves` clause in a debug build, or a callee declared never to return that returned |
 | `ExitOutOfRange` | `retx #k` named an exit the active frame lacks, or fired with no frame active |
 | `ProfileViolation` | `call.m` or `retx` ran on a base-profile image |
 

@@ -1,4 +1,4 @@
-# Linting `.tmc`/`.tma` — `tmt lint`
+# Linting `.tmc`/`.tmh`/`.tma` — `tmt lint`
 
 `tmt lint` reports hygiene findings the compiler and assembler
 deliberately do not refuse. Each input's extension picks its rule table:
@@ -355,9 +355,10 @@ run, mirroring `unused-alphabet`'s own fix.
 
 ### unused-set
 
-A `set NAME { … }` declaration — a named glyph set, expanded in place
-wherever an alphabet body, a contract clause, or a pattern cell names it —
-that none of those three sites names. Export-independent, the same
+A `set NAME { … }` declaration (`docs/tmt/language.md (glyph sets)`) —
+a named glyph set, expanded in place wherever an alphabet body, a
+contract clause, or a pattern cell names it — that none of those three
+sites names. Export-independent, the same
 reasoning as `unused-alphabet`/`unused-map`: a set is data for those three
 element-list sites, never a tape type in its own right, so an
 exported-but-unused declaration is as dead as a private one.
@@ -448,10 +449,12 @@ c.tmc:7:5: lint: this rule is unreachable — an earlier rule in `s` already cov
 `dead-rule` is lint's richer relative of two warnings the compiler raises
 on its own channel (`docs/tmt/language.md`): `unreachable-rule` (a second
 all-wildcard rule — and only that exact shape) and `empty-expansion` (a
-rule whose range/glyph expansion drops to zero rows). Those two live on
-the compile channel because compilation must be total and honest even when
-lint never runs; `dead-rule` is the fuller same-band-cover analysis, done
-only at lint time.
+rule of a grafted graph that maps to no host symbol at its splice, so it
+expands to zero rows there — `docs/tmt/language.md (pattern ranges)`; a
+rule naming a symbol its own tape lacks is a compile error, not this
+warning). Those two live on the compile channel because compilation must
+be total and honest even when lint never runs; `dead-rule` is the fuller
+same-band-cover analysis, done only at lint time.
 
 `fix: None` — a remove-the-covered-row deletion would be pure text, but its
 safety rests on the cover analysis (band classification, per-cell superset,
@@ -472,7 +475,11 @@ from an identical alphabet — same glyphs, same order — because identity
 completion is index-based and applies only across equal-size alphabets.
 Anywhere subtler the rule stays quiet: `x -> x` across unequal
 alphabets is load-bearing, not redundant, and a false positive there
-would be advice to break a working program.
+would be advice to break a working program. So is an identity pair in
+an OPEN map (`with map { …, * }`, `docs/tmt/language.md (symbol maps)`),
+which the rule skips whatever the alphabets: there an unlisted symbol
+reads as the callee's opaque index rather than completing to itself, so
+deleting the pair would change what that glyph means to the callee.
 
 ```
 e.tmc:9:41: lint: identity pair `0 -> 0` is redundant — an identity mapping already supplies it
@@ -629,6 +636,10 @@ write. The rule is purely syntactic: it compares the two DECLARED sets
 the resolver already built and needs no write-footprint inference of its
 own, so it stays cheap regardless of how large a world's body is.
 
+A glyph set named in a clause (`docs/tmt/language.md (glyph sets)`) is
+one source element like any other: the finding lands on the set's name,
+and the removal fix below removes that reference.
+
 The finding is per SOURCE ELEMENT of the `writes` clause, not per glyph:
 a `writes` range straddling the overlap only partially — some of its
 glyphs also named by `never writes`, some not — still gets exactly one
@@ -775,9 +786,20 @@ answer might clear.
 
 At a site the set is projected forward through the binding's symbol map
 into the callee's own alphabet frame, which is the frame the message's
-glyphs are named in. A caller glyph the map holds out is not reported
-here: it never reaches the callee's head at all — reading it takes the
-`UnmappedRead` trap instead (`docs/tmt/language.md (symbol maps)`).
+glyphs are named in. A caller glyph a closed map holds out is not
+reported here: it never reaches the callee's head at all — reading it
+takes the `UnmappedRead` trap instead (`docs/tmt/language.md (symbol
+maps)`). An OPEN map is different: every caller glyph it does not list
+reaches the callee as the callee's opaque index, which no `enters` clause
+can name, so a site where such a glyph may reach the call is reported,
+and the message says so rather than naming a glyph:
+
+```
+m.tmc:12:25: lint: the head may be on '_', or a symbol this open map sends to the callee's opaque index here, outside the `enters { '0', '1' }` that `inc`'s tape `num` declares
+```
+
+A pattern cell that names a glyph set narrows the set by the set's
+members, exactly as the equivalent list of glyphs would.
 
 The answer OVER-approximates, and the message says so: "may be on". A
 row that moves on the bound tape reaches the callee with the head on a

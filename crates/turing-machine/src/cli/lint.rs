@@ -3,8 +3,9 @@
 //! 0 = clean, 1 = findings or errors anywhere. Mirrors `pmt lint`'s shape —
 //! dirs-and-files positionals, per-file `tmt.json` union, batch-keeps-going —
 //! with two `.tmc`-family differences: a `--warn` flag turns on the opt-in
-//! rules, and there is no `--fix` (no `.tmc` or `.tma` rule emits a
-//! machine-applicable fix — the fix surface is the PM-1 crate's for now).
+//! rules, and there is no `--fix` driver: the fixes several rules
+//! attach reach the user through the language server's code actions only
+//! (docs/tmt/lint.md (quickfix availability)).
 //! Each file lints by extension: `.tmc` through the `.tmc` rule table,
 //! a `.tmh` header through its declarations-only subset of that table, and
 //! `.tma` through core's five arch-agnostic asm rules plus the TM-1

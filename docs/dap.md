@@ -152,6 +152,18 @@ stepping**, below), and the driving `tick` all funnel through one
 | a client `pause` request | `"pause"` | absent |
 | `stopOnEntry`, before the first instruction runs | `"entry"` | absent |
 | a trap | `"exception"` | the trap's own text |
+| a contract trap — `tmt` only | `"contract"` | the trap's own text |
+
+The contract row is the one divergence between the two adapters: a
+`Contract` trap (`docs/core.md (execution)`) reports the program's own
+declaration turning out false — a head-contract check or the trap after
+a call written without a continuation (`docs/tmt/isa.md (explicit
+traps)`) — rather than the machine faulting, so `tmt dap` gives it a
+reason of its own a client can present differently. PM-1 has no way to
+raise it. The reason follows from the trap's kind alone, so it holds in
+a build with no debug information; only the source location a client
+can show for the stop degrades, as `tmt run`'s own report does
+(`docs/tmt/cli.md (run)`).
 
 A trap is never surfaced as an adapter error: state stays fully
 inspectable at the fault (stack, tapes, registers), and it is only

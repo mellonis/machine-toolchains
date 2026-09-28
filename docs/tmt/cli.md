@@ -107,7 +107,14 @@ observability barrier the optimizer will not move code across, so stripping
 it and optimizing are related choices rather than independent ones
 (`docs/tmt/isa.md`). `--strip-asserts` drops contract-check states the same
 way, independently of `--strip-debugger` — the two flags strip unrelated
-things and either may be passed without the other.
+things and either may be passed without the other. The states it drops
+are the run-time checks of routines' `enters`/`leaves` clauses
+(`docs/tmt/language.md (head-position clauses)`); the clauses themselves
+stay in the object's published signature, and the trap after a `call`
+written without `then` stays too, since it checks a declaration no
+clause states. `--release` includes `--strip-asserts`, so a release
+build carries no head-contract check; for a program with no clause it
+changes nothing.
 
 Compile warnings always print to stderr as `FILE:LINE:COL: warning: MESSAGE`.
 `-v` additionally renders the optimizer's report — the number of fixpoint
@@ -263,7 +270,7 @@ subsection.
 | `naked-pattern` | A rule pattern written without its enclosing `[ … ]` — bare single-tape patterns are not supported. |
 | `wildcard-binding` | `* as v` — a wildcard cannot bind; write the range explicitly so the expansion cost is visible. |
 | `range-kind-mismatch` | A range in an alphabet or set body whose endpoints are not the same kind (`'a'..3`) — a body range is `glyph..glyph` or `number..number` only. |
-| `char-arithmetic` | Arithmetic on a glyph-bound substitution (`{c+1}`) — only numeric bindings fold. |
+| `char-arithmetic` | Arithmetic on a substitution bound to a symbol whose label is not a number (`{c+1}` where `c` bound `'a'`, or `'07'`) — only a binding every one of whose symbols is labelled with a number's canonical decimal folds, whatever its quotes (`'7'` and `7` fold alike). A range whose declared run, or a set whose members, include one such symbol is refused the same way. |
 | `graft-needs-name` | A non-`entry` `graft` with no `as name` — an unreferenced unnamed instance would be dead. |
 | `state-redirect` | The `state name;` redirect form — a state always has a `{ … }` body. |
 | `dangling-doc-run` | A doc/attention run not immediately followed by a declaration that accepts documentation. |
@@ -271,13 +278,13 @@ subsection.
 | `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
 | `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
 | `contract-clause-order` | A signature tape parameter's contract clauses written out of the fixed canonical order — `writes` then `never writes` then `enters` then `leaves`. |
-| `duplicate-contract-clause` | A second `writes` or `never writes` clause on one signature tape parameter. |
+| `duplicate-contract-clause` | A second clause of one kind — `writes`, `never writes`, `enters` or `leaves` — on one signature tape parameter. |
 | `empty-head-clause` | An `enters { … }` or `leaves { … }` clause with no elements — unlike `writes {}`/`never writes {}` (a meaningful empty set), a head-position clause states no moment at all. |
 | `empty-alphabet` | An alphabet with no elements — a world needs at least one symbol. |
 | `duplicate-glyph` | The same glyph appears twice in one alphabet. |
 | `alphabet-too-large` | An alphabet resolves to more than 127 symbols. |
-| `range-endpoint-not-scalar` | A glyph range endpoint that is not a single Unicode scalar. |
-| `range-descending` | A range whose low endpoint exceeds its high endpoint — ranges are inclusive and ascending. |
+| `range-endpoint-not-scalar` | A glyph range endpoint in an alphabet or set body that is not a single Unicode scalar (a cell or clause range may name any glyph of its alphabet). |
+| `range-descending` | A range in an alphabet or set body whose low endpoint exceeds its high endpoint — a body range is inclusive and ascending. A cell or clause range whose endpoints come in the wrong order is `range-outside-alphabet`. |
 | `symbol-outside-alphabet` | A pattern cell's single symbol is not a symbol of the alphabet of the tape the cell reads. |
 | `set-outside-alphabet` | A member of the glyph set a pattern cell names is not a symbol of the alphabet of the tape the cell reads. |
 | `range-outside-alphabet` | A range in a pattern cell or a contract clause has no walk over the alphabet it is written against, which it walks in declared order: a cell range's endpoint is not a symbol of the alphabet, or the second endpoint comes first in it. |
@@ -294,9 +301,9 @@ subsection.
 | `goto-into-bind` | `goto` targeting a bind name — a bind is a call target, never a state. |
 | `goto-not-a-state` | `goto` targeting a routine or graph — a reuse target, not a state. |
 | `undefined-state` | `goto`, a continuation, or a state argument names no state (or graft instance) in the world. |
-| `wrong-target-kind` | A `call`/`graft`/`bind` target resolves to the wrong entity kind. |
+| `wrong-target-kind` | A `call`/`graft`/`bind` target, or a set reference in an alphabet body, a set body, a contract clause or a pattern cell, resolves to the wrong entity kind. |
 | `undefined-graph` | A `graft` target names no graph — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose unit's declarations were not given (declare it locally, or supply its declarations to this compile). |
-| `undefined-set` | A set reference — in an alphabet body, a set body, or a contract clause — names no glyph set: either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). A name that resolves to something other than a set is `wrong-target-kind`. |
+| `undefined-set` | A set reference — in an alphabet body, a set body, a contract clause, or a pattern cell — names no glyph set: either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). A name that resolves to something other than a set is `wrong-target-kind`. |
 | `set-cycle` | A glyph set's body reaches the set itself, directly or through other sets, so it has no finite expansion. |
 | `unknown-arg` | A binding argument names a parameter the signature does not declare. |
 | `duplicate-arg` | Two binding arguments share one parameter name. |
@@ -305,7 +312,7 @@ subsection.
 | `unresolved-tape-target` | A tape-parameter argument names a target that is not a tape in the enclosing world. |
 | `duplicate-tape-target` | Two tape-parameter arguments of one `call`, `graft`, or `bind` name the same caller tape — one caller tape cannot back two callee tapes. |
 | `bind-call-args` | A `call` on a world-local bind name carries binding arguments — a bind is already fully bound at its declaration. |
-| `contract-symbol-unknown` | A `writes`/`never writes` clause names a glyph that is not a symbol of the parameter's alphabet. |
+| `contract-symbol-unknown` | A contract clause — `writes`, `never writes`, `enters` or `leaves` — names a glyph that is not a symbol of the parameter's alphabet, alone, as a range endpoint, or as a member of a named set. |
 | `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `never writes`). |
 | `enters-not-accepted` | A declared `enters { … }` clause names a glyph the world's entry state has no rule for. |
 | `leaves-outside-contract` | A declared `leaves { … }` clause is contradicted by an exit row whose leaving glyph is statically known. |
@@ -466,7 +473,8 @@ suppresses one here and `lint.allow` in `tmt.json` suppresses it for
 Errors are outside the namespace and cannot be suppressed — a callee
 wider than the caller or declaring exits the site does not supply, a
 binding naming a parameter or a glyph the callee does not declare, an
-open binding into a tape the callee does not declare opaque, a graft or
+open binding into a tape the callee's signature does not publish as
+opaque (`docs/tmt/language.md (symbol maps)`), a graft or
 an imported alphabet whose digest drifted, and the copy path's own
 refusals (`docs/core.md (call mechanisms)`).
 
@@ -740,7 +748,14 @@ external references of its own left to resolve):
 
 Renders a unit's exported declarations as one canonical, deterministic
 text — the same shape a header file carries (docs/tmt/language.md
-(headers)). Like `dis`, `INPUT` is told apart by its container magic
+(headers)). The canonical layout is `tmt fmt`'s own: the printer's last
+step, on either arm, is the `.tmc` formatter, so a signature past 80
+columns wraps one parameter per line, a long map's pairs print one per
+line, and a graph body's rules sit on the state-block grid. A header
+`tmt interface` wrote therefore passes `tmt fmt --check` unchanged, and a
+directory walk may format it along with everything else. A unit with
+nothing to export prints a single newline, the canonical form of an
+empty file. Like `dis`, `INPUT` is told apart by its container magic
 rather than its extension (`docs/formats.md`): a `.tmc` renamed to
 `.tmo`, or the reverse, still runs the arm its bytes actually are.
 
@@ -856,6 +871,27 @@ do. The object arm prints no map at all: the wire records none, a named
 map having expanded to its pairs long before codegen
 (docs/tmt/language.md (named maps)).
 
+**Glyph sets print on the source arm only.** Every EXPORTED `set`
+prints, as `export set`, with its members spelled out rather than the
+author's ranges and set references — and a member whose label is a
+number prints bare, so a fold over it reads back as a fold. A private
+set prints, as a plain `set`, when a printed graph body names it in a
+pattern cell, the same transitive closure named maps follow. The object
+arm prints no set: the wire records none, a set having expanded to its
+members before anything past the front end saw it (docs/tmt/language.md
+(glyph sets)).
+
+**The printed header is parsed again before it is written.** The
+formatting step on either arm is a full `.tmc` parse of the printed
+text, so a header that would not parse is an error rather than a file —
+for example, one from an object whose parameter is named after a `.tmc`
+keyword, which a hand-written `.tma` can do:
+
+```
+$ tmt interface kw.tmo
+tmt: kw.tmo: the generated header does not re-read at 2:26: `set` is a reserved keyword and cannot be used as a tape parameter name
+```
+
 **A `.tmh` extension selects declarations-only reading of a text INPUT**
 (docs/tmt/language.md (headers)): the identical `.tmc` grammar, read in a
 mode that rejects a `machine` block and a routine WITH a body, and
@@ -948,6 +984,35 @@ Because budget exhaustion is a trap, exit `3` does not by itself mean the
 program is wrong — it may only mean it needed a longer leash. Read the
 outcome line before concluding. `docs/tmt/isa.md` covers trap kinds at the
 machine level.
+
+A **contract** trap — a debug build's head-contract check failing, or a
+call written without `then` whose callee returned after all
+(`docs/tmt/language.md (head-position clauses)`) — gets an outcome line
+of its own, which says as much as the image's debug information allows.
+Built with `-g`, it names the routine, the tape and the clause, and maps
+the stop to the line of the routine's signature:
+
+```
+$ tmt build -O0 -g walk.tmc -o walk.tmx
+$ tmt run walk.tmx --tape-block leaves.tmt
+outcome: contract broken at 0x00000026 in `walk`: tape `num` broke its `leaves` clause (walk.tmc:3)
+```
+
+The tape and clause come from the check's own label in the `.tmx.map`
+sidecar. At `-O1`, `inline` may splice a small routine's check into its
+caller, where it is lowered without that label: the line then names the
+function now holding the check — the caller — and the signature's line,
+with the tape and clause left out. Built without `-g`, the sidecar holds
+no labels or lines, and the line names the kind, the address and the
+routine alone:
+
+```
+outcome: contract broken at 0x0000001d in `main` (walk.tmc:3)
+outcome: contract broken at 0x00000026 in `walk`
+```
+
+Neither form names the offending glyph: the tape's own final contents,
+printed below the outcome line, show the cell the head is on.
 
 ## `tmt tape-block`
 
@@ -1405,14 +1470,10 @@ would change, or a lex/parse error occurred anywhere in the batch.
 
 **A `.tmh` header formats through the `.tmc` printer** — a header is
 `.tmc` syntax — whether named directly or found by the directory walk;
-on stdin it is `--lang tmc`. One caveat: **what `tmt interface` prints
-is canonical for the header printer, not for `tmt fmt`.** The two are
-separate printers, and a generated header run through `tmt fmt --check`
-can report that it would change. That is not a defect in either one —
-neither output is ever read by the other — but since a directory walk
-collects headers, a directory holding a generated header should
-`--exclude` it (or regenerate it after formatting) rather than let the
-two printers take turns rewriting it.
+on stdin it is `--lang tmc`. A header `tmt interface` generated is
+already canonical: that command's last step is this same printer
+(`tmt interface`, below), so `tmt fmt --check` passes over it unchanged
+and a directory holding generated headers needs no `--exclude` for them.
 
 Unlike `tmt lint`, `tmt fmt` takes no **configuration** from `tmt.json` —
 formatting has no configurable surface for a project file to set, and there

@@ -346,6 +346,10 @@ Trap causes:
 | `ProfileViolation` | an instruction requiring the frames profile ran on a base-profile core |
 | `Contract` | a contract the program declared about itself was broken where a compiler-planted check tested it |
 
+This table is held to the `Trap` enum in both directions by a test: a
+variant added without a row here, or a row left behind by a removed
+variant, fails it.
+
 A non-interactive run reports a trap as a structured trapped outcome;
 under the debug API it instead pauses on the faulting instruction.
 

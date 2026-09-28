@@ -314,7 +314,9 @@ identity projection where the callee takes a prefix of the caller's
 tapes and the rest stay unbound. An explicit map is refused even when
 every pair is an identity, because a partial pair list encodes
 cardinality holes that the composition engine, not this pass, is the
-authority on. The callee must be a routine (never the `machine` world,
+authority on — and an open map (`*`, `docs/tmt/language.md (symbol
+maps)`) is an explicit map too, so a site that leaves its map open is
+never spliced. The callee must be a routine (never the `machine` world,
 which nothing calls), a leaf (no nested call of its own), and at most
 six rows in total. The candidate set is computed once from the state at
 the start of the pass, so a routine that becomes a leaf during this pass
@@ -905,6 +907,13 @@ paired call and return push and restore the frame register
 bare jump would skip that push, and the callee's return would restore
 the wrong frame and desync the stack. Only a bindless call — a plain
 call the linker resolves — is safe to turn into a jump.
+
+A routine whose tape declares `leaves` loses the shape whenever its
+checks are built, by construction: the `leaves` check stands before every `return`
+(`docs/tmt/language.md (head-position clauses)`), so its `call … then
+return` continues into the check rather than returning, and there is no
+tail position left to rewrite. The same routine built with
+`--strip-asserts` has no check, and the pass applies as above.
 
 ```tmc
 alphabet ab { '_', 'a' }

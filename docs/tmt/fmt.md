@@ -2,7 +2,9 @@
 
 `tmt fmt` reprints a source file to one canonical layout. Each input's
 extension picks its formatter: a `.tmc` file goes through the language's
-own printer, described on this page; a `.tma` file goes through the
+own printer, described on this page, and so does a `.tmh` header, which
+is `.tmc` syntax — every header `tmt interface` generates is already this
+printer's output (`docs/tmt/cli.md (interface)`); a `.tma` file goes through the
 canonical assembly grid shared with the rest of the toolchain
 (`docs/formats.md`). The command surface — the directory walk,
 `--check`, stdin with `--lang`, exit codes — is `docs/tmt/cli.md`.
@@ -146,9 +148,9 @@ to that token's column:
        ) then fin;
 ```
 
-A tape parameter's `writes`/`never writes` clause
-(`docs/tmt/language.md (contract clauses)`) renders as part of the
-parameter it decorates — one leading space before the keyword, `{ … }`
+A tape parameter's contract clauses — `writes`, `never writes`,
+`enters`, `leaves` (`docs/tmt/language.md (contract clauses)`) — render
+as part of the parameter they decorate — one leading space before the keyword, `{ … }`
 with interior spacing around a non-empty body and bare `{}` for an empty
 one — and counts toward that same parameter's own width like any other
 token, not as an exemption from it. A signature with a clause wraps
@@ -170,6 +172,12 @@ of whether the resulting line would have fit
 comment, which stays inline there; a `//` comment, or any own-line
 comment, block or line, still forces a break in an `alphabet` body
 exactly as it does in every other list — not just because of width.
+
+A `set` declaration prints in an `alphabet`'s shape — `set digits {
+'0'..'2' }`, and `set none {}` for an empty one — and a set named in an
+alphabet body, a clause or a pattern cell prints as written, qualified
+or bare. An open map's `*` prints as the map's last entry, `with map {
+'0' -> '0', * }`, a trailing comma after it dropped like any other.
 
 A single binding argument is never broken further on width alone — a
 `with map { … }` with no interior comment of its own stays inline, so one
@@ -400,6 +408,12 @@ A comment inside a `{ … }` write-cell substitution prints inside it,
 between its own tokens — the one place a substitution reprints spaced
 rather than tight, since a comment cannot be concatenated into the tight
 form.
+
+The rule holds with no exception inside a `set` declaration and a
+qualified set reference, anywhere in a pattern cell naming a set —
+qualified or not, bound with `as` or not — before and inside the
+`enters`/`leaves` clauses and between them, between the two words of
+`never writes`, and on either side of an open map's `*`.
 
 **Three recorded residuals** still relocate, all stable on the first
 pass, all inside a construct whose own list machinery claims every
