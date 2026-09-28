@@ -1707,7 +1707,7 @@ mod tests {
     /// Retokenizing a REUSE's own SIG_PARAM node and reparsing it
     /// through `Parser::sig_param` reproduces the exact `SigParam`s
     /// written below, across BOTH shapes the production itself branches
-    /// on: `Tape` (`writes`/`preserves` clauses included) and the plain
+    /// on: `Tape` (`writes`/`never writes` clauses included) and the plain
     /// `State` parameter — a fixture with only the `Tape` shape would
     /// leave the `State` arm of `Parser::sig_param` entirely unpinned.
     /// The expected values are literals captured from the retired
@@ -1715,7 +1715,7 @@ mod tests {
     /// still callable.
     #[test]
     fn reparsed_sig_param_equals_the_expected_sig_param_for_both_shapes() {
-        let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \
+        let src = "routine r(tape t: ab writes { '0' } never writes { '1' }, state s) {\n  \
                    entry state a {\n    [*] -> stop;\n  }\n}\n";
 
         let expected_params = vec![
@@ -1732,26 +1732,26 @@ mod tests {
                         kw_span: Span::new(1, 22, 1, 28),
                         span: Span::new(1, 22, 1, 36),
                     }),
-                    preserves: Some(crate::parser::ContractClause {
+                    never_writes: Some(crate::parser::ContractClause {
                         elems: vec![crate::parser::AlphabetElem::Single(SymLit::Glyph {
                             value: "1".to_string(),
-                            span: Span::new(1, 49, 1, 52),
+                            span: Span::new(1, 52, 1, 55),
                         })],
-                        kw_span: Span::new(1, 37, 1, 46),
-                        span: Span::new(1, 37, 1, 54),
+                        kw_span: Span::new(1, 37, 1, 49),
+                        span: Span::new(1, 37, 1, 57),
                     }),
                     enters: None,
                     leaves: None,
                 },
                 name: "t".to_string(),
                 name_span: Span::new(1, 16, 1, 17),
-                span: Span::new(1, 11, 1, 54),
+                span: Span::new(1, 11, 1, 57),
             },
             crate::parser::SigParam {
                 kind: SigParamKind::State,
                 name: "s".to_string(),
-                name_span: Span::new(1, 62, 1, 63),
-                span: Span::new(1, 56, 1, 63),
+                name_span: Span::new(1, 65, 1, 66),
+                span: Span::new(1, 59, 1, 66),
             },
         ];
 
@@ -2611,7 +2611,7 @@ mod tests {
                    \n\
                    alphabet nm { 0..9 }\n\
                    \n\
-                   export graph gr(tape t: ab writes { '0'..'5' } preserves { '_' }, state k) {\n\
+                   export graph gr(tape t: ab writes { '0'..'5' } never writes { '_' }, state k) {\n\
                    \x20 entry state a {\n\
                    \x20   ['0'] -> write ['1'] move [>] goto a;\n\
                    \x20   ['1'] -> a;\n\
@@ -3017,26 +3017,31 @@ mod tests {
     /// hypothetical shapes — a smoke test that the whole crate's own
     /// `Program` type still round-trips through `parse` on one of them
     /// AND that the fixture's every declared feature actually landed (a
-    /// wrong implementation dropping, say, the `preserves` clause or the
+    /// wrong implementation dropping, say, the `never writes` clause or the
     /// second sig param would still leave `routines.len() == 1`, so that
     /// alone proves nothing).
 
     #[test]
     fn fixture_smoke_check_parses_to_a_program() {
-        let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \
+        let src = "routine r(tape t: ab writes { '0' } never writes { '1' }, state s) {\n  \
                    entry state a {\n    [*] -> stop;\n  }\n}\n";
         let program: Program = crate::parser::parse(src).unwrap();
         assert_eq!(program.routines.len(), 1);
         let r = &program.routines[0];
         assert_eq!(r.sig.params.len(), 2, "both sig params must survive");
         let SigParamKind::Tape {
-            writes, preserves, ..
+            writes,
+            never_writes,
+            ..
         } = &r.sig.params[0].kind
         else {
             panic!("expected a tape param");
         };
         assert!(writes.is_some(), "the writes clause must survive");
-        assert!(preserves.is_some(), "the preserves clause must survive");
+        assert!(
+            never_writes.is_some(),
+            "the `never writes` clause must survive"
+        );
         assert_eq!(r.states.len(), 1, "the entry state must survive");
     }
 }

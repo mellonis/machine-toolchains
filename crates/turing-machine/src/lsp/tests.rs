@@ -1110,7 +1110,7 @@ machine {
 #[test]
 fn after_a_signature_tapes_alphabet_the_clause_position_completion_offers_nothing_yet() {
     // Mirrors `after_volatile_the_item_boundary_completion_offers_nothing_yet`:
-    // `writes`/`preserves` are reserved keywords with no `classify_context`
+    // `writes`/`never writes` are reserved keywords with no `classify_context`
     // arm of their own, so the position right after a signature tape's
     // alphabet name falls through every branch (the previous token is an
     // `Ident`, not a boundary punctuation mark) and returns `None`. This is
@@ -1500,17 +1500,17 @@ routine r(tape num: bits writes { '0', '1' }) {
 #[test]
 fn hovering_a_routine_shows_volatile_with_both_clauses_in_order() {
     // The three modifiers together, not just the pairwise cases: `volatile`
-    // then `writes` then `preserves`, in the fixed grammar order (fmt's own
+    // then `writes` then `never writes`, in the fixed grammar order (fmt's own
     // `volatile_and_both_clauses_compose_in_a_signature_param` pins the same
     // shape for the printer). The head builds this string unconditionally
-    // (writes pushed before preserves) rather than reading an order back out
+    // (writes pushed before never writes) rather than reading an order back out
     // of the source, which is correct only because the parser itself
-    // rejects `preserves` before `writes` — this pins that the two stay in
+    // rejects `never writes` before `writes` — this pins that the two stay in
     // step.
     let src = "\
 alphabet symbols { '0', '1', '#' }
 
-routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {
+routine w(volatile tape num: symbols writes { '0' } never writes { '#' }) {
   entry state s { [*] -> stop; }
 }
 
@@ -1526,7 +1526,7 @@ machine {
     assert!(
         hover
             .text
-            .contains("routine w(volatile tape num: symbols writes { '0' } preserves { '#' })"),
+            .contains("routine w(volatile tape num: symbols writes { '0' } never writes { '#' })"),
         "{}",
         hover.text
     );
@@ -1537,7 +1537,7 @@ fn tape_hover_shows_volatile_with_both_clauses_in_order() {
     let src = "\
 alphabet symbols { '0', '1', '#' }
 
-routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {
+routine w(volatile tape num: symbols writes { '0' } never writes { '#' }) {
   entry state s { [*] -> stop; }
 }
 ";
@@ -1547,7 +1547,7 @@ routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {
         .expect("a hover");
     assert_eq!(
         hover.text,
-        "volatile tape num: symbols writes { '0' } preserves { '#' }"
+        "volatile tape num: symbols writes { '0' } never writes { '#' }"
     );
 }
 

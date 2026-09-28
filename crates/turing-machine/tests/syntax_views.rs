@@ -77,7 +77,7 @@ fn every_node_kind_has_a_view_that_casts_from_it() {
     // signature parameter writes its keyword FIRST (`tape t: ab`,
     // `state done`), a namespace must be present or NAMESPACE has no
     // instance to cast from, a signature tape parameter must carry a
-    // `writes`/`preserves` clause or CONTRACT_CLAUSE has none, and a binding
+    // `writes`/`never writes` clause or CONTRACT_CLAUSE has none, and a binding
     // argument must carry `with map { … }` or SYM_MAP has none.
     let src = "use a::b;\n\n? doc\n! [deprecated] old\nalphabet ab { '_', 'a' }\n\n\
                namespace n {\n  alphabet inner { '_' }\n}\n\n\
@@ -585,8 +585,8 @@ fn a_writes_clause_puts_commas_where_a_splitter_would_read_separators() {
 
 /// A clause is identified by its own keyword, never by its position:
 /// both are optional, so position says nothing on a parameter carrying
-/// only one of them (measured — on `tape a: x preserves { '1' }` the
-/// clause at position 0 is `preserves`).
+/// only one of them (measured — on `tape a: x never writes { '1' }` the
+/// clause at position 0 is `never writes`).
 ///
 /// The two extra shapes earn their place for different reasons, both
 /// measured by mutation. `volatile` is the one that breaks a NAIVE
@@ -602,7 +602,7 @@ fn a_writes_clause_puts_commas_where_a_splitter_would_read_separators() {
 fn contract_clauses_are_named_by_their_own_keyword() {
     let root = tree(
         "alphabet x { '0', '1' }\n\
-         routine r(volatile tape a: x writes { '0' } preserves { '1' }, state done) {\n\
+         routine r(volatile tape a: x writes { '0' } never writes { '1' }, state done) {\n\
          \x20 entry state s { [*] -> done; }\n}\n",
     );
     let r = ReuseView::cast(first_of(&root, TmcKind::Reuse)).expect("reuse");
@@ -622,9 +622,20 @@ fn contract_clauses_are_named_by_their_own_keyword() {
         .iter()
         .map(|c| c.keyword_token().text().to_string())
         .collect();
-    assert_eq!(keywords, vec!["writes", "preserves"]);
+    // `never writes` is two tokens in ONE clause node: its first token,
+    // `never`, is the keyword the view answers, and neither word leaks
+    // into the parameter's own IDENT run — the alphabet stays one segment.
+    assert_eq!(keywords, vec!["writes", "never"]);
     assert_eq!(clauses[0].syntax().text(), "writes { '0' }");
-    assert_eq!(clauses[1].syntax().text(), "preserves { '1' }");
+    assert_eq!(clauses[1].syntax().text(), "never writes { '1' }");
+    assert_eq!(
+        params[0]
+            .alphabet_segments()
+            .iter()
+            .map(|t| t.text().to_string())
+            .collect::<Vec<_>>(),
+        vec!["x".to_string()]
+    );
 
     assert!(!params[1].volatile());
     assert_eq!(params[1].kind(), SigParamKind::State);
@@ -827,7 +838,9 @@ fn binding_arguments_split_around_an_interior_symbol_map() {
 /// check independent: reading the expected span back off the extracted
 /// `Program` instead would move both sides together, since extraction
 /// derives a node's span by reparsing that node's own tokens — a node
-/// opening one token early would shift the span with it and pass.
+/// opening one token early would shift the span with it and pass. The
+/// line-2 ends past the second clause's keyword moved three columns
+/// right, by hand, when that keyword became the two words `never writes`.
 /// `TRANSITION` is checked on three variants, since each carries its own
 /// span field.
 #[test]
@@ -837,7 +850,7 @@ fn each_new_nodes_extent_matches_its_measured_literal_span() {
     use mtc_turing_machine::parser::parse_green;
 
     let src = "alphabet x { '0', '1' }\n\
-               routine r(volatile tape a: x writes { '0' } preserves { '1' }, state done) {\n\
+               routine r(volatile tape a: x writes { '0' } never writes { '1' }, state done) {\n\
                \x20 entry state s { [*] -> return; }\n\
                }\n\
                machine {\n\
@@ -874,15 +887,15 @@ fn each_new_nodes_extent_matches_its_measured_literal_span() {
 
     check(
         &all_of(&root, TmcKind::SigParam),
-        &[Span::new(2, 11, 2, 62), Span::new(2, 64, 2, 74)],
+        &[Span::new(2, 11, 2, 65), Span::new(2, 67, 2, 77)],
         &extent,
         "SIG_PARAM",
     );
     check(
         &all_of(&root, TmcKind::ContractClause),
-        &[Span::new(2, 30, 2, 44), Span::new(2, 45, 2, 62)],
+        &[Span::new(2, 30, 2, 44), Span::new(2, 45, 2, 65)],
         &extent,
-        "CONTRACT_CLAUSE — `writes` then `preserves`",
+        "CONTRACT_CLAUSE — `writes` then `never writes`",
     );
     // The `write`/`move` keywords stay OUTSIDE their vectors; the spans
     // open at the `[`.

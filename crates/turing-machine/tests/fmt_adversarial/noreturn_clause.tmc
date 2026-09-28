@@ -1,6 +1,6 @@
 alphabet ab { '_', '0', '1' }
 
-routine bodied(tape t:ab writes{'0'}preserves{'1'}) noreturn {
+routine bodied(tape t:ab writes{'0'}never writes{'1'}) noreturn {
   entry state s { [*] -> goto s; }
 }
 

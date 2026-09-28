@@ -86,7 +86,7 @@ struct WorldView<'a> {
     binds: &'a [Bind],
 }
 
-/// One tape as written, whichever carrier declared it. `writes`/`preserves`
+/// One tape as written, whichever carrier declared it. `writes`/`never writes`
 /// are the declared contract clauses; a machine tape declaration has no
 /// contract grammar at all, so both are always `None` there — only a
 /// signature tape parameter can carry one.
@@ -97,7 +97,7 @@ struct WorldTape<'a> {
     alphabet_span: Span,
     volatile: bool,
     writes: Option<&'a ContractClause>,
-    preserves: Option<&'a ContractClause>,
+    never_writes: Option<&'a ContractClause>,
 }
 
 const NO_NS: &[String] = &[];
@@ -120,7 +120,7 @@ fn world_views(program: &Program) -> Vec<WorldView<'_>> {
                     alphabet_span: t.alphabet_span,
                     volatile: t.volatile,
                     writes: None,
-                    preserves: None,
+                    never_writes: None,
                 })
                 .collect(),
             sig: None,
@@ -167,7 +167,7 @@ fn sig_tapes(sig: &Signature) -> Vec<WorldTape<'_>> {
                 alphabet_span,
                 volatile,
                 writes,
-                preserves,
+                never_writes,
                 ..
             } => Some(WorldTape {
                 name: p.name.as_str(),
@@ -176,7 +176,7 @@ fn sig_tapes(sig: &Signature) -> Vec<WorldTape<'_>> {
                 alphabet_span: *alphabet_span,
                 volatile: *volatile,
                 writes: writes.as_ref(),
-                preserves: preserves.as_ref(),
+                never_writes: never_writes.as_ref(),
             }),
             SigParamKind::State => None,
         })
@@ -731,7 +731,7 @@ fn render(program: &Program, state: &DocState, target: &Target) -> Option<String
             let view = world_views(program)
                 .into_iter()
                 .find(|w| w.mangled == *mangled)?;
-            // `world_head` already carries any DECLARED `writes`/`preserves`
+            // `world_head` already carries any DECLARED `writes`/`never writes`
             // clauses (a promise about a signature tape parameter); the
             // `writes <tape>: {…}` lines appended below are the INFERRED
             // footprint (a computation over the body). The two can
@@ -756,8 +756,8 @@ fn render(program: &Program, state: &DocState, target: &Target) -> Option<String
             if let Some(clause) = tape.writes {
                 head.push_str(&crate::fmt::contract_clause_text("writes", clause));
             }
-            if let Some(clause) = tape.preserves {
-                head.push_str(&crate::fmt::contract_clause_text("preserves", clause));
+            if let Some(clause) = tape.never_writes {
+                head.push_str(&crate::fmt::contract_clause_text("never writes", clause));
             }
             (head, None)
         }
@@ -831,7 +831,7 @@ fn alphabet_head(mangled: &str, alphabet: &Alphabet, resolved: Option<&Resolved>
 }
 
 /// A world's signature as written, tape parameters with their alphabets
-/// and any declared `writes`/`preserves` clauses included — the pmc hover's
+/// and any declared `writes`/`never writes` clauses included — the pmc hover's
 /// "signature" line, in TM terms. Clause text is rendered through fmt's own
 /// `contract_clause_text`, so a declared clause reads identically here and
 /// in the canonical `.tmc` printer.
@@ -852,7 +852,7 @@ fn world_head(view: &WorldView<'_>) -> String {
                 alphabet,
                 volatile,
                 writes,
-                preserves,
+                never_writes,
                 ..
             } => {
                 let prefix = if *volatile { "volatile " } else { "" };
@@ -860,8 +860,8 @@ fn world_head(view: &WorldView<'_>) -> String {
                 if let Some(clause) = writes {
                     param.push_str(&crate::fmt::contract_clause_text("writes", clause));
                 }
-                if let Some(clause) = preserves {
-                    param.push_str(&crate::fmt::contract_clause_text("preserves", clause));
+                if let Some(clause) = never_writes {
+                    param.push_str(&crate::fmt::contract_clause_text("never writes", clause));
                 }
                 param
             }

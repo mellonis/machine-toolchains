@@ -193,7 +193,7 @@ pub struct IrTape {
     /// A ROUTINE tape's published write set, as glyphs
     /// (`compiler::published_writes`, the one function both this lowering
     /// and the source arm of `tmt interface` call): the declared EFFECTIVE
-    /// set (`writes` minus `preserves`) for a contracted signature tape,
+    /// set (`writes` minus `never writes`) for a contracted signature tape,
     /// or — when the parameter declares NEITHER clause — the tape's
     /// INFERRED write set (`footprint::infer_resolved_with`, the same
     /// sound-upper-bound analysis `check_contracts` runs to validate a
@@ -201,7 +201,7 @@ pub struct IrTape {
     /// declared" (an absent `writes=` decodes as "writes nothing" —
     /// docs/formats.md (routine interfaces)), so an uncontracted routine
     /// tape must still publish what it actually writes rather than an
-    /// empty set that would understate it. `preserves` itself has no IR
+    /// empty set that would understate it. `never writes` itself has no IR
     /// representation either way: it is source-level sugar the effective
     /// set already absorbs.
     ///
@@ -2937,14 +2937,14 @@ machine {
 
     /// `IrTape.glyphs` carries every tape's glyph table, and `IrTape.writes`
     /// carries the EFFECTIVE set (`compiler::declared_effective`) — never the
-    /// raw `writes` clause. The `preserves`-only routine mirrors
-    /// `std::…::invertNumber` (`preserves { '_' }`, no `writes` clause): the
-    /// a `preserves` clause on its own DOES constrain the tape, so this
+    /// raw `writes` clause. The `never writes`-only routine mirrors
+    /// `std::…::invertNumber` (`never writes { '_' }`, no `writes` clause): the
+    /// a `never writes` clause on its own DOES constrain the tape, so this
     /// must still yield `Some` (the alphabet minus the preserved glyph),
     /// not the `None` a raw reading of "no `writes` clause" would produce
     /// (docs/tmt/language.md (contract clauses)). Mutation: reading `tape.writes`
     /// directly instead of calling `declared_effective` makes the
-    /// `preserves`-only assertion fail (it would see `None`).
+    /// `never writes`-only assertion fail (it would see `None`).
     #[test]
     fn writes_is_the_effective_set_not_the_raw_clause() {
         let src = "\
@@ -2952,7 +2952,7 @@ alphabet bits { '_', '1' }
 export routine byWrites(tape a: bits writes { '1' }) {
   entry state s { [*] -> return; }
 }
-export routine byPreserves(tape a: bits preserves { '_' }) {
+export routine byNeverWrites(tape a: bits never writes { '_' }) {
   entry state s { [*] -> return; }
 }
 export routine byNeither(tape a: bits) {
@@ -2977,15 +2977,15 @@ machine {
             .expect("the byWrites world");
         assert_eq!(by_writes.tapes[0].writes, Some(vec!["1".to_string()]));
 
-        // The invertNumber shape: `preserves` only, no `writes` clause. A raw
+        // The invertNumber shape: `never writes` only, no `writes` clause. A raw
         // reading of "no `writes` clause" would answer `None`; the effective
         // set is the alphabet minus the preserved blank.
-        let by_preserves = ir
+        let by_never_writes = ir
             .worlds
             .iter()
-            .find(|w| w.name.ends_with("byPreserves"))
-            .expect("the byPreserves world");
-        assert_eq!(by_preserves.tapes[0].writes, Some(vec!["1".to_string()]));
+            .find(|w| w.name.ends_with("byNeverWrites"))
+            .expect("the byNeverWrites world");
+        assert_eq!(by_never_writes.tapes[0].writes, Some(vec!["1".to_string()]));
 
         // Neither clause: the routine's body (a bare `return`) writes
         // nothing, so the INFERRED set is empty — `Some(vec![])`, never

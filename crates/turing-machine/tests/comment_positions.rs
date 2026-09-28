@@ -296,14 +296,15 @@ fn set_cell_comments_stay_where_written() {
 /// The remaining header families. Measured destinations: `namespace`,
 /// `machine`, `state` → own line inside the body (after the `{`);
 /// `routine`, `graft`, `bind` → riding the argument list's `(`;
-/// `tape` → trailing after the whole statement's `;`. The three
+/// `tape` → trailing after the whole statement's `;`. Three of the
 /// `sig-param` entries are a signature tape parameter's `enters`/`leaves`
 /// head-position clauses: a comment before the `enters` keyword, inside a
 /// clause's own braces, or between the two clauses all stay exactly where
 /// written — a BLOCK comment prints inline, a LINE comment breaks the
 /// whole parameter list to one parameter per line (the same
 /// comment-bearing-parameter path every other signature entry above
-/// takes).
+/// takes). The fourth sits between the two words of the one two-token
+/// clause keyword, `never writes`, and stays there the same way.
 const OTHER_HEADERS: &[(&str, &str)] = &[
     (
         "namespace/kw-name",
@@ -380,6 +381,10 @@ const OTHER_HEADERS: &[(&str, &str)] = &[
     (
         "sig-param/between-enters-leaves",
         "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab enters { 'a' } @C@\n  leaves { 'b' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
+    ),
+    (
+        "sig-param/never-writes-interior",
+        "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab never @C@\n  writes { 'a' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
     ),
 ];
 

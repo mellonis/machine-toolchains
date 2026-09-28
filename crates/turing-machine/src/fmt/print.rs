@@ -1135,13 +1135,13 @@ fn continuation_text(cont: &Continuation) -> String {
     }
 }
 
-/// One `writes { … }`, `preserves { … }`, `enters { … }`, or `leaves { … }`
+/// One `writes { … }`, `never writes { … }`, `enters { … }`, or `leaves { … }`
 /// clause, re-encoded losslessly:
 /// a single leading space ahead of the keyword, then the same brace-body
 /// spacing an `alphabet` renders inline (`{ elem, elem }`,
-/// [`render_alphabet`]). An empty clause is meaningful — it declares that
-/// the parameter writes (or preserves) nothing, distinct from no clause at
-/// all — and prints `{}` with no inner space; this deliberately does NOT
+/// [`render_alphabet`]). An empty clause is meaningful — `writes {}` declares
+/// that the parameter writes nothing, distinct from no clause at all — and
+/// prints `{}` with no inner space; this deliberately does NOT
 /// mirror `render_alphabet`'s empty-body spacing because a bare `alphabet`
 /// body can never be empty (the compiler rejects it), so that path renders
 /// no real input and sets no convention. A clause carries no interior
@@ -1171,7 +1171,7 @@ fn signature_params(params: &[SigParam]) -> Vec<String> {
                 alphabet,
                 volatile,
                 writes,
-                preserves,
+                never_writes,
                 enters,
                 leaves,
                 ..
@@ -1181,8 +1181,8 @@ fn signature_params(params: &[SigParam]) -> Vec<String> {
                 if let Some(clause) = writes {
                     out.push_str(&contract_clause_text("writes", clause));
                 }
-                if let Some(clause) = preserves {
-                    out.push_str(&contract_clause_text("preserves", clause));
+                if let Some(clause) = never_writes {
+                    out.push_str(&contract_clause_text("never writes", clause));
                 }
                 if let Some(clause) = enters {
                     out.push_str(&contract_clause_text("enters", clause));
@@ -3809,8 +3809,8 @@ mod tests {
         );
         pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  \
-             routine r(volatile tape t: ab writes {} preserves { '_'..'a' }, state s) {\n  }\n}\n",
-            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(volatile tape t: ab writes {} preserves { '_'..'a' }, state s) {\n  }\n}\n",
+             routine r(volatile tape t: ab writes {} never writes { '_'..'a' }, state s) {\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(volatile tape t: ab writes {} never writes { '_'..'a' }, state s) {\n  }\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g() {\n  }\n}\n",

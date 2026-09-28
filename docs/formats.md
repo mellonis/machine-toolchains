@@ -657,7 +657,7 @@ as an empty one. What each says:
   decoded and a disassembly prints neither. A compiled routine always
   carries the list: the `.tmc` compiler fills it with the tape's declared
   EFFECTIVE set when the source declared a contract (`writes` minus
-  `preserves`, `docs/tmt/language.md (contract clauses)`), and with its
+  `never writes`, `docs/tmt/language.md (contract clauses)`), and with its
   own inferred write set for that tape when the source declared none —
   so "no clause declared" never reaches the wire as "writes anything".
   The entry world is the one exception: a `machine` compiles to `main`,
@@ -1311,7 +1311,7 @@ alphabet *name* and cardinality ride along for readability and for
 index-bound validation; since version 4 every tape also carries its own
 glyph table (`glyphs`, one entry per index) and, for a contracted signature
 tape, its declared effective write set as glyphs (`writes` — `writes` minus
-`preserves`; omitted when the parameter declares neither clause). A
+`never writes`; omitted when the parameter declares neither clause). A
 pre-version-4 document has neither field.
 
 - `kind` per world is `machine` or `routine`. Graphs do not survive to the

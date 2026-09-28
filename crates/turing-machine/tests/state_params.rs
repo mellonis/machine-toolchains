@@ -245,7 +245,7 @@ machine {{
 /// A `then` that names one of the enclosing routine's own `state`
 /// parameters: `outer` calls a leaf that RETURNS normally, and the
 /// continuation leaves `outer` through its own exit instead of resuming
-/// in `outer`. `then never` in the machine halts, so a continuation that
+/// in `outer`. `then unreached` in the machine halts, so a continuation that
 /// wrongly printed `ret` would come back there and change the
 /// termination kind.
 const THEN_EXIT: &str = "\
@@ -262,9 +262,9 @@ routine outer(tape t: ab, state done) {
 machine {
   tape d: ab;
   tape out: ab;
-  entry state go { [*, *] -> call outer(t = d, done = fin) then never; }
-  state fin   { [*, *] -> write [-, '0'] stop; }
-  state never { [*, *] -> halt; }
+  entry state go { [*, *] -> call outer(t = d, done = fin) then unreached; }
+  state fin       { [*, *] -> write [-, '0'] stop; }
+  state unreached { [*, *] -> halt; }
 }
 ";
 
@@ -543,7 +543,7 @@ fn a_then_that_names_a_state_parameter_prints_retx() {
 /// The behavioural half, standing on its own so the consequence is
 /// observed and not merely implied by the text: leaving through the exit
 /// reaches the machine's `fin`, which stops. A continuation that returned
-/// normally instead would come back to `then never`, which halts.
+/// normally instead would come back to `then unreached`, which halts.
 ///
 /// Mutation: print `ret` for such a `then`; every run halts instead of
 /// stopping, and the tape stays blank.

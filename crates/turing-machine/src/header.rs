@@ -21,14 +21,14 @@
 //! namespaces (`binaryNumbersVolatile`, `binaryNumbersBareVolatile`)
 //! would break the two-arm agreement below on every routine they declare.
 //!
-//! **The printer never emits `preserves`.** A contract clause always
+//! **The printer never emits `never writes`.** A contract clause always
 //! prints as `writes { … }` carrying the tape's PUBLISHED write set
 //! (`compiler::published_writes`, the one function both `ir::lower` and
 //! this module call): the declared EFFECTIVE set when the tape declares
-//! `writes` or `preserves`, or — when neither clause is written — the
+//! `writes` or `never writes`, or — when neither clause is written — the
 //! compiler's own INFERRED write set for that tape, never the whole
 //! alphabet as a stand-in for "no restriction declared" (the wire has no
-//! way to spell that — docs/formats.md (routine interfaces)). `preserves`
+//! way to spell that — docs/formats.md (routine interfaces)). `never writes`
 //! itself is source-level sugar with no representation on the wire, so an
 //! object-arm render could not reproduce it even in principle, and using
 //! it as a stand-in for the uncontracted case would diverge from the
@@ -1740,7 +1740,7 @@ fn sig_param_text(
         // and is never checked at a call site (binding a volatile machine
         // tape into a non-volatile-declared parameter "is not
         // diagnosed"), so it is not part of what a caller may rely on —
-        // exactly the line the module doc draws for `preserves`. The
+        // exactly the line the module doc draws for `never writes`. The
         // object arm has no wire bit to read it back from either way, so
         // dropping it here is what keeps the two arms in agreement over
         // std.tmc's volatile-twin routines.

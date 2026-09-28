@@ -1323,7 +1323,7 @@ copy__2:
         // The cross-alphabet call renders the binding-call operand
         // `call mylib::plusOne [1{3->1, 4->2}]` (host tape 1 = data; wide '0'
         // = idx 3 → bits '0' = idx 1, wide '1' = idx 4 → bits '1' = idx 2).
-        // `num` declares neither `writes` nor `preserves`, so its `.param`
+        // `num` declares neither `writes` nor `never writes`, so its `.param`
         // publishes the INFERRED write set — the tape actually writes '0'
         // and '1' — rather than omitting `writes=` (docs/formats.md
         // (routine interfaces): an absent `writes=` decodes as "writes

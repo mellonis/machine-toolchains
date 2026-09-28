@@ -3,7 +3,7 @@
 //! (docs/tmt/language.md (declarations)), and carries the
 //! interface-emission tests that refactor exists for
 //! (docs/formats.md (routine interfaces)): every compiled world's `.param`
-//! lines, the `writes=` suffix's effective-set/preserves semantics, exported
+//! lines, the `writes=` suffix's effective-set/`never writes` semantics, exported
 //! alphabets reaching `Interface.alphabets`, and the text round trip codegen's
 //! glyph spelling depends on.
 
@@ -246,7 +246,7 @@ machine {
 /// `writes=` decodes as "writes nothing" (docs/formats.md (routine
 /// interfaces)) — so the ONLY thing that legitimately empties `writes[0]`
 /// is the tape actually writing nothing, never the mere absence of a
-/// `writes`/`preserves` clause: `byNeither` below writes nothing in its
+/// `writes`/`never writes` clause: `byNeither` below writes nothing in its
 /// body (a bare `return`), so its INFERRED footprint is independently
 /// empty, and that — not the absent clause — is why no suffix prints. The
 /// pair with [`the_writes_suffix_lists_the_effective_set`] and with
@@ -281,7 +281,7 @@ machine {
     );
 }
 
-/// A tape declaring NEITHER `writes` nor `preserves`, whose body
+/// A tape declaring NEITHER `writes` nor `never writes`, whose body
 /// unconditionally writes one glyph of a three-glyph alphabet: the object
 /// must publish exactly that glyph, never an empty set — an uncontracted
 /// routine still has to describe what it actually writes, because the
@@ -334,16 +334,16 @@ machine {
     assert_eq!(routine.writes[0], vec!["1".to_string()]);
 }
 
-/// The `std::…::invertNumber` shape (`preserves { '_' }`, no `writes`
+/// The `std::…::invertNumber` shape (`never writes { '_' }`, no `writes`
 /// clause). Mutation: filling `IrTape.writes` from the raw `writes` clause
 /// instead of `compiler::declared_effective` — this tape would then print
 /// no suffix at all, publishing permission to write the preserved blank the
 /// source forbids. Nothing else in this suite catches that.
 #[test]
-fn a_preserves_only_clause_prints_the_alphabet_minus_the_preserved_glyphs() {
+fn a_never_writes_only_clause_prints_the_alphabet_minus_the_excluded_glyphs() {
     let src = "\
 alphabet bits { '_', '0', '1' }
-export routine byPreserves(tape a: bits preserves { '_' }) {
+export routine byNeverWrites(tape a: bits never writes { '_' }) {
   entry state s { [*] -> return; }
 }
 machine {
@@ -354,7 +354,7 @@ machine {
     let object = compile(src, CompileOptions::default())
         .expect("compiles")
         .object;
-    let routine = routine_interface(&object, "byPreserves");
+    let routine = routine_interface(&object, "byNeverWrites");
     assert_eq!(routine.writes[0], vec!["0".to_string(), "1".to_string()]);
 }
 

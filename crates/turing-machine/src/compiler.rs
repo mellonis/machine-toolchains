@@ -114,7 +114,7 @@ pub enum CompileErrorKind {
     /// A second `[deprecated]` attribute inside one run.
     DuplicateAttribute,
     /// A signature tape parameter's contract clauses written out of the
-    /// fixed canonical order — `writes` < `preserves` < `enters` <
+    /// fixed canonical order — `writes` < `never writes` < `enters` <
     /// `leaves` — a grammar rule, not an fmt convention: fmt is
     /// token-preserving and cannot reorder an author's clauses. `what`
     /// names the clause the parser was reading; `before` names the
@@ -123,12 +123,12 @@ pub enum CompileErrorKind {
         what: &'static str,
         before: &'static str,
     },
-    /// A second `writes` or `preserves` clause on one signature tape
+    /// A second `writes` or `never writes` clause on one signature tape
     /// parameter. `what` names the repeated keyword.
     DuplicateContractClause { what: &'static str },
     /// An `enters { … }` or `leaves { … }` clause with no elements. Unlike
-    /// `writes {}`/`preserves {}` — a legal, meaningful empty SET ("writes
-    /// nothing" / "preserves nothing") — a head-position clause states
+    /// `writes {}`/`never writes {}` — a legal, meaningful empty SET ("writes
+    /// nothing" / "excludes nothing") — a head-position clause states
     /// where the head is at a moment in time, and there is no such thing
     /// as arriving or departing on no symbol at all.
     EmptyHeadClause,
@@ -265,7 +265,7 @@ pub enum CompileErrorKind {
     /// A `call` on a world-local bind name carries binding arguments. A bind
     /// is already fully bound at its declaration, so a call on it takes none.
     BindCallArgs(String),
-    /// A `writes`/`preserves` clause names a glyph the parameter's alphabet
+    /// A `writes`/`never writes` clause names a glyph the parameter's alphabet
     /// does not contain. A contract is stated in the tape's own frame, so
     /// every element must be a symbol of that alphabet. `clause` names which
     /// of the two clauses carried it.
@@ -275,8 +275,8 @@ pub enum CompileErrorKind {
         alphabet: String,
     },
     /// A world's inferred write footprint on one tape leaves the effective
-    /// set its contract declares (`writes` minus `preserves`, or everything
-    /// minus `preserves` when there is no `writes`). `glyphs` are the
+    /// set its contract declares (`writes` minus `never writes`, or everything
+    /// minus `never writes` when there is no `writes`). `glyphs` are the
     /// offending symbols, ascending. The inference OVER-approximates: a
     /// symbol outside the footprint provably never lands, while one inside it
     /// merely may — hence "may write".
@@ -723,7 +723,7 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::ContractClauseOrder { what, before } => {
                 write!(
                     f,
-                    "`{what}` must come before `{before}` (canonical order: `writes` < `preserves` < `enters` < `leaves`)"
+                    "`{what}` must come before `{before}` (canonical order: `writes` < `never writes` < `enters` < `leaves`)"
                 )
             }
             CompileErrorKind::DuplicateContractClause { what } => {
@@ -1650,12 +1650,12 @@ pub(crate) struct ResolvedTape {
     /// Always `None` on a machine tape — only a signature parameter takes a
     /// contract.
     pub writes: Option<SymSet>,
-    /// The declared `preserves { … }` clause, same frame and same `None`
+    /// The declared `never writes { … }` clause, same frame and same `None`
     /// meaning: nothing is declared off-limits.
-    pub preserves: Option<SymSet>,
+    pub never_writes: Option<SymSet>,
     /// The declared `enters { … }` clause — the symbols the head may be
     /// sitting on when a call transfers control into this parameter's
-    /// tape — same frame and `None` meaning as `writes`/`preserves`: no
+    /// tape — same frame and `None` meaning as `writes`/`never writes`: no
     /// clause declares no restriction, never an empty one (the parser
     /// rejects `enters {}`). Always `None` on a machine tape.
     pub enters: Option<SymSet>,
@@ -2175,14 +2175,14 @@ fn check_declarations_shape(program: &Program, mode: ReadMode) -> Result<(), Com
 
 /// A tape parameter's declared EFFECTIVE set (docs/tmt/language.md (contract
 /// clauses)): `writes` — the whole alphabet when there is no `writes` clause —
-/// minus `preserves`. A tape with neither clause therefore answers the whole
+/// minus `never writes`. A tape with neither clause therefore answers the whole
 /// alphabet, which is also what an external callee with no contract
 /// contributes to its callers.
 pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
     let declared = tape
         .writes
         .unwrap_or_else(|| SymSet::full(tape.cardinality as u32));
-    let preserved = tape.preserves.unwrap_or_else(SymSet::empty);
+    let preserved = tape.never_writes.unwrap_or_else(SymSet::empty);
     let mut allowed = SymSet::empty();
     for index in declared.iter() {
         if !preserved.contains(index) {
@@ -2195,7 +2195,7 @@ pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
 /// The write set a routine's tape PUBLISHES — to `IrTape::writes` (which
 /// becomes the compiled object's `RoutineInterface::writes`) and, on the
 /// source arm, to a `tmt interface` header. The declared EFFECTIVE set
-/// (`declared_effective`) when the tape declares `writes` or `preserves`;
+/// (`declared_effective`) when the tape declares `writes` or `never writes`;
 /// otherwise the tape's INFERRED write set, never the whole alphabet as a
 /// stand-in for "no restriction declared" — the wire has no way to spell
 /// that (an absent `writes=` decodes as "writes nothing" —
@@ -2210,7 +2210,7 @@ pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
 /// `tmt interface` promises (docs/tmt/cli.md (interface)) depends on both
 /// going through here rather than each re-deriving the rule.
 pub(crate) fn published_writes(tape: &ResolvedTape, inferred: Option<SymSet>) -> SymSet {
-    if tape.writes.is_some() || tape.preserves.is_some() {
+    if tape.writes.is_some() || tape.never_writes.is_some() {
         declared_effective(tape)
     } else {
         inferred.unwrap_or_else(SymSet::empty)
@@ -2235,7 +2235,7 @@ pub(crate) fn symset_glyphs(set: SymSet, glyphs: &[String]) -> Vec<String> {
 
 /// A resolved head-position clause (`ResolvedTape::enters`/`::leaves`),
 /// through the same [`symset_glyphs`] step `writes` uses, for a clause that
-/// carries no `writes`/`preserves`-style effective-set arithmetic of its
+/// carries no `writes`/`never writes`-style effective-set arithmetic of its
 /// own: an `enters`/`leaves` clause is either declared exactly as written
 /// or not declared at all. `None` in, `None` out; a present clause is
 /// never empty (the parser rejects `enters {}`/`leaves {}`), so this never
@@ -2248,9 +2248,9 @@ pub(crate) fn clause_glyphs(clause: Option<SymSet>, glyphs: &[String]) -> Option
 ///
 /// A contract states what a world's body — and everything it calls or grafts —
 /// may put on one of its tapes. The effective permission is `writes` (or, with
-/// no `writes` clause, the whole alphabet) MINUS `preserves`; a symbol in both
+/// no `writes` clause, the whole alphabet) MINUS `never writes`; a symbol in both
 /// clauses is redundancy rather than an error, and the subtraction settles it
-/// in `preserves`' favour. A footprint reaching outside that set is fatal at
+/// in `never writes`' favour. A footprint reaching outside that set is fatal at
 /// the parameter that declared the contract.
 ///
 /// The inference OVER-approximates (`crate::footprint`'s soundness contract):
@@ -2264,7 +2264,7 @@ fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), 
     let contracted = resolved.worlds.iter().any(|w| {
         w.tapes
             .iter()
-            .any(|t| t.writes.is_some() || t.preserves.is_some())
+            .any(|t| t.writes.is_some() || t.never_writes.is_some())
     });
     if !contracted {
         return Ok(());
@@ -2290,7 +2290,7 @@ fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), 
             continue;
         };
         for (k, tape) in world.tapes.iter().enumerate() {
-            if tape.writes.is_none() && tape.preserves.is_none() {
+            if tape.writes.is_none() && tape.never_writes.is_none() {
                 continue;
             }
             let allowed = declared_effective(tape);
@@ -2327,7 +2327,7 @@ fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), 
 /// world's own body can PROVE, never against what it merely fails to
 /// disprove — the sibling of `check_contracts` for the other kind of
 /// promise a signature tape parameter can make (docs/tmt/language.md (head-
-/// position clauses)). Unlike `writes`/`preserves`, neither check walks a
+/// position clauses)). Unlike `writes`/`never writes`, neither check walks a
 /// call graph or a footprint fixpoint: both read one world's own rules only.
 ///
 /// `enters` is checked against the world's ENTRY state — the glyphs its own
@@ -3270,7 +3270,7 @@ fn resolve_world(
                 alphabet,
                 volatile,
                 writes,
-                preserves,
+                never_writes,
                 enters,
                 leaves,
                 ..
@@ -3282,7 +3282,7 @@ fn resolve_world(
                     .map(|a| a.glyphs.as_slice())
                     .expect("a resolved tape alphabet is in the table");
                 // `enters`/`leaves` take the same membership check as
-                // `writes`/`preserves` — every element must be a symbol of
+                // `writes`/`never writes` — every element must be a symbol of
                 // the parameter's own alphabet — and, like them, the
                 // resolved set is carried on `ResolvedTape` for `ir::lower`
                 // and the source arm of `tmt interface` to read.
@@ -3299,7 +3299,7 @@ fn resolve_world(
                 let enters = clause(enters.as_deref(), "enters")?;
                 let leaves = clause(leaves.as_deref(), "leaves")?;
                 let writes = clause(writes.as_ref(), "writes")?;
-                let preserves = clause(preserves.as_ref(), "preserves")?;
+                let never_writes = clause(never_writes.as_ref(), "never writes")?;
                 tapes.push(ResolvedTape {
                     name: p.name.clone(),
                     name_span: p.name_span,
@@ -3308,7 +3308,7 @@ fn resolve_world(
                     span: p.span,
                     volatile: *volatile,
                     writes,
-                    preserves,
+                    never_writes,
                     enters,
                     leaves,
                 });
@@ -3497,7 +3497,7 @@ fn resolve_machine_world(
             // A machine tape declaration has no contract grammar: the clauses
             // live on signature parameters, where a caller can read them.
             writes: None,
-            preserves: None,
+            never_writes: None,
             enters: None,
             leaves: None,
         });
@@ -3641,7 +3641,7 @@ pub(crate) fn find_external_graph<'a>(
     })
 }
 
-/// Resolve one `writes`/`preserves` clause into a symbol-index set in its
+/// Resolve one `writes`/`never writes` clause into a symbol-index set in its
 /// tape's own alphabet frame. `None` in, `None` out — an absent clause is not
 /// an empty one: it declares nothing, where `writes {}` declares that nothing
 /// is written.
@@ -4353,7 +4353,7 @@ impl WorldCtx<'_> {
             for p in &sig.params {
                 if let SigParamKind::Tape {
                     writes,
-                    preserves,
+                    never_writes,
                     enters,
                     leaves,
                     ..
@@ -4361,7 +4361,7 @@ impl WorldCtx<'_> {
                 {
                     let clauses = [
                         writes.as_ref(),
-                        preserves.as_ref(),
+                        never_writes.as_ref(),
                         enters.as_deref(),
                         leaves.as_deref(),
                     ];
@@ -5030,7 +5030,7 @@ mod tests {
             CompileErrorKind::DuplicateAttribute,
             CompileErrorKind::ContractClauseOrder {
                 what: "writes",
-                before: "preserves",
+                before: "never writes",
             },
             CompileErrorKind::DuplicateContractClause { what: "writes" },
             CompileErrorKind::EmptyHeadClause,
@@ -5841,7 +5841,7 @@ machine {
     fn contract_clauses_resolve_to_index_sets_in_the_tapes_own_frame() {
         let a = ok("\
 alphabet bits { '_', '0', '1' }
-routine r(tape t: bits writes {'0'..'1'} preserves {'_'}) {
+routine r(tape t: bits writes {'0'..'1'} never writes {'_'}) {
   entry state s { [*] -> return; }
 }
 ");
@@ -5854,7 +5854,10 @@ routine r(tape t: bits writes {'0'..'1'} preserves {'_'}) {
             vec![1, 2],
             "`'0'..'1'` is positions 1 and 2 of `{{'_', '0', '1'}}`"
         );
-        assert_eq!(tape.preserves.unwrap().iter().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(
+            tape.never_writes.unwrap().iter().collect::<Vec<_>>(),
+            vec![0]
+        );
     }
 
     #[test]
@@ -5866,12 +5869,12 @@ machine { tape m: bits; entry state s { [*] -> stop; } }
 ");
         let routine = a.resolved.worlds.iter().find(|w| w.name == "r").unwrap();
         assert!(routine.tapes[0].writes.is_none());
-        assert!(routine.tapes[0].preserves.is_none());
+        assert!(routine.tapes[0].never_writes.is_none());
         // A machine tape declaration has no clause grammar at all, so the
         // machine world's tapes are unconditionally uncontracted.
         let machine = a.resolved.worlds.iter().find(|w| w.name == "main").unwrap();
         assert!(machine.tapes[0].writes.is_none());
-        assert!(machine.tapes[0].preserves.is_none());
+        assert!(machine.tapes[0].never_writes.is_none());
     }
 
     #[test]
@@ -5919,10 +5922,10 @@ routine setZero(tape n: bin writes { '$' }) {
     }
 
     #[test]
-    fn a_violated_preserves_contract_errors() {
+    fn a_violated_never_writes_contract_errors() {
         let e = err("\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits preserves {'1'}) {
+routine mark(tape t: bits never writes {'1'}) {
   entry state s { [*] -> write ['1'] return; }
 }
 ");
@@ -5934,12 +5937,12 @@ routine mark(tape t: bits preserves {'1'}) {
     }
 
     #[test]
-    fn preserves_subtracts_from_writes_where_the_two_overlap() {
-        // `'1'` in BOTH clauses is redundancy, not an error — and `preserves`
+    fn never_writes_subtracts_from_writes_where_the_two_overlap() {
+        // `'1'` in BOTH clauses is redundancy, not an error — and `never writes`
         // wins the subtraction, so a body writing it violates the contract.
         let overlapping = "\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0','1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0','1'} never writes {'1'}) {
   entry state s { [*] -> write ['1'] return; }
 }
 ";
@@ -5947,7 +5950,7 @@ routine mark(tape t: bits writes {'0','1'} preserves {'1'}) {
         // The same declaration over a body writing only `'0'` is satisfied.
         ok("\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0','1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0','1'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ");
@@ -6006,14 +6009,14 @@ routine mark(tape t: bits writes {'x'}) {
         );
         let e = err("\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits preserves {'x'}) {
+routine mark(tape t: bits never writes {'x'}) {
   entry state s { [*] -> return; }
 }
 ");
         assert_eq!(e.kind.code(), "contract-symbol-unknown");
         assert_eq!(
             e.kind.to_string(),
-            "'x' in the `preserves` clause is not a symbol of alphabet `bits`"
+            "'x' in the `never writes` clause is not a symbol of alphabet `bits`"
         );
     }
 

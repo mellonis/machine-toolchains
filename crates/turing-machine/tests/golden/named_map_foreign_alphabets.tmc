@@ -10,7 +10,7 @@ namespace bare {
   export alphabet bits { '_', '0', '1' }
 
   ? Flip every bit of a run of digits, stopping on the blank after it.
-  export routine invert(tape num: bits preserves { '_' } leaves { '_' }) {
+  export routine invert(tape num: bits never writes { '_' } leaves { '_' }) {
     entry state sweep {
       ['0'] -> write ['1'] move [>] goto sweep;
       ['1'] -> write ['0'] move [>] goto sweep;

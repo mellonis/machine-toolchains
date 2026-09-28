@@ -146,7 +146,7 @@ to that token's column:
        ) then fin;
 ```
 
-A tape parameter's `writes`/`preserves` clause
+A tape parameter's `writes`/`never writes` clause
 (`docs/tmt/language.md (contract clauses)`) renders as part of the
 parameter it decorates — one leading space before the keyword, `{ … }`
 with interior spacing around a non-empty body and bare `{}` for an empty
@@ -414,8 +414,9 @@ pending comment wholesale:
 - in a signature's parameter list, a comment between a parameter and the
   following `,` crosses the comma and prints after it. The parameter's
   own interior is unaffected — a comment inside the parameter, including
-  one inside its `writes`/`preserves` clause, stays where it was
-  written, and so does one written after the comma:
+  one inside any of its contract clauses or between the two words of
+  `never writes`, stays where it was written, and so does one written
+  after the comma:
 
   ```
   routine r(tape t: ab writes /* o */ {} /* p */ , /* q */ state /* r */ hit)

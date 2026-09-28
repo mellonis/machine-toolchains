@@ -120,7 +120,7 @@ compiled from. Head position is part of every contract, on entry and on
 exit, and is the part most easily got wrong: several routines leave the head
 somewhere data-dependent.
 
-Every routine below declares a machine-checked `writes`/`preserves` clause
+Every routine below declares a machine-checked `writes`/`never writes` clause
 (`docs/tmt/language.md (contract clauses)`) on its `num` parameter,
 formalizing part of the same `?` doc-line contract as grammar the compiler
 enforces, rather than leaving it as prose alone. The **Contract** column
@@ -135,7 +135,7 @@ Not every doc-line guarantee is expressible that way. `deleteNumber`,
 `normalizeNumber`, `plusOne`, and `minusOneFast` in the delimited
 namespace, and `minusOne` in the bare one, each document a **conditional**
 tape-unchanged guarantee — the delimited four only when the head starts off
-a number, the bare one only on underflow — and a `writes`/`preserves`
+a number, the bare one only on underflow — and a `writes`/`never writes`
 clause is an unconditional promise about every run of the routine, so a
 guarantee that holds on only one input shape cannot be written as one.
 Their `writes` clause states which symbols a run may write; their doc-line
@@ -182,13 +182,13 @@ showing, not because it is the one to reach for.
 Every routine takes a single tape parameter, `num`, typed by the namespace's
 3-symbol `symbols` alphabet, and every one of them expects the head on the
 **leftmost digit** on entry — the Contract column below carries each
-routine's clause; `invertNumber` states its as a `preserves`.
+routine's clause; `invertNumber` states its as a `never writes` clause.
 
 | Routine | Effect | Head on exit | Contract |
 |---|---|---|---|
 | `plusOne()` | adds one; on overflow the number grows one cell left (`'111'` → `'1000'`) | data-dependent: the digit the carry settled on — the cell that flipped `'0'` → `'1'`, which on overflow is the new leading `'1'` | `writes { '0', '1' }` |
 | `minusOne()` | subtracts one; the result is **not** normalized, so a borrow that reaches the most significant digit leaves a leading zero (`'1000'` − 1 → `'0111'`) | data-dependent: the cell that flipped `'1'` → `'0'`. On underflow (an empty region) the tape is unchanged and the head sits one cell left, on a blank | `writes { '0', '1' }` |
-| `invertNumber()` | flips every bit | the trailing blank | `preserves { '_' }` |
+| `invertNumber()` | flips every bit | the trailing blank | `never writes { '_' }` |
 | `normalizeNumber()` | strips leading zeros. All-zeros restores a single `'0'`, so zero keeps its representation | the first `'1'`, or that restored `'0'` | `writes { '_', '0' }` |
 
 The bare exit positions are the sharp edge of this namespace: only
@@ -203,7 +203,7 @@ facade that grafts that graph with `done = return`:
 
 ```
 export graph invertNumberGraph(
-  tape num: symbols preserves { '_' },
+  tape num: symbols never writes { '_' },
   state done
 ) {
   entry state sweep {
@@ -213,7 +213,7 @@ export graph invertNumberGraph(
   }
 }
 
-export routine invertNumber(tape num: symbols preserves { '_' }) {
+export routine invertNumber(tape num: symbols never writes { '_' }) {
   entry graft invertNumberGraph(num = num, done = return);
 }
 ```
@@ -305,7 +305,7 @@ Each of the two representations is mirrored by a **volatile twin** namespace:
 | bare | `std::binaryNumbersBare` | `std::binaryNumbersBareVolatile` |
 
 A twin exports the same routine names as its counterpart, under the same
-contracts — including the same `writes`/`preserves` clause, verbatim, on
+contracts — including the same `writes`/`never writes` clause, verbatim, on
 every routine (the Contract column above carries them) — computing the
 same thing. It differs in exactly one way:
 its tape parameter is declared `volatile`

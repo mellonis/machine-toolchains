@@ -47,7 +47,7 @@ pub const RESERVED: [&str; 31] = [
     "debugger",
     "volatile",
     "writes",
-    "preserves",
+    "never",
     "noreturn",
     "enters",
     "leaves",

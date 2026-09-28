@@ -735,13 +735,13 @@ fn no_golden_tmc_carries_a_dead_map_pair() {
 
 // -- contract-clause-overlap ---------------------------------------------
 
-/// A `writes`/`preserves` clause pair sharing the glyph `'1'` — `preserves`
+/// A `writes`/`never writes` clause pair sharing the glyph `'1'` — `never writes`
 /// wins the effective-set subtraction, so the `writes` entry naming `'1'` is
 /// inert. The body writes only `'0'`, so the contract itself is satisfied and
 /// the file compiles; only the redundancy fires.
 const CONTRACT_OVERLAP: &str = "\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0', '1'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ";
@@ -754,7 +754,7 @@ fn a_contract_clause_overlap_file_reports_and_exits_one() {
     assert_eq!(out.code, 1);
     assert!(
         out.stdout.contains(
-            "lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         ),
         "{}",
         out.stdout

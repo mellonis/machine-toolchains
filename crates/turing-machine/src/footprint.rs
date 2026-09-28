@@ -1798,7 +1798,7 @@ routine setZero(tape n: bin) {
     #[test]
     fn every_stdlib_export_declares_an_exact_contract() {
         // `docs/tmt/stdlib.md (roster)` promises two things of the embedded
-        // library: every exported world declares a `writes`/`preserves`
+        // library: every exported world declares a `writes`/`never writes`
         // clause on every signature tape, and each clause is exact — its
         // effective set is precisely what the world's own transitions
         // write, so a caller believing it (`infer_resolved`) learns the
@@ -1810,7 +1810,7 @@ routine setZero(tape n: bin) {
         for world in std.worlds.iter().filter(|world| world.exported) {
             for (k, tape) in world.tapes.iter().enumerate() {
                 assert!(
-                    tape.writes.is_some() || tape.preserves.is_some(),
+                    tape.writes.is_some() || tape.never_writes.is_some(),
                     "std export {} declares no contract clause on tape {}",
                     world.name,
                     tape.name

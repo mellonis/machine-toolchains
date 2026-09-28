@@ -812,16 +812,16 @@ impl StateView {
 }
 
 /// A `SIG_PARAM`'s own direct IDENT tokens, in order. Exactly
-/// `volatile? tape NAME ALPHABET` or `state NAME` — the `writes`/
-/// `preserves` keywords are NOT among them, because each clause is a
+/// `volatile? tape NAME ALPHABET` or `state NAME` — the contract-clause
+/// keywords are NOT among them, because each clause is a
 /// `CONTRACT_CLAUSE` child node and this walk is direct-children-only.
 ///
 /// That exclusion is a CONSEQUENCE of bracketing the clauses, not the
 /// reason for it, and the accessors below do not depend on it. Measured
-/// with the `CONTRACT_CLAUSE` bracket removed, on
-/// `volatile tape a: x writes { '0' } preserves { '1' }`: this run
-/// becomes six IDENTs (`volatile`, `tape`, `a`, `x`, `writes`,
-/// `preserves`), and every positional accessor still answers correctly
+/// with the `CONTRACT_CLAUSE` bracket removed, on a `volatile tape a: x`
+/// carrying a `writes { '0' }` clause and a second, one-word clause: this
+/// run became six IDENTs (`volatile`, `tape`, `a`, `x` and the two clause
+/// keywords), and every positional accessor still answered correctly
 /// — `volatile()` true, `kind()` `Tape`, `name_token()` `a`,
 /// `alphabet_token()` `Some("x")` — because a clause keyword can only
 /// ever sit AFTER the alphabet. The single thing that breaks is
@@ -933,7 +933,8 @@ impl SigParamView {
     }
 
     /// This parameter's own contract clauses, in the order written.
-    /// The parser fixes that order (`writes` before `preserves`) and
+    /// The parser fixes that order (`writes` < `never writes` < `enters` <
+    /// `leaves`) and
     /// rejects a duplicate of either, so a caller reads each clause's
     /// own keyword rather than its position.
     pub fn contract_clauses(&self) -> impl Iterator<Item = ContractClauseView> + '_ {
@@ -942,7 +943,9 @@ impl SigParamView {
 }
 
 impl ContractClauseView {
-    /// `writes` or `preserves` — the clause's own first token. The
+    /// `writes`, `never`, `enters` or `leaves` — the clause's own first
+    /// token (`never writes` is the one two-word keyword, and its first
+    /// word alone already says which clause it is). The
     /// keyword is what says which field this clause fills; its position
     /// among the parameter's clauses does not.
     pub fn keyword_token(&self) -> SyntaxToken {

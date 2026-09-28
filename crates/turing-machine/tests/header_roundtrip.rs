@@ -492,14 +492,14 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// Mutation: printing `preserves` from the source arm — `invertNumber`
+/// Mutation: printing `never writes` from the source arm — `invertNumber`
 /// (`std::binaryNumbersBare::invertNumber` and its volatile twin, each
-/// declaring `preserves { '_' }` with no `writes` clause) diverges,
-/// because the object arm has no `preserves` to print back: it only ever
+/// declaring `never writes { '_' }` with no `writes` clause) diverges,
+/// because the object arm has no `never writes` to print back: it only ever
 /// carries the EFFECTIVE set. This pins the wire's own rule — a routine
 /// interface records one write set per tape and has no field for the
-/// source-level `preserves` sugar (docs/formats.md (routine interfaces))
-/// — at the surface where it is observable. VERIFIED RED by hand: printing `preserves`'s raw elements
+/// source-level `never writes` sugar (docs/formats.md (routine interfaces))
+/// — at the surface where it is observable. VERIFIED RED by hand: printing `never writes`'s raw elements
 /// instead of the effective set on the source arm's tape signature made
 /// this test fail on exactly the two `invertNumber` entries, restored
 /// afterward (see the task report).
@@ -640,7 +640,7 @@ fn the_o_flag_writes_the_header_to_a_file_instead_of_stdout() {
     );
 }
 
-/// A tape with NEITHER `writes` nor `preserves` must publish the SAME
+/// A tape with NEITHER `writes` nor `never writes` must publish the SAME
 /// write set on both arms: the compiler's own INFERRED set for that tape,
 /// never the whole alphabet. `touchA`'s body writes exactly one glyph
 /// (`'a'`) of a three-glyph alphabet unconditionally. Mutation: the source

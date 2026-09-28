@@ -436,13 +436,13 @@ fn volatile_signature_params_format_canonically() {
     assert_eq!(out, twice, "formatting the output is not idempotent");
 }
 
-/// A signature tape parameter's `writes { … }` and `preserves { … }` clauses
+/// A signature tape parameter's `writes { … }` and `never writes { … }` clauses
 /// print in canonical form: a single space ahead of each keyword, and the
 /// brace body spaced the same way an `alphabet` body is (`{ elem, elem }`).
 #[test]
-fn writes_and_preserves_clauses_format_canonically() {
+fn writes_and_never_writes_clauses_format_canonically() {
     let src = "alphabet bits { '_', '0', '1', '#' }\n\n\
-               routine w(tape t:bits writes{'0','1'}preserves{'#'}) { entry state g { [*] -> stop; } }\n\n\
+               routine w(tape t:bits writes{'0','1'}never writes{'#'}) { entry state g { [*] -> stop; } }\n\n\
                machine {\n\
                \x20 tape m: bits;\n\
                \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
@@ -453,7 +453,7 @@ fn writes_and_preserves_clauses_format_canonically() {
         .find(|l| l.starts_with("routine w"))
         .expect("the routine signature survives");
     assert_eq!(
-        sig_line, "routine w(tape t: bits writes { '0', '1' } preserves { '#' }) {",
+        sig_line, "routine w(tape t: bits writes { '0', '1' } never writes { '#' }) {",
         "the contract clauses print in canonical form, got: {sig_line:?}"
     );
     let twice = format(&out).expect("the formatted output re-formats");
@@ -465,7 +465,7 @@ fn writes_and_preserves_clauses_format_canonically() {
 #[test]
 fn an_already_canonical_contract_clause_is_a_fixed_point() {
     let src = "alphabet bits { '_', '0', '1', '#' }\n\n\
-               routine w(tape t: bits writes { '0', '1' } preserves { '#' }) { entry state g { [*] -> stop; } }\n\n\
+               routine w(tape t: bits writes { '0', '1' } never writes { '#' }) { entry state g { [*] -> stop; } }\n\n\
                machine {\n\
                \x20 tape m: bits;\n\
                \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
@@ -476,19 +476,19 @@ fn an_already_canonical_contract_clause_is_a_fixed_point() {
         .find(|l| l.starts_with("routine w"))
         .expect("the routine signature survives");
     assert_eq!(
-        sig_line, "routine w(tape t: bits writes { '0', '1' } preserves { '#' }) {",
+        sig_line, "routine w(tape t: bits writes { '0', '1' } never writes { '#' }) {",
         "an already-canonical clause round-trips unchanged, got: {sig_line:?}"
     );
 }
 
 /// A clause-bearing signature is the `formatting_never_changes_a_token`
 /// property (module doc) narrowed to a single fixture: the printer must not
-/// silently drop the `writes`/`preserves` tokens (or their brace bodies) the
+/// silently drop the `writes`/`never writes` tokens (or their brace bodies) the
 /// way an entry that only reads `alphabet` off `SigParamKind::Tape` would.
 #[test]
 fn formatting_never_changes_a_token_with_contract_clauses() {
     let src = "alphabet bits { '_', '0', '1', '#' }\n\n\
-               routine w(tape t: bits writes { '0', '1' } preserves { '#' }) { entry state g { [*] -> stop; } }\n\n\
+               routine w(tape t: bits writes { '0', '1' } never writes { '#' }) { entry state g { [*] -> stop; } }\n\n\
                machine {\n\
                \x20 tape m: bits;\n\
                \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
@@ -674,7 +674,7 @@ fn a_wide_writes_clause_breaks_the_param_list_without_wrapping_the_clause() {
 #[test]
 fn volatile_and_both_clauses_compose_in_a_signature_param() {
     let src = "alphabet symbols { '0', '1', '#' }\n\n\
-               routine w(volatile   tape  num:symbols   writes{'0'}preserves{'#'}) { entry state g { [*] -> stop; } }\n\n\
+               routine w(volatile   tape  num:symbols   writes{'0'}never writes{'#'}) { entry state g { [*] -> stop; } }\n\n\
                machine {\n\
                \x20 tape m: symbols;\n\
                \x20 entry state s { [*] -> call w(num = m) then stop; }\n\
@@ -685,19 +685,19 @@ fn volatile_and_both_clauses_compose_in_a_signature_param() {
         .find(|l| l.starts_with("routine w"))
         .expect("the routine signature survives");
     assert_eq!(
-        sig_line, "routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {",
+        sig_line, "routine w(volatile tape num: symbols writes { '0' } never writes { '#' }) {",
         "volatile and both clauses compose in signature position, got: {sig_line:?}"
     );
     let twice = format(&out).expect("the formatted output re-formats");
     assert_eq!(out, twice, "formatting the output is not idempotent");
 }
 
-/// A bare `preserves`-only clause (no `writes`) formats canonically — the
-/// grammar allows `preserves` with no preceding `writes`.
+/// A bare `never writes`-only clause (no `writes`) formats canonically — the
+/// grammar allows `never writes` with no preceding `writes`.
 #[test]
-fn a_preserves_only_clause_formats_canonically() {
+fn a_never_writes_only_clause_formats_canonically() {
     let src = "alphabet bits { '_', '0', '1' }\n\n\
-               routine w(tape t:bits preserves{'_'}) { entry state g { [*] -> stop; } }\n\n\
+               routine w(tape t:bits never writes{'_'}) { entry state g { [*] -> stop; } }\n\n\
                machine {\n\
                \x20 tape m: bits;\n\
                \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
@@ -708,8 +708,8 @@ fn a_preserves_only_clause_formats_canonically() {
         .find(|l| l.starts_with("routine w"))
         .expect("the routine signature survives");
     assert_eq!(
-        sig_line, "routine w(tape t: bits preserves { '_' }) {",
-        "a bare preserves-only clause formats canonically, got: {sig_line:?}"
+        sig_line, "routine w(tape t: bits never writes { '_' }) {",
+        "a bare never-writes-only clause formats canonically, got: {sig_line:?}"
     );
     let twice = format(&out).expect("the formatted output re-formats");
     assert_eq!(out, twice, "formatting the output is not idempotent");
@@ -720,7 +720,7 @@ fn a_preserves_only_clause_formats_canonically() {
 #[test]
 fn a_range_element_inside_a_clause_formats_canonically() {
     let src = "alphabet bits { '_', '0', '1', '#' }\n\n\
-               routine w(tape t:bits writes{'0'..'1'}preserves{'#'}) { entry state g { [*] -> stop; } }\n\n\
+               routine w(tape t:bits writes{'0'..'1'}never writes{'#'}) { entry state g { [*] -> stop; } }\n\n\
                machine {\n\
                \x20 tape m: bits;\n\
                \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
@@ -731,7 +731,7 @@ fn a_range_element_inside_a_clause_formats_canonically() {
         .find(|l| l.starts_with("routine w"))
         .expect("the routine signature survives");
     assert_eq!(
-        sig_line, "routine w(tape t: bits writes { '0'..'1' } preserves { '#' }) {",
+        sig_line, "routine w(tape t: bits writes { '0'..'1' } never writes { '#' }) {",
         "a range element re-encodes losslessly inside a clause, got: {sig_line:?}"
     );
     let twice = format(&out).expect("the formatted output re-formats");
@@ -850,7 +850,7 @@ fn a_bodiless_signature_formats_without_panicking_and_is_idempotent() {
 /// `)` and the body's `{` (or the bodiless `;`), the exact slot
 /// `render_reuse`'s comment-free arm used to hard-code past, silently
 /// dropping any significant token there. Covers a BODIED routine with a
-/// `writes`/`preserves` pair ahead of the clause and a BODILESS
+/// `writes`/`never writes` pair ahead of the clause and a BODILESS
 /// (declarations-only) one, both round-tripping through the same fix.
 /// Reads the same fixture `every_adversarial_source_formats_to_its_
 /// committed_sidecar` pins, rather than duplicating the source text.
@@ -871,7 +871,7 @@ fn a_noreturn_clause_formats_canonically_with_a_body_and_without_one() {
 
     let once = format(&src).expect("a noreturn clause must format, not panic or error");
     assert!(
-        once.contains("routine bodied(tape t: ab writes { '0' } preserves { '1' }) noreturn {"),
+        once.contains("routine bodied(tape t: ab writes { '0' } never writes { '1' }) noreturn {"),
         "the bodied signature lost its noreturn clause:\n{once}"
     );
     assert!(

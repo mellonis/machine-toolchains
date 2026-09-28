@@ -219,10 +219,12 @@ pub struct SigParam {
     pub span: Span,
 }
 
-/// One `writes { … }` or `preserves { … }` contract clause on a signature
-/// tape parameter: the brace-set's elements (the same element grammar as an
-/// alphabet body — singles and ranges), the keyword's own span, and the
-/// whole clause's span (keyword start → closing `}`).
+/// One `writes { … }`, `never writes { … }`, `enters { … }`, or
+/// `leaves { … }` contract clause on a signature tape parameter: the
+/// brace-set's elements (the same element grammar as an alphabet body —
+/// singles, ranges and set references), the keyword's own span (both
+/// words of the two-token `never writes`, and anything written between
+/// them), and the whole clause's span (keyword start → closing `}`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractClause {
     pub elems: Vec<AlphabetElem>,
@@ -239,12 +241,14 @@ pub enum SigParamKind {
         /// A declared `writes { … }` clause, signature-only (never present
         /// on a machine tape declaration).
         writes: Option<ContractClause>,
-        /// A declared `preserves { … }` clause, signature-only.
-        preserves: Option<ContractClause>,
+        /// A declared `never writes { … }` clause, signature-only: the
+        /// symbols the body never writes, subtracted from the `writes`
+        /// set (or from the whole alphabet when there is none).
+        never_writes: Option<ContractClause>,
         /// A declared `enters { … }` clause, signature-only: the symbols
         /// the head may be sitting on when a call transfers control into
         /// this parameter's tape. Canonical order: after `writes`/
-        /// `preserves`, before `leaves`. Boxed (alongside `leaves`) to keep
+        /// `never writes`, before `leaves`. Boxed (alongside `leaves`) to keep
         /// this variant from dwarfing `State`'s zero-byte payload — a
         /// signature-only pair, so the indirection never touches a
         /// world-body hot path.
@@ -1790,27 +1794,27 @@ impl Parser<'_> {
             // (docs/tmt/language.md (qualified names)).
             let q = self.qual_name("an alphabet name")?;
             let (alphabet, alphabet_span) = (q.joined(), q.span);
-            // `writes { … }`, `preserves { … }`, `enters { … }`,
+            // `writes { … }`, `never writes { … }`, `enters { … }`,
             // `leaves { … }`, all optional, in that canonical order — the
             // fixed order is a grammar rule, not an fmt convention, because
             // fmt is token-preserving and cannot reorder an author's
             // clauses. `enters`/`leaves` state head POSITION at a moment
             // (call-in / return), not a write footprint, so an empty one
-            // has no meaning the way `writes {}`/`preserves {}` do (an
+            // has no meaning the way `writes {}`/`never writes {}` do (an
             // explicit empty SET) — `EmptyHeadClause` catches it right
             // where it is parsed.
             let mut writes: Option<ContractClause> = None;
-            let mut preserves: Option<ContractClause> = None;
+            let mut never_writes: Option<ContractClause> = None;
             let mut enters: Option<Box<ContractClause>> = None;
             let mut leaves: Option<Box<ContractClause>> = None;
             loop {
                 if self.at_kw("writes") {
-                    if preserves.is_some() || enters.is_some() || leaves.is_some() {
+                    if never_writes.is_some() || enters.is_some() || leaves.is_some() {
                         // Name the nearest already-declared clause in
                         // canonical order — the one `writes` most directly
                         // needed to precede.
-                        let before = if preserves.is_some() {
-                            "preserves"
+                        let before = if never_writes.is_some() {
+                            "never writes"
                         } else if enters.is_some() {
                             "enters"
                         } else {
@@ -1831,24 +1835,37 @@ impl Parser<'_> {
                         ));
                     }
                     writes = Some(self.contract_clause()?);
-                } else if self.at_kw("preserves") {
+                } else if self.at_kw("never") {
                     if enters.is_some() || leaves.is_some() {
                         let before = if enters.is_some() { "enters" } else { "leaves" };
                         return Err(Self::err_at(
                             self.peek(),
                             CompileErrorKind::ContractClauseOrder {
-                                what: "preserves",
+                                what: "never writes",
                                 before,
                             },
                         ));
                     }
-                    if preserves.is_some() {
+                    if never_writes.is_some() {
                         return Err(Self::err_at(
                             self.peek(),
-                            CompileErrorKind::DuplicateContractClause { what: "preserves" },
+                            CompileErrorKind::DuplicateContractClause {
+                                what: "never writes",
+                            },
                         ));
                     }
-                    preserves = Some(self.contract_clause()?);
+                    never_writes = Some(self.contract_clause()?);
+                } else if self.at_kw("preserves") {
+                    // `.tmc` 0.1's spelling of `never writes`. No longer a
+                    // keyword — it names things again — but an identifier
+                    // can never follow a tape parameter's alphabet, so here
+                    // it can only be the old clause: name the new spelling
+                    // rather than fall through to "`,` or `)`"
+                    // (docs/tmt/language.md (version history)).
+                    return Err(Self::expected(
+                        self.peek(),
+                        "`never writes` (the clause `.tmc` 0.1 spelled `preserves` is now `never writes { … }`)",
+                    ));
                 } else if self.at_kw("enters") {
                     if leaves.is_some() {
                         return Err(Self::err_at(
@@ -1895,7 +1912,7 @@ impl Parser<'_> {
             let last_span = leaves
                 .as_deref()
                 .or(enters.as_deref())
-                .or(preserves.as_ref())
+                .or(never_writes.as_ref())
                 .or(writes.as_ref())
                 .map_or(alphabet_span, |c| c.span);
             Ok(SigParam {
@@ -1904,7 +1921,7 @@ impl Parser<'_> {
                     alphabet_span,
                     volatile,
                     writes,
-                    preserves,
+                    never_writes,
                     enters,
                     leaves,
                 },
@@ -1929,10 +1946,13 @@ impl Parser<'_> {
         }
     }
 
-    /// A `writes { … }`, `preserves { … }`, `enters { … }`, or
-    /// `leaves { … }` clause body, the current token already the keyword:
-    /// mirrors [`Self::parse_alphabet`]'s body loop
-    /// (comma-separated [`Self::alphabet_elem`], empty allowed). Interior
+    /// A `writes { … }`, `never writes { … }`, `enters { … }`, or
+    /// `leaves { … }` clause, the current token already its (first)
+    /// keyword. `never` must be followed by `writes` — the two words are
+    /// one keyword, and `never` on its own, or before anything else, is an
+    /// error naming the `writes` it needs. The body mirrors
+    /// [`Self::parse_alphabet`]'s body loop (comma-separated
+    /// [`Self::alphabet_elem`], empty allowed). Interior
     /// comments are deliberately not accepted here — unlike an alphabet
     /// body, a clause is a short one-line construct, and a comment splitting
     /// one open is not worth the complexity budget this early; a comment
@@ -1940,12 +1960,24 @@ impl Parser<'_> {
     /// the next fmt pass (the same relocation an author sees writing a
     /// comment inside a signature or binding argument list).
     fn contract_clause(&mut self) -> Result<ContractClause, CompileError> {
-        let kw_span = self.peek().span();
-        // Bracketed here rather than at the two call sites above, so the
-        // node opens at the clause keyword for both — its extent is then
+        let first = self.peek().span();
+        let two_words = self.at_kw("never");
+        // Bracketed here rather than at the call sites above, so the node
+        // opens at the clause keyword for all of them — its extent is then
         // exactly `kw_span` → the closing `}`, i.e. `ContractClause::span`.
+        // For `never writes` both words, and any comment between them, sit
+        // inside the one node.
         self.g_flush_start(TmcKind::ContractClause);
-        self.bump(); // `writes` / `preserves` / `enters` / `leaves`
+        self.bump(); // `writes` / `never` / `enters` / `leaves`
+        let kw_span = if two_words {
+            let writes = self.expect(
+                &TokenKind::Ident("writes".to_string()),
+                "`writes` after `never` (the clause is `never writes { … }`)",
+            )?;
+            join(first, writes.span())
+        } else {
+            first
+        };
         self.expect(&TokenKind::LBrace, "`{` to open the clause body")?;
         let mut elems: Vec<AlphabetElem> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
@@ -3194,7 +3226,7 @@ pub(crate) fn reparse_sym_map(tokens: &[Token]) -> SymMap {
 /// Retokenization reuse shim for a REUSE's own SIG_PARAM node:
 /// re-parses it through `Parser::sig_param`. Covers both shapes the
 /// production itself branches on — `Tape` (with its optional
-/// `writes`/`preserves` clauses) and the plain `State` parameter.
+/// contract clauses) and the plain `State` parameter.
 pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
     bare_parser(tokens)
         .sig_param()

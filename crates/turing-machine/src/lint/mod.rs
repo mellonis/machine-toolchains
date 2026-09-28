@@ -499,7 +499,7 @@ export routine clear(tape t: bit writes { '_' });
     }
 
     /// Constructs a header rule flags do report in a header: an unused
-    /// import, and a `writes`/`preserves` overlap in a bodiless signature.
+    /// import, and a `writes`/`never writes` overlap in a bodiless signature.
     /// Mutation it catches: a header flag that suppresses everything (an
     /// empty [`HEADER_RULES`], or a filter that never admits a code).
     #[test]
@@ -509,7 +509,7 @@ use lib::helper;
 
 alphabet bits { '_', '0', '1' }
 
-export routine mark(tape t: bits writes { '0', '1' } preserves { '1' });
+export routine mark(tape t: bits writes { '0', '1' } never writes { '1' });
 ";
         let report = lint_header(src, LintOptions::default()).unwrap();
         let codes: Vec<&str> = report.diagnostics.iter().map(|d| d.code).collect();

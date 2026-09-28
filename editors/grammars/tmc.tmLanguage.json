@@ -71,7 +71,7 @@
     },
     "keywordsContract": {
       "name": "keyword.control.tmc",
-      "match": "\\b(writes|preserves|enters|leaves)\\b"
+      "match": "\\b(writes|never|enters|leaves)\\b"
     },
     "declaration": {
       "comment": "Colors the name introduced by a declaring keyword. The keyword itself is re-scoped here because a TextMate rule consumes what it matches; the authoritative keyword lists are the `keywords*` rules above.",

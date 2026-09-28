@@ -1,13 +1,13 @@
 //! `contract-clause-overlap`: a signature tape parameter's `writes` clause
-//! names a glyph its `preserves` clause also names. The checker's effective
-//! allowed set is `writes MINUS preserves` — a symbol in both is cancelled
+//! names a glyph its `never writes` clause also names. The checker's effective
+//! allowed set is `writes` MINUS `never writes` — a symbol in both is cancelled
 //! before it ever reaches the inferred-footprint comparison, so the `writes`
 //! entry naming it contributes nothing: it is inert.
 //!
 //! Purely syntactic-plus-resolution: unlike most of the checker's own work,
 //! deciding overlap needs no footprint inference at all. It compares the two
 //! DECLARED symbol sets the resolver already built (`ResolvedTape::writes` /
-//! `::preserves`), so this rule stays cheap regardless of how large a world's
+//! `::never_writes`), so this rule stays cheap regardless of how large a world's
 //! body is, and reads exactly the sets the checker itself subtracts — it never
 //! re-resolves a clause's glyphs on its own.
 //!
@@ -15,11 +15,11 @@
 //!
 //! The finding is per SOURCE ELEMENT of the `writes` clause, not per glyph. A
 //! `writes` range straddling the overlap only partially — some of its glyphs
-//! are also in `preserves`, some are not — still gets exactly one finding,
+//! are also in `never writes`, some are not — still gets exactly one finding,
 //! naming just the glyphs that overlap, and ships no fix: splitting a range
 //! into "the part that stays" and "the part that goes" is not a
 //! whitespace-safe single text edit. An element every one of whose glyphs
-//! overlaps (a single symbol, or a range entirely swallowed by `preserves`)
+//! overlaps (a single symbol, or a range entirely swallowed by `never writes`)
 //! gets the removal fix.
 //!
 //! # The fix, and the one case it changes shape
@@ -31,13 +31,13 @@
 //! Doing that to the clause's ONLY element would leave `writes {}` behind —
 //! and `writes {}` is a first-class, far more restrictive declaration
 //! (explicitly "write nothing") than the vacuous clause it would be replacing
-//! (a clause whose one listed symbol contributed nothing, because `preserves`
+//! (a clause whose one listed symbol contributed nothing, because `never writes`
 //! already cancelled it). So when the overlapping element is the clause's
 //! only one, the fix removes the whole clause instead, leaving no `writes`
 //! restriction at all rather than minting a new, stronger one nobody wrote.
 //! That widening is a real semantics change (unlike an ordinary element
 //! removal, which is inert by construction — the removed entry was already
-//! excluded by the `preserves` subtraction), so the whole-clause fix is
+//! excluded by the `never writes` subtraction), so the whole-clause fix is
 //! `MaybeIncorrect`, the same tier every other whole-declaration deletion in
 //! this crate uses (`unused-alphabet` and its siblings); the ordinary
 //! element-removal fix stays `MachineApplicable`.
@@ -122,7 +122,7 @@ fn quoted_list(glyphs: &[String]) -> String {
 /// clause's own span live only on the AST — the resolved module keeps the
 /// resolved SET (`ResolvedTape::writes`), not where each element sits in the
 /// source. `None` for a machine world: a machine tape declaration carries no
-/// contract grammar at all, so its tapes' `writes`/`preserves` are always
+/// contract grammar at all, so its tapes' `writes`/`never writes` are always
 /// `None` and never reach this lookup.
 fn world_sig<'a>(program: &'a Program, world_name: &str) -> Option<(&'a [SigParam], &'a [String])> {
     if let Some(r) = program
@@ -208,10 +208,11 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
         for tape in &world.tapes {
             // Both clauses must be DECLARED for an overlap to be possible at
             // all — an absent clause contributes nothing to intersect with.
-            let (Some(writes_set), Some(preserves_set)) = (tape.writes, tape.preserves) else {
+            let (Some(writes_set), Some(never_writes_set)) = (tape.writes, tape.never_writes)
+            else {
                 continue;
             };
-            let overlap = writes_set.intersect(preserves_set);
+            let overlap = writes_set.intersect(never_writes_set);
             if overlap == SymSet::empty() {
                 continue;
             }
@@ -243,7 +244,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                     code: "contract-clause-overlap",
                     span: elem_span(elem),
                     message: format!(
-                        "{named} is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+                        "{named} is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
                     ),
                     fix,
                 });
@@ -312,7 +313,7 @@ mod tests {
     fn a_single_overlapping_glyph_fires_at_the_writes_element_span() {
         let src = "\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0', '1'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ";
@@ -320,18 +321,18 @@ routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(
             f[0].message,
-            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "'1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         );
         // The span names exactly the writes-clause's `'1'` element, not the
-        // preserves one — slicing it out of the source proves it, and the
-        // span must sit BEFORE the `preserves` keyword to prove it's the
-        // `writes`-side `'1'`, not the (textually identical) `preserves` one.
+        // `never writes` one — slicing it out of the source proves it, and the
+        // span must sit BEFORE the `never writes` keyword to prove it's the
+        // `writes`-side `'1'`, not the (textually identical) `never writes` one.
         let start = byte_of(src, f[0].span.start);
         let end = byte_of(src, f[0].span.end);
         assert_eq!(&src[start..end], "'1'");
         assert!(
-            !src[..start].contains("preserves"),
-            "the span sits inside `writes`, before `preserves` even starts"
+            !src[..start].contains("never writes"),
+            "the span sits inside `writes`, before `never writes` even starts"
         );
 
         // `'1'` is the LAST of the two writes elements, so the fix must take
@@ -343,7 +344,7 @@ routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
             .expect("a single glyph is always fully covered");
         let fixed = apply(src, &fix.edits);
         assert!(
-            fixed.contains("writes {'0'} preserves {'1'}"),
+            fixed.contains("writes {'0'} never writes {'1'}"),
             "the trailing element and its LEADING comma are removed:\n{fixed}"
         );
         assert!(
@@ -354,16 +355,16 @@ routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
     }
 
     /// A `writes` element that is a named glyph set is one source element
-    /// like any other: its members overlapping `preserves` still fire, at
+    /// like any other: its members overlapping `never writes` still fire, at
     /// the set reference's own span. Mutation: `elem_indices` answering
     /// `None` for a set reference — which compiles, and silently switches
     /// the rule off for every clause holding a set.
     #[test]
-    fn a_set_in_writes_overlapping_preserves_still_fires() {
+    fn a_set_in_writes_overlapping_never_writes_still_fires() {
         let src = "\
 alphabet bits { '_', '0', '1' }
 set ones { '1' }
-routine mark(tape t: bits writes {'0', ones} preserves {'1'}) {
+routine mark(tape t: bits writes {'0', ones} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ";
@@ -371,7 +372,7 @@ routine mark(tape t: bits writes {'0', ones} preserves {'1'}) {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(
             f[0].message,
-            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "'1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         );
         let start = byte_of(src, f[0].span.start);
         let end = byte_of(src, f[0].span.end);
@@ -382,7 +383,7 @@ routine mark(tape t: bits writes {'0', ones} preserves {'1'}) {
     fn disjoint_clauses_are_quiet() {
         let src = "\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ";
@@ -390,11 +391,11 @@ routine mark(tape t: bits writes {'0'} preserves {'1'}) {
     }
 
     /// `enters { … }` and `leaves { … }` naming the same glyph is not a
-    /// contradiction the way `writes`/`preserves` overlap is — it is the
+    /// contradiction the way `writes`/`never writes` overlap is — it is the
     /// normal shape for a routine that walks to a marker and stops on it,
     /// since the two clauses state two different MOMENTS (where the head
     /// starts, where it ends), not one promise made twice. This rule stays
-    /// `writes` × `preserves` only.
+    /// `writes` × `never writes` only.
     ///
     /// Mutation this catches: extending the overlap computation over the
     /// new clauses.
@@ -413,7 +414,7 @@ routine mark(tape t: bits enters { '1' } leaves { '1' }) {
     fn a_partially_overlapping_range_names_only_the_overlap_and_ships_no_fix() {
         let src = "\
 alphabet bits { '_', '0', '1', '2' }
-routine mark(tape t: bits writes {'0'..'2'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0'..'2'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ";
@@ -421,7 +422,7 @@ routine mark(tape t: bits writes {'0'..'2'} preserves {'1'}) {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(
             f[0].message,
-            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "'1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         );
         assert!(
             f[0].fix.is_none(),
@@ -433,7 +434,7 @@ routine mark(tape t: bits writes {'0'..'2'} preserves {'1'}) {
     fn the_fix_on_a_middle_element_removes_it_with_its_comma_and_recompiles_identically() {
         let src = "\
 alphabet bits { '_', '0', '1', '2' }
-routine mark(tape t: bits writes {'0', '1', '2'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0', '1', '2'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ";
@@ -444,14 +445,14 @@ routine mark(tape t: bits writes {'0', '1', '2'} preserves {'1'}) {
             .clone()
             .expect("a single glyph is always fully covered");
         assert_eq!(fix.description, "remove '1' from the `writes` clause");
-        // Inert (the removed entry was already excluded by the `preserves`
+        // Inert (the removed entry was already excluded by the `never writes`
         // subtraction), unlike the only-element whole-clause fix — pins the
         // applicability split between the two branches.
         assert_eq!(fix.applicability, Applicability::MachineApplicable);
 
         let fixed = apply(src, &fix.edits);
         assert!(
-            fixed.contains("writes {'0', '2'} preserves {'1'}"),
+            fixed.contains("writes {'0', '2'} never writes {'1'}"),
             "element and its comma removed cleanly:\n{fixed}"
         );
 
@@ -479,7 +480,7 @@ routine mark(tape t: bits writes {'0', '1', '2'} preserves {'1'}) {
     fn the_fix_on_the_only_element_removes_the_whole_clause_and_recompiles_identically() {
         let src = "\
 alphabet bits { '_', '1' }
-routine mark(tape t: bits writes {'1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'1'} never writes {'1'}) {
   entry state s { [*] -> return; }
 }
 ";
@@ -490,19 +491,21 @@ routine mark(tape t: bits writes {'1'} preserves {'1'}) {
             .clone()
             .expect("a single glyph is always fully covered");
         assert_eq!(fix.description, "remove the emptied `writes` clause");
-        // Widens the declared contract (writes-nothing → full-minus-preserves)
+        // Widens the declared contract (writes-nothing → full-minus-`never writes`)
         // — a semantics change, unlike plain element removal — so this tier
         // matches every other whole-declaration deletion fix in the crate.
         assert_eq!(fix.applicability, Applicability::MaybeIncorrect);
 
         let fixed = apply(src, &fix.edits);
-        assert!(
-            !fixed.contains("writes"),
+        // The one `writes` left is the second word of `never writes`.
+        assert_eq!(
+            fixed.matches("writes").count(),
+            1,
             "the whole clause is gone:\n{fixed}"
         );
         assert!(
-            fixed.contains("preserves {'1'}"),
-            "the preserves clause survives untouched:\n{fixed}"
+            fixed.contains("never writes {'1'}"),
+            "the `never writes` clause survives untouched:\n{fixed}"
         );
 
         assert!(
@@ -512,7 +515,7 @@ routine mark(tape t: bits writes {'1'} preserves {'1'}) {
         );
 
         // The fix WIDENS the declared effective set (writes-nothing →
-        // full-minus-preserves, per the comment above), so unlike the other
+        // full-minus-`never writes`, per the comment above), so unlike the other
         // fixes in this file it is not codegen-inert at the INTERFACE level:
         // `mark`'s `.param` line's `writes=` suffix legitimately differs —
         // absent before (the effective set was empty) and `writes=('_')`
@@ -529,12 +532,12 @@ routine mark(tape t: bits writes {'1'} preserves {'1'}) {
 
     #[test]
     fn a_fully_covered_range_element_gets_the_removal_fix() {
-        // The range `'0'..'1'` is entirely swallowed by `preserves` — every
+        // The range `'0'..'1'` is entirely swallowed by `never writes` — every
         // glyph it names overlaps, so (unlike the partial-overlap case) it
         // gets the fix, naming both glyphs it removes.
         let src = "\
 alphabet bits { '_', '0', '1', '2' }
-routine mark(tape t: bits writes {'0'..'1', '2'} preserves {'0'..'1'}) {
+routine mark(tape t: bits writes {'0'..'1', '2'} never writes {'0'..'1'}) {
   entry state s { [*] -> write ['2'] return; }
 }
 ";
@@ -542,7 +545,7 @@ routine mark(tape t: bits writes {'0'..'1', '2'} preserves {'0'..'1'}) {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(
             f[0].message,
-            "'0', '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "'0', '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         );
         let fix = f[0]
             .fix
@@ -552,7 +555,7 @@ routine mark(tape t: bits writes {'0'..'1', '2'} preserves {'0'..'1'}) {
 
         let fixed = apply(src, &fix.edits);
         assert!(
-            fixed.contains("writes {'2'} preserves {'0'..'1'}"),
+            fixed.contains("writes {'2'} never writes {'0'..'1'}"),
             "the range element and its trailing comma are removed:\n{fixed}"
         );
         assert!(
@@ -577,7 +580,7 @@ routine mark(tape t: bits writes {'0'..'1', '2'} preserves {'0'..'1'}) {
         // (`world_sig`'s graph arm, exercised by no other test here).
         let src = "\
 alphabet bits { '_', '0', '1' }
-graph g(tape t: bits writes {'0', '1'} preserves {'1'}, state done) {
+graph g(tape t: bits writes {'0', '1'} never writes {'1'}, state done) {
   entry state s { ['0'] -> done; [*] -> write ['0'] goto s; }
 }
 ";
@@ -585,7 +588,7 @@ graph g(tape t: bits writes {'0', '1'} preserves {'1'}, state done) {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(
             f[0].message,
-            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "'1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         );
     }
 
@@ -600,7 +603,7 @@ graph g(tape t: bits writes {'0', '1'} preserves {'1'}, state done) {
         let src = "\
 namespace lib {
   alphabet bits { '_', '0', '1' }
-  routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
+  routine mark(tape t: bits writes {'0', '1'} never writes {'1'}) {
     entry state s { [*] -> write ['0'] return; }
   }
 }
@@ -609,7 +612,7 @@ namespace lib {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(
             f[0].message,
-            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "'1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         );
         let start = byte_of(src, f[0].span.start);
         let end = byte_of(src, f[0].span.end);
@@ -625,7 +628,7 @@ namespace lib {
         // partial-range overlap.
         let src = "\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0', /* keep me */ '1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0', /* keep me */ '1'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ";
@@ -633,7 +636,7 @@ routine mark(tape t: bits writes {'0', /* keep me */ '1'} preserves {'1'}) {
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(
             f[0].message,
-            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "'1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         );
         assert!(
             f[0].fix.is_none(),

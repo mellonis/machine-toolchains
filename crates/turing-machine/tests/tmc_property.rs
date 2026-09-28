@@ -42,7 +42,7 @@
 //! (`state`, `graft`, the latter's non-entry form additionally
 //! exercising the parser's `as`-name requirement); tape declarations,
 //! plain and `volatile`; routine/graph signatures with both parameter
-//! kinds (`tape`, `state`) and, on a tape parameter, `writes`/`preserves`
+//! kinds (`tape`, `state`) and, on a tape parameter, `writes`/`never writes`
 //! independently (neither, either alone, or both in their one legal
 //! order); every pattern-cell shape (a literal, a range, a wildcard, and
 //! — on either a literal or a range, never a wildcard — an `as` binding)
@@ -322,7 +322,7 @@ fn gen_alphabet_elem(cur: &mut Cursor, em: &mut Emitted) -> String {
 }
 
 /// A comma-separated element list body (no brackets), used by both an
-/// `alphabet { … }` body and a `writes`/`preserves { … }` contract clause.
+/// `alphabet { … }` body and a `writes`/`never writes { … }` contract clause.
 /// `contract` says which: a clause body may be empty (`{}` is a real,
 /// meaningful shape — "written nowhere" — distinct from an absent clause;
 /// see docs/tmt/language.md (contract clauses)) and is the only one of
@@ -1233,13 +1233,13 @@ fn gen_world_items(
 
 /// A `routine`/`graph` signature (docs/tmt/language.md (tapes and heads)):
 /// `tape NAME: ALPHABET` parameters, each occasionally `volatile` and
-/// occasionally carrying `writes { … }`, `preserves { … }`, both, or
+/// occasionally carrying `writes { … }`, `never writes { … }`, both, or
 /// neither — the two clauses are each independently optional
 /// (docs/tmt/language.md (contract clauses)), and when both appear they
-/// stay in their one legal order, `writes` then `preserves`
+/// stay in their one legal order, `writes` then `never writes`
 /// (`ContractClauseOrder`/`DuplicateContractClause` are parse-time errors
 /// this generator avoids by construction, never generating either clause
-/// twice or `preserves` before `writes`); a `graph` additionally gets
+/// twice or `never writes` before `writes`); a `graph` additionally gets
 /// `state` exit parameters. Returns the tape
 /// arity (the vector width every rule in this world's body must use) and
 /// the exit-state parameter names — present for the `state exit0` shape
@@ -1276,17 +1276,17 @@ fn gen_signature(
         }
         let alphabet = ["ab", "bytes", "chars"][cur.choose(3)];
         out.push_str(&format!("tape tp{}: {alphabet}", cur.choose(4)));
-        // `writes` and `preserves` are each INDEPENDENTLY optional
-        // (docs/tmt/language.md (contract clauses)) — `preserves {}` is
+        // `writes` and `never writes` are each INDEPENDENTLY optional
+        // (docs/tmt/language.md (contract clauses)) — `never writes {}` is
         // legal with no `writes` at all — so the two draws below are
         // separate chances, not nested. When both fire they still emit
-        // in the one legal order, `writes` then `preserves`.
+        // in the one legal order, `writes` then `never writes`.
         let want_writes = cur.chance(1, 3);
-        let want_preserves = cur.chance(1, 3);
-        em.mark(match (want_writes, want_preserves) {
+        let want_never_writes = cur.chance(1, 3);
+        em.mark(match (want_writes, want_never_writes) {
             (true, true) => "sig.tape.both-clauses",
             (true, false) => "sig.tape.writes-only",
-            (false, true) => "sig.tape.preserves-only",
+            (false, true) => "sig.tape.never-writes-only",
             (false, false) => "sig.tape.no-clause",
         });
         if want_writes {
@@ -1294,8 +1294,8 @@ fn gen_signature(
             gen_elem_list(cur, n, em, true, false, out);
             out.push_str(" }");
         }
-        if want_preserves {
-            out.push_str(" preserves { ");
+        if want_never_writes {
+            out.push_str(" never writes { ");
             gen_elem_list(cur, n, em, true, false, out);
             out.push_str(" }");
         }
@@ -1764,7 +1764,7 @@ const REQUIRED_CONSTRUCTS: &[&str] = &[
     "sig.tape.volatile",
     "sig.tape.plain",
     "sig.tape.writes-only",
-    "sig.tape.preserves-only",
+    "sig.tape.never-writes-only",
     "sig.tape.both-clauses",
     "sig.tape.no-clause",
     "contract.empty",
@@ -1900,7 +1900,7 @@ const CHOSEN_CONSTRUCTS: &[&str] = &[
     "sig.tape.volatile",
     "sig.tape.plain",
     "sig.tape.writes-only",
-    "sig.tape.preserves-only",
+    "sig.tape.never-writes-only",
     "sig.tape.both-clauses",
     "sig.tape.no-clause",
     "contract.empty",
@@ -2304,7 +2304,7 @@ fn stamp_signature(sig: &mtc_turing_machine::parser::Signature, seen: &mut BTree
             SigParamKind::Tape {
                 volatile,
                 writes,
-                preserves,
+                never_writes,
                 ..
             } => {
                 seen.insert("sig.param.tape");
@@ -2313,13 +2313,13 @@ fn stamp_signature(sig: &mtc_turing_machine::parser::Signature, seen: &mut BTree
                 } else {
                     "sig.tape.plain"
                 });
-                seen.insert(match (writes.is_some(), preserves.is_some()) {
+                seen.insert(match (writes.is_some(), never_writes.is_some()) {
                     (true, true) => "sig.tape.both-clauses",
                     (true, false) => "sig.tape.writes-only",
-                    (false, true) => "sig.tape.preserves-only",
+                    (false, true) => "sig.tape.never-writes-only",
                     (false, false) => "sig.tape.no-clause",
                 });
-                for clause in [writes, preserves].into_iter().flatten() {
+                for clause in [writes, never_writes].into_iter().flatten() {
                     seen.insert(if clause.elems.is_empty() {
                         "contract.empty"
                     } else {

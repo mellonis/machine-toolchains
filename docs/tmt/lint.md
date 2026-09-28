@@ -620,10 +620,10 @@ both digits, so their write-back halves are live.
 
 ### contract-clause-overlap
 
-A signature tape parameter declaring BOTH `writes` and `preserves`
+A signature tape parameter declaring BOTH `writes` and `never writes`
 (`docs/tmt/language.md (contract clauses)`), where a glyph appears in
-both. The checker's own effective set is `writes` MINUS `preserves`, so
-naming a glyph in both is not a contradiction — `preserves` wins, and
+both. The checker's own effective set is `writes` MINUS `never writes`, so
+naming a glyph in both is not a contradiction — `never writes` wins, and
 the `writes` entry naming it contributes nothing to what the body may
 write. The rule is purely syntactic: it compares the two DECLARED sets
 the resolver already built and needs no write-footprint inference of its
@@ -631,25 +631,25 @@ own, so it stays cheap regardless of how large a world's body is.
 
 The finding is per SOURCE ELEMENT of the `writes` clause, not per glyph:
 a `writes` range straddling the overlap only partially — some of its
-glyphs also named by `preserves`, some not — still gets exactly one
+glyphs also named by `never writes`, some not — still gets exactly one
 finding, naming just the glyphs that overlap, and ships no fix, because
 splitting a range into "the part that stays" and "the part that goes" is
 not a single whitespace-safe text edit:
 
 ```
-g.tmc:3:35: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
+g.tmc:3:35: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert
 ```
 
 An element every one of whose glyphs overlaps — a single symbol, or a
-range entirely swallowed by `preserves` — gets a removal fix instead,
+range entirely swallowed by `never writes` — gets a removal fix instead,
 and what exactly the fix removes depends on whether the element is the
 clause's only one. Removing an element takes its adjacent comma with it
 — the comma AFTER it for every element but the last, the comma BEFORE it
 (so the remaining list still parses) when it is last. For a middle
-element of `writes {'0', '1', '2'} preserves {'1'}`:
+element of `writes {'0', '1', '2'} never writes {'1'}`:
 
 ```
-j.tmc:3:40: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
+j.tmc:3:40: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert
 ```
 
 Like every fix in this crate, it never appears on the command line
@@ -661,17 +661,17 @@ remove '1' from the `writes` clause
 ```
 
 That fix is `MachineApplicable`: the removed entry was already excluded
-by the `preserves` subtraction, so nothing about what the body may write
+by the `never writes` subtraction, so nothing about what the body may write
 changes. Doing the same thing to the clause's ONLY element would leave
 `writes {}` behind, and `writes {}` is a first-class, far more
 restrictive declaration (explicitly "write nothing") than the vacuous
 clause it would be replacing (a clause whose one listed symbol
-contributed nothing, because `preserves` already cancelled it) — so when
+contributed nothing, because `never writes` already cancelled it) — so when
 the overlapping element is the clause's only one, the fix removes the
-WHOLE clause instead. For `writes {'1'} preserves {'1'}`:
+WHOLE clause instead. For `writes {'1'} never writes {'1'}`:
 
 ```
-i.tmc:3:35: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
+i.tmc:3:35: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert
 ```
 
 Again as a code-action title only, never on the command line:
@@ -683,7 +683,7 @@ remove the emptied `writes` clause
 That fix is `MaybeIncorrect`, the same tier every other whole-declaration
 deletion in this crate uses (`unused-alphabet` and its siblings): unlike
 ordinary element removal, widening a writes-nothing declaration to "the
-full alphabet minus `preserves`" is a real semantics change, not an inert
+full alphabet minus `never writes`" is a real semantics change, not an inert
 one. Applying it silently discards an enforced writes-nothing guarantee —
 a later body edit that adds a write to the parameter then compiles clean
 where, before the fix, it would have errored.
@@ -698,7 +698,7 @@ reports in that case, same posture as the partial-range overlap — only
 the fix is missing:
 
 ```
-h.tmc:3:54: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
+h.tmc:3:54: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert
 ```
 
 ### unreachable-continuation

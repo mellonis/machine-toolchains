@@ -343,17 +343,26 @@ A signature tape parameter — `tape` or `volatile tape` alike, on a
 canonical form:
 
 ```
-routine mark(tape t: bits writes { '0', '1' } preserves { '1' }) { … }
+routine mark(tape t: bits writes { '0', '1' } never writes { '1' }) { … }
 ```
 
-`writes { … }` and `preserves { … }` each take an alphabet-body element
+`writes { … }` names the symbols the body may write; `never writes { … }`
+names the symbols the body never writes. Both are statements about
+symbols, not a promise about cells: a cell holding a symbol the body
+never writes may still be overwritten with any symbol the contract does
+allow. `never writes` is one keyword spelled as two words — `never` is
+reserved — and `never` on its own, or followed by anything but
+`writes`, is a parse error naming the `writes` it needs. (`.tmc` 0.1
+spelled this clause `preserves`; see "Grammar version history".)
+
+`writes { … }` and `never writes { … }` each take an alphabet-body element
 list — single glyphs and ascending ranges, the same grammar an
 `alphabet` body uses (see "Alphabets"), except that a clause's list may
 be empty where a bare `alphabet` body may not. Both clauses are
 optional, and the order between them is fixed when both appear: `writes`
-first, `preserves` second. Both are parse errors: writing `preserves`
+first, `never writes` second. Both are parse errors: writing `never writes`
 before `writes` is the `contract-clause-order` error; a second `writes`
-or a second `preserves` on one parameter is `duplicate-contract-clause`.
+or a second `never writes` on one parameter is `duplicate-contract-clause`.
 The fixed order is a grammar rule rather than a style preference, and it
 has to be: `tmt fmt`
 is a token-preserving printer (`docs/tmt/fmt.md`) that never reorders
@@ -364,14 +373,14 @@ could sort the two clauses back into place.
 `writes {}` is a real, meaningful clause, distinct from no clause at
 all: it declares that the parameter is written **nowhere**, a stronger
 promise than a missing clause makes (a missing clause promises nothing).
-`preserves {}` is legal too, though it has no effect a missing
-`preserves` does not already have.
+`never writes {}` is legal too, though it has no effect a missing
+`never writes` does not already have.
 
 A tape parameter's **effective set** — what its world's body, and
 everything it calls or grafts, is allowed to write there — is `writes`
 (or, when `writes` is absent, the parameter's whole alphabet) MINUS
-`preserves`. A glyph named by both clauses is not a contradiction:
-`preserves` wins, and the `writes` entry naming it is simply inert — the
+`never writes`. A glyph named by both clauses is not a contradiction:
+`never writes` wins, and the `writes` entry naming it is simply inert — the
 `contract-clause-overlap` lint reports exactly that (`docs/tmt/lint.md`).
 
 The effective set is also what a callee **promises its callers**. When a
@@ -433,9 +442,9 @@ body writes through a substitution on a given tape, that tape's inferred
 footprint is the full alphabet no matter how narrow the substitution's
 real range is — so the effective set has to be the full alphabet too for
 the check on THAT tape to pass, which rules out a `writes` clause naming
-anything less than every symbol and rules out `preserves` naming
+anything less than every symbol and rules out `never writes` naming
 anything at all; a substitution write on one tape says nothing about a
-plain clause on another tape of the same world. `preserves` is the
+plain clause on another tape of the same world. `never writes` is the
 clause this bites hardest, since reaching for it is usually trying to
 say "this glyph is never touched," and that is exactly the claim a
 substitution write makes unprovable to the checker:
@@ -448,17 +457,17 @@ promise the checker can never confirm.
 
 A signature tape parameter may also declare a head-position clause —
 `enters { … }` / `leaves { … }`, each the same alphabet-body element list
-`writes`/`preserves` take, in the same canonical order after them
-(`writes` < `preserves` < `enters` < `leaves`; out of order is the same
+`writes`/`never writes` take, in the same canonical order after them
+(`writes` < `never writes` < `enters` < `leaves`; out of order is the same
 `contract-clause-order` error). Unlike `writes {}`, an empty
 `enters {}`/`leaves {}` has no meaning — there is no symbol-less moment
 for the head to be at — so it is its own `empty-head-clause` error; an
-absent clause states nothing, exactly as an absent `writes`/`preserves`
+absent clause states nothing, exactly as an absent `writes`/`never writes`
 does. `enters` promises the glyph the head is on when a call transfers
 control INTO the parameter's tape; `leaves` promises the glyph it is on
 when control returns. Both are checked statically against the world's
 own body alone — never a call graph or a footprint fixpoint the way
-`writes`/`preserves` are. `enters` is checked against the world's entry
+`writes`/`never writes` are. `enters` is checked against the world's entry
 state: every glyph the clause names must be one some rule of that state
 matches, or the state traps on exactly the input the clause promises a
 caller may hand it — `enters-not-accepted`, naming the entry state, the
@@ -480,7 +489,7 @@ declared set — `leaves-outside-contract`, naming the row's state, the
 tape, and the glyph.
 
 A machine's own `tape` declaration carries no contract grammar at all —
-`writes`/`preserves`/`enters`/`leaves` are legal only on a signature
+`writes`/`never writes`/`enters`/`leaves` are legal only on a signature
 tape parameter, which is what distinguishes a machine's tapes from a
 routine's or a graph's (see "Tapes and heads", above); there is nowhere
 else in the grammar a clause can appear.
@@ -1361,11 +1370,11 @@ What it carries follows from that:
 - **A routine appears as a signature terminated by `;`** — no body. Its
   tapes carry their glyph lists and one contract clause, `writes { … }`,
   which is the tape's PUBLISHED write set: the declared effective set
-  (`writes` minus `preserves`) when the source declared either clause,
+  (`writes` minus `never writes`) when the source declared either clause,
   and the compiler's own inferred write set when it declared neither.
   **Every tape carries one**, `writes {}` included: a header states what
   a tape writes, and there is no spelling for "nothing declared". A
-  `preserves` clause never appears; it has no independent meaning once
+  `never writes` clause never appears; it has no independent meaning once
   the effective set is published, and could not be reconstructed from a
   compiled object anyway.
 - **A declared `enters { … }`/`leaves { … }` clause prints in the tape's
@@ -1524,7 +1533,7 @@ tape, state, world, namespace, alias, binding, or graft-instance name:
 alphabet  machine  tape    state   entry   routine  graph   namespace
 export    use      graft   bind    as      map      with    write
 move      goto     call    then    return  stop     halt    debugger
-volatile  writes   preserves       noreturn
+volatile  writes   never   noreturn
 enters    leaves   set
 ```
 
@@ -1553,5 +1562,12 @@ text, and it remains available as an ordinary identifier.
   the other way: `noreturn` joins the reserved words as the
   twenty-eighth, so a 0.1 program using it as a name no longer compiles;
   and `main` is reserved for the entry world in a library as well as in a
-  program ("Program structure"). Everything else 0.1 accepted, 0.2
-  accepts.
+  program ("Program structure"). One rename is breaking too: the contract
+  clause 0.1 spelled `preserves { … }` is spelled `never writes { … }`
+  ("Contract clauses") — the same symbols, the same effective-set
+  arithmetic, the same diagnostics, under a name that no longer suggests
+  it preserves cells. A 0.1 program writing `preserves` stops compiling,
+  at a parse error that names the new spelling; `never` joins the
+  reserved words, so a 0.1 program using it as a name stops compiling
+  too, while `preserves` leaves them and is an ordinary name again.
+  Everything else 0.1 accepted, 0.2 accepts.

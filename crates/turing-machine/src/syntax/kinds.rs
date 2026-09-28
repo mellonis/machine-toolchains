@@ -14,7 +14,7 @@
 //! about what a consumer would otherwise have to re-derive:
 //!
 //! 1. **A keyword-decided extent.** `write [ … ]`, `move [ … ]`, a
-//!    written transition, `writes { … }`/`preserves { … }`, and
+//!    written transition, `writes { … }`/`never writes { … }`, and
 //!    `map { … }` are each present only if their reserved word is, so
 //!    finding where one starts and stops means re-encoding a decision
 //!    `Parser::rule`/`sig_param`/`binding_arg` already made. An omitted

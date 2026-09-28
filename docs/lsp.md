@@ -404,7 +404,7 @@ location to open.
 
 **`.tmc`** answers on the same references its go-to-definition resolves,
 and leads with a **signature line** — an alphabet with its glyphs, a world
-with its parameters and their alphabets (any DECLARED `writes`/`preserves`
+with its parameters and their alphabets (any DECLARED `writes`/`never writes`
 clause on a tape parameter included, in fmt's own canonical spelling —
 `docs/tmt/language.md (contract clauses)`, `docs/tmt/fmt.md`), a bind
 instance with the mangled routine it targets and each argument's bound
@@ -438,7 +438,7 @@ tape directly but hands it to a callee under a symbol map still shows
 whatever the callee's write set maps back onto it, since a caller's write
 set is host-independent — it depends only on what the callee, and
 everything the callee in turn calls, provably writes. A callee in the
-standard library contributes what it *declares*: its `writes`/`preserves`
+standard library contributes what it *declares*: its `writes`/`never writes`
 clauses are a promise its own compile enforced, so a call into a library
 routine that declares `writes {}` adds nothing to the caller's line, and
 one that declares no clause adds the whole alphabet. A callee whose
@@ -446,7 +446,7 @@ signature is not visible at all — a library object at the link boundary —
 adds the whole alphabet too.
 
 **Declared and inferred are two different statements, and a hover can
-show both at once.** When a tape parameter carries a `writes`/`preserves`
+show both at once.** When a tape parameter carries a `writes`/`never writes`
 clause, that clause already appears in the signature line above this
 block — a DECLARED promise about the parameter. The `writes <tape>:
 {...}` line here is a separate, INFERRED computation over the body. The
@@ -456,7 +456,7 @@ subset of its own declared clause is legal, and the two lines can
 legitimately disagree — a hover is not restating one fact twice, it is
 answering two different questions about the same tape. The worked
 example below, a real declaration from the embedded standard library,
-shows the shape: a declared `preserves { '_' }` in the signature line,
+shows the shape: a declared `never writes { '_' }` in the signature line,
 and the inferred set the checker actually computed underneath it.
 
 The block appears only on a **declaration** hover — the routine's or
@@ -475,7 +475,7 @@ declaration hover against that document's own resolved module, so it
 does get the block, the same as any other `.tmc` file:
 
 ```
-routine std::binaryNumbersBare::invertNumber(tape num: symbols preserves { '_' })
+routine std::binaryNumbersBare::invertNumber(tape num: symbols never writes { '_' })
 
 writes num: {'0', '1'}
 

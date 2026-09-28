@@ -270,9 +270,9 @@ subsection.
 | `doc-line-order` | A `?` doc line appears after the run has already entered its `!` block. |
 | `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
 | `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
-| `contract-clause-order` | A signature tape parameter's contract clauses written out of the fixed canonical order — `writes` then `preserves` then `enters` then `leaves`. |
-| `duplicate-contract-clause` | A second `writes` or `preserves` clause on one signature tape parameter. |
-| `empty-head-clause` | An `enters { … }` or `leaves { … }` clause with no elements — unlike `writes {}`/`preserves {}` (a meaningful empty set), a head-position clause states no moment at all. |
+| `contract-clause-order` | A signature tape parameter's contract clauses written out of the fixed canonical order — `writes` then `never writes` then `enters` then `leaves`. |
+| `duplicate-contract-clause` | A second `writes` or `never writes` clause on one signature tape parameter. |
+| `empty-head-clause` | An `enters { … }` or `leaves { … }` clause with no elements — unlike `writes {}`/`never writes {}` (a meaningful empty set), a head-position clause states no moment at all. |
 | `empty-alphabet` | An alphabet with no elements — a world needs at least one symbol. |
 | `duplicate-glyph` | The same glyph appears twice in one alphabet. |
 | `alphabet-too-large` | An alphabet resolves to more than 127 symbols. |
@@ -305,8 +305,8 @@ subsection.
 | `unresolved-tape-target` | A tape-parameter argument names a target that is not a tape in the enclosing world. |
 | `duplicate-tape-target` | Two tape-parameter arguments of one `call`, `graft`, or `bind` name the same caller tape — one caller tape cannot back two callee tapes. |
 | `bind-call-args` | A `call` on a world-local bind name carries binding arguments — a bind is already fully bound at its declaration. |
-| `contract-symbol-unknown` | A `writes`/`preserves` clause names a glyph that is not a symbol of the parameter's alphabet. |
-| `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `preserves`). |
+| `contract-symbol-unknown` | A `writes`/`never writes` clause names a glyph that is not a symbol of the parameter's alphabet. |
+| `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `never writes`). |
 | `enters-not-accepted` | A declared `enters { … }` clause names a glyph the world's entry state has no rule for. |
 | `leaves-outside-contract` | A declared `leaves { … }` clause is contradicted by an exit row whose leaving glyph is statically known. |
 | `graft-cycle` | A graph definition graft-depends on itself, directly or through a cycle of definitions. |
@@ -769,11 +769,11 @@ symbol map, and no doc line to read back (docs/formats.md (routine
 interfaces)), so those never appear on that arm. Both arms render the
 IDENTICAL signature line for the same routine: a contract clause always
 prints the tape's PUBLISHED write set (`writes { … }`) — the declared
-EFFECTIVE set (`writes` minus `preserves`) when the tape declares either
+EFFECTIVE set (`writes` minus `never writes`) when the tape declares either
 clause, or the compiler's own INFERRED write set for that tape when
 neither clause was written — rather than the author's own spelling, and
 never the whole alphabet as a stand-in for "no restriction declared" (the
-wire has no way to spell that). `preserves` itself never appears on
+wire has no way to spell that). `never writes` itself never appears on
 either arm: it has no representation on the wire and an object-arm render
 could not reproduce it. A declared `enters { … }`/`leaves { … }` clause
 prints identically on both arms too, right after `writes { … }`, and

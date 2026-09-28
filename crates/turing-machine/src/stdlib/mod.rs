@@ -561,7 +561,10 @@ mod tests {
                     assert_eq!(p.alphabet, t.alphabet, "{at}: the SAME alphabet");
                     assert_eq!(p.cardinality, t.cardinality, "{at}: same cardinality");
                     assert_eq!(p.writes, t.writes, "{at}: same `writes` clause");
-                    assert_eq!(p.preserves, t.preserves, "{at}: same `preserves` clause");
+                    assert_eq!(
+                        p.never_writes, t.never_writes,
+                        "{at}: same `never writes` clause"
+                    );
                     assert!(
                         !p.volatile,
                         "{plain_ns}::{local}: the plain side is never volatile"

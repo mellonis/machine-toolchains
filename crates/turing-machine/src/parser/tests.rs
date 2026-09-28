@@ -564,18 +564,20 @@ fn volatile_state_parameter_is_an_error() {
 }
 
 // ---------------------------------------------------------------------------
-// `writes`/`preserves` contract clauses on signature tape parameters.
+// `writes`/`never writes` contract clauses on signature tape parameters.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn contract_clauses_round_trip_on_a_tape_param() {
-    let src = "routine r(tape t: bits writes { 'a', 'b'..'c' } preserves { 'd' }) \
+    let src = "routine r(tape t: bits writes { 'a', 'b'..'c' } never writes { 'd' }) \
                { entry state s { [*] -> stop; } }";
     let p = parse_src(src).expect("parses");
     let r = &p.routines[0];
     assert_eq!(r.sig.params.len(), 1);
     let SigParamKind::Tape {
-        writes, preserves, ..
+        writes,
+        never_writes,
+        ..
     } = &r.sig.params[0].kind
     else {
         panic!("expected a tape parameter");
@@ -584,31 +586,34 @@ fn contract_clauses_round_trip_on_a_tape_param() {
     assert_eq!(writes.elems.len(), 2);
     assert!(matches!(writes.elems[0], AlphabetElem::Single(_)));
     assert!(matches!(writes.elems[1], AlphabetElem::Range { .. }));
-    let preserves = preserves.as_ref().expect("a `preserves` clause");
-    assert_eq!(preserves.elems.len(), 1);
-    assert!(matches!(preserves.elems[0], AlphabetElem::Single(_)));
+    let never_writes = never_writes.as_ref().expect("a `never writes` clause");
+    assert_eq!(never_writes.elems.len(), 1);
+    assert!(matches!(never_writes.elems[0], AlphabetElem::Single(_)));
 
-    // `kw_span` pins to the keyword token itself; each clause's span starts
-    // there and extends past it (through the closing `}`); `preserves`
-    // starts only after `writes` closes; `SigParam.span` reaches the last
-    // clause's close.
+    // `kw_span` pins to the keyword itself — for `never writes`, both of
+    // its words, `never` through the second `writes`; each clause's span
+    // starts there and extends past it (through the closing `}`); `never
+    // writes` starts only after `writes` closes; `SigParam.span` reaches
+    // the last clause's close.
     let tokens = lex(src).unwrap();
-    let writes_tok = tokens
+    let writes_toks: Vec<_> = tokens
         .iter()
-        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "writes"))
-        .expect("a `writes` token in the stream");
-    assert_eq!(writes.kw_span, writes_tok.span());
-    let preserves_tok = tokens
+        .filter(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "writes"))
+        .collect();
+    assert_eq!(writes_toks.len(), 2, "one `writes` per clause");
+    assert_eq!(writes.kw_span, writes_toks[0].span());
+    let never_tok = tokens
         .iter()
-        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "preserves"))
-        .expect("a `preserves` token in the stream");
-    assert_eq!(preserves.kw_span, preserves_tok.span());
+        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "never"))
+        .expect("a `never` token in the stream");
+    assert_eq!(never_writes.kw_span.start, never_tok.span().start);
+    assert_eq!(never_writes.kw_span.end, writes_toks[1].span().end);
     assert_eq!(writes.span.start, writes.kw_span.start);
     assert!(writes.span.end > writes.kw_span.end);
-    assert!(preserves.kw_span.start >= writes.span.end);
-    assert_eq!(preserves.span.start, preserves.kw_span.start);
-    assert!(preserves.span.end > preserves.kw_span.end);
-    assert_eq!(r.sig.params[0].span.end, preserves.span.end);
+    assert!(never_writes.kw_span.start >= writes.span.end);
+    assert_eq!(never_writes.span.start, never_writes.kw_span.start);
+    assert!(never_writes.span.end > never_writes.kw_span.end);
+    assert_eq!(r.sig.params[0].span.end, never_writes.span.end);
 }
 
 #[test]
@@ -617,30 +622,34 @@ fn writes_clause_may_be_empty() {
     let p = parse_src(src).expect("an empty `writes {}` clause parses");
     let r = &p.routines[0];
     let SigParamKind::Tape {
-        writes, preserves, ..
+        writes,
+        never_writes,
+        ..
     } = &r.sig.params[0].kind
     else {
         panic!("expected a tape parameter");
     };
     let writes = writes.as_ref().expect("a `writes` clause");
     assert!(writes.elems.is_empty());
-    assert!(preserves.is_none());
+    assert!(never_writes.is_none());
 }
 
 #[test]
-fn preserves_clause_may_be_empty() {
-    let src = "routine r(tape t: bits preserves {}) { entry state s { [*] -> stop; } }";
-    let p = parse_src(src).expect("an empty `preserves {}` clause parses");
+fn never_writes_clause_may_be_empty() {
+    let src = "routine r(tape t: bits never writes {}) { entry state s { [*] -> stop; } }";
+    let p = parse_src(src).expect("an empty `never writes {}` clause parses");
     let r = &p.routines[0];
     let SigParamKind::Tape {
-        writes, preserves, ..
+        writes,
+        never_writes,
+        ..
     } = &r.sig.params[0].kind
     else {
         panic!("expected a tape parameter");
     };
     assert!(writes.is_none());
-    let preserves = preserves.as_ref().expect("a `preserves` clause");
-    assert!(preserves.elems.is_empty());
+    let never_writes = never_writes.as_ref().expect("a `never writes` clause");
+    assert!(never_writes.elems.is_empty());
 }
 
 #[test]
@@ -649,19 +658,21 @@ fn a_tape_param_with_no_clauses_leaves_both_fields_none() {
         parse_src("routine r(tape t: bits) { entry state s { [*] -> stop; } }").expect("parses");
     let r = &p.routines[0];
     let SigParamKind::Tape {
-        writes, preserves, ..
+        writes,
+        never_writes,
+        ..
     } = &r.sig.params[0].kind
     else {
         panic!("expected a tape parameter");
     };
     assert!(writes.is_none());
-    assert!(preserves.is_none());
+    assert!(never_writes.is_none());
 }
 
 #[test]
-fn preserves_before_writes_is_a_targeted_order_error() {
+fn never_writes_before_writes_is_a_targeted_order_error() {
     let err = parse_src(
-        "routine r(tape t: bits preserves { 'a' } writes { 'b' }) \
+        "routine r(tape t: bits never writes { 'a' } writes { 'b' }) \
          { entry state s { [*] -> stop; } }",
     )
     .unwrap_err();
@@ -670,29 +681,29 @@ fn preserves_before_writes_is_a_targeted_order_error() {
         matches!(
             &err.kind,
             CompileErrorKind::ContractClauseOrder { what, before }
-                if *what == "writes" && *before == "preserves"
+                if *what == "writes" && *before == "never writes"
         ),
         "{:?}",
         err.kind
     );
     assert_eq!(
         err.kind.to_string(),
-        "`writes` must come before `preserves` (canonical order: `writes` < `preserves` < `enters` < `leaves`)"
+        "`writes` must come before `never writes` (canonical order: `writes` < `never writes` < `enters` < `leaves`)"
     );
 }
 
-/// A violation between the two NEW keywords — `preserves` after `enters`,
+/// A violation between the two NEW keywords — `never writes` after `enters`,
 /// with no `writes` clause anywhere in the source — must name the pair
-/// that actually collided (`preserves`, `enters`), never fall back to the
-/// writes/preserves wording from the two-clause era.
+/// that actually collided (`never writes`, `enters`), never fall back to the
+/// `writes`/`never writes` wording from the two-clause era.
 ///
 /// Mutation this catches: hard-coding the message to the fixed
-/// `` `writes` must come before `preserves` `` string regardless of which
+/// `` `writes` must come before `never writes` `` string regardless of which
 /// pair actually violated the order.
 #[test]
-fn enters_before_preserves_names_the_actual_pair() {
+fn enters_before_never_writes_names_the_actual_pair() {
     let err = parse_src(
-        "routine r(tape t: bits enters { 'a' } preserves { 'a' }) \
+        "routine r(tape t: bits enters { 'a' } never writes { 'a' }) \
          { entry state s { [*] -> stop; } }",
     )
     .unwrap_err();
@@ -701,7 +712,7 @@ fn enters_before_preserves_names_the_actual_pair() {
         matches!(
             &err.kind,
             CompileErrorKind::ContractClauseOrder { what, before }
-                if *what == "preserves" && *before == "enters"
+                if *what == "never writes" && *before == "enters"
         ),
         "{:?}",
         err.kind
@@ -711,7 +722,7 @@ fn enters_before_preserves_names_the_actual_pair() {
     // reference line, never as the offending clause.
     let msg = err.kind.to_string();
     assert!(
-        msg.starts_with("`preserves` must come before `enters`"),
+        msg.starts_with("`never writes` must come before `enters`"),
         "{msg}"
     );
 }
@@ -728,14 +739,14 @@ fn duplicate_writes_clause_is_an_error() {
 }
 
 #[test]
-fn duplicate_preserves_clause_is_an_error() {
+fn duplicate_never_writes_clause_is_an_error() {
     let err = parse_src(
-        "routine r(tape t: bits preserves { 'a' } preserves { 'b' }) \
+        "routine r(tape t: bits never writes { 'a' } never writes { 'b' }) \
          { entry state s { [*] -> stop; } }",
     )
     .unwrap_err();
     assert_eq!(err.kind.code(), "duplicate-contract-clause");
-    assert_eq!(err.kind.to_string(), "duplicate `preserves` clause");
+    assert_eq!(err.kind.to_string(), "duplicate `never writes` clause");
 }
 
 #[test]
@@ -814,12 +825,10 @@ fn writes_is_reserved_as_a_name() {
 }
 
 #[test]
-fn preserves_is_reserved_as_a_name() {
-    // A tape may not be NAMED preserves — the word is reserved.
-    assert_eq!(
-        err_code("machine { tape preserves: bits; }"),
-        "reserved-name"
-    );
+fn never_is_reserved_as_a_name() {
+    // A tape may not be NAMED never — the word is reserved (the first
+    // word of the `never writes` clause keyword).
+    assert_eq!(err_code("machine { tape never: bits; }"), "reserved-name");
 }
 
 // ---------------------------------------------------------------------------

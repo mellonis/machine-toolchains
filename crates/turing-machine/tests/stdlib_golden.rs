@@ -424,7 +424,7 @@ fn bare_normalize_number_all_zero_preserves_zero() {
 // ── contract clauses are codegen-inert ──────────────────────────────────────
 
 /// The standing guarantee behind the library declaring its contracts: a
-/// `writes` / `preserves` clause is a compile-time assertion about a world's
+/// `writes` / `never writes` clause is a compile-time assertion about a world's
 /// write set — resolved, checked against the inferred footprint, then
 /// discarded — so declaring one may never move a byte of what is emitted.
 ///
@@ -451,7 +451,7 @@ export routine walk(tape num: bits writes {}) {
   entry graft walkGraph(num = num, done = return);
 }
 
-export graph sweepGraph(tape num: bits preserves { '_' }, state done) {
+export graph sweepGraph(tape num: bits never writes { '_' }, state done) {
   entry state sweep {
     ['0'] -> write ['1'] move [>] goto sweep;
     ['1'] -> write ['0'] move [>] goto sweep;
@@ -459,7 +459,7 @@ export graph sweepGraph(tape num: bits preserves { '_' }, state done) {
   }
 }
 
-export routine sweep(tape num: bits preserves { '_' }) {
+export routine sweep(tape num: bits never writes { '_' }) {
   entry graft sweepGraph(num = num, done = return);
 }
 
@@ -472,7 +472,7 @@ machine {
 ";
     let clause_free = WITH_CLAUSES
         .replace(" writes {}", "")
-        .replace(" preserves { '_' }", "");
+        .replace(" never writes { '_' }", "");
     assert_ne!(
         clause_free, WITH_CLAUSES,
         "the pair must differ in source, or the comparison below is vacuous"
@@ -489,7 +489,7 @@ machine {
         // chains) — stays inert to a contract clause; that is what this test
         // pins. The INTERFACE section is not codegen and is no longer
         // inert (docs/formats.md (routine interfaces)): `sweep`'s
-        // `preserves { '_' }` carries a different EFFECTIVE write set than
+        // `never writes { '_' }` carries a different EFFECTIVE write set than
         // no clause at all (the alphabet minus `'_'`, vs. every symbol), so
         // its `.param` line's `writes=` suffix — and therefore the whole
         // `.tma` text and object — legitimately differ between the two

@@ -1,10 +1,10 @@
 //! `enters { … }` / `leaves { … }` on a signature tape parameter
 //! (docs/tmt/cli.md (compile errors)): the two head-position clauses take
-//! the same clause grammar `writes`/`preserves` already have — the same
+//! the same clause grammar `writes`/`never writes` already have — the same
 //! alphabet-body element list, the same membership check against the
 //! parameter's own alphabet, and the same canonical-order and duplicate
-//! checks — extended to the pair `writes` < `preserves` < `enters` <
-//! `leaves`. Unlike `writes {}`/`preserves {}` (a legal, meaningful empty
+//! checks — extended to the pair `writes` < `never writes` < `enters` <
+//! `leaves`. Unlike `writes {}`/`never writes {}` (a legal, meaningful empty
 //! SET), an empty `enters {}`/`leaves {}` has no meaning — there is no
 //! symbol-less moment for the head to be at — so it is its own error,
 //! `empty-head-clause`.
@@ -101,7 +101,7 @@ fn code(src: &str) -> &'static str {
 }
 
 /// Mutation this catches: skipping the membership check for the two new
-/// clause kinds — the existing `writes`/`preserves` fixtures stay green
+/// clause kinds — the existing `writes`/`never writes` fixtures stay green
 /// under that mutation, so only this test moves.
 #[test]
 fn a_clause_glyph_outside_the_alphabet_is_rejected() {
@@ -143,10 +143,10 @@ fn leaves_before_enters_is_a_clause_order_error() {
 }
 
 /// Mutation this catches: checking order only among the new pair and not
-/// against the old pair — `preserves` written after `enters`.
+/// against the old pair — `never writes` written after `enters`.
 #[test]
-fn preserves_after_enters_is_a_clause_order_error() {
-    let src = wrap(" writes {} enters { '^' } preserves { '0' }");
+fn never_writes_after_enters_is_a_clause_order_error() {
+    let src = wrap(" writes {} enters { '^' } never writes { '0' }");
     assert_eq!(code(&src), "contract-clause-order");
 }
 

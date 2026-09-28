@@ -181,7 +181,7 @@ fn regen() {
 /// against the COMMITTED `std.tmh` text itself, both read by the
 /// identical `qualified_routines`/`write_set_suffix` extraction
 /// `header_roundtrip.rs`'s two-arm test uses. This also proves the
-/// `preserves`-only case specifically: `invertNumber`'s shape must
+/// `never writes`-only case specifically: `invertNumber`'s shape must
 /// compare EQUAL (both sides already publish the same reduced EFFECTIVE
 /// set), not merely happen not to differ. Mutation: dropping the `writes`
 /// clause from the printer entirely — VERIFIED by hand: with
@@ -279,7 +279,7 @@ fn the_header_and_the_source_agree_on_every_declared_contract() {
         );
     }
 
-    // Non-vacuity for the `preserves`-only case specifically: both
+    // Non-vacuity for the `never writes`-only case specifically: both
     // routines must be present, on both sides, already collapsed to the
     // reduced effective set `{ '0', '1' }` (the alphabet `{ '_', '0', '1' }`
     // minus `'_'`) rather than a coincidental agreement over some other
