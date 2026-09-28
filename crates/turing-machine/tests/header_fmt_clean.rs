@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mtc_turing_machine::asm::assemble;
 use mtc_turing_machine::cli::execute;
 use mtc_turing_machine::compiler::{CompileOptions, Declarations, compile};
 use mtc_turing_machine::stdlib;
@@ -239,5 +240,48 @@ fn a_graft_through_the_committed_stdlib_header_records_the_unmoved_digest() {
             .unwrap_or_else(|| panic!("no graft record for {name} in {:?}", object.grafts))
             .digest;
         assert_eq!(got, *want, "{name}");
+    }
+}
+
+/// A hand-assembled object whose routine names its tape parameter after a
+/// `.tmc` keyword. The `.tma` dialect accepts the name (a parameter name
+/// is letters, digits and underscore, docs/formats.md (routine
+/// interfaces)), so the object arm prints a signature the `.tmc` grammar
+/// then refuses.
+const KEYWORD_PARAM_TMA: &str = "\
+.routine helper, tapes=1, alpha=(2)
+.param state, ('_', '1')
+.func helper
+        rd
+        ret
+";
+
+/// The one input class that reaches the formatter's error on renderer
+/// output: the object arm prints a header whose tape parameter is named
+/// `state`, and the formatter's parse refuses it. `tmt interface` must
+/// fail with that refusal rather than print text no reader accepts.
+/// Mutation: the printer falling back to the unformatted text when the
+/// formatter errors (`unwrap_or` over `crate::fmt::format`) — the command
+/// then succeeds with an unparseable header, and every corpus sweep above
+/// stays green, since no shipped source names a parameter after a
+/// keyword.
+#[test]
+fn a_header_the_formatter_refuses_is_an_interface_error() {
+    let dir = scratch("header_fmt_refused");
+    let object = assemble(KEYWORD_PARAM_TMA, false).expect("the `.tma` assembles");
+    let path = dir.join("keyword.tmo");
+    std::fs::write(&path, object.to_bytes()).unwrap();
+    let out = dir.join("keyword.tmh");
+    match execute(&args(&[
+        "interface",
+        path.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ])) {
+        Err(message) => assert!(message.contains("does not re-read"), "{message}"),
+        Ok(o) => panic!(
+            "got Ok: code={} stdout={} stderr={}",
+            o.code, o.stdout, o.stderr
+        ),
     }
 }
