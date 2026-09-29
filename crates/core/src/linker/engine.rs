@@ -51,11 +51,11 @@ use super::compose::{
     Composite, absolutize, canonical_key, compose, identity_composite, is_full_passthrough,
 };
 use super::resolve::FuncRef;
+use super::table_ref::{RefKind, ref_kind};
 use super::{CallMech, LinkError};
 use crate::asm::decode::{self, Body, DecodedOperand};
 use crate::asm::{ArchSyntax, Flow};
 use crate::formats::object::{BoundCall, RoutineSig};
-use crate::vm::OperandKind;
 use crate::vm::frame::descriptor_bytes;
 
 /// Where a directory entry's descriptor bytes come from. Engine composites
@@ -504,12 +504,7 @@ pub(super) fn validate_frame_phys(
         let blob: &[u8] = &f.blob;
         let table: &[u8] = &f.table;
         for &(hole, toff) in &f.table_fixups {
-            let is_frame = hole
-                .checked_sub(5)
-                .and_then(|p| blob.get(p as usize))
-                .and_then(|&op| syntax.by_opcode(op))
-                .is_some_and(|e| e.operand == OperandKind::FramedCall);
-            if is_frame {
+            if matches!(ref_kind(syntax, blob, hole), Some((_, RefKind::Frame))) {
                 check_descriptor_phys(table, toff, arity, &f.name)?;
             }
         }
@@ -1492,41 +1487,14 @@ fn shift_table(
         return Ok(Vec::new());
     }
     use std::collections::BTreeMap;
-    #[derive(Clone, Copy)]
-    enum Kind {
-        Match,
-        Dispatch,
-        Frame,
-    }
     let malformed = |at: u32| LinkError::MalformedTable {
         symbol: name.to_string(),
         at,
     };
     // Classify each referenced table start by the opcode at its fixup hole.
-    let mut starts: BTreeMap<u32, Kind> = BTreeMap::new();
+    let mut starts: BTreeMap<u32, RefKind> = BTreeMap::new();
     for &(hole, toff) in fixups {
-        let kind = if hole
-            .checked_sub(1)
-            .and_then(|p| orig_blob.get(p as usize))
-            .and_then(|&op| syntax.by_opcode(op))
-            .is_some_and(|e| e.operand == OperandKind::TableRef)
-        {
-            let op = orig_blob[(hole - 1) as usize];
-            if syntax.by_opcode(op).unwrap().flow == Flow::FallThrough {
-                Kind::Match
-            } else {
-                Kind::Dispatch
-            }
-        } else if hole
-            .checked_sub(5)
-            .and_then(|p| orig_blob.get(p as usize))
-            .and_then(|&op| syntax.by_opcode(op))
-            .is_some_and(|e| e.operand == OperandKind::FramedCall)
-        {
-            Kind::Frame
-        } else {
-            Kind::Match
-        };
+        let kind = ref_kind(syntax, orig_blob, hole).map_or(RefKind::Match, |(_, k)| k);
         starts.entry(toff).or_insert(kind);
     }
 
@@ -1539,7 +1507,7 @@ fn shift_table(
             return Err(malformed(pos.min(start)));
         }
         let end = match kind {
-            Kind::Match => {
+            RefKind::Match => {
                 if start + 3 > len {
                     return Err(malformed(start));
                 }
@@ -1552,7 +1520,7 @@ fn shift_table(
                 out.extend_from_slice(&table[start as usize..end as usize]);
                 end
             }
-            Kind::Dispatch => {
+            RefKind::Dispatch => {
                 if start + 2 > len {
                     return Err(malformed(start));
                 }
@@ -1570,7 +1538,9 @@ fn shift_table(
                 }
                 end
             }
-            Kind::Frame => shift_frame_descriptor(table, start, len, shift, &malformed, &mut out)?,
+            RefKind::Frame => {
+                shift_frame_descriptor(table, start, len, shift, &malformed, &mut out)?
+            }
         };
         pos = end;
     }

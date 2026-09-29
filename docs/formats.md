@@ -323,7 +323,10 @@ case, which is exactly the case that forces version 4.
 - **Table fixups** are operand holes in a blob's `mtc`/`djmp` instructions:
   the u32 operand is an offset into that blob's own table blob, which the
   linker rebases into the final image's table section. The 4-byte hole obeys
-  the same `offset..offset + 4` in-blob invariant as a call relocation.
+  the same `offset..offset + 4` in-blob invariant as a call relocation. A
+  fixup records no kind: the frame half of a framed call is a table fixup
+  too, and the linker tells the kinds apart from the code bytes
+  (`docs/core.md (relaxation)`).
 - **Bound calls** are the declarative call sites of composed routines
   (`call name [binding]`): each marks a call operand hole, like a
   relocation, then binds every callee virtual tape — which caller tape feeds

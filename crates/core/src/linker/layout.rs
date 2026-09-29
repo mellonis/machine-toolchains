@@ -13,54 +13,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::resolve::FuncRef;
+use super::table_ref::{RefKind, ref_kind};
 use super::{LinkError, MapFunction};
 use crate::asm::decode::{self, Body, DecodedOperand};
 use crate::asm::{ArchSyntax, Flow};
-use crate::vm::OperandKind;
-
-/// Which table a fixup hole references, and its owning opcode's offset —
-/// inferred from the referencing operand kind, not the table bytes (a
-/// concatenated table blob is not self-describing). A plain `TableRef`
-/// operand sits one byte after its opcode (`Match` if the opcode falls
-/// through, `Dispatch` if it transfers); a `FramedCall`'s frame half sits
-/// five bytes after its opcode (`Frame`). This is the linker's mirror of
-/// the disassembler's kind inference.
-#[derive(Clone, Copy)]
-enum RefKind {
-    Match,
-    Dispatch,
-    Frame,
-}
-
-/// The `(opcode offset, RefKind)` for a fixup hole, or `None` when neither
-/// a `TableRef` opcode precedes the hole by one byte nor a `FramedCall`
-/// opcode precedes it by five (a malformed fixup).
-fn ref_kind(syntax: &ArchSyntax, blob: &[u8], hole: u32) -> Option<(u32, RefKind)> {
-    if let Some(op) = hole
-        .checked_sub(1)
-        .and_then(|p| blob.get(p as usize))
-        .copied()
-        && let Some(entry) = syntax.by_opcode(op)
-        && entry.operand == OperandKind::TableRef
-    {
-        let kind = if entry.flow == Flow::FallThrough {
-            RefKind::Match
-        } else {
-            RefKind::Dispatch
-        };
-        return Some((hole - 1, kind));
-    }
-    if let Some(op) = hole
-        .checked_sub(5)
-        .and_then(|p| blob.get(p as usize))
-        .copied()
-        && let Some(entry) = syntax.by_opcode(op)
-        && entry.operand == OperandKind::FramedCall
-    {
-        return Some((hole - 5, RefKind::Frame));
-    }
-    None
-}
 
 /// One classified piece of a function's ORIGINAL blob (offsets are
 /// blob-relative, i.e. relative to that function's own `ent`).

@@ -774,6 +774,17 @@ sections are emitted alongside code, with per-function table bases and
 dispatch entries rebased through the same offset map, so a relaxation
 that moves code keeps table references correct.
 
+**What a table fixup references** is read from the code bytes, since a
+fixup records no kind (`docs/formats.md (object file)`), and every
+place the linker needs it applies one rule: a table-reference opcode
+right before the hole marks a plain match or dispatch table, and only
+when that test fails does a framed-call opcode five bytes back mark the
+frame-descriptor half of a framed call. The order matters. The byte five
+back from a plain table hole is whatever the previous instruction left
+there — the low byte of another table offset, say — and it can equal
+the framed-call opcode by coincidence; tested first, it would read a
+match or dispatch table as a frame descriptor.
+
 **Call width is not spellable in source.** Because this pass owns it,
 a short call mnemonic is a syntax error (`width is linker-selected`),
 and an object carries only far call holes — one relocation per call

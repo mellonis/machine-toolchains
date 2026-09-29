@@ -502,6 +502,59 @@ T:  .row [1]
     assert_eq!(exe.tables, vec![1, 2, 0, 1, 0x7F]);
 }
 
+#[test]
+fn a_framed_call_opcode_five_bytes_before_a_plain_table_hole_is_not_a_frame() {
+    // A plain table reference is told apart from a frame half by the
+    // table-reference opcode right before its hole; a framed-call opcode
+    // five bytes back counts only when that first test fails
+    // (docs/core.md (relaxation)). Here the byte five back from the
+    // `tdispatch` hole is the low byte of the preceding `tmatch`'s table
+    // offset, and that offset is 0x14 — the `fcall` opcode. Looking five
+    // bytes back alone would read the dispatch table D as a frame
+    // descriptor and refuse its "physical tape" (the second byte of D's
+    // first entry, 0x02, past the arity 1) on a program that calls
+    // nothing.
+    //
+    // Tables: P is a 17-row match table, one row per symbol of a
+    // 17-symbol alphabet (3 + 17 = 20 bytes), so T starts
+    // at table offset 20 = 0x14 (4 bytes), and D at 24. Code: ent@0,
+    // tmatch P@1, tmatch T@6 (hole 7..11 = 14 00 00 00), tdispatch D@11
+    // (hole 12; hole - 5 = 7 holds 0x14), 600 nops, A: nop@616, B: stp.
+    // A = 0x0268, so D reads 02 00 68 02 ...
+    let pad_rows: String = (0..17).map(|s| format!(".row [{s}]\n    ")).collect();
+    let nops = "        nop\n".repeat(600);
+    let src = format!(
+        "\
+.routine main, tapes=1, alpha=(17)
+.section tables
+P:  {pad_rows}
+T:  .row [1]
+D:  .targets A, B
+.section code
+.func main
+        tmatch  P
+        tmatch  T
+        tdispatch D
+{nops}A:      nop
+B:      stp
+"
+    );
+    let obj = asm(&src, false);
+    // The collision itself, asserted on the object so a drift in the
+    // assembler's layout fails here instead of passing vacuously.
+    assert_eq!(&obj.blobs[0][6..12], &[0x11, 0x14, 0, 0, 0, 0x12]);
+    let tables = &obj.table_blobs.as_ref().unwrap()[0];
+    assert_eq!(&tables[20..28], &[1, 1, 0, 1, 2, 0, 0x68, 0x02]);
+    let out = link_one(obj);
+    let exe = &out.executable;
+    assert_eq!(exe.profile, 0, "a frameless link");
+    assert_eq!(
+        u32::from_le_bytes(exe.tables[26..30].try_into().unwrap()),
+        616,
+        "D's first entry is A's address"
+    );
+}
+
 // ------------------------------------------------------------------
 // Executable-level disassembly + the strong round trip
 // ------------------------------------------------------------------

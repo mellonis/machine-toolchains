@@ -8,6 +8,7 @@ mod interface;
 mod layout;
 pub(crate) mod resolve;
 mod stamp;
+mod table_ref;
 
 use crate::asm::ArchSyntax;
 use crate::formats::executable::Executable;
