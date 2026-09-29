@@ -28,10 +28,17 @@ pub(super) enum RefKind {
 /// table hole is whatever precedes its opcode — often the last byte of an
 /// earlier operand, such as the low byte of another table offset — and can
 /// equal the framed-call opcode by coincidence. The reverse collision
-/// cannot arise while no `TableRef` opcode is `0x00` or `0xFF`: the byte
-/// before a frame half is the high byte of the call's 32-bit displacement,
-/// one of those two for any displacement under 16 MiB.
+/// needs only that no `TableRef` opcode is `0x00`: the linker classifies
+/// blobs before layout patches them, while a framed call's displacement
+/// half is still the zero placeholder the assembler (or the linker's own
+/// rewriting) wrote, so the byte before a frame half is always `0x00`.
 pub(super) fn ref_kind(syntax: &ArchSyntax, blob: &[u8], hole: u32) -> Option<(u32, RefKind)> {
+    debug_assert!(
+        syntax
+            .by_opcode(0x00)
+            .is_none_or(|e| e.operand != OperandKind::TableRef),
+        "a table-reference opcode of 0x00 would read a frame half as a plain table"
+    );
     if let Some(op) = hole
         .checked_sub(1)
         .and_then(|p| blob.get(p as usize))

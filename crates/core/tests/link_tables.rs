@@ -469,6 +469,40 @@ A:      stp
 }
 
 #[test]
+fn a_frame_descriptor_naming_a_tape_past_the_machine_arity_is_refused() {
+    // The true-positive side of telling a frame half from a plain table
+    // (docs/core.md (relaxation)): a genuine frame descriptor IS checked.
+    // Its per-tape physical index must lie below the machine arity
+    // (docs/formats.md (frame descriptors)); here a one-tape machine's
+    // descriptor projects onto physical tape 1, which does not exist.
+    // With the link-time phys check disabled, this links.
+    let src = "\
+.routine main, tapes=1, alpha=(2)
+.section tables
+F0: .frame tapes=(1)
+    .exits A
+.section code
+.func main
+        fcall   main, F0
+A:      stp
+";
+    let err = link(
+        &fake_syntax(),
+        &[asm(src, false)],
+        &[],
+        LinkOptions::default(),
+    )
+    .expect_err("a descriptor past the machine arity is refused");
+    match err {
+        LinkError::BadFrameDescriptor { symbol, message } => {
+            assert_eq!(symbol, "main");
+            assert_eq!(message, "physical tape 1 is at or past the machine arity 1");
+        }
+        other => panic!("expected BadFrameDescriptor, got {other:?}"),
+    }
+}
+
+#[test]
 fn table_ref_holes_follow_a_relaxation_shift() {
     // The dual of the dispatch-entry case: here the TABLE REFERENCE
     // itself sits after a far call that narrows, so the hole's final
