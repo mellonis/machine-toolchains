@@ -787,8 +787,10 @@ first line the two sides disagree on. `-v` additionally lists every
 differing line as a `-`/`+` pair (a positional listing, not a minimal
 diff). Line endings are part of the comparison: a missing final newline,
 or `\r\n` where the render carries `\n`, is a difference. A leading run of
-`//` comment lines and blank lines in `FILE` is skipped, so a "generated,
-do not edit" notice stamped above the header does not count; the reported
+`//` comment lines in `FILE` is skipped, so a "generated, do not edit"
+notice stamped above the header does not count. Blank lines are skipped
+only after such a notice line, and never when the header itself begins
+with one (an export-less unit's header is a single newline); the reported
 line number still counts those lines, and a comment anywhere else is an
 ordinary difference, since the printed header carries none. `FILE` missing or unreadable is
 a distinct failure, reported as such rather than folded into "differs",

@@ -440,6 +440,120 @@ fn check_line_numbers_count_the_notice() {
     differs_at(&result, &header, &src, 5);
 }
 
+/// A machine-only unit: nothing exported, so its header is the
+/// formatter's canonical empty file, a single newline.
+const EXPORT_LESS_TMC: &str = "\
+alphabet ab { '_', 'a' }
+machine {
+  tape t: ab;
+  entry state s { [*] -> stop; }
+}
+";
+
+// ── 13: an export-less unit's own header checks clean ───────────────────
+
+/// Mutation this fixture kills: leading blank lines always skipped (with
+/// no `//` line required), which eats the export-less header's single
+/// newline and leaves an empty remainder that differs from the render.
+#[test]
+fn check_accepts_an_export_less_units_own_header() {
+    let scratch = Scratch::new("export-less");
+    let src = scratch.path("unit.tmc");
+    fs::write(&src, EXPORT_LESS_TMC).unwrap();
+    let header = scratch.path("unit.tmh");
+    write_header(&src, &header);
+    assert_eq!(fs::read_to_string(&header).unwrap(), "\n");
+
+    let result = check(&src, &header);
+    assert_eq!(result.code, 0, "stderr: {}", result.stderr);
+    assert!(result.stderr.is_empty(), "stderr: {}", result.stderr);
+}
+
+// ── 14: a notice above an export-less header is skipped ─────────────────
+
+/// Mutation this fixture kills: blank lines after the notice always
+/// skipped, which eats the header's own newline once the notice is gone.
+#[test]
+fn check_skips_a_notice_above_an_export_less_header() {
+    let scratch = Scratch::new("export-less-notice");
+    let src = scratch.path("unit.tmc");
+    fs::write(&src, EXPORT_LESS_TMC).unwrap();
+    let header = scratch.path("unit.tmh");
+    fs::write(
+        &header,
+        "// GENERATED - do not edit by hand.\n// Regenerate.\n\n",
+    )
+    .unwrap();
+
+    let result = check(&src, &header);
+    assert_eq!(result.code, 0, "stderr: {}", result.stderr);
+    assert!(result.stderr.is_empty(), "stderr: {}", result.stderr);
+}
+
+// ── 15: every shipped source checks against its own header ──────────────
+
+fn collect_tmc(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_tmc(&p, out);
+        } else if p.extension().and_then(|s| s.to_str()) == Some("tmc") {
+            out.push(p);
+        }
+    }
+}
+
+/// Mutation this fixture kills: leading blank lines always skipped — it
+/// names each unit whose own fresh header then fails `--check` (13 of the
+/// shipped units export nothing).
+#[test]
+fn check_accepts_the_fresh_header_of_every_shipped_source() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let mut corpus = Vec::new();
+    collect_tmc(&root.join("docs/examples"), &mut corpus);
+    corpus.push(root.join("crates/turing-machine/src/stdlib/std.tmc"));
+    corpus.sort();
+    assert!(
+        corpus.len() > 2,
+        "the corpus is unexpectedly small: {corpus:?}"
+    );
+
+    let scratch = Scratch::new("corpus");
+    let mut failures = Vec::new();
+    for (i, src) in corpus.iter().enumerate() {
+        // The stdlib source declares `std` itself, so it headers without
+        // the embedded declarations of that namespace.
+        let nostdlib: &[&str] = if src.ends_with("std.tmc") {
+            &["--nostdlib"]
+        } else {
+            &[]
+        };
+        let header = scratch.path(&format!("h{i}.tmh"));
+        let mut write = vec!["interface", src.to_str().unwrap()];
+        write.extend(nostdlib);
+        write.extend(["-o", header.to_str().unwrap()]);
+        let wrote = execute(&args(&write)).unwrap_or_else(|e| panic!("{}: {e}", src.display()));
+        assert_eq!(wrote.code, 0, "{}: {}", src.display(), wrote.stderr);
+
+        let mut chk = vec!["interface", src.to_str().unwrap()];
+        chk.extend(nostdlib);
+        chk.extend(["--check", header.to_str().unwrap()]);
+        let result = execute(&args(&chk)).unwrap_or_else(|e| panic!("{}: {e}", src.display()));
+        if result.code != 0 {
+            failures.push(format!("{}: {}", src.display(), result.stderr));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 // ── 12: a comment elsewhere is a difference ─────────────────────────────
 
 /// Mutation this fixture kills: comment lines skipped everywhere rather

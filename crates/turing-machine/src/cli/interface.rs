@@ -170,7 +170,7 @@ fn check_header(
     // A leading "generated, do not edit" notice is not part of the header
     // (docs/tmt/cli.md (interface)): skip it, remembering how many lines
     // it took so a reported line number stays the line in FILE.
-    let (skipped_bytes, skipped_lines) = leading_notice(&actual_bytes);
+    let (skipped_bytes, skipped_lines) = leading_notice(&actual_bytes, text);
     let actual_bytes = &actual_bytes[skipped_bytes..];
     if actual_bytes == text.as_bytes() {
         return Ok(CliOutput::ok(String::new(), String::new()));
@@ -196,23 +196,42 @@ fn check_header(
     })
 }
 
-/// The length in bytes, and in lines, of the LEADING run of `//` line
-/// comments and blank lines at the top of `bytes` — the notice a project
-/// may stamp on a generated header. Only the very top counts: the printed
-/// header itself never contains a comment, so a comment anywhere later is
-/// an ordinary difference.
-fn leading_notice(bytes: &[u8]) -> (usize, usize) {
-    let mut offset = 0;
-    let mut lines = 0;
-    for line in bytes.split_inclusive(|&b| b == b'\n') {
-        let body = line.trim_ascii();
-        if !(body.is_empty() || body.starts_with(b"//")) {
-            break;
-        }
-        offset += line.len();
-        lines += 1;
-    }
-    (offset, lines)
+/// The length in bytes, and in lines, of the notice a project may stamp
+/// above a generated header: the LEADING run of `//` line comments and
+/// blank lines at the top of `bytes`, up to and including its LAST `//`
+/// line. With no `//` line at the top, nothing is a notice. Blank lines
+/// after that last comment are skipped too, but only while `render` does
+/// not itself begin with a blank line: an export-less unit's header is a
+/// single newline, and skipping it would eat content the render starts
+/// with. Only the very top counts: the printed header contains no
+/// comment, so a comment anywhere later is an ordinary difference.
+fn leading_notice(bytes: &[u8], render: &str) -> (usize, usize) {
+    let run: Vec<(usize, bool)> = bytes
+        .split_inclusive(|&b| b == b'\n')
+        .map_while(|line| {
+            let body = line.trim_ascii();
+            if body.is_empty() {
+                Some((line.len(), false))
+            } else if body.starts_with(b"//") {
+                Some((line.len(), true))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let Some(last_comment) = run.iter().rposition(|&(_, is_comment)| is_comment) else {
+        return (0, 0);
+    };
+    let render_starts_blank = render
+        .split_inclusive('\n')
+        .next()
+        .is_some_and(|l| l.trim_ascii().is_empty());
+    let keep = if render_starts_blank {
+        last_comment + 1
+    } else {
+        run.len()
+    };
+    (run[..keep].iter().map(|&(len, _)| len).sum(), keep)
 }
 
 /// Splits `s` into lines that each KEEP their own terminator (`\n` or
