@@ -217,7 +217,10 @@ rebuilt object actually does (a stale header next to a freshly rebuilt
 which the linker's own graft-drift check DOES verify digest-for-digest
 against every consumer that spliced it (`docs/core.md (graft drift)`).
 Regenerating a library's header from its current source (`tmt interface`)
-alongside rebuilding its object is the way to keep the two honest. A
+alongside rebuilding its object is the way to keep the two honest — the
+build never does this on its own, so a committed header is checked
+against its current source or object with `tmt interface --check
+FILE.tmh INPUT` (docs/tmt/cli.md (tmt interface)). A
 **header-only library** (no `<name>.tmo` on the search path at all)
 contributes declarations and is never handed to the linker: nothing to
 link means nothing for the graft-drift check to compare a spliced body

@@ -726,7 +726,7 @@ address column remains an exact index of where each instruction starts.
 ## `tmt interface`
 
 ```
-USAGE: tmt interface INPUT [-o OUT.tmh] [FLAGS]
+USAGE: tmt interface INPUT [-o OUT.tmh | --check FILE] [FLAGS]
 
 INPUT is told apart by its container magic, never by its extension: a
 .tmc source or a compiled .tmo object. A .tmh extension (case-insensitive)
@@ -740,6 +740,12 @@ source the header is complete: it also carries exported graph bodies in
 full and every `?` doc line. From an object it carries signatures and
 alphabets only — no graph body, no map, no doc line, since none of those
 exist on the wire. Without -o the header goes to stdout.
+
+FLAGS:
+  --check FILE       compare FILE, byte for byte, against this render;
+                     exit 1 naming the first differing line on a
+                     mismatch, and write nothing (exclusive with -o)
+  -v                 with --check, also list the differing lines
 
 FLAGS (text INPUT only — rejected on a .tmo object, which carries no
 external references of its own left to resolve):
@@ -760,6 +766,27 @@ nothing to export prints a single newline, the canonical form of an
 empty file. Like `dis`, `INPUT` is told apart by its container magic
 rather than its extension (`docs/formats.md`): a `.tmc` renamed to
 `.tmo`, or the reverse, still runs the arm its bytes actually are.
+
+**`--check` is a CI/pre-commit guard against a stale committed header.**
+Nothing regenerates or checks a committed `.tmh` on its own (docs/tmt/project.md
+(Declaration derivation)), so a project that commits `tmt interface`'s
+output can drift silently once the source or object it was taken from
+changes — the linker never reports a wider-than-real alphabet list such
+drift can produce. `--check FILE` renders `INPUT` exactly as a bare `tmt
+interface INPUT` would — same arm, same `--extern`/`--nostdlib` — and
+compares the result against `FILE`'s bytes, byte for byte, instead of
+writing anywhere; it is a usage error alongside `-o`, the same "mutually
+exclusive" refusal `tape-block set`'s `-o`/`--in-place` pair already
+uses. A match is exit 0 with no output. A mismatch is exit 1, naming
+`FILE`, `INPUT` and the 1-based line of the first difference, comparing
+lines together with their own terminator: `FILE` differing only in its
+own final newline, or only in carrying `\r\n` where the render carries
+`\n`, is a difference on that shared line rather than a phantom extra or
+missing one; a genuinely extra or missing whole line reports at the
+first line the two sides disagree on. `-v` additionally lists every
+differing line as a minimal `-`/`+` pair. `FILE` missing or unreadable is
+a distinct failure, reported as such rather than folded into "differs",
+so a CI gate cannot mistake an absent header for a stale one.
 
 **`--extern`/`--nostdlib` take exactly `tmt compile`'s own meaning**
 (above): a library whose exported routine, graph or map itself reaches

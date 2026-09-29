@@ -522,7 +522,17 @@ fn interface_spec() -> CommandSpec {
         path: strings(&["interface"]),
         positional: Positional::One(PositionalHint::File(ext(&["tmc", "tmo"]))),
         flags: vec![
-            FlagSpec::value("-o", "output path", ValueHint::File(any_file())),
+            FlagSpec::value("-o", "output path", ValueHint::File(any_file()))
+                .exclusive("interface-output"),
+            // A CI/pre-commit guard: exit 1 when the committed header no
+            // longer matches what this invocation would render
+            // (docs/tmt/cli.md (tmt interface)).
+            FlagSpec::value(
+                "--check",
+                "compare a committed header; exit 1 if it differs",
+                ValueHint::File(ext(&["tmh"])),
+            )
+            .exclusive("interface-output"),
             // Same meaning as `tmt compile`'s own pair (`compile_spec`
             // above) — a library that itself depends on another unit's
             // declarations needs them to header at all.
@@ -536,6 +546,7 @@ fn interface_spec() -> CommandSpec {
                 "--nostdlib",
                 "do not read the embedded standard library's declarations",
             ),
+            FlagSpec::boolean("-v", "with --check, also list the differing lines"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
