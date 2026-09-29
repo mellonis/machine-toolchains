@@ -198,7 +198,8 @@ contributes the whole alphabet. `FILE`'s extension decides how it is read,
 never a second front end: a `.tmh` is read STRICTLY, the same shape `tmt
 interface` enforces on a header (a routine body or a `machine` block is an
 error); anything else — a `.tmc` — is read LENIENTLY as a full program,
-where any body and any `machine` block are simply unused. The flag is
+where any `machine` block is unused and a routine's body contributes only
+its `noreturn`, inferred exactly as `tmt interface` infers it. The flag is
 repeatable, and order is meaningful: modules are consulted in command-line
 order, with the embedded standard library consulted last — so a `--extern
 std.tmh` of the user's own shadows the built-in `std` when both are
@@ -217,15 +218,16 @@ does not, by itself, resolve a call target or an alphabet reached through
 `use` — an unresolved `use`-imported name fails exactly as it does without
 `--extern`.
 
-A declarations reading believes DECLARED facts only, so which of the two
-forms of a unit you point `--extern` at changes what compiles: a routine
-declaring no `writes` clause is read as able to write its whole
-alphabet, and one not saying `noreturn` as able to return. `tmt
-interface` is where inference becomes a declared fact — it writes the
-inferred write set and `noreturn` down — so a unit given as its own
-generated `.tmh` supports strictly more than the same unit given as a
-`.tmc` sibling (`docs/tmt/project.md (Declaration derivation)`). Declare
-the clauses in the source, or point `--extern` at the generated header.
+A declarations reading believes the DECLARED write set only, so which
+of the two forms of a unit you point `--extern` at changes what
+compiles: a routine declaring no `writes` clause is read as able to
+write its whole alphabet. `tmt interface` is where inference becomes a
+declared fact — it writes the inferred write set down — so a unit given
+as its own generated `.tmh` supports strictly more than the same unit
+given as a `.tmc` (`docs/tmt/project.md (Declaration derivation)`).
+Declare the clauses in the source, or point `--extern` at the generated
+header. `noreturn` is the same either way: a `.tmc` read leniently has
+its bodies, and infers it exactly as `tmt interface` does.
 
 `--extern` takes declaration **source** text. A compiled container given
 to it — an object, an executable, a tape block — is refused on its magic,

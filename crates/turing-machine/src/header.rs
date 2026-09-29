@@ -210,43 +210,7 @@ fn render_from_source(
     // published write set (docs/tmt/cli.md (interface)).
     let analysis = compiler::analyze_with_mode(source, externals, mode)?;
     let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
-    // A routine's `noreturn` fact: INFERRED from its body for a BODIED
-    // routine (`ReadMode::Program`, the ONLY mode where `has_body` is ever
-    // true), through the identical `ir::body_can_return` the compiler
-    // itself runs over a freshly-expanded module — never re-derived by a
-    // second walk. `ReadMode::DeclarationsOnly` gives every routine an
-    // EMPTY body (a header has none to infer from), so `expand::expand`
-    // is skipped there entirely.
-    //
-    // An interface printer answers what a unit DECLARES, not what it
-    // compiles to — `analyze` (resolution) is as far as this render ever
-    // otherwise goes, and expansion errors (a descending range, a graft
-    // map conflict, …) are strictly LATER than that. A unit with such an
-    // error in one routine must still print every OTHER routine's
-    // signature, so a failed expansion here is not propagated: `returns`
-    // is left EMPTY instead, and `render_source`'s own per-routine lookup
-    // already falls back to the routine's DECLARED clause (or its
-    // conservative absence) when an entry is missing — the identical
-    // fallback a bodiless routine always takes, so the two failure modes
-    // share one path rather than needing a second.
-    let returns: HashMap<String, bool> = if analysis.program.routines.iter().any(|r| r.has_body) {
-        crate::expand::expand(&analysis.resolved, externals)
-            .map(|expanded| {
-                expanded
-                    .worlds
-                    .iter()
-                    .map(|w| {
-                        (
-                            w.name.clone(),
-                            crate::ir::body_can_return(w, &analysis.resolved),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
+    let returns = inferred_returns(&analysis.program, &analysis.resolved, externals);
     // The same scope substrate `resolve_program` built while analyzing this
     // very source — rebuilt here from the same `Program` rather than
     // threaded out of the analysis, so nothing on the compile path grows a
@@ -269,6 +233,60 @@ fn render_from_source(
         span: Span::point(0, 0),
         kind: CompileErrorKind::Internal(message),
     })
+}
+
+/// Every BODIED routine's inferred "can return" fact, keyed by mangled
+/// name — the ONE inference both a header's source arm
+/// ([`render_from_source`]) and a lenient declarations read
+/// ([`read_declarations_with_mode`]) take `noreturn` from, so `tmt
+/// interface` and `tmt build`'s sibling read can never disagree on it
+/// (docs/tmt/project.md (Declaration derivation)). It runs the identical
+/// `ir::body_can_return` the compiler itself runs over a freshly-expanded
+/// module — never a second walk. [`ReadMode::DeclarationsOnly`] gives
+/// every routine an EMPTY body (a header has none to infer from), so
+/// `expand::expand` is skipped there entirely and the map is empty.
+///
+/// A declarations reader answers what a unit DECLARES, not what it
+/// compiles to — `analyze` (resolution) is as far as it otherwise goes,
+/// and expansion errors (a descending range, a graft map conflict, …) are
+/// strictly LATER than that. A unit with such an error in one routine must
+/// still declare every OTHER routine's signature, so a failed expansion
+/// here is not propagated: the map is left EMPTY instead, and
+/// [`noreturn_fact`] falls back to each routine's DECLARED clause — the
+/// identical fallback a bodiless routine always takes, so the two failure
+/// modes share one path rather than needing a second.
+fn inferred_returns(
+    program: &Program,
+    resolved: &Resolved,
+    externals: &Declarations,
+) -> HashMap<String, bool> {
+    if !program.routines.iter().any(|r| r.has_body) {
+        return HashMap::new();
+    }
+    crate::expand::expand(resolved, externals)
+        .map(|expanded| {
+            expanded
+                .worlds
+                .iter()
+                .map(|w| (w.name.clone(), crate::ir::body_can_return(w, resolved)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether routine `name` is `noreturn`: INFERRED when its fact is in
+/// `returns` ([`inferred_returns`] — a bodied routine whose unit
+/// expanded); echoed from the DECLARED clause otherwise — a bodiless
+/// routine has no body to infer from at all, and a bodied one whose unit
+/// failed to expand has no provable fact either, so the author's own
+/// assertion is the best available answer, and its absence conservatively
+/// means "may return" rather than guessing. The one rule both the header
+/// printer and a lenient declarations read apply.
+fn noreturn_fact(returns: &HashMap<String, bool>, name: &str, declared: bool) -> bool {
+    match returns.get(name) {
+        Some(&can_return) => !can_return,
+        None => declared,
+    }
 }
 
 /// The printed header's canonical layout: the assembled text passed once
@@ -307,8 +325,9 @@ fn canonical(text: &str) -> Result<String, String> {
 /// cannot omit it — this is what makes a sibling's or a library's
 /// exported graph graftable); anything else (a `.tmc`) is read LENIENTLY
 /// as [`ReadMode::Program`]: bodies and a `machine` block are accepted
-/// and simply unused for routines (a routine's body contributes nothing
-/// [`Resolved`] keeps), while a graph's body is read and kept exactly as
+/// and a routine's body contributes one fact [`Resolved`] keeps — its
+/// `noreturn`, inferred exactly as `tmt interface` infers it
+/// ([`inferred_returns`]) — while a graph's body is read and kept exactly as
 /// the strict arm keeps it. Text has no container magic to tell a header
 /// from a full source by, so — exactly as in `cli/interface.rs` — the
 /// extension is the one place it IS the signal, never a second front end.
@@ -358,7 +377,28 @@ fn read_declarations_with_mode(
     // from — this module's own AST is about to be dropped, and `Resolved`
     // alone carries no way to recompute it (`stamp_graph_digests`).
     let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
+    // A routine's `noreturn` is the one fact a consumer reads off a
+    // routine world that a lenient `.tmc` read would otherwise lose: the
+    // body is about to be dropped with the AST, and `ir::known_noreturn`
+    // believes only `declared_noreturn` for an out-of-unit callee. So the
+    // fact is settled HERE, by the same inference and the same rule `tmt
+    // interface` prints it by — a strict read (a header, or an object's
+    // rendered one) has no bodies, `returns` is empty, and every world
+    // keeps its declared clause untouched.
+    let returns = inferred_returns(&analysis.program, &analysis.resolved, externals);
     let mut resolved = analysis.resolved;
+    for world in resolved
+        .worlds
+        .iter_mut()
+        .filter(|w| w.kind == WorldKind::Routine)
+    {
+        let noreturn = noreturn_fact(&returns, &world.name, world.declared_noreturn.is_some());
+        // An inferred fact with no clause behind it carries the routine's
+        // own name as its span — the one place a diagnostic about the
+        // routine's return behaviour can point to.
+        world.declared_noreturn =
+            noreturn.then(|| world.declared_noreturn.unwrap_or(world.name_span));
+    }
     stamp_graph_digests(&analysis.program, &mut resolved, &footprint);
     Ok(resolved)
 }
@@ -1185,18 +1225,9 @@ fn render_source(
         }
         let full = full_name(&routine.ns, &routine.name);
         let world = worlds[full.as_str()];
-        // Inferred when this routine's own fact is in `returns` (a bodied
-        // routine, expansion having succeeded); echoed from the declared
-        // clause otherwise — a bodiless routine has no body to infer from
-        // at all, and a bodied one whose UNIT failed to expand (a sibling
-        // routine's own error, `render_from_source`'s own doc) has no
-        // provable fact either, so the declared clause — the author's own
-        // assertion — is the best available answer, and its absence
-        // conservatively omits `noreturn` rather than guessing.
-        let noreturn = match returns.get(&full) {
-            Some(&can_return) => !can_return,
-            None => routine.noreturn.is_some(),
-        };
+        // Inferred when this routine's own fact is in `returns`, echoed
+        // from the declared clause otherwise (`noreturn_fact`).
+        let noreturn = noreturn_fact(returns, &full, routine.noreturn.is_some());
         root.insert(
             &routine.ns,
             routine_lines(routine, world, resolved, footprint, noreturn),

@@ -138,12 +138,13 @@ declared clause *is* the fact.
 `then` becomes OPTIONAL at a `call`/`bind` site whose callee is KNOWN to
 be `noreturn`. "Known" means this unit can see the fact: for a routine
 defined here, the inference above, written clause or not; for one defined
-elsewhere, the `noreturn` clause of a declaration this compile was given
-(a sibling source, a header, or the embedded standard library). That
-second case is why the clause is worth writing even when the compiler
-would infer it: a declarations reading never walks a body, so a routine
-in another unit that does not SAY `noreturn` is read as able to return,
-and its callers there must keep writing `then`. Against
+elsewhere, the `noreturn` its declarations carry — the clause of a
+header or of the embedded standard library, or, for a `.tmc` read as a
+declarations source, the fact inferred from its body exactly as `tmt
+interface` infers it. A routine reached only through a header that does
+not SAY `noreturn` (a hand-written one, or one whose body cannot be
+expanded) is read as able to return, and its callers must keep writing
+`then`. Against
 an unknown callee, or one that can return, `then` stays mandatory
 (`then-required`), since the linker never checks a continuation either
 way. A `then` written anyway against a known `noreturn` callee is the
@@ -1653,11 +1654,13 @@ each routine's tapes with their glyph lists, declared effective write
 set, and declared `enters`/`leaves` head-position clauses (when
 written), its `state` parameter count, and its declared `noreturn`
 clause.
-Routine bodies and the `machine` block contribute nothing and are not
-needed. The write set and `noreturn` are both DECLARED facts here, never
-inferred ones: the reading never walks a body, so a routine that declares
-no `writes` clause is read as able to write its whole alphabet, and one
-that does not say `noreturn` is read as able to return.
+The `machine` block contributes nothing and is not needed. The write set
+is a DECLARED fact here, never an inferred one: a routine that declares
+no `writes` clause is read as able to write its whole alphabet. So is
+`noreturn` when the reading has no body to walk (a header); a `.tmc`
+read leniently infers it from the body exactly as `tmt interface` does,
+and a routine whose body cannot be expanded falls back to its declared
+clause.
 
 What a compile is given to read is a matter for the tools rather than the
 language: `tmt compile --extern FILE`, the sibling sources and libraries
@@ -1672,9 +1675,10 @@ which is read unless switched off (`docs/tmt/cli.md (--extern and
   is `routine-body-in-declarations`. A graph, by contrast, MUST carry its
   body — a graph's only form is its source.
 - a **`.tmc`** used as a declarations source is read LENIENTLY: it is an
-  ordinary program, and the bodies and the `machine` block it happens to
-  carry are simply not used. A graph's body is kept, so a sibling's
-  exported graph is graftable exactly as a header's is.
+  ordinary program, and the `machine` block it happens to carry is simply
+  not used. A routine's body contributes its inferred `noreturn` and
+  nothing else. A graph's body is kept, so a sibling's exported graph is
+  graftable exactly as a header's is.
 
 Both readings run the one `.tmc` grammar. There is no separate header
 language, and no second front end to drift from the first.

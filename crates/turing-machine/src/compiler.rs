@@ -1599,7 +1599,11 @@ pub(crate) struct ResolvedWorld {
     /// checked against the body's own inferred fact (`ir::lower_world`) for
     /// a bodied routine; the only source of truth for a BODILESS one (a
     /// header carries no body to infer from — docs/tmt/language.md
-    /// (routines)).
+    /// (routines)). A world read LENIENTLY for its declarations (a sibling
+    /// `.tmc`, `header::read_extern`) carries the INFERRED fact here
+    /// instead, exactly as `tmt interface` would print it — the clause's
+    /// span when one was written, the routine's `name_span` when only the
+    /// body proves it.
     pub declared_noreturn: Option<Span>,
     /// States, rules in SOURCE form.
     pub states: Vec<State>,

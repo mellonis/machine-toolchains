@@ -1442,3 +1442,146 @@ machine {
     .expect_err("--extern is not a build flag in either mode");
     assert_eq!(err, "unknown flag `--extern`");
 }
+
+// ── a sibling's inferred `noreturn` ─────────────────────────────────────
+
+/// A sibling callee with two exits and no way to return: `tmt interface`
+/// infers `noreturn` from its body and prints it, so a caller may omit
+/// `then` (docs/tmt/language.md (reuse)).
+const GUARD_NORETURN: &str = "\
+namespace lib {
+  alphabet ab { '_', '0', '1' }
+
+  export routine path_guard(tape t: ab, state hit, state miss) {
+    entry state s {
+      ['_'] -> goto hit;
+      [*]   -> goto miss;
+    }
+  }
+}
+";
+
+/// The near miss: the same callee with one row that returns, so it is NOT
+/// `noreturn` and a `then`-less call into it must stay refused.
+const GUARD_RETURNS: &str = "\
+namespace lib {
+  alphabet ab { '_', '0', '1' }
+
+  export routine path_guard(tape t: ab, state hit, state miss) {
+    entry state s {
+      ['_'] -> goto hit;
+      ['0'] -> return;
+      [*]   -> goto miss;
+    }
+  }
+}
+";
+
+/// Calls `lib::path_guard` WITHOUT `then`: legal only against a callee
+/// known to be `noreturn`.
+const APP_CALLS_GUARD_WITHOUT_THEN: &str = "\
+alphabet ab { '_', '0', '1' }
+
+machine {
+  tape d: ab;
+  entry state go { [*] -> call lib::path_guard(t = d, hit = won, miss = lost); }
+  state won  { [*] -> write ['0'] stop; }
+  state lost { [*] -> write ['1'] stop; }
+}
+";
+
+/// Runs `execute`, folding a refusal and a non-zero exit into one `Err`
+/// carrying the text a user reads.
+fn run(list: &[&str]) -> Result<(), String> {
+    match execute(&args(list)) {
+        Ok(out) if out.code == 0 => Ok(()),
+        Ok(out) => Err(out.stderr),
+        Err(e) => Err(e),
+    }
+}
+
+/// The two build routes agree on a sibling's `noreturn`. Route A renders
+/// the callee's header with `tmt interface` (which infers `noreturn` from
+/// the body) and compiles the caller with `--extern`; route B hands both
+/// sources to `tmt build`, which reads the callee leniently for its
+/// declarations. Both must accept the `then`-less call, and the caller's
+/// object must be byte-identical either way — the lenient read infers the
+/// fact through the same function the interface printer does, never a
+/// second walk (docs/tmt/project.md (Declaration derivation)).
+///
+/// Mutation: the lenient read skipping the inference (the fix reverted) —
+/// route B then refuses the call with `then-required`, the exact refusal
+/// this test was first seen failing with.
+#[test]
+fn a_sibling_callee_is_inferred_noreturn_as_its_interface_is() {
+    let dir = scratch("sibling_noreturn");
+    let guard = write(&dir, "guard.tmc", GUARD_NORETURN);
+    let app = write(&dir, "app.tmc", APP_CALLS_GUARD_WITHOUT_THEN);
+
+    // Route A: header, then `compile --extern`.
+    let ext = dir.join("extern");
+    std::fs::create_dir_all(&ext).unwrap();
+    let header = ext.join("guard.tmh");
+    run(&[
+        "interface",
+        guard.to_str().unwrap(),
+        "-o",
+        header.to_str().unwrap(),
+    ])
+    .unwrap_or_else(|e| panic!("interface guard.tmc: {e}"));
+    assert!(
+        std::fs::read_to_string(&header)
+            .unwrap()
+            .contains("noreturn"),
+        "the interface arm must infer `noreturn` for the fixture to mean anything"
+    );
+    let via_extern = ext.join("app.tmo");
+    run(&[
+        "compile",
+        "--extern",
+        header.to_str().unwrap(),
+        app.to_str().unwrap(),
+        "-o",
+        via_extern.to_str().unwrap(),
+    ])
+    .unwrap_or_else(|e| panic!("compile --extern: {e}"));
+
+    // Route B: both sources as siblings; `--keep-objects` writes `app.tmo`
+    // next to `app.tmc`.
+    run(&[
+        "build",
+        "--keep-objects",
+        guard.to_str().unwrap(),
+        app.to_str().unwrap(),
+        "-o",
+        dir.join("app.tmx").to_str().unwrap(),
+    ])
+    .unwrap_or_else(|e| panic!("tmt build must accept the `then`-less call: {e}"));
+
+    assert_eq!(
+        std::fs::read(dir.join("app.tmo")).unwrap(),
+        std::fs::read(&via_extern).unwrap(),
+        "the caller's object must not depend on the build route"
+    );
+}
+
+/// The negative control: a sibling callee that CAN return is not inferred
+/// `noreturn`, so the same `then`-less call stays refused.
+///
+/// Mutation: the lenient read stamping `noreturn` on every sibling routine
+/// regardless of its body — this build would then succeed.
+#[test]
+fn a_sibling_callee_that_returns_still_requires_then() {
+    let dir = scratch("sibling_returns");
+    let guard = write(&dir, "guard.tmc", GUARD_RETURNS);
+    let app = write(&dir, "app.tmc", APP_CALLS_GUARD_WITHOUT_THEN);
+    let err = run(&[
+        "build",
+        guard.to_str().unwrap(),
+        app.to_str().unwrap(),
+        "-o",
+        dir.join("app.tmx").to_str().unwrap(),
+    ])
+    .expect_err("a callee that can return is not `noreturn`");
+    assert!(err.contains("[then-required]"), "{err}");
+}

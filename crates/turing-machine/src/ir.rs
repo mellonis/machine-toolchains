@@ -866,8 +866,11 @@ fn args_return(args: &[BindingArg]) -> bool {
 /// it, built by mapping every world of an EXPANDED module through
 /// `body_can_return` (exactly what `lower` does once, up front, before its
 /// own per-world loop runs). An OUT-OF-UNIT callee has no body this unit
-/// can read, so its fact is its DECLARED `noreturn` clause alone, exactly
-/// as the object arm's printer reads a bodiless header
+/// can read, so its fact is the one its declarations carry — the DECLARED
+/// `noreturn` clause of a header or object, or, for a sibling source read
+/// leniently, the fact inferred from its body at read time exactly as
+/// `tmt interface` infers it (`header::read_extern`) — exactly as the
+/// object arm's printer reads a bodiless header
 /// (docs/tmt/language.md (routines)); the header-versus-object question —
 /// whether a lying header is later caught — is a different, later check
 /// (docs/formats.md (routine interfaces)).

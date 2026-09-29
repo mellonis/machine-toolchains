@@ -154,9 +154,11 @@ library, in `-l`/manifest order, then the embedded standard library
 unless opted out — the same objects-then-libraries-then-stdlib order the
 linker itself resolves names in.
 
-A `.tmc` sibling is read LENIENTLY: a routine's body is parsed and
-simply unused (a routine's declared shape is its signature, not its
-body), but a GRAPH's body is kept in full — a graph's only form is its
+A `.tmc` sibling is read LENIENTLY: a routine's declared shape is its
+signature, and its body contributes one fact only — its `noreturn`,
+inferred from the body exactly as `tmt interface` infers it, so a caller
+may omit `then` against a sibling it could omit it against through that
+sibling's generated header — but a GRAPH's body is kept in full — a graph's only form is its
 source, so this is what makes a sibling's exported graph graftable by
 another sibling, exactly as a library's own header does. A `.tma`/`.tmo`
 sibling is assembled/loaded and its OBJECT's own interface feeds the
@@ -222,21 +224,20 @@ link means nothing for the graft-drift check to compare a spliced body
 against either, which is by design — a header-only library is the one
 place a header is trusted outright (`docs/core.md (graft drift)`).
 
-**A generated header is STRONGER than the source it came from.** A
-declarations reading uses declared facts only (`docs/tmt/language.md
-(declarations)`): a routine that declares no `writes` clause is read as
-able to write its whole alphabet, and one that does not say `noreturn`
-is read as able to return. `tmt interface` is where the compiler's own
-INFERENCE is turned into a declared fact — it writes the inferred write
-set into a `writes { … }` clause and prints `noreturn` for a routine
-whose body cannot return, whether or not the source said either. So the
-SAME unit supports strictly more when it is read as its own generated
-header than when it is read as a sibling source: a caller under a narrow
-write contract, or one omitting `then` at a call that never returns, can
-build against the header and fail against the sibling. Two ways to
-settle it, both fine: declare the clauses in the source so both readings
-agree, or generate the header with `tmt interface` and build against
-that.
+**A generated header is STRONGER than the source it came from** in
+one respect, the write set. A declarations reading uses the DECLARED
+write set only (`docs/tmt/language.md (declarations)`): a routine that
+declares no `writes` clause is read as able to write its whole alphabet.
+`tmt interface` is where the compiler's own inference is turned into a
+declared fact — it writes the inferred write set into a `writes { … }`
+clause whether or not the source said one. So a caller under a narrow
+write contract can build against the header and fail against the
+sibling. Two ways to settle it, both fine: declare the clauses in the
+source so both readings agree, or generate the header with `tmt
+interface` and build against that. `noreturn` is not part of that gap:
+a lenient read infers it through the same inference `tmt interface`
+prints it from, so a call omitting `then` builds against either form
+alike.
 
 Argv mode's own `-L`/`-l` (`docs/tmt/cli.md (build)`) select compile-time
 declarations too, exactly like a manifest's `libraries` — `tmt link`'s
