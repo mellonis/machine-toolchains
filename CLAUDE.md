@@ -10,8 +10,8 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 | Contract | Version |
 |---|---|
-| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.5.0 |
-| `mtc-wasm` crate / JS API | 0.5.0 |
+| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.6.0-dev on `next` (last release 0.5.0) |
+| `mtc-wasm` crate / JS API | 0.6.0-dev on `next` (last release 0.5.0) |
 | `.pmc` language / PM-1 `.pma` dialect | 0.4 / 0.3 |
 | `.tmc` language / TM-1 `.tma` dialect | 0.2 / 0.5 (`.tmc` 0.2 reserves 31 words) |
 | PM IR / TM IR | 4 / 4 |
@@ -248,6 +248,20 @@ as a compatibility matrix across releases. Component sections follow
 only where changes exist. `CHANGELOG.md` (first entry: v0.2.0) uses this
 structure in ref-free prose (published-docs policy); tracker links
 belong in GH release notes.
+
+**Two branches.** `master` is the last release — it never moves except
+to a release commit, so a clone, the repository's front page and
+`cargo install --git` all see released behaviour and released docs.
+`next` is the development branch: feature branches start from it and
+merge into it, CI runs on it, and its crates carry a `-dev` version
+(`0.6.0-dev` after 0.5.0 — the smallest bump the work is known to earn,
+marked pre-release, replaced by the real number at the cut) paired with
+the CHANGELOG's `## [Unreleased]` heading, which the man-page date test
+accepts in place of a dated one. A nightly is a `v*` tag on a `next`
+commit plus `gh release create --prerelease`; the release workflow
+attaches the bundle to it as to any release (the bundle's file name
+carries the `-dev` version, the tag disambiguates). A release cut
+fast-forwards `master` to `next` and tags there.
 
 Realized release flow (v0.2.0 precedent): docs audit first (per-page
 claim verification + citation-keyword resolution); bump both crates,

@@ -196,6 +196,16 @@ mod tests {
         let changelog = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         let version = env!("CARGO_PKG_VERSION");
+        // A `-dev` version is the development branch between releases:
+        // it pairs with the `## [Unreleased]` heading and keeps the last
+        // release's date until the cut replaces the suffix.
+        if version.ends_with("-dev") {
+            assert!(
+                changelog.lines().any(|l| l.starts_with("## [Unreleased]")),
+                "CHANGELOG.md has no `## [Unreleased]` heading for {version}"
+            );
+            return;
+        }
         let base = version.split('-').next().unwrap();
         let heading = changelog
             .lines()

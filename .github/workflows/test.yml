@@ -14,9 +14,11 @@ on:
   push:
     branches:
       - master
+      - next
   pull_request:
     branches:
       - master
+      - next
 
 permissions:
   contents: read

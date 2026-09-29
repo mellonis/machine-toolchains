@@ -7,6 +7,13 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
+## [Unreleased]
+
+The development branch between releases. Its crates report a `-dev`
+version — `0.6.0-dev` after 0.5.0 — so a build from it names itself as
+unreleased; the entry for the next release assembles here at the cut and
+takes the version the work earned.
+
 ## [0.5.0] - 2026-09-02
 
 Two release candidates preceded this cut on the same day: the first so
