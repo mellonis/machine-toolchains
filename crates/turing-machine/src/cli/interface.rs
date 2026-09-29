@@ -167,6 +167,11 @@ fn check_header(
 ) -> Result<CliOutput, String> {
     let actual_bytes =
         fs::read(check).map_err(|e| format!("{}: cannot read: {e}", check.display()))?;
+    // A leading "generated, do not edit" notice is not part of the header
+    // (docs/tmt/cli.md (interface)): skip it, remembering how many lines
+    // it took so a reported line number stays the line in FILE.
+    let (skipped_bytes, skipped_lines) = leading_notice(&actual_bytes);
+    let actual_bytes = &actual_bytes[skipped_bytes..];
     if actual_bytes == text.as_bytes() {
         return Ok(CliOutput::ok(String::new(), String::new()));
     }
@@ -174,8 +179,8 @@ fn check_header(
     // but line-by-line reporting needs text; a non-UTF-8 FILE is already
     // known to differ, and lossy decoding only affects how the mismatch
     // is DESCRIBED, never whether one was found.
-    let actual = String::from_utf8_lossy(&actual_bytes);
-    let line = first_diff_line(text, &actual);
+    let actual = String::from_utf8_lossy(actual_bytes);
+    let line = skipped_lines + first_diff_line(text, &actual);
     let mut stderr = format!(
         "{}: differs from the header of {} (first difference at line {line})\n",
         check.display(),
@@ -189,6 +194,25 @@ fn check_header(
         stderr,
         code: 1,
     })
+}
+
+/// The length in bytes, and in lines, of the LEADING run of `//` line
+/// comments and blank lines at the top of `bytes` — the notice a project
+/// may stamp on a generated header. Only the very top counts: the printed
+/// header itself never contains a comment, so a comment anywhere later is
+/// an ordinary difference.
+fn leading_notice(bytes: &[u8]) -> (usize, usize) {
+    let mut offset = 0;
+    let mut lines = 0;
+    for line in bytes.split_inclusive(|&b| b == b'\n') {
+        let body = line.trim_ascii();
+        if !(body.is_empty() || body.starts_with(b"//")) {
+            break;
+        }
+        offset += line.len();
+        lines += 1;
+    }
+    (offset, lines)
 }
 
 /// Splits `s` into lines that each KEEP their own terminator (`\n` or
@@ -209,8 +233,9 @@ fn lines_with_terminators(s: &str) -> Vec<&str> {
 
 /// The 1-based line number of the first difference between `expected` and
 /// `actual`. Only called once the caller has already confirmed the two
-/// differ as bytes, so the comparison is guaranteed to find one: if every
-/// line matched, the two texts would be byte-identical.
+/// differ as bytes, so the comparison finds one (`split_inclusive` lines
+/// concatenate back to their text) except for the lossy-decoding case
+/// noted at the end.
 fn first_diff_line(expected: &str, actual: &str) -> usize {
     let exp_lines = lines_with_terminators(expected);
     let act_lines = lines_with_terminators(actual);
@@ -220,7 +245,10 @@ fn first_diff_line(expected: &str, actual: &str) -> usize {
             return i + 1;
         }
     }
-    unreachable!("first_diff_line is only called after a byte-level mismatch")
+    // Every line agreeing means byte-identical text, so this is reached
+    // only when FILE's non-UTF-8 bytes were lossily decoded into text that
+    // happens to equal the render; report the line past the last one.
+    max + 1
 }
 
 /// A minimal unified-diff-style listing (`-`/`+` lines, no external tool)

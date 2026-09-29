@@ -784,7 +784,13 @@ own final newline, or only in carrying `\r\n` where the render carries
 `\n`, is a difference on that shared line rather than a phantom extra or
 missing one; a genuinely extra or missing whole line reports at the
 first line the two sides disagree on. `-v` additionally lists every
-differing line as a minimal `-`/`+` pair. `FILE` missing or unreadable is
+differing line as a `-`/`+` pair (a positional listing, not a minimal
+diff). Line endings are part of the comparison: a missing final newline,
+or `\r\n` where the render carries `\n`, is a difference. A leading run of
+`//` comment lines and blank lines in `FILE` is skipped, so a "generated,
+do not edit" notice stamped above the header does not count; the reported
+line number still counts those lines, and a comment anywhere else is an
+ordinary difference, since the printed header carries none. `FILE` missing or unreadable is
 a distinct failure, reported as such rather than folded into "differs",
 so a CI gate cannot mistake an absent header for a stale one.
 

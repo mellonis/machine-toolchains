@@ -316,3 +316,142 @@ fn check_verbose_lists_the_differing_lines() {
     assert_eq!(minus_lines, vec!["-export alphabet cd { '_', 'c' }"]);
     assert_eq!(plus_lines, vec!["+export alphabet zz { '_', 'c' }"]);
 }
+
+// ── helpers for the line-ending and notice fixtures ─────────────────────
+
+/// Writes `TWO_ALPHABETS_TMC` and its fresh header into `scratch`,
+/// returning `(source path, header path, fresh header text)`.
+fn fresh_header(scratch: &Scratch) -> (PathBuf, PathBuf, String) {
+    let src = scratch.path("unit.tmc");
+    fs::write(&src, TWO_ALPHABETS_TMC).unwrap();
+    let header = scratch.path("unit.tmh");
+    write_header(&src, &header);
+    let fresh = fs::read_to_string(&header).unwrap();
+    (src, header, fresh)
+}
+
+fn check(src: &std::path::Path, header: &std::path::Path) -> mtc_turing_machine::cli::CliOutput {
+    execute(&args(&[
+        "interface",
+        src.to_str().unwrap(),
+        "--check",
+        header.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("--check should report, not fail: {e}"))
+}
+
+fn differs_at(
+    result: &mtc_turing_machine::cli::CliOutput,
+    header: &std::path::Path,
+    src: &std::path::Path,
+    line: usize,
+) {
+    assert_eq!(result.code, 1, "stderr: {}", result.stderr);
+    assert_eq!(
+        result.stderr,
+        format!(
+            "{}: differs from the header of {} (first difference at line {line})\n",
+            header.display(),
+            src.display()
+        )
+    );
+}
+
+// ── 7: a missing final newline is a difference ──────────────────────────
+
+/// Mutation this fixture kills: `lines()` in place of `split_inclusive`
+/// in the line comparison, which folds an unterminated last line into the
+/// terminated one and reports no difference line.
+#[test]
+fn check_reports_a_missing_final_newline() {
+    let scratch = Scratch::new("no-final-newline");
+    let (src, header, fresh) = fresh_header(&scratch);
+    let stripped = fresh.strip_suffix('\n').expect("header ends in a newline");
+    fs::write(&header, stripped).unwrap();
+
+    let result = check(&src, &header);
+    differs_at(&result, &header, &src, fresh.lines().count());
+}
+
+// ── 8: CRLF is a difference ─────────────────────────────────────────────
+
+/// Mutation this fixture kills: `lines()` in place of `split_inclusive`,
+/// which strips `\r\n` and `\n` alike and so sees the two as equal lines.
+#[test]
+fn check_reports_crlf_line_endings() {
+    let scratch = Scratch::new("crlf");
+    let (src, header, fresh) = fresh_header(&scratch);
+    fs::write(&header, fresh.replace('\n', "\r\n")).unwrap();
+
+    let result = check(&src, &header);
+    differs_at(&result, &header, &src, 1);
+}
+
+// ── 9: the shipped header checks clean ──────────────────────────────────
+
+/// Mutation this fixture kills: the leading-notice skip removed, which
+/// makes the shipped header (prefixed by its generated-file notice) differ
+/// at line 1.
+#[test]
+fn check_accepts_the_shipped_std_header() {
+    let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/stdlib");
+    let result = execute(&args(&[
+        "interface",
+        stdlib.join("std.tmc").to_str().unwrap(),
+        "--check",
+        stdlib.join("std.tmh").to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("--check of the shipped header should succeed: {e}"));
+    assert_eq!(result.code, 0, "stderr: {}", result.stderr);
+    assert!(result.stderr.is_empty(), "stderr: {}", result.stderr);
+}
+
+const NOTICE: &str = "// GENERATED - do not edit by hand.\n// Regenerate with tmt interface.\n\n";
+
+// ── 10: a leading notice is skipped ─────────────────────────────────────
+
+/// Mutation this fixture kills: the leading-notice skip removed.
+#[test]
+fn check_skips_a_leading_notice() {
+    let scratch = Scratch::new("notice");
+    let (src, header, fresh) = fresh_header(&scratch);
+    fs::write(&header, format!("{NOTICE}{fresh}")).unwrap();
+
+    let result = check(&src, &header);
+    assert_eq!(result.code, 0, "stderr: {}", result.stderr);
+    assert!(result.stderr.is_empty(), "stderr: {}", result.stderr);
+}
+
+// ── 11: line numbers count the notice ───────────────────────────────────
+
+/// Mutation this fixture kills: the reported line taken relative to the
+/// text after the notice instead of the line in FILE. The notice is three
+/// lines (two comments and a blank), the changed header line is its
+/// second, so the answer is 5, not 2.
+#[test]
+fn check_line_numbers_count_the_notice() {
+    let scratch = Scratch::new("notice-line");
+    let (src, header, fresh) = fresh_header(&scratch);
+    let mutated = fresh.replace("cd", "zz");
+    assert_ne!(fresh, mutated);
+    fs::write(&header, format!("{NOTICE}{mutated}")).unwrap();
+
+    let result = check(&src, &header);
+    differs_at(&result, &header, &src, 5);
+}
+
+// ── 12: a comment elsewhere is a difference ─────────────────────────────
+
+/// Mutation this fixture kills: comment lines skipped everywhere rather
+/// than only at the very top.
+#[test]
+fn check_rejects_a_comment_in_the_middle() {
+    let scratch = Scratch::new("middle-comment");
+    let (src, header, fresh) = fresh_header(&scratch);
+    let mut lines: Vec<&str> = fresh.lines().collect();
+    lines.insert(1, "// stray");
+    fs::write(&header, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let result = check(&src, &header);
+    differs_at(&result, &header, &src, 2);
+}
