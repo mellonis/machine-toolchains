@@ -10,6 +10,7 @@ mod config;
 pub mod dap;
 pub mod fmt;
 pub mod ir;
+pub mod ir_graph;
 pub mod lexer;
 pub mod lint;
 mod lsp;

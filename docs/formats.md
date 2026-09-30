@@ -1388,3 +1388,77 @@ pre-version-4 document has neither field.
   (routines)). A world without any way to return omits the field
   (`returns: true` is the fill/deserialization default, since a v3 document
   never omitted it).
+
+### Graph label notation
+
+`tmt ir graph` and `pmt ir graph` draw an IR document in three views
+(`docs/tmt/cli.md (tmt ir)`, `docs/pmt/cli.md (pmt ir)`): **raw**, one
+arrow per rule row exactly as the IR lists it; **merged**, the default,
+where parallel rows are folded into one arrow; and **shape**, one arrow
+per pair of states labelled with the number of rows it stands for. This
+section is the one definition of how a merged arrow is labelled, so any
+other renderer of the same graph can write the same text.
+
+**When rows merge.** Two rows of one state merge only when they share
+the target, the write vector, the move vector, the `debugger` flag and
+the whole transition (for a call: callee, binding record and exits), and
+their read patterns differ in **exactly one** cell, by disjoint symbol
+sets. The merged arrow reads the union in that cell. Merged arrows merge
+again under the same rule until nothing changes. A `*` cell equals only
+a `*` cell and never joins a set. So expanding a merged arrow — the
+cartesian product of its cells — gives back exactly the raw rows it
+replaced, each as many times as it occurred: rows `[1,2]` and `[2,1]`
+stay two arrows, because a per-cell union `[{1,2},{1,2}]` would also
+describe `[1,1]` and `[2,2]`, which do not exist.
+
+**Order.** A merged arrow is drawn where its first raw row stood. Rows
+that carry a wildcard are tried in source order (`docs/tmt/language.md
+(which rule fires)`), so a row is never moved above an earlier
+wildcard-bearing row whose pattern overlaps its own; where that would
+happen the rows stay apart. Exact rows and the catch-all do not depend
+on position, so they merge freely.
+
+**Labels.** A merged label has the raw label's layout — the read vector
+in `[…]`, then `w[…]` and `m[…]` where the row writes or moves, `brk `
+in front of a `debugger` row, `call`/`tail` and the callee after a call —
+with two changes inside the vectors:
+
+- A read cell holding one symbol is that index, as in the raw view. A
+  run of three or more consecutive indices is written `a–b`, with an en
+  dash (U+2013). Any other set is written in braces, runs of three or
+  more still as ranges inside: `{1,2}`, `{1,3}`, `{1–3,7,9–12}`. The
+  braces keep a set's own commas from being read as cell separators.
+  Indices are the IR's symbol indices, so a range is a range of
+  consecutive indices, not of glyphs.
+- In any vector — read, write or move — three or more identical
+  adjacent cells are written once as `cell×k` (U+00D7): `*×13`, `-×13`,
+  `.×13`, `{1,2}×3`. Two identical cells are written out.
+
+A label is a quoted Mermaid string, where the en dash, the multiplication
+sign and the braces need no escaping. A `.pmc` graph has no vectors to
+compress; its one parallel pair, a `check` whose two arms reach the same
+block, merges to one edge labelled `{MF,!MF}`.
+
+The cases below are held to the renderer by a test, row for row. Each
+left cell lists the raw labels of one state's rows (every row with the
+same target and transition); the right cell lists the arrows the merged
+view draws for them.
+
+| Raw rows | Merged view |
+|---|---|
+| `[4]` | `[4]` |
+| `[1]` `[2]` | `[{1,2}]` |
+| `[1]` `[2]` `[3]` | `[1–3]` |
+| `[1]` `[3]` | `[{1,3}]` |
+| `[1]` `[2]` `[3]` `[7]` `[9]` `[10]` `[11]` `[12]` | `[{1–3,7,9–12}]` |
+| `[1,*,*,*]` `[2,*,*,*]` `[3,*,*,*]` | `[1–3,*×3]` |
+| `[*,*]` | `[*,*]` |
+| `[1,*,*] w[-,-,-] m[.,.,.]` | `[1,*,*] w[-×3] m[.×3]` |
+| `[1,1,1]` `[1,1,2]` `[1,2,1]` `[1,2,2]` `[2,1,1]` `[2,1,2]` `[2,2,1]` `[2,2,2]` | `[{1,2}×3]` |
+| `[1,2]` `[2,1]` | `[1,2]` `[2,1]` |
+| `[1,1]` `[2,1]` `[1,2]` `[2,2]` | `[{1,2},{1,2}]` |
+| `[*,1]` `[2,1]` | `[*,1]` `[2,1]` |
+| `[1,1]` `[1,1]` | `[1,1]` `[1,1]` |
+| `[1,*]` `[*,2]` `[2,*]` | `[1,*]` `[*,2]` `[2,*]` |
+| `[1,0]` `[*,2]` `[2,0]` | `[{1,2},0]` `[*,2]` |
+| `[1] w[2]` `[2] w[3]` | `[1] w[2]` `[2] w[3]` |

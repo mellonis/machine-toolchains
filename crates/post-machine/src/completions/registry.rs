@@ -589,6 +589,9 @@ fn ir_graph_spec() -> CommandSpec {
             FlagSpec::boolean("-O0", "optimization level O0 (default)").exclusive("opt-level"),
             FlagSpec::boolean("-O1", "optimization level O1 (full pass pipeline)")
                 .exclusive("opt-level"),
+            FlagSpec::boolean("--raw", "draw one edge per check arm").exclusive("graph-view"),
+            FlagSpec::boolean("--shape", "draw one edge per pair of blocks")
+                .exclusive("graph-view"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }

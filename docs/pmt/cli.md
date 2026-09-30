@@ -710,19 +710,39 @@ stats print unconditionally regardless of `-v`.
 
 ```
 USAGE: pmt ir graph FILE.ir.json|FILE.pmc [--function NAME]
-                    [--variant normal|volatile] [-O0|-O1]
+                    [--variant normal|volatile] [-O0|-O1] [--raw|--shape]
 
 Renders --emit-ir output as a Mermaid flowchart (one per function). A
 .pmc input is compiled in memory first: --variant picks which build
 column's CFG is rendered (default normal) and -O0/-O1 the optimization
 level (default -O0, as in `pmt compile`). Both flags need a .pmc input —
-a .ir.json file already holds exactly one column.
+a .ir.json file already holds exactly one column. By default a check
+whose two arms reach one block is drawn as one edge; --raw draws one
+edge per arm, --shape one edge per pair of blocks, labelled with the
+number of edges it stands for.
 ```
 
 Renders each function's control-flow graph as a Mermaid `flowchart TD`:
 block contents (labels, ops, terminal instruction) become node text, and
 `check` terminators become a pair of `MF`/`!MF` edges. `--function NAME`
 restricts the output to one function.
+
+The graph comes in the same three views as `tmt ir graph`'s
+(`docs/tmt/cli.md (tmt ir)`), and `--raw`/`--shape` apply to either
+input kind:
+
+- **merged** (the default). A block has one terminator, so the only
+  parallel edges a CFG can carry are a `check` whose two arms reach the
+  same block; the merged view draws that pair as one edge labelled
+  `{MF,!MF}` (`docs/formats.md (graph label notation)`). Everywhere else
+  it is identical to the raw view — there is no vector to compress —
+  and in the final CFG of an `-O1` build, where the check-fold pass has
+  already turned every such check into a plain `goto`, the two views
+  coincide.
+- **`--raw`** draws one edge per successor, both arms of every `check`.
+- **`--shape`** draws one edge per pair of blocks, labelled with the
+  number of raw edges behind it (`2` for the agreeing `check`, `1`
+  everywhere else).
 
 The input is either a `--emit-ir` JSON file (`docs/formats.md (IR JSON)`)
 or a `.pmc` source, and the two accept different flags. A JSON file

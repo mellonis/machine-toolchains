@@ -1336,10 +1336,13 @@ unbounded tape, not the whole of it.
 ## `tmt ir`
 
 ```
-USAGE: tmt ir graph FILE.ir.json [--function NAME]
+USAGE: tmt ir graph FILE.ir.json [--function NAME] [--raw|--shape]
        tmt ir footprints FILE.ir.json [--function NAME]
 
 `graph` renders --emit-ir output as a Mermaid flowchart (one per world).
+By default rows that differ in a single read cell are merged into one
+arrow; --raw draws one arrow per row, --shape one arrow per pair of
+states, labelled with the number of rows it stands for.
 `footprints` renders each world's inferred write footprint: per tape, the
 symbol indices its body may ever write, out of the tape's cardinality. Both
 share the `--function` flag (pmt's flag name, for cross-tool muscle memory);
@@ -1348,10 +1351,39 @@ world name.
 ```
 
 Reads a `--emit-ir` JSON file and renders each world's state graph as a
-Mermaid `flowchart TD`. `--function NAME` restricts output to one world;
-naming a world the file does not contain is an error. As with `tape`,
-`graph --help` renders the same usage block shown above, same as bare
-`tmt ir`.
+Mermaid `flowchart TD`, each preceded by a `%% NAME` comment line.
+`--function NAME` restricts output to one world; naming a world the file
+does not contain is an error. As with `tape`, `graph --help` renders the
+same usage block shown above, same as bare `tmt ir`.
+
+The graph comes in three views, one at a time:
+
+- **merged** (the default) folds parallel rows into one arrow. Rows of a
+  state merge only when they share the target, the write and move
+  vectors, the `debugger` flag and the whole transition, and differ in
+  exactly one read cell — so the merge is lossless: expanding a merged
+  arrow gives back exactly the rows it replaced. Labels use a compact
+  notation: `1–16` for a run of indices, `{1,3}` for any other set,
+  `*×13` for thirteen identical cells. The rule and the notation, with
+  worked cases, are in `docs/formats.md (graph label notation)`.
+- **`--raw`** draws one arrow per row, exactly as the IR lists them —
+  the view that matches `-S` listings row for row, and the one the
+  optimizer walkthroughs use (`docs/tmt/optimizer.md (reading the
+  examples)`).
+- **`--shape`** draws one arrow per pair of states (or state and
+  terminal node), labelled with the number of rows behind it. A call
+  row that reaches a state through both its `then` and one of its exits
+  counts once.
+
+On `docs/examples/rpnwide/rpnwide.tmc` (compiled `-O0`) the raw view draws
+4,711 arrows, the merged view 4,603 and the shape view 86. `main` drops
+from 139 arrows to 46 — its sixteen `call pushTok` rows on one state
+become one arrow labelled `[1–16,*×13] call pushTok` — while the two
+512-row arithmetic routines stay at 2,049 arrows each. Their writes
+depend on the digits they read, so two rows that write the same digit
+read different digits in two cells at once (`1+2` and `2+1`), and a
+union of those would describe pairs that write something else. The
+shape view (five arrows each) is the readable one there.
 
 ### `tmt ir footprints`
 

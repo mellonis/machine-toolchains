@@ -20,6 +20,7 @@ pub(crate) mod footprint;
 pub(crate) mod head_flow;
 mod header;
 pub mod ir;
+pub mod ir_graph;
 pub mod lexer;
 pub mod lint;
 mod lsp;

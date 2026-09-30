@@ -513,195 +513,20 @@ impl IrProgram {
 }
 
 impl IrWorld {
-    /// A Mermaid flowchart of this world's state graph (`tmt ir graph`):
-    /// nodes are states, edges are rows labelled by a compact pattern/action
-    /// summary. Terminators (and call `then`-terminators) route to shared
-    /// round terminal nodes so the whole control flow is visible.
+    /// A Mermaid flowchart of this world's state graph, row for row — the
+    /// raw view of `tmt ir graph --raw`: nodes are states, edges are rows
+    /// labelled by a compact pattern/action summary. Terminators (and call
+    /// `then`-terminators) route to shared round terminal nodes so the
+    /// whole control flow is visible.
     pub fn to_mermaid(&self) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::from("flowchart TD\n");
-        for st in &self.states {
-            let _ = writeln!(out, "    S{}[\"{}\"]", st.id, escape(&st.name));
-        }
-        // Terminal pseudo-nodes, declared once each on first use.
-        let mut terms: HashSet<&'static str> = HashSet::new();
-        let declare =
-            |out: &mut String, id: &'static str, text: &str, terms: &mut HashSet<&'static str>| {
-                if terms.insert(id) {
-                    let _ = writeln!(out, "    {id}((\"{text}\"))");
-                }
-            };
-        // `ReturnExit` terminals are per-exit, so they cannot share the
-        // `&'static str` pool above; one shared node per exit number instead.
-        let mut ret_exit_terms: HashSet<u32> = HashSet::new();
-        // Two passes so all node declarations precede the edges.
-        let mut edges = String::new();
-        for st in &self.states {
-            for r in &st.rules {
-                let label = row_label(r);
-                match &r.transition {
-                    IrTransition::Goto { state } => {
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| S{state}", st.id);
-                    }
-                    IrTransition::CallThen {
-                        target,
-                        exits,
-                        then,
-                        ..
-                    } => {
-                        let call = format!("{label} call {}", escape(target));
-                        // Each declared exit resumes at a state of this
-                        // world, so the graph carries one edge per exit
-                        // alongside the `then` — the whole control flow is
-                        // what this rendering exists to show.
-                        for (k, state) in exits.iter().enumerate() {
-                            let _ = writeln!(
-                                edges,
-                                "    S{} -->|\"{call} exit #{k}\"| S{state}",
-                                st.id
-                            );
-                        }
-                        // `then: None` is the omitted-`then` (tail-position)
-                        // shape — control never comes back to this call at
-                        // all, so there is no edge left to draw for it
-                        // beyond the exits already rendered above.
-                        if let Some(then) = then {
-                            match then {
-                                IrThen::Goto { state } => {
-                                    let _ =
-                                        writeln!(edges, "    S{} -->|\"{call}\"| S{state}", st.id);
-                                }
-                                IrThen::Return => {
-                                    declare(&mut out, "T_ret", "ret", &mut terms);
-                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_ret", st.id);
-                                }
-                                IrThen::ReturnExit { exit } => {
-                                    if ret_exit_terms.insert(*exit) {
-                                        let _ = writeln!(out, "    T_ret{exit}((\"ret #{exit}\"))");
-                                    }
-                                    let _ = writeln!(
-                                        edges,
-                                        "    S{} -->|\"{call}\"| T_ret{exit}",
-                                        st.id
-                                    );
-                                }
-                                IrThen::Stop => {
-                                    declare(&mut out, "T_stp", "stp", &mut terms);
-                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_stp", st.id);
-                                }
-                                IrThen::Halt => {
-                                    declare(&mut out, "T_hlt", "hlt", &mut terms);
-                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_hlt", st.id);
-                                }
-                            }
-                        }
-                    }
-                    IrTransition::TailCall { target } => {
-                        // A tail call transfers out of this world for good (no
-                        // return trip), so it routes to a shared terminal node,
-                        // its label naming the callee.
-                        declare(&mut out, "T_tail", "tail", &mut terms);
-                        let _ = writeln!(
-                            edges,
-                            "    S{} -->|\"{label} tail {}\"| T_tail",
-                            st.id,
-                            escape(target)
-                        );
-                    }
-                    IrTransition::Return => {
-                        declare(&mut out, "T_ret", "ret", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_ret", st.id);
-                    }
-                    IrTransition::ReturnExit { exit } => {
-                        if ret_exit_terms.insert(*exit) {
-                            let _ = writeln!(out, "    T_ret{exit}((\"ret #{exit}\"))");
-                        }
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_ret{exit}", st.id);
-                    }
-                    IrTransition::Stop => {
-                        declare(&mut out, "T_stp", "stp", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_stp", st.id);
-                    }
-                    IrTransition::Halt => {
-                        declare(&mut out, "T_hlt", "hlt", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_hlt", st.id);
-                    }
-                    IrTransition::TrapRead => {
-                        declare(&mut out, "T_trap0", "trap #0", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_trap0", st.id);
-                    }
-                    IrTransition::TrapWrite => {
-                        declare(&mut out, "T_trap1", "trap #1", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_trap1", st.id);
-                    }
-                    IrTransition::TrapContract => {
-                        declare(&mut out, "T_trap2", "trap #2", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_trap2", st.id);
-                    }
-                }
-            }
-        }
-        out.push_str(&edges);
-        out
+        crate::ir_graph::render(self, crate::ir_graph::GraphView::Raw)
     }
-}
 
-/// A compact row summary for a Mermaid edge label: the pattern, then the
-/// write/move action when present, then a `brk` marker. ASCII only; `"` and
-/// `|` are stripped since Mermaid edge labels are pipe-delimited.
-fn row_label(r: &IrRule) -> String {
-    let mut s = String::new();
-    if r.debugger {
-        s.push_str("brk ");
+    /// The same flowchart in any of `tmt ir graph`'s three views
+    /// ([`crate::ir_graph`]).
+    pub fn to_mermaid_view(&self, view: crate::ir_graph::GraphView) -> String {
+        crate::ir_graph::render(self, view)
     }
-    s.push('[');
-    for (i, c) in r.pattern.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        match c {
-            IrCell::Wildcard => s.push('*'),
-            IrCell::Index { index } => {
-                let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{index}"));
-            }
-        }
-    }
-    s.push(']');
-    if let Some(w) = &r.write {
-        s.push_str(" w[");
-        for (i, c) in w.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            match c {
-                IrWrite::Keep => s.push('-'),
-                IrWrite::Index { index } => {
-                    let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{index}"));
-                }
-            }
-        }
-        s.push(']');
-    }
-    if let Some(m) = &r.moves {
-        s.push_str(" m[");
-        for (i, d) in m.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push(match d {
-                IrMove::Left => '<',
-                IrMove::Right => '>',
-                IrMove::Stay => '.',
-            });
-        }
-        s.push(']');
-    }
-    s
-}
-
-/// Strip the two characters Mermaid quoted labels cannot carry.
-fn escape(s: &str) -> String {
-    s.replace(['"', '|'], "")
 }
 
 // ---------------------------------------------------------------------------

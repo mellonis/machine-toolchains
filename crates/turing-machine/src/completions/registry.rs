@@ -697,6 +697,9 @@ fn ir_graph_spec() -> CommandSpec {
                 "restrict output to one world",
                 ValueHint::Text,
             ),
+            FlagSpec::boolean("--raw", "draw one arrow per row").exclusive("graph-view"),
+            FlagSpec::boolean("--shape", "draw one arrow per pair of states")
+                .exclusive("graph-view"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }

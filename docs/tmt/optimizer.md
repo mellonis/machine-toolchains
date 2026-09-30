@@ -243,7 +243,9 @@ Each pass below is shown transforming a small program, and most examples
 follow the same recipe: compile once with `--emit-ir=lowered` for the
 graph as lowering produced it, once with `--emit-ir=after:<pass>` for
 the graph right after that pass last changed something, and render both
-with `tmt ir graph` (`docs/tmt/cli.md (ir)`). `-v` on the first compile
+with `tmt ir graph --raw` (`docs/tmt/cli.md (ir)`). The passes rewrite
+rows, so the examples draw the row-for-row raw view rather than the
+merged default, which would fold parallel rows together. `-v` on the first compile
 shows which passes fired and how often, which is how one can tell that a
 fragment shows what it claims to show.
 
@@ -275,8 +277,9 @@ is its dense id and the quoted text is its source name. Round nodes are
 shared terminal pseudo-nodes — `stp`, `hlt`, `ret`, `tail`, and
 `trap #0` / `trap #1` / `trap #2` for the three synthesized trap kinds —
 declared once each and reused, so all of a world's control flow ends
-somewhere visible. Every edge is one match row, labelled with a compact
-summary of it: the match pattern in `[…]`, then the write vector as
+somewhere visible. In the raw view every edge is one match row,
+labelled with a compact summary of it: the match pattern in `[…]`, then
+the write vector as
 `w[…]` where the row writes and the move vector as `m[…]` where it
 moves, with `brk ` prefixed on a `debugger` row and `call <target>` or
 `tail <target>` appended on a call.
@@ -350,7 +353,7 @@ opt: 2 round(s)
   jump-threading main: 1 change(s)
   dce main: 1 change(s)
   dispatch-select main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -365,7 +368,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:inline -o inlined.tmo inline.tmc
-$ tmt ir graph inlined.ir.json --function main
+$ tmt ir graph inlined.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -528,7 +531,7 @@ opt: 2 round(s)
   tail-merge main: 7 change(s)
   dce main: 6 change(s)
   dce main.outline0: 1 change(s)
-$ tmt ir graph on.ir.json --function main.outline0
+$ tmt ir graph on.ir.json --function main.outline0 --raw
 ```
 
 ```mermaid
@@ -571,7 +574,7 @@ both of `start`'s arms now enter the same state:
 
 ```
 $ tmt compile -O1 --foutline --emit-ir=final -o final.tmo outline.tmc
-$ tmt ir graph final.ir.json --function main
+$ tmt ir graph final.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -678,7 +681,7 @@ opt: 2 round(s)
   tail-merge main: 1 change(s)
   dce main: 1 change(s)
   dispatch-select main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -698,7 +701,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:jump-threading -o threaded.tmo jump-threading.tmc
-$ tmt ir graph threaded.ir.json --function main
+$ tmt ir graph threaded.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -723,7 +726,7 @@ the end of the round `dce` has removed them:
 
 ```
 $ tmt compile -O1 --emit-ir=final -o final.tmo jump-threading.tmc
-$ tmt ir graph final.ir.json --function main
+$ tmt ir graph final.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -934,7 +937,7 @@ machine {
 $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo tail-call.tmc
 opt: 2 round(s)
   tail-call caller: 1 change(s)
-$ tmt ir graph lowered.ir.json --function caller
+$ tmt ir graph lowered.ir.json --function caller --raw
 ```
 
 ```mermaid
@@ -947,7 +950,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:tail-call -o tailed.tmo tail-call.tmc
-$ tmt ir graph tailed.ir.json --function caller
+$ tmt ir graph tailed.ir.json --function caller --raw
 ```
 
 ```mermaid
@@ -1000,7 +1003,7 @@ $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo tail-merge.tmc
 opt: 2 round(s)
   tail-merge main: 1 change(s)
   dispatch-select main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1020,7 +1023,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:tail-merge -o merged.tmo tail-merge.tmc
-$ tmt ir graph merged.ir.json --function main
+$ tmt ir graph merged.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1088,7 +1091,7 @@ $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo dce.tmc
 dce.tmc:5:9: warning: state `orphan` is unreachable in `main` [unreachable-state]
 opt: 2 round(s)
   dce main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1107,7 +1110,7 @@ flowchart TD
 ```
 $ tmt compile -O1 --emit-ir=after:dce -o alive.tmo dce.tmc
 dce.tmc:5:9: warning: state `orphan` is unreachable in `main` [unreachable-state]
-$ tmt ir graph alive.ir.json --function main
+$ tmt ir graph alive.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1174,7 +1177,7 @@ $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo dead-rows.tmc
 opt: 2 round(s)
   dead-rows main: 1 change(s)
   dispatch-select main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1189,7 +1192,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:dead-rows -o trimmed.tmo dead-rows.tmc
-$ tmt ir graph trimmed.ir.json --function main
+$ tmt ir graph trimmed.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1254,7 +1257,7 @@ machine {
 $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo row-subsumption.tmc
 opt: 2 round(s)
   dead-rows main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1270,7 +1273,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:dead-rows -o dr.tmo row-subsumption.tmc
-$ tmt ir graph dr.ir.json --function main
+$ tmt ir graph dr.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1302,7 +1305,7 @@ machine {
 
 ```
 $ tmt compile -O1 --emit-ir=after:dead-rows -o dr2.tmo row-subsumption-keep.tmc
-$ tmt ir graph dr2.ir.json --function main
+$ tmt ir graph dr2.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1509,6 +1512,7 @@ written, but no `.ir.json` sidecar is. Both are errors rather than a
 silent fall-back, which is what lets an `after:<pass>` example on this
 page prove that its pass really ran.
 
-`tmt ir graph FILE.ir.json [--function NAME]` renders such a document as
-a Mermaid flowchart — one per world, or one named world — which is how
-every diagram on this page was produced (`docs/tmt/cli.md (ir)`).
+`tmt ir graph FILE.ir.json [--function NAME] [--raw|--shape]` renders
+such a document as a Mermaid flowchart — one per world, or one named
+world — which is how every diagram on this page was produced, in its
+row-for-row `--raw` view (`docs/tmt/cli.md (ir)`).
