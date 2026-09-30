@@ -1665,3 +1665,428 @@ fn a_library_graft_wider_than_the_hosts_clause_is_still_refused() {
         "the diagnostic did not name the declared set minus the contract: {err}"
     );
 }
+
+// ── a library graft's argument list ──────────────────────────────────────
+//
+// A graft of a graph from another unit is checked against the graph's
+// DECLARED signature exactly as a local graft is checked against its local
+// one (docs/tmt/language.md (grafting a graph from another unit)): the same
+// codes, the same positions, the same messages. Each shape below compiles
+// one consumer against `glib`'s header AND the same consumer against a
+// local copy of the same graph, laid out so the graft sits on line 6 in
+// both, and demands the two diagnostics be identical once the file path is
+// masked. Before the check existed, every shape either aborted the
+// compiler inside the splice or was silently accepted.
+
+/// `glib::g` — two tape parameters and one state parameter, in that order,
+/// so the one-missing-parameter shapes below name the same parameter
+/// whichever order a signature is walked in.
+const GLIB_TMC: &str = "\
+namespace glib {
+  export alphabet bits { '_', '0', '1' }
+  export graph g(tape a: bits, tape b: bits, state done) {
+    entry state s { [*, *] -> goto done; }
+  }
+}
+";
+
+/// The consumer grafting `glib::g` with `ARGS` spliced in; the graft is on
+/// line 6 and its argument list opens at column 16, so the first argument
+/// starts at column 17.
+const GLIB_CONSUMER: &str = "\
+use glib::bits;
+use glib::g;
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry graft g(ARGS) as gg;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// [`GLIB_CONSUMER`]'s in-unit twin: the same graph written locally, the
+/// graft on the same line and column.
+const GLIB_LOCAL: &str = "\
+alphabet bits { '_', '0', '1' }
+graph g(tape a: bits, tape b: bits, state done) { entry state s { [*, *] -> goto done; } }
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry graft g(ARGS) as gg;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// Compile `glib::g(args)` against `glib`'s generated header, expecting a
+/// fatal, and compile the same argument list against the local twin; both
+/// diagnostics come back with their file path masked as `<src>`, and are
+/// asserted identical here — the library graft reports exactly what the
+/// local one does.
+fn library_graft_err(tag: &str, graft_args: &str) -> String {
+    let dir = scratch(tag);
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let header = interface(&dir, &lib_src, "glib.tmh");
+    let consumer = GLIB_CONSUMER.replace("ARGS", graft_args);
+    let ext = compile_extern_err(&dir, "ext.tmc", &consumer, &header);
+    let ext_path = dir.join("ext.tmc");
+    let ext = ext.replace(ext_path.to_str().unwrap(), "<src>");
+
+    let local_src = write_file(&dir, "loc.tmc", &GLIB_LOCAL.replace("ARGS", graft_args));
+    let out = dir.join("loc.tmo");
+    let local = execute(&args(&[
+        "compile",
+        local_src.to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("the local twin must fail too");
+    let local = local.replace(local_src.to_str().unwrap(), "<src>");
+    assert_eq!(
+        ext, local,
+        "the library graft and the local graft disagree for `g({graft_args})`"
+    );
+    ext
+}
+
+/// A repeated argument name is `duplicate-arg`, at the repeat's name.
+/// Mutation: drop the declared-signature lookup in front of the binding-
+/// argument check (a graph found only in the declarations gets no check) —
+/// the compile then aborts in the splice (`panicked at … expand.rs`).
+#[test]
+fn a_library_graft_with_a_duplicate_argument_is_duplicate_arg() {
+    let err = library_graft_err("lib_graft_dup_arg", "a = x, a = y, done = fin");
+    assert!(err.contains("<src>:6:24: error:"), "{err}");
+    assert!(err.contains("duplicate binding argument `a`"), "{err}");
+    assert!(err.contains("[duplicate-arg]"), "{err}");
+}
+
+/// An unbound tape parameter is `missing-arg`, naming it, at the first
+/// argument. Mutation: the same dropped lookup — the splice aborts on the
+/// unbound tape instead.
+#[test]
+fn a_library_graft_missing_a_tape_argument_is_missing_arg() {
+    let err = library_graft_err("lib_graft_missing_tape", "a = x, done = fin");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `b`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// An unbound STATE parameter is `missing-arg` too. Mutation: the dropped
+/// lookup — the splice aborts on the unbound continuation instead.
+#[test]
+fn a_library_graft_missing_its_state_argument_is_missing_arg() {
+    let err = library_graft_err("lib_graft_missing_state", "a = x, b = y");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `done`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// An empty argument list has no argument to blame, so `missing-arg`
+/// points at the graft target itself. Mutation: the dropped lookup — the
+/// splice aborts.
+#[test]
+fn a_library_graft_with_an_empty_argument_list_is_missing_arg_at_the_target() {
+    let err = library_graft_err("lib_graft_empty_args", "");
+    assert!(err.contains("<src>:6:15: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `a`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// A tape argument naming no tape of the host is `unresolved-tape-target`.
+/// Mutation: the dropped lookup — the splice aborts looking the tape up.
+#[test]
+fn a_library_graft_naming_no_host_tape_is_unresolved_tape_target() {
+    let err = library_graft_err("lib_graft_nosuch_tape", "a = nosuch, b = y, done = fin");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(
+        err.contains("`nosuch` is not a tape in this world"),
+        "{err}"
+    );
+    assert!(err.contains("[unresolved-tape-target]"), "{err}");
+}
+
+/// A tape argument naming one of the host's STATES is still no tape:
+/// `unresolved-tape-target`. Mutation: the dropped lookup — the splice
+/// aborts looking the tape up.
+#[test]
+fn a_library_graft_giving_a_tape_parameter_a_state_is_unresolved_tape_target() {
+    let err = library_graft_err("lib_graft_tape_is_state", "a = fin, b = y, done = fin");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(err.contains("`fin` is not a tape in this world"), "{err}");
+    assert!(err.contains("[unresolved-tape-target]"), "{err}");
+}
+
+/// A terminator handed to a tape parameter is `wrong-arg-kind`. Mutation:
+/// the dropped lookup — the splice aborts on the terminator.
+#[test]
+fn a_library_graft_giving_a_tape_parameter_a_terminator_is_wrong_arg_kind() {
+    let err = library_graft_err("lib_graft_tape_is_stop", "a = stop, b = y, done = fin");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(
+        err.contains("binding argument `a` must be a tape target"),
+        "{err}"
+    );
+    assert!(err.contains("[wrong-arg-kind]"), "{err}");
+}
+
+/// An argument naming no parameter of the graph is `unknown-arg`.
+/// Mutation: the dropped lookup — the stray argument is silently ignored
+/// and the compile succeeds.
+#[test]
+fn a_library_graft_with_an_unknown_argument_is_unknown_arg() {
+    let err = library_graft_err("lib_graft_unknown_arg", "a = x, b = y, zz = x, done = fin");
+    assert!(err.contains("<src>:6:31: error:"), "{err}");
+    assert!(
+        err.contains("`zz` is not a parameter of this signature"),
+        "{err}"
+    );
+    assert!(err.contains("[unknown-arg]"), "{err}");
+}
+
+/// Two tape arguments naming one host tape are `duplicate-tape-target`,
+/// blamed on the second. Mutation: the dropped lookup — the aliased graft
+/// compiles, and links.
+#[test]
+fn a_library_graft_binding_one_host_tape_twice_is_duplicate_tape_target() {
+    let err = library_graft_err("lib_graft_dup_tape", "a = x, b = x, done = fin");
+    assert!(err.contains("<src>:6:24: error:"), "{err}");
+    assert!(
+        err.contains("binding arguments `a` and `b` both bind tape `x`"),
+        "{err}"
+    );
+    assert!(err.contains("[duplicate-tape-target]"), "{err}");
+}
+
+/// A state argument carrying a `with map` is `wrong-arg-kind` — a map
+/// makes it a tape binding. Mutation: the dropped lookup — the map is
+/// silently ignored and the compile succeeds.
+#[test]
+fn a_library_graft_mapping_a_state_argument_is_wrong_arg_kind() {
+    let err = library_graft_err(
+        "lib_graft_state_map",
+        "a = x, b = y, done = fin with map { '0' -> '1' }",
+    );
+    assert!(err.contains("<src>:6:31: error:"), "{err}");
+    assert!(
+        err.contains("binding argument `done` must be a state or terminator"),
+        "{err}"
+    );
+    assert!(err.contains("[wrong-arg-kind]"), "{err}");
+}
+
+/// A state argument naming one of the host's TAPES is `undefined-state`
+/// AT THE ARGUMENT. Without the check the error still surfaced, but from
+/// inside the spliced library body, at the LIBRARY's line and column.
+/// Mutation: the dropped lookup — the position becomes the header's
+/// (`:4:…`), not the consumer's `6:31`.
+#[test]
+fn a_library_graft_giving_a_state_parameter_a_tape_is_undefined_state_at_the_argument() {
+    let err = library_graft_err("lib_graft_state_is_tape", "a = x, b = y, done = x");
+    assert!(err.contains("<src>:6:31: error:"), "{err}");
+    assert!(err.contains("`x` is not a state in this world"), "{err}");
+    assert!(err.contains("[undefined-state]"), "{err}");
+}
+
+/// The control: a well-formed library graft still compiles against the
+/// header and links against the library's own object. Mutation: a check
+/// that refuses every declared graph (say, one treating the declared
+/// signature as parameterless) — this compile then fails `unknown-arg`.
+#[test]
+fn a_well_formed_library_graft_still_compiles_and_links() {
+    let dir = scratch("lib_graft_args_control");
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let header = interface(&dir, &lib_src, "glib.tmh");
+    let consumer = compile_extern(
+        &dir,
+        "ok.tmc",
+        &GLIB_CONSUMER.replace("ARGS", "a = x, b = y, done = fin"),
+        &header,
+    );
+    let lib = compile_alone(GLIB_TMC);
+    link(&[consumer, lib], &[], LinkOptions::default())
+        .unwrap_or_else(|e| panic!("the well-formed library graft must link: {e}"));
+}
+
+/// The lenient route: the same library read from its SOURCE (`--extern
+/// glib.tmc`) rather than its header checks the same way. Mutation: the
+/// dropped lookup — the splice aborts.
+#[test]
+fn a_library_graft_read_from_a_source_checks_its_arguments_too() {
+    let dir = scratch("lib_graft_args_source");
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let err = compile_extern_err(
+        &dir,
+        "ext.tmc",
+        &GLIB_CONSUMER.replace("ARGS", "a = x, a = y, done = fin"),
+        &lib_src,
+    );
+    assert!(err.contains("ext.tmc:6:24: error:"), "{err}");
+    assert!(err.contains("[duplicate-arg]"), "{err}");
+}
+
+/// A library graft inside a ROUTINE body is checked like one in the
+/// machine block. Mutation: the dropped lookup — the splice aborts.
+#[test]
+fn a_library_graft_inside_a_routine_checks_its_arguments() {
+    let dir = scratch("lib_graft_args_routine");
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let header = interface(&dir, &lib_src, "glib.tmh");
+    let src = "\
+use glib::bits;
+use glib::g;
+routine r(tape t: bits) {
+  entry graft g(a = t, a = t, done = return) as gg;
+}
+machine {
+  tape x: bits;
+  entry state s { [*] -> call r(t = x) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+    let err = compile_extern_err(&dir, "inr.tmc", src, &header);
+    assert!(err.contains("inr.tmc:4:24: error:"), "{err}");
+    assert!(err.contains("[duplicate-arg]"), "{err}");
+}
+
+/// A library graft inside a GRAPH body is checked where it is written, not
+/// only once that graph is itself spliced. Mutation: the dropped lookup —
+/// the splice of `h` recurses into the ill-formed graft and aborts.
+#[test]
+fn a_library_graft_inside_a_graph_checks_its_arguments() {
+    let dir = scratch("lib_graft_args_graph");
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let header = interface(&dir, &lib_src, "glib.tmh");
+    let src = "\
+use glib::bits;
+use glib::g;
+graph h(tape t: bits, state out) {
+  entry graft g(a = t, done = out) as gg;
+}
+machine {
+  tape x: bits;
+  entry graft h(t = x, out = fin) as hh;
+  state fin { [*] -> stop; }
+}
+";
+    let err = compile_extern_err(&dir, "ing.tmc", src, &header);
+    assert!(err.contains("ing.tmc:4:17: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `b`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// A library whose own graph mis-grafts a STANDARD LIBRARY graph, read
+/// leniently from its source by a consumer that grafts it: the ill-formed
+/// nested graft is refused as `missing-arg` while the library is read, not
+/// discovered by the splice. Mutation: the dropped lookup — the consumer's
+/// splice recurses into the nested graft and aborts.
+#[test]
+fn a_library_graphs_own_ill_formed_stdlib_graft_is_refused_when_read() {
+    let dir = scratch("lib_graft_args_nested");
+    let lib_src = write_file(
+        &dir,
+        "nlib.tmc",
+        "\
+namespace nlib {
+  export graph w(tape t: std::binaryNumbers::symbols, state out) {
+    entry graft std::binaryNumbers::goToNumberGraph(done = out) as inner;
+  }
+}
+",
+    );
+    let consumer = write_file(
+        &dir,
+        "ncons.tmc",
+        "\
+use std::binaryNumbers::symbols;
+use nlib::w;
+machine {
+  tape x: symbols;
+  entry graft w(t = x, out = fin) as ww;
+  state fin { [*] -> stop; }
+}
+",
+    );
+    let out = dir.join("ncons.tmo");
+    let err = execute(&args(&[
+        "compile",
+        consumer.to_str().unwrap(),
+        "--extern",
+        lib_src.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("an ill-formed nested graft must be refused");
+    // The library's own line and column; which file a declaration's
+    // diagnostic is rendered under is not what this test pins.
+    assert!(err.contains(":3:53: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `num`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// A standard-library graph grafted with its tape argument forgotten,
+/// through the REAL `tmt` binary, for both `tmt compile` and `tmt lint`:
+/// a coded `missing-arg` at the argument, an ordinary failing exit (never
+/// the 101 of a panic), and no panic text. Mutation: the dropped lookup —
+/// both commands abort in the splice, exit 101, "panicked" on stderr.
+#[test]
+fn a_stdlib_graft_missing_its_tape_argument_is_a_coded_error_for_compile_and_lint() {
+    let dir = scratch("stdlib_graft_missing_tape");
+    let src = write_file(
+        &dir,
+        "app.tmc",
+        "\
+use std::binaryNumbers::symbols;
+machine {
+  tape t: symbols;
+  entry graft std::binaryNumbers::goToNumberGraph(done = fin) as gg;
+  state fin { [*] -> stop; }
+}
+",
+    );
+    let out_path = dir.join("app.tmo");
+    for argv in [
+        vec![
+            "compile",
+            src.to_str().unwrap(),
+            "-o",
+            out_path.to_str().unwrap(),
+        ],
+        vec!["lint", "--no-config", src.to_str().unwrap()],
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_tmt"))
+            .args(&argv)
+            .output()
+            .expect("tmt runs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let code = out.status.code();
+        assert!(!text.contains("panicked"), "{argv:?}: {text}");
+        assert_ne!(code, Some(101), "{argv:?}: {text}");
+        assert_ne!(code, Some(0), "{argv:?} must fail: {text}");
+        assert!(text.contains("app.tmc:4:51:"), "{argv:?}: {text}");
+        assert!(
+            text.contains("missing binding argument for parameter `num`"),
+            "{argv:?}: {text}"
+        );
+        assert!(text.contains("[missing-arg]"), "{argv:?}: {text}");
+    }
+}

@@ -1860,7 +1860,10 @@ Two things are NOT re-checked, and are worth knowing:
 ### Grafting a graph from another unit
 
 A graph declared by another unit is grafted exactly like a local one, and
-the splice is identical. Names inside the spliced body resolve in the
+the splice is identical. Its argument list is checked against the
+graph's declared signature exactly as a local graft's is against the
+local one — the same errors, at the same positions — before anything is
+spliced. Names inside the spliced body resolve in the
 **declaring** unit, never in the consumer's: a consumer alphabet that
 happens to share a name with one the graph uses is a different alphabet,
 and an omitted map between the two is `identity-glyph-mismatch` rather

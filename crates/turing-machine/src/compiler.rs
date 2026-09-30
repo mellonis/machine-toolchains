@@ -13,6 +13,7 @@
 //! staged seam) are read only by the language-tooling layers rather than by
 //! `compile()`; each carries its own `dead_code` allow with the reason.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -1897,6 +1898,7 @@ fn resolve_program(
     let mut resolved = resolve_module(program, &scopes, alphabets, sets, set_refs, externals)?;
     let mut ctx = WorldCtx {
         scopes: &scopes,
+        externals: &ext_modules,
         imports_used: vec![false; program.imports.len()],
         warned_undeclared: HashSet::new(),
         diagnostics: Vec::new(),
@@ -2845,9 +2847,35 @@ enum ParamKind {
     State,
 }
 
+#[derive(Clone)]
 struct SigInfo {
     /// Parameters in signature order: `(name, kind)`.
     params: Vec<(String, ParamKind)>,
+}
+
+impl SigInfo {
+    /// The signature of a world known only through the declarations table
+    /// — a graph another unit exports. A resolved world keeps its tape
+    /// parameters and its state parameters in two lists, each in signature
+    /// order, but not how the two kinds interleave, so the tape parameters
+    /// come first here. That order decides only which parameter a
+    /// `missing-arg` names when several of different kinds are unbound;
+    /// the error's position is the same either way.
+    fn declared(world: &ResolvedWorld) -> SigInfo {
+        SigInfo {
+            params: world
+                .tapes
+                .iter()
+                .map(|t| (t.name.clone(), ParamKind::Tape))
+                .chain(
+                    world
+                        .state_params
+                        .iter()
+                        .map(|p| (p.clone(), ParamKind::State)),
+                )
+                .collect(),
+        }
+    }
 }
 
 /// Per-scope definition + import maps, the mangled-name index, and the
@@ -4288,6 +4316,10 @@ fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
 /// The mutable context threaded through the world-boundary checks.
 struct WorldCtx<'a> {
     scopes: &'a Scopes,
+    /// The declarations modules, in table order — the same list
+    /// `resolve_world_reuse` resolved every graft target against, so a
+    /// graft's argument check and its target resolution read one table.
+    externals: &'a [&'a Resolved],
     imports_used: Vec<bool>,
     warned_undeclared: HashSet<String>,
     diagnostics: Vec<Diagnostic>,
@@ -4746,8 +4778,10 @@ impl WorldCtx<'_> {
             }
         }
 
-        // graft declarations — the graph target is already resolved to a
-        // local graph (`resolve_world_reuse`); check its binding args.
+        // graft declarations — the graph target is already resolved
+        // (`resolve_world_reuse`), to a local graph or to one the
+        // declarations carry; either way its binding args are checked here,
+        // before anything splices it.
         for g in &world.grafts {
             self.check_binding_args(
                 &g.target,
@@ -4843,7 +4877,9 @@ impl WorldCtx<'_> {
         }
     }
 
-    /// Arity + argument-KIND checks against a locally-defined signature. Tape
+    /// Arity + argument-KIND checks against the target's signature — a
+    /// locally-defined one, or, for a graft of a graph another unit exports,
+    /// the one its declarations carry ([`Self::signature`]). Tape
     /// params take tape targets (world tapes); state params take state names
     /// (same-world states) or terminators. Map LEGALITY (glyph sets, etc.) is
     /// the graft/range expander's — this only checks the kind.
@@ -4855,11 +4891,13 @@ impl WorldCtx<'_> {
     /// about what it would mean. State parameters are exempt — two
     /// continuations legitimately share one target state. Every `call`,
     /// `graft`, and `bind` funnels through here, so one check covers all
-    /// three; a `.tmc` bound call always has a local signature to check
-    /// against here — an out-of-unit callee's own arg-list check runs
-    /// against its DECLARED signature instead, in `ir::resolve_binding`
-    /// (docs/formats.md (bound calls)), which is also where a call with no
-    /// declarations for its callee at all defers the check to the linker.
+    /// three. A graft splices its graph before IR exists, so a graft of
+    /// another unit's graph is checked here too, against the declared
+    /// signature — nothing later would. An out-of-unit `call`/`bind`
+    /// callee is not checked here: its arg-list check runs against its
+    /// DECLARED signature in `ir::resolve_binding` (docs/formats.md (bound
+    /// calls)), which is also where a call with no declarations for its
+    /// callee at all defers the check to the linker.
     #[allow(clippy::too_many_arguments)]
     fn check_binding_args(
         &self,
@@ -4873,8 +4911,7 @@ impl WorldCtx<'_> {
         // call/graft/bind site itself (there is no first arg to blame).
         fallback_span: Span,
     ) -> Result<(), CompileError> {
-        let _ = want;
-        let Some(sig) = self.scopes.sigs.get(sig_key) else {
+        let Some(sig) = self.signature(sig_key, want) else {
             return Ok(());
         };
         // arg name -> param kind, with duplicate + unknown detection.
@@ -4925,6 +4962,23 @@ impl WorldCtx<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The signature a binding-argument list is checked against: this
+    /// unit's own definition of `sig_key` when it has one, otherwise — for
+    /// a graph only — the declared graph the declarations table carries
+    /// under that name, the same first-match lookup that resolved the graft
+    /// target. `None` leaves the list unchecked here, which only an
+    /// out-of-unit routine reaches (see [`Self::check_binding_args`]).
+    fn signature(&self, sig_key: &str, want: DefKind) -> Option<Cow<'_, SigInfo>> {
+        if let Some(sig) = self.scopes.sigs.get(sig_key) {
+            return Some(Cow::Borrowed(sig));
+        }
+        if want != DefKind::Graph {
+            return None;
+        }
+        find_external_graph(self.externals, sig_key)
+            .map(|(_, world)| Cow::Owned(SigInfo::declared(world)))
     }
 
     fn check_arg_kind(

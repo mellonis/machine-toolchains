@@ -1187,8 +1187,10 @@ pub(crate) fn check_named_map_decl(
 
 /// Build a graft's [`Composite`] (per graph tape) plus its continuation
 /// substitution (graph state-param → the host continuation the graft binds).
-/// The T4 world checks guarantee every parameter is bound with a
-/// kind-correct argument, so the "impossible" branches are invariants.
+/// The compiler's world checks guarantee every parameter is bound with a
+/// kind-correct argument — against the graph's local signature, or its
+/// declared one for a graph another unit exports — so the "impossible"
+/// branches are invariants.
 /// `host_owner`/`graph_owner`: the modules `host` and `graph` respectively
 /// belong to — usually the SAME module (an in-unit graft, or a nested graft
 /// inside one library graph reaching a sibling of the same library), but
@@ -1209,15 +1211,15 @@ fn build_composite(
     for gt in &graph.tapes {
         let arg = args
             .get(gt.name.as_str())
-            .expect("T4 binds every tape parameter");
+            .expect("the world checks bind every tape parameter");
         let BindingValue::Named { target, map, .. } = &arg.value else {
-            unreachable!("T4 gives a tape parameter a named tape target");
+            unreachable!("the world checks give a tape parameter a named tape target");
         };
         let phys = host
             .tapes
             .iter()
             .position(|t| &t.name == target)
-            .expect("T4 resolves the tape target to a host tape");
+            .expect("the world checks resolve the tape target to a host tape");
         let host_glyphs = alphabet_glyphs(&host.tapes[phys].alphabet, host_owner)?;
         // The graph's OWN tape alphabet resolves in the GRAPH's own owner —
         // local for an in-unit graph (where `graph_owner` IS `host_owner`),
@@ -1236,7 +1238,7 @@ fn build_composite(
     for sp in &graph.state_params {
         let arg = args
             .get(sp.as_str())
-            .expect("T4 binds every state parameter");
+            .expect("the world checks bind every state parameter");
         let t2 = match &arg.value {
             BindingValue::Named { target, .. } => Transition2::Goto(target.clone()),
             BindingValue::Terminator { kind, .. } => match kind {
