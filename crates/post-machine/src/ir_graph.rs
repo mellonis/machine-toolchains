@@ -75,30 +75,43 @@ pub fn render(function: &IrFunction, view: GraphView) -> String {
         match (&block.term, view) {
             (IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. }, _) => {}
             (IrTerm::FallThrough { to } | IrTerm::Goto { to }, GraphView::Shape) => {
-                let _ = writeln!(out, "    B{id} -->|\"1\"| B{to}");
+                edge(&mut out, id, *to, Some(("1", true)));
             }
             (IrTerm::Check { marked, blank }, GraphView::Shape) => {
                 if marked == blank {
-                    let _ = writeln!(out, "    B{id} -->|\"2\"| B{marked}");
+                    edge(&mut out, id, *marked, Some(("2", true)));
                 } else {
-                    let _ = writeln!(out, "    B{id} -->|\"1\"| B{marked}");
-                    let _ = writeln!(out, "    B{id} -->|\"1\"| B{blank}");
+                    edge(&mut out, id, *marked, Some(("1", true)));
+                    edge(&mut out, id, *blank, Some(("1", true)));
                 }
             }
             (IrTerm::Check { marked, blank }, GraphView::Merged) if marked == blank => {
-                let _ = writeln!(out, "    B{id} -->|\"{{MF,!MF}}\"| B{marked}");
+                edge(&mut out, id, *marked, Some(("{MF,!MF}", true)));
             }
-            (IrTerm::FallThrough { to }, _) => {
-                let _ = writeln!(out, "    B{id} --> B{to}");
-            }
-            (IrTerm::Goto { to }, _) => {
-                let _ = writeln!(out, "    B{id} -->|goto| B{to}");
-            }
+            (IrTerm::FallThrough { to }, _) => edge(&mut out, id, *to, None),
+            (IrTerm::Goto { to }, _) => edge(&mut out, id, *to, Some(("goto", false))),
             (IrTerm::Check { marked, blank }, _) => {
-                let _ = writeln!(out, "    B{id} -->|MF| B{marked}");
-                let _ = writeln!(out, "    B{id} -->|!MF| B{blank}");
+                edge(&mut out, id, *marked, Some(("MF", false)));
+                edge(&mut out, id, *blank, Some(("!MF", false)));
             }
         }
     }
     out
+}
+
+/// One edge line: unlabelled, or labelled — quoted or bare — with the
+/// label text through the shared escaping every `ir graph` edge label
+/// takes (docs/formats.md (graph label notation)).
+fn edge(out: &mut String, from: u32, to: u32, label: Option<(&str, bool)>) {
+    let _ = match label {
+        None => writeln!(out, "    B{from} --> B{to}"),
+        Some((text, quoted)) => {
+            let text = mtc_core::mermaid::edge_label(text);
+            if quoted {
+                writeln!(out, "    B{from} -->|\"{text}\"| B{to}")
+            } else {
+                writeln!(out, "    B{from} -->|{text}| B{to}")
+            }
+        }
+    };
 }

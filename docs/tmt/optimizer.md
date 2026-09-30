@@ -289,7 +289,10 @@ and `<` / `>` / `.` are the three moves. Concrete cells render as
 **symbol indices, not glyphs** — the IR is index-only by contract, since
 the processor never sees glyphs either (`docs/formats.md (IR JSON)`) —
 so in a world whose tape carries `alphabet ab { '_', 'a', 'b' }` the row
-matching `'a'` renders as `[1]` and a write of `'b'` as `w[2]`.
+matching `'a'` renders as `[1]` and a write of `'b'` as `w[2]`. In the
+text itself `<` and `>` are written as Mermaid's entity codes `#lt;` and
+`#gt;`, which the diagram draws as the arrows
+(`docs/formats.md (graph label notation)`).
 
 `tmt ir graph` renders every world in the document; `--function NAME`
 keeps just one. The flag keeps the `pmt` spelling for cross-tool muscle
@@ -380,7 +383,7 @@ flowchart TD
     T_stp(("stp"))
     S0 -->|"[*]"| S2
     S1 -->|"[*]"| T_stp
-    S2 -->|"[2] w[1] m[<]"| S2
+    S2 -->|"[2] w[1] m[#lt;]"| S2
     S2 -->|"[*] w[2]"| S1
 ```
 
@@ -545,13 +548,13 @@ flowchart TD
     S5["a5"]
     S6["a6"]
     T_ret(("ret"))
-    S0 -->|"[1] m[>]"| S1
+    S0 -->|"[1] m[#gt;]"| S1
     S0 -->|"[*]"| T_ret
-    S1 -->|"[*] m[>]"| S2
-    S2 -->|"[*] m[>]"| S3
-    S3 -->|"[*] m[>]"| S4
-    S4 -->|"[*] m[>]"| S5
-    S5 -->|"[*] m[>]"| S6
+    S1 -->|"[*] m[#gt;]"| S2
+    S2 -->|"[*] m[#gt;]"| S3
+    S3 -->|"[*] m[#gt;]"| S4
+    S4 -->|"[*] m[#gt;]"| S5
+    S5 -->|"[*] m[#gt;]"| S6
     S6 -->|"[*]"| S0
 ```
 
@@ -696,7 +699,7 @@ flowchart TD
     S0 -->|"[*]"| S2
     S1 -->|"[*]"| S2
     S2 -->|"[*]"| S3
-    S3 -->|"[*] m[>]"| T_hlt
+    S3 -->|"[*] m[#gt;]"| T_hlt
 ```
 
 ```
@@ -716,7 +719,7 @@ flowchart TD
     S0 -->|"[*]"| S3
     S1 -->|"[*]"| S3
     S2 -->|"[*]"| S3
-    S3 -->|"[*] m[>]"| T_hlt
+    S3 -->|"[*] m[#gt;]"| T_hlt
 ```
 
 Both of `start`'s rows now reach `work` directly, and so does the edge
@@ -737,7 +740,7 @@ flowchart TD
     T_hlt(("hlt"))
     S0 -->|"[1]"| S1
     S0 -->|"[*]"| S1
-    S1 -->|"[*] m[>]"| T_hlt
+    S1 -->|"[*] m[#gt;]"| T_hlt
 ```
 
 A *cycle* of empty forwarders is left exactly as written — it is a
@@ -1016,8 +1019,8 @@ flowchart TD
     T_stp(("stp"))
     S0 -->|"[1]"| S1
     S0 -->|"[*]"| S2
-    S1 -->|"[*] w[2] m[>]"| S3
-    S2 -->|"[*] w[2] m[>]"| S3
+    S1 -->|"[*] w[2] m[#gt;]"| S3
+    S2 -->|"[*] w[2] m[#gt;]"| S3
     S3 -->|"[*]"| T_stp
 ```
 
@@ -1035,7 +1038,7 @@ flowchart TD
     T_stp(("stp"))
     S0 -->|"[1]"| S1
     S0 -->|"[*]"| S1
-    S1 -->|"[*] w[2] m[>]"| S2
+    S1 -->|"[*] w[2] m[#gt;]"| S2
     S2 -->|"[*]"| T_stp
 ```
 
@@ -1102,8 +1105,8 @@ flowchart TD
     S2["done"]
     T_hlt(("hlt"))
     T_stp(("stp"))
-    S0 -->|"[*] m[>]"| S2
-    S1 -->|"[*] m[<]"| T_hlt
+    S0 -->|"[*] m[#gt;]"| S2
+    S1 -->|"[*] m[#lt;]"| T_hlt
     S2 -->|"[*]"| T_stp
 ```
 
@@ -1119,7 +1122,7 @@ flowchart TD
     S0["start"]
     S1["done"]
     T_stp(("stp"))
-    S0 -->|"[*] m[>]"| S1
+    S0 -->|"[*] m[#gt;]"| S1
     S1 -->|"[*]"| T_stp
 ```
 
@@ -1185,8 +1188,8 @@ $ tmt ir graph lowered.ir.json --function main --raw
 flowchart TD
     S0["s"]
     T_stp(("stp"))
-    S0 -->|"[1,*,*] m[>,.,.]"| S0
-    S0 -->|"[1,2,*] m[>,.,.]"| S0
+    S0 -->|"[1,*,*] m[#gt;,.,.]"| S0
+    S0 -->|"[1,2,*] m[#gt;,.,.]"| S0
     S0 -->|"[*,*,*]"| T_stp
 ```
 
@@ -1200,7 +1203,7 @@ $ tmt ir graph trimmed.ir.json --function main --raw
 flowchart TD
     S0["s"]
     T_stp(("stp"))
-    S0 -->|"[1,*,*] m[>,.,.]"| S0
+    S0 -->|"[1,*,*] m[#gt;,.,.]"| S0
     S0 -->|"[*,*,*]"| T_stp
 ```
 

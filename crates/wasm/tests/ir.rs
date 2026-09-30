@@ -119,7 +119,7 @@ fn ir_graph_is_what_ir_graph_prints_split_by_world() {
     // The views really differ on these programs, and merged is the default.
     let tm = |v| ir_graph(Lang::Tmc, TMC, 0, IrStage::Lowered, v).unwrap();
     assert_ne!(tm(GraphView::Merged), tm(GraphView::Raw));
-    assert!(tm(GraphView::Merged)[0].1.contains("[{1,2}] m[>]"));
+    assert!(tm(GraphView::Merged)[0].1.contains("[{1,2}] m[#gt;]"));
     let pm = ir_graph(Lang::Pmc, PMC, 0, IrStage::Lowered, GraphView::default()).unwrap();
     assert!(pm[0].1.contains("{MF,!MF}"), "{}", pm[0].1);
 }

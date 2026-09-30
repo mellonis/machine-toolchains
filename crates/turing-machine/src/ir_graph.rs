@@ -342,7 +342,12 @@ pub fn render(world: &IrWorld, view: GraphView) -> String {
         {
             let _ = writeln!(out, "    {}((\"{text}\"))", node.id());
         }
-        let _ = writeln!(edges_text, "    S{src} -->|\"{label}\"| {}", node.id());
+        let _ = writeln!(
+            edges_text,
+            "    S{src} -->|\"{}\"| {}",
+            mtc_core::mermaid::edge_label(label),
+            node.id()
+        );
     }
     out.push_str(&edges_text);
     out

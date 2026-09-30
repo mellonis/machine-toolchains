@@ -1435,7 +1435,11 @@ with two changes inside the vectors:
   `.×13`, `{1,2}×3`. Two identical cells are written out.
 
 A label is a quoted Mermaid string, where the en dash, the multiplication
-sign and the braces need no escaping. A `.pmc` graph has no vectors to
+sign and the braces need no escaping. In every view, raw included, `<`,
+`>` and `&` are written as Mermaid's entity codes `#lt;`, `#gt;` and
+`#amp;` — Mermaid empties a label holding a bare `<` — so a move vector
+reads `m[#lt;,#gt;]` in the text and draws as `m[<,>]`; the table below
+shows labels before that step. A `.pmc` graph has no vectors to
 compress; its one parallel pair, a `check` whose two arms reach the same
 block, merges to one edge labelled `{MF,!MF}`.
 

@@ -133,10 +133,13 @@ fn every_shape() -> IrWorld {
     )
 }
 
-/// The raw view is today's row-for-row rendering, byte for byte.
+/// The raw view is the row-for-row rendering, byte for byte — with `<`,
+/// `>` and `&` written as Mermaid's entity codes, which Mermaid decodes
+/// when it draws the label (a bare `<` would empty it).
 ///
-/// Mutation: change any edge format in the renderer (drop the space in
-/// `call ns::r exit #0`, say) and the literal no longer matches.
+/// Mutations: change any edge format in the renderer (drop the space in
+/// `call ns::r exit #0`, say), or make the label escaping the identity,
+/// and the literal no longer matches.
 #[test]
 fn the_raw_view_is_pinned_byte_for_byte() {
     let expected = r#"flowchart TD
@@ -151,8 +154,8 @@ fn the_raw_view_is_pinned_byte_for_byte() {
     T_trap0(("trap #0"))
     T_trap1(("trap #1"))
     T_trap2(("trap #2"))
-    S0 -->|"[1,*] w[2,-] m[>,.]"| S1
-    S0 -->|"brk [2,3] m[<,<]"| S0
+    S0 -->|"[1,*] w[2,-] m[#gt;,.]"| S1
+    S0 -->|"brk [2,3] m[#lt;,#lt;]"| S0
     S0 -->|"[0,1] call ns::r exit #0"| S1
     S0 -->|"[0,1] call ns::r exit #1"| S0
     S0 -->|"[0,1] call ns::r"| S1

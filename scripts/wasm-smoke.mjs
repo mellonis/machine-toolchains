@@ -290,8 +290,8 @@ check(threw, "unknown lang throws");
   check(JSON.parse(Toolchain.ir("pmc", PMC_INC, undefined)).functions[0].name === "main", "pmc ir is the CFG document");
   const merged = Toolchain.irGraph("tmc", TMC_IR, undefined);
   eq(merged.map(g => g.name), ["main"], "irGraph has one entry per world");
-  check(merged[0].mermaid.startsWith("flowchart TD\n") && merged[0].mermaid.includes("[{1,2}] m[>]"), "the default view is merged");
-  check(Toolchain.irGraph("tmc", TMC_IR, { view: "raw" })[0].mermaid.includes("\"[1] m[>]\""), "view raw draws one arrow per row");
+  check(merged[0].mermaid.startsWith("flowchart TD\n") && merged[0].mermaid.includes("[{1,2}] m[#gt;]"), "the default view is merged");
+  check(Toolchain.irGraph("tmc", TMC_IR, { view: "raw" })[0].mermaid.includes("\"[1] m[#gt;]\""), "view raw draws one arrow per row");
   check(/-->\|"\d+"\|/.test(Toolchain.irGraph("tmc", TMC_IR, { view: "shape" })[0].mermaid), "view shape labels arrows with counts");
   check(Toolchain.irGraph("pmc", PMC_INC, undefined).length === 1, "pmc irGraph has one entry per function");
   for (const [what, call] of [
