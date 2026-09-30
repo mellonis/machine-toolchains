@@ -464,6 +464,10 @@ pub enum AlphabetMiss {
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
+    /// The name resolves to one of this unit's own declarations of another
+    /// kind — a glyph set, a named map, a routine or a graph. `found` is
+    /// that kind's noun phrase.
+    NotAnAlphabet { name: String, found: &'static str },
 }
 
 /// [`AlphabetMiss`]'s named-map analog (`CompileErrorKind::UndefinedMap`) —
@@ -488,6 +492,12 @@ pub enum SetMiss {
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
+    /// Reached through `use` or a qualified path, and a declarations module
+    /// given to this compile DOES declare the name — as another kind
+    /// (`found`, a noun phrase). A local name of another kind is
+    /// [`CompileErrorKind::WrongTargetKind`] instead; this reading keeps the
+    /// cross-unit code while saying what the name actually is.
+    WrongKind { name: String, found: &'static str },
 }
 
 /// [`AlphabetMiss`]'s graft-target analog (`CompileErrorKind::UndefinedGraph`)
@@ -859,6 +869,12 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NoSuchAlphabet(n)) => {
                 write!(f, "unknown alphabet `{n}`")
             }
+            CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NotAnAlphabet { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found}, not an alphabet — a tape's type must be an alphabet"
+                )
+            }
             CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::DeclarationsNotGiven(n)) => {
                 write!(
                     f,
@@ -925,6 +941,13 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet(n)) => {
                 write!(f, "unknown glyph set `{n}`")
+            }
+            CompileErrorKind::UndefinedSet(SetMiss::WrongKind { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found} in the declarations given to this compile, \
+                     not a glyph set"
+                )
             }
             CompileErrorKind::UndefinedSet(SetMiss::DeclarationsNotGiven(n)) => {
                 write!(
@@ -1256,7 +1279,13 @@ fn resolve_set_ref<'e>(
             Some(set) => Ok(SetTarget::External(r.full, set)),
             None => Err(CompileError {
                 span,
-                kind: CompileErrorKind::UndefinedSet(SetMiss::DeclarationsNotGiven(r.full)),
+                kind: CompileErrorKind::UndefinedSet(match external_kind(externals, &r.full) {
+                    Some(found) => SetMiss::WrongKind {
+                        name: r.full,
+                        found: found.noun(),
+                    },
+                    None => SetMiss::DeclarationsNotGiven(r.full),
+                }),
             }),
         },
         None => Err(CompileError {
@@ -1264,6 +1293,31 @@ fn resolve_set_ref<'e>(
             kind: CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet(name.to_string())),
         }),
     }
+}
+
+/// The kind a declarations module given to this compile declares the
+/// mangled `name` as, first module first — `None` when none declares it
+/// as an alphabet, a set, a map or a world. What lets a cross-unit miss
+/// say what a name IS instead of claiming its declarations were not given.
+fn external_kind(externals: &[&Resolved], name: &str) -> Option<DefKind> {
+    externals.iter().find_map(|m| {
+        if m.alphabets.contains_key(name) {
+            Some(DefKind::Alphabet)
+        } else if m.sets.contains_key(name) {
+            Some(DefKind::Set)
+        } else if m.maps.contains_key(name) {
+            Some(DefKind::Map)
+        } else {
+            m.worlds
+                .iter()
+                .find(|w| w.name == name)
+                .and_then(|w| match w.kind {
+                    WorldKind::Routine => Some(DefKind::Routine),
+                    WorldKind::Graph => Some(DefKind::Graph),
+                    WorldKind::Machine => None,
+                })
+        }
+    })
 }
 
 /// Everything a set reference resolves against once every set of this
@@ -3833,6 +3887,15 @@ fn resolve_tape_alphabet(
                 kind: CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::DeclarationsNotGiven(
                     r.full,
                 )),
+            });
+        }
+        if let Some(kind) = r.kind {
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NotAnAlphabet {
+                    name: alphabet.to_string(),
+                    found: kind.noun(),
+                }),
             });
         }
     }

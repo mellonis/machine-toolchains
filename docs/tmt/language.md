@@ -317,8 +317,10 @@ error: glyph sets form a cycle: `a` -> `b` -> `a` — a set built from sets must
 
 A set name that resolves to nothing is `undefined-set`, split the same
 two ways an unresolved alphabet is ("Alphabets, maps and graphs across
-units"); a name that resolves to an alphabet, a map or a world instead is
-`wrong-target-kind`.
+units"); a name that resolves to one of this unit's own alphabets, maps
+or worlds instead is `wrong-target-kind`, while one reached across units
+that the given declarations carry as another kind stays `undefined-set`,
+its message naming the kind found.
 
 A set never survives resolution. An alphabet receives the member
 glyphs, a clause the member indices, and a compiled object's `.param`
@@ -1654,8 +1656,14 @@ message says which one it found:
   it. The remedy is to declare the alphabet locally or to give the
   compile those declarations.
 
+(A name that resolves to one of this unit's own declarations of another
+kind — a glyph set, say — is `unresolved-alphabet` too, and its message
+names the kind it found.)
+
 `undefined-graph`, `undefined-map` and `undefined-set` split the same two ways, for the
-same reason.
+same reason. `undefined-set` has a third reading: a name reached across
+units that the declarations given to this compile DO declare, as
+something other than a set; its message names the kind it found.
 
 ## Declarations and headers
 

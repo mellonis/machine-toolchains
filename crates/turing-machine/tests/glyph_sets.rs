@@ -245,6 +245,104 @@ fn a_set_is_never_a_tape_type() {
     );
 }
 
+/// Naming a set as a tape type is `unresolved-alphabet`, and the message
+/// says what the name IS rather than that no alphabet by that name
+/// exists: the name resolves, just to the wrong kind. Mutation: folding a
+/// name that resolves to another local kind back into the
+/// nothing-declares-it reading — the message reverts to "unknown alphabet
+/// `digits`".
+#[test]
+fn a_set_named_as_a_tape_type_says_it_is_a_set() {
+    let err = compile(
+        "set digits { '0'..'9' }\nmachine {\n  tape t: digits;\n  entry state s { [*] -> stop; }\n}\n",
+        CompileOptions::default(),
+    )
+    .expect_err("a set is never a tape type");
+    assert_eq!(err.kind.code(), "unresolved-alphabet");
+    assert_eq!(
+        err.kind.to_string(),
+        "`digits` is a glyph set, not an alphabet — a tape's type must be an alphabet"
+    );
+}
+
+/// A set reference reached across units that names a declaration of
+/// another kind stays `undefined-set`, but when that unit's declarations
+/// WERE given the message says what the name is instead of claiming they
+/// were not; without them, the not-given reading is still the one printed.
+/// Mutation: treating every cross-unit miss among the given sets as
+/// declarations-not-given — the first compile's message claims the
+/// declarations were not given although `--extern` supplied them; or
+/// dropping the routine arm of the kind lookup — the qualified routine
+/// probe does the same.
+#[test]
+fn a_cross_unit_alphabet_named_as_a_set_says_what_it_is() {
+    let dir = scratch("glyph_sets_cross_unit_wrong_kind");
+    let header = write(
+        &dir,
+        "lib.tmh",
+        "namespace lib {\n  export alphabet dec { '_', '0', '1' }\n  export routine skip(tape t: dec writes {});\n}\n",
+    );
+    let consumer = write(
+        &dir,
+        "consumer.tmc",
+        "use lib::dec;\n\nalphabet a { '_', dec }\n\nmachine {\n  tape t: a;\n  entry state s { [*] -> stop; }\n}\n",
+    );
+    let out = dir.join("consumer.tmo");
+    let err = execute(&args(&[
+        "compile",
+        consumer.to_str().unwrap(),
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("an alphabet is not a set");
+    assert!(
+        err.contains(
+            "`lib::dec` is an alphabet in the declarations given to this compile, \
+             not a glyph set [undefined-set]"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("declarations were not given"), "{err}");
+
+    // A routine the header declares, named by a qualified path in a set
+    // position, reads the same way.
+    let routine_consumer = write(
+        &dir,
+        "routine_consumer.tmc",
+        "alphabet a { '_', lib::skip }\n\nmachine {\n  tape t: a;\n  entry state s { [*] -> stop; }\n}\n",
+    );
+    let err = execute(&args(&[
+        "compile",
+        routine_consumer.to_str().unwrap(),
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("a routine is not a set");
+    assert!(
+        err.contains(
+            "`lib::skip` is a routine in the declarations given to this compile, \
+             not a glyph set [undefined-set]"
+        ),
+        "{err}"
+    );
+
+    let err = execute(&args(&[
+        "compile",
+        consumer.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("without the header nothing backs the name");
+    assert!(
+        err.contains("[undefined-set]") && err.contains("declarations were not given"),
+        "{err}"
+    );
+}
+
 /// A name nothing declares, in a set position, is its own refusal; a name
 /// that resolves to something other than a set is the wrong-kind one.
 #[test]
