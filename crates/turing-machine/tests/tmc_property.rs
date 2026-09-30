@@ -34,7 +34,7 @@
 //! through undetected).
 //!
 //! **Scope — deliberately covered.** Every top-level item kind (`use`,
-//! `alphabet`, `routine`, `graph`, `namespace` — including a reopened
+//! `alphabet`, `set`, `routine`, `graph`, `namespace` — including a reopened
 //! and a one-level-nested namespace (a namespace's body may itself
 //! contain another `namespace` block, one level deep — the documented
 //! `namespace std { namespace binaryNumbers { … } }` shape), `machine`);
@@ -44,8 +44,13 @@
 //! plain and `volatile`; routine/graph signatures with both parameter
 //! kinds (`tape`, `state`) and, on a tape parameter, `writes`/`never writes`
 //! independently (neither, either alone, or both in their one legal
-//! order); every pattern-cell shape (a literal, a range, a wildcard, and
-//! — on either a literal or a range, never a wildcard — an `as` binding)
+//! order); glyph sets — declared (exported, documented, namespaced, empty
+//! or not) and named, bare or qualified, in the three element-list
+//! positions (an alphabet body, another set's body, a `writes`/`never
+//! writes` clause) and in a pattern cell, each reference naming a set
+//! declared earlier so no chain of sets can cycle; every pattern-cell
+//! shape (a literal, a range, a set, a wildcard, and — on any but a
+//! wildcard — an `as` binding)
 //! over both symbol kinds (glyph and numeric), including escaped glyphs
 //! (`'\''`, `'\\'`); every write-cell shape (`-` keep, a literal,
 //! a passthrough substitution, an arithmetic fold over `+ - * %` and
@@ -209,12 +214,21 @@ impl<'a> Cursor<'a> {
 /// [`CHOSEN_CONSTRUCTS`] is the closed list of labels this type is
 /// allowed to carry, and its doc comment explains which labels are
 /// deliberately absent.
+///
+/// It also carries the one piece of state the generator shares across
+/// items: the names of the glyph sets declared so far, which is the pool
+/// every set REFERENCE draws from. A set body draws before its own name
+/// joins the pool, so a set only ever names sets declared ahead of it and
+/// the references can never form a cycle.
 #[derive(Default)]
-struct Emitted(BTreeSet<&'static str>);
+struct Emitted {
+    labels: BTreeSet<&'static str>,
+    sets: Vec<String>,
+}
 
 impl Emitted {
     fn mark(&mut self, label: &'static str) {
-        self.0.insert(label);
+        self.labels.insert(label);
     }
 }
 
@@ -321,36 +335,60 @@ fn gen_alphabet_elem(cur: &mut Cursor, em: &mut Emitted) -> String {
     }
 }
 
-/// A comma-separated element list body (no brackets), used by both an
-/// `alphabet { … }` body and a `writes`/`never writes { … }` contract clause.
-/// `contract` says which: a clause body may be empty (`{}` is a real,
-/// meaningful shape — "written nowhere" — distinct from an absent clause;
-/// see docs/tmt/language.md (contract clauses)) and is the only one of
-/// the two whose emptiness extraction stamps a label for, while a bare
-/// `alphabet` body stays non-empty here since an empty one is a later
-/// semantic error, not a parse one, and this generator otherwise keeps to
-/// realistic shapes (see the module doc's left-out list). `interior`
-/// gates one of this generator's four covered interior-comment list
-/// positions.
+/// Which body an element list is written for — the three share one
+/// element grammar (docs/tmt/language.md (glyph sets)).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ElemList {
+    Alphabet,
+    Contract,
+    Set,
+}
+
+/// A reference to a glyph set declared earlier in the program, bare or —
+/// occasionally — `::`-qualified. Only ever called with a non-empty pool.
+fn gen_set_ref(cur: &mut Cursor, em: &Emitted) -> String {
+    let name = &em.sets[cur.choose(em.sets.len())];
+    if cur.chance(1, 4) {
+        format!("ns{}::{name}", cur.choose(3))
+    } else {
+        name.clone()
+    }
+}
+
+/// A comma-separated element list body (no brackets), used by an
+/// `alphabet { … }` body, a `set { … }` body and a `writes`/`never writes
+/// { … }` contract clause. `kind` says which: a clause body may be empty
+/// (`{}` is a real, meaningful shape — "written nowhere" — distinct from
+/// an absent clause; see docs/tmt/language.md (contract clauses)), and so
+/// may a set's (`set none {}` is legal — docs/tmt/language.md (glyph
+/// sets)); those are the two whose emptiness extraction stamps a label
+/// for, while a bare `alphabet` body stays non-empty here since an empty
+/// one is a later semantic error, not a parse one, and this generator
+/// otherwise keeps to realistic shapes (see the module doc's left-out
+/// list). Any element may name a set declared earlier (see [`Emitted`]).
+/// `interior` gates one of this generator's four covered interior-comment
+/// list positions.
 fn gen_elem_list(
     cur: &mut Cursor,
     n: &mut u32,
     em: &mut Emitted,
-    contract: bool,
+    kind: ElemList,
     interior: bool,
     out: &mut String,
 ) {
-    let count = if contract && cur.chance(1, 5) {
+    let count = if kind != ElemList::Alphabet && cur.chance(1, 5) {
         0
     } else {
         1 + cur.choose(4)
     };
-    if contract {
-        em.mark(if count == 0 {
+    match kind {
+        ElemList::Contract => em.mark(if count == 0 {
             "contract.empty"
         } else {
             "contract.non-empty"
-        });
+        }),
+        ElemList::Set if count == 0 => em.mark("set.empty"),
+        _ => {}
     }
     for i in 0..count {
         if i > 0 {
@@ -359,7 +397,12 @@ fn gen_elem_list(
         if interior && cur.chance(1, 6) {
             push_comment_break(cur, n, out);
         }
-        out.push_str(&gen_alphabet_elem(cur, em));
+        if !em.sets.is_empty() && cur.chance(1, 5) {
+            em.mark("alphabet.elem.set-ref");
+            out.push_str(&gen_set_ref(cur, em));
+        } else {
+            out.push_str(&gen_alphabet_elem(cur, em));
+        }
     }
     if interior && cur.chance(1, 8) {
         if count > 0 {
@@ -491,7 +534,9 @@ fn gen_use(cur: &mut Cursor, n: &mut u32, em: &mut Emitted, in_ns: bool, out: &m
 
 /// One pattern cell (docs/tmt/language.md (pattern cells)): a wildcard
 /// (never bound — `* as v` is a parse-time `WildcardBinding` error), or a
-/// literal/range optionally bound with `as NAME`. Returns the cell text
+/// literal, a range or a glyph set declared earlier, optionally bound with
+/// `as NAME`. A set-bound name is reported glyph-kind, so no fold is ever
+/// written over it (it stays a passthrough). Returns the cell text
 /// plus the binding this cell introduced, if any (name, is-glyph) — the
 /// write vector needs to know which bound names are glyph-kind, since a
 /// non-passthrough substitution over a glyph binding is a parse-time
@@ -505,6 +550,18 @@ fn gen_pattern_cell(
         em.mark("pattern.wildcard");
         em.mark("pattern.unbound");
         return ("*".to_string(), None);
+    }
+    if !em.sets.is_empty() && cur.chance(1, 6) {
+        em.mark("pattern.set-ref");
+        let body = gen_set_ref(cur, em);
+        return if cur.chance(1, 2) {
+            em.mark("pattern.bound");
+            let name = format!("v{}", uid(n));
+            (format!("{body} as {name}"), Some((name, true)))
+        } else {
+            em.mark("pattern.unbound");
+            (body, None)
+        };
     }
     let (lo, is_glyph) = gen_sym(cur, em);
     let body = if cur.chance(1, 3) {
@@ -1291,12 +1348,12 @@ fn gen_signature(
         });
         if want_writes {
             out.push_str(" writes { ");
-            gen_elem_list(cur, n, em, true, false, out);
+            gen_elem_list(cur, n, em, ElemList::Contract, false, out);
             out.push_str(" }");
         }
         if want_never_writes {
             out.push_str(" never writes { ");
-            gen_elem_list(cur, n, em, true, false, out);
+            gen_elem_list(cur, n, em, ElemList::Contract, false, out);
             out.push_str(" }");
         }
     }
@@ -1492,7 +1549,43 @@ fn gen_namespace(
     out.push('\n');
 }
 
-/// One file- or namespace-level item: `use`, `alphabet`, `routine`,
+/// One `export? set NAME { … }` (docs/tmt/language.md (glyph sets)): its
+/// body the alphabet element grammar, possibly empty, naming only sets
+/// declared ahead of it (see [`Emitted`]); its name joins the reference
+/// pool once the body is written.
+fn gen_set(
+    cur: &mut Cursor,
+    n: &mut u32,
+    em: &mut Emitted,
+    pad: &str,
+    ns_depth: usize,
+    out: &mut String,
+) {
+    em.mark("set");
+    if ns_depth > 0 {
+        em.mark("set.namespaced");
+    }
+    if ns_depth > 1 {
+        em.mark("namespace.nested");
+    }
+    if cur.chance(1, 4) {
+        em.mark("set.documented");
+        gen_doc_run(cur, n, em, true, pad, out);
+    }
+    out.push_str(pad);
+    if cur.chance(1, 3) {
+        em.mark("set.exported");
+        out.push_str("export ");
+    }
+    let name = format!("st{}", uid(n));
+    out.push_str(&format!("set {name} {{ "));
+    let interior = cur.chance(1, 4);
+    gen_elem_list(cur, n, em, ElemList::Set, interior, out);
+    out.push_str(" }\n");
+    em.sets.push(name);
+}
+
+/// One file- or namespace-level item: `use`, `alphabet`, `set`, `routine`,
 /// `graph`, or (when `depth` allows) a nested `namespace`. Never a
 /// `machine` — see `gen_namespace`'s doc; `generate_program` is the only
 /// caller that ever places one, and only at `depth == 0`.
@@ -1512,7 +1605,7 @@ fn gen_top_item(
     ns_names: &mut Vec<String>,
     out: &mut String,
 ) {
-    let choices = if depth > 0 { 5 } else { 4 };
+    let choices = if depth > 0 { 6 } else { 5 };
     match cur.choose(choices) {
         0 => {
             out.push_str(pad);
@@ -1555,7 +1648,7 @@ fn gen_top_item(
                 out.push(' ');
             }
             let elems_interior = cur.chance(1, 3);
-            gen_elem_list(cur, n, em, false, elems_interior, out);
+            gen_elem_list(cur, n, em, ElemList::Alphabet, elems_interior, out);
             out.push_str(" }");
             if cur.chance(1, 6) {
                 out.push(' ');
@@ -1565,6 +1658,7 @@ fn gen_top_item(
         }
         2 => gen_reuse(cur, n, em, pad, ns_depth, false, out),
         3 => gen_reuse(cur, n, em, pad, ns_depth, true, out),
+        4 => gen_set(cur, n, em, pad, ns_depth, out),
         _ => gen_namespace(cur, n, em, pad, depth - 1, ns_depth, ns_names, out),
     }
 }
@@ -1743,6 +1837,13 @@ const REQUIRED_CONSTRUCTS: &[&str] = &[
     "alphabet.namespaced",
     "alphabet.elem.single",
     "alphabet.elem.range",
+    // glyph sets
+    "set",
+    "set.exported",
+    "set.documented",
+    "set.namespaced",
+    "set.empty",
+    "alphabet.elem.set-ref",
     // symbol literals, wherever they occur
     "sym.glyph",
     "sym.glyph.escaped",
@@ -1801,6 +1902,7 @@ const REQUIRED_CONSTRUCTS: &[&str] = &[
     "pattern.wildcard",
     "pattern.single",
     "pattern.range",
+    "pattern.set-ref",
     "pattern.bound",
     "pattern.unbound",
     "write.keep",
@@ -1883,6 +1985,12 @@ const CHOSEN_CONSTRUCTS: &[&str] = &[
     "alphabet.namespaced",
     "alphabet.elem.single",
     "alphabet.elem.range",
+    "set",
+    "set.exported",
+    "set.documented",
+    "set.namespaced",
+    "set.empty",
+    "alphabet.elem.set-ref",
     "sym.glyph",
     "sym.glyph.escaped",
     "sym.number",
@@ -1934,6 +2042,7 @@ const CHOSEN_CONSTRUCTS: &[&str] = &[
     "pattern.wildcard",
     "pattern.single",
     "pattern.range",
+    "pattern.set-ref",
     "pattern.bound",
     "pattern.unbound",
     "write.keep",
@@ -2029,10 +2138,6 @@ fn stamp_elems(
                 stamp_sym(lo, seen);
                 stamp_sym(hi, seen);
             }
-            // The generator writes no glyph set, so this label is never
-            // stamped today; listed nowhere, it fails the tally's own
-            // "stamps labels REQUIRED_CONSTRUCTS does not list" check the
-            // day the generator starts writing set references.
             mtc_turing_machine::parser::AlphabetElem::SetRef { .. } => {
                 seen.insert("alphabet.elem.set-ref");
             }
@@ -2141,10 +2246,6 @@ fn stamp_rule(rule: &mtc_turing_machine::parser::Rule, seen: &mut BTreeSet<&'sta
                 stamp_sym(lo, seen);
                 stamp_sym(hi, seen);
             }
-            // The generator writes no glyph set, so this label is never
-            // stamped today; listed nowhere, it fails the tally's own
-            // "stamps labels REQUIRED_CONSTRUCTS does not list" check the
-            // day the generator starts writing set references.
             PatternCellKind::SetRef { .. } => {
                 seen.insert("pattern.set-ref");
             }
@@ -2369,6 +2470,26 @@ fn stamp_program(program: &Program, seen: &mut BTreeSet<&'static str>) {
         stamp_doc(&alphabet.doc, seen);
         stamp_elems(&alphabet.elems, seen);
     }
+    for set in &program.sets {
+        seen.insert("set");
+        if set.exported {
+            seen.insert("set.exported");
+        }
+        if set.doc.is_some() {
+            seen.insert("set.documented");
+        }
+        if !set.ns.is_empty() {
+            seen.insert("set.namespaced");
+        }
+        if set.ns.len() > 1 {
+            seen.insert("namespace.nested");
+        }
+        if set.elems.is_empty() {
+            seen.insert("set.empty");
+        }
+        stamp_doc(&set.doc, seen);
+        stamp_elems(&set.elems, seen);
+    }
     for routine in &program.routines {
         seen.insert("routine");
         if routine.exported {
@@ -2491,7 +2612,7 @@ fn the_generator_reaches_every_construct_extraction_rebuilds() {
         let mut stamped: BTreeSet<&'static str> = BTreeSet::new();
         stamp_program(&program, &mut stamped);
 
-        let unlisted: Vec<&&str> = emitted.0.difference(&chosen).collect();
+        let unlisted: Vec<&&str> = emitted.labels.difference(&chosen).collect();
         assert!(
             unlisted.is_empty(),
             "case {case}: the generator recorded labels CHOSEN_CONSTRUCTS does not list: \
@@ -2499,8 +2620,8 @@ fn the_generator_reaches_every_construct_extraction_rebuilds() {
         );
         let stamped_chosen: BTreeSet<&'static str> =
             stamped.intersection(&chosen).copied().collect();
-        let dropped: Vec<&&str> = emitted.0.difference(&stamped_chosen).collect();
-        let invented: Vec<&&str> = stamped_chosen.difference(&emitted.0).collect();
+        let dropped: Vec<&&str> = emitted.labels.difference(&stamped_chosen).collect();
+        let invented: Vec<&&str> = stamped_chosen.difference(&emitted.labels).collect();
         assert!(
             dropped.is_empty() && invented.is_empty(),
             "case {case}: the generator wrote {dropped:?} and extraction did not rebuild it; \
