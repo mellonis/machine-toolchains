@@ -937,12 +937,14 @@ compile was given the callee's declarations:
 - **With declarations** (a sibling source, a `--extern` file, a library,
   or the embedded standard library), the argument list is checked here,
   exactly as a local signature's is: a missing, duplicate, or
-  unrecognized argument name is a compile error naming the parameter, and
+  unrecognized argument name is a compile error naming the parameter, two
+  tape arguments naming one caller tape are `duplicate-tape-target`, and
   the emitted entries follow the callee's own tape order.
 - **Without them**, the call still compiles: every entry is written by
   name, in source order, and the same checks run at LINK time instead,
   against the callee's real object — where a parameter the callee does
-  not declare, or one the site never named, is a link error.
+  not declare, one the site never named, or one caller tape backing two
+  callee tapes is a link error.
 
 ```
 use hidden;

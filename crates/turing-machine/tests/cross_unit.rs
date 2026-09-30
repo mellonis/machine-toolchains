@@ -880,6 +880,188 @@ machine {
     assert!(err.contains("num"), "{err}");
 }
 
+/// Two tape arguments naming ONE caller tape, against a callee whose
+/// declarations are given: the same `duplicate-tape-target` compile error
+/// an in-unit callee gets (docs/tmt/language.md (reuse)), blamed on the
+/// second argument — not a compile that succeeds only for the linker to
+/// refuse the binding by tape index. Mutation: dropping the aliasing check
+/// from the out-of-unit branch; the compile succeeds.
+#[test]
+fn two_arguments_naming_one_tape_are_a_compile_error_with_declarations() {
+    let dir = scratch("symbolic_tape_alias_call");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  entry state go { [*] -> call mylib::combine(a = data, b = data) then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[duplicate-tape-target]"), "{err}");
+    assert!(
+        err.contains("binding arguments `a` and `b` both bind tape `data`"),
+        "{err}"
+    );
+    // The second argument, `b = data`, is the one blamed.
+    assert!(err.contains("app.tmc:4:57:"), "{err}");
+}
+
+/// The `bind` form of the same check: a declared argument list goes
+/// through the identical out-of-unit path. Mutation: as above.
+#[test]
+fn two_bind_arguments_naming_one_tape_are_a_compile_error_with_declarations() {
+    let dir = scratch("symbolic_tape_alias_bind");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  bind mylib::combine(a = data, b = data) as h;
+  entry state go { [*] -> call h() then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[duplicate-tape-target]"), "{err}");
+    assert!(
+        err.contains("binding arguments `a` and `b` both bind tape `data`"),
+        "{err}"
+    );
+    assert!(err.contains("app.tmc:4:33:"), "{err}");
+}
+
+/// Two tape arguments naming the same NON-tape: the target is reported as
+/// not a tape of this world, exactly as a local callee's arguments are —
+/// the aliasing check only compares real caller tapes. Mutation: dropping
+/// the host-tape condition from the out-of-unit aliasing check; the error
+/// reads as `duplicate-tape-target` instead.
+#[test]
+fn two_arguments_naming_one_non_tape_are_an_unresolved_target_with_declarations() {
+    let dir = scratch("symbolic_tape_alias_non_tape");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  entry state go { [*] -> call mylib::combine(a = nosuch, b = nosuch) then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[unresolved-tape-target]"), "{err}");
+    assert!(!err.contains("[duplicate-tape-target]"), "{err}");
+}
+
+/// State parameters are exempt from the aliasing check: two continuations
+/// legitimately share one target state, out of unit as in it. Mutation:
+/// keying the aliasing check on every named argument rather than on the
+/// declared TAPE parameters only; `hit = done, miss = done` is refused.
+#[test]
+fn two_state_arguments_sharing_one_state_compile_with_declarations() {
+    let dir = scratch("symbolic_state_alias");
+    let header = write(
+        &dir,
+        "mylib.tmh",
+        "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine pick(tape n: bits writes {}, state hit, state miss);
+}
+",
+    );
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  entry state go { [*] -> call mylib::pick(n = data, hit = done, miss = done) then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let out = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+}
+
+/// With NO declarations for the callee there is nothing to check the
+/// arguments against at compile time: the aliased site compiles, and the
+/// linker refuses the binding once it has the callee's real signature.
+/// Mutation: refusing the alias without declarations; the compile fails.
+#[test]
+fn two_arguments_naming_one_tape_are_a_link_error_without_declarations() {
+    let dir = scratch("symbolic_tape_alias_link");
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+alphabet bits2 { '_', '0', '1' }
+
+machine {
+  tape data: bits2;
+  entry state go { [*] -> call mylib::combine(a = data, b = data) then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let app_obj = compile(&dir, &input, "app.tmo", &["--nostdlib"]);
+    assert!(app_obj.is_ok(), "{:?}", app_obj.err());
+
+    let lib_src = write(&dir, "mylib.tmc", MYLIB_COMBINE_TMC);
+    let lib_obj = compile(&dir, &lib_src, "mylib.tmo", &["--nostdlib"]);
+    assert!(lib_obj.is_ok(), "{:?}", lib_obj.err());
+
+    let link_err = link(
+        &dir,
+        &[&dir.join("app.tmo"), &dir.join("mylib.tmo")],
+        "app.tmx",
+        &["--nostdlib", "--call-mech", "frames"],
+    )
+    .unwrap_err();
+    assert!(
+        link_err.contains("one caller tape cannot back two callee tapes"),
+        "{link_err}"
+    );
+}
+
 /// A hand-written `.tma` pair carrying the exact operand text
 /// `an_external_bound_call_emits_the_symbolic_operand` above compiles to,
 /// assembled, linked and RUN — the end-to-end proof that a symbolic site
