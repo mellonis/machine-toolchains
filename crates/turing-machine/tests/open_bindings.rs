@@ -749,6 +749,63 @@ machine {
     }
 }
 
+/// A two-tape routine whose entry row takes `transition`: a transparent
+/// call into `std`'s one-tape `plusOne`, or — the control — a plain step.
+/// Both tapes read `*` alone, so each is opaque unless a forward closes
+/// it.
+fn two_tape_transparent_caller(transition: &str) -> String {
+    format!(
+        "\
+use std::binaryNumbersBare::symbols;
+
+routine r(tape a: symbols, tape b: symbols) {{
+  entry state go {{ [*, *] -> {transition}; }}
+  state done {{ [*, *] -> return; }}
+}}
+
+machine {{
+  tape t: symbols;
+  tape u: symbols;
+  entry state go {{ [*, *] -> call r(a = t, b = u) then done; }}
+  state done {{ [*, *] -> stop; }}
+}}
+"
+    )
+}
+
+/// A transparent call into another unit closes EVERY tape of the caller,
+/// not only the tapes the callee is known to have: this unit cannot see
+/// the callee's arity (docs/tmt/language.md (open maps)), so the one-tape
+/// `plusOne` closes `b` as well as `a`. The control — the same routine
+/// with the call replaced by a plain step — publishes `opaque` on both,
+/// so the closing is the call's doing.
+///
+/// Mutation it catches: close only tape 0 on a transparent call into
+/// another unit (`is_none_or(..)` → `map_or(k == 0, ..)` in
+/// `settle_opacity`) — `b` publishes `opaque` while the one-tape test
+/// above stays green.
+#[test]
+fn a_transparent_call_into_another_unit_closes_every_tape() {
+    let control = build(&two_tape_transparent_caller("goto done"));
+    for p in ["a", "b"] {
+        assert!(
+            param_line(&control.tma, "r", p).ends_with(", opaque"),
+            "control: `{p}` is opaque without the call:\n{}",
+            control.tma
+        );
+    }
+    let out = build(&two_tape_transparent_caller(
+        "call std::binaryNumbersBare::plusOne() then done",
+    ));
+    for p in ["a", "b"] {
+        let line = param_line(&out.tma, "r", p);
+        assert!(
+            !line.ends_with(", opaque"),
+            "`{p}` must close under a transparent cross-unit call: {line}"
+        );
+    }
+}
+
 // ── more than one tape ─────────────────────────────────────────────────────
 
 /// Two tapes, two rows, `['0', *]` and `[*, '1']`: each position has a
