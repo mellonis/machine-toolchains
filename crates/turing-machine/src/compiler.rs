@@ -1627,6 +1627,12 @@ pub(crate) struct ResolvedWorld {
     /// State-parameter names (routine/graph), in signature order — valid
     /// goto / continuation targets inside the body.
     pub state_params: Vec<String>,
+    /// The kind of every signature parameter, in signature order — how
+    /// `tapes` and `state_params` interleave, which neither list keeps on
+    /// its own. Empty for a `machine`. What lets a world known only through
+    /// its declarations be checked against its signature in the order it
+    /// was written ([`SigInfo::declared`]).
+    pub(crate) param_kinds: Vec<ParamKind>,
     /// `state_params.len()` as the one-byte count a signature publishes
     /// (docs/formats.md (routine interfaces)) — narrowed HERE, where the
     /// signature is resolved, so a world that is only DECLARED (a header
@@ -2842,39 +2848,202 @@ impl DefKind {
 
 /// A signature parameter's kind, for binding-argument checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParamKind {
+pub(crate) enum ParamKind {
     Tape,
     State,
 }
 
 #[derive(Clone)]
-struct SigInfo {
+pub(crate) struct SigInfo {
     /// Parameters in signature order: `(name, kind)`.
     params: Vec<(String, ParamKind)>,
 }
 
 impl SigInfo {
-    /// The signature of a world known only through the declarations table
-    /// — a graph another unit exports. A resolved world keeps its tape
-    /// parameters and its state parameters in two lists, each in signature
-    /// order, but not how the two kinds interleave, so the tape parameters
-    /// come first here. That order decides only which parameter a
-    /// `missing-arg` names when several of different kinds are unbound;
-    /// the error's position is the same either way.
-    fn declared(world: &ResolvedWorld) -> SigInfo {
+    /// The signature of a resolved world — how a graph another unit
+    /// exports is checked, since only its resolved form is at hand. The
+    /// tape and state parameters are zipped back into signature order
+    /// through [`ResolvedWorld::param_kinds`], so the check walks them
+    /// exactly as it walks a local signature.
+    pub(crate) fn declared(world: &ResolvedWorld) -> SigInfo {
+        let mut tapes = world.tapes.iter();
+        let mut states = world.state_params.iter();
         SigInfo {
             params: world
-                .tapes
+                .param_kinds
                 .iter()
-                .map(|t| (t.name.clone(), ParamKind::Tape))
-                .chain(
-                    world
-                        .state_params
-                        .iter()
-                        .map(|p| (p.clone(), ParamKind::State)),
-                )
+                .map(|kind| {
+                    let name = match kind {
+                        ParamKind::Tape => &tapes.next().expect("one tape per tape kind").name,
+                        ParamKind::State => states.next().expect("one state per state kind"),
+                    };
+                    (name.clone(), *kind)
+                })
                 .collect(),
         }
+    }
+}
+
+/// A world's state-name space for goto / continuation / state-argument
+/// resolution: its state parameters, its states and its graft instances'
+/// names.
+pub(crate) fn state_targets(world: &ResolvedWorld) -> HashSet<&str> {
+    let mut set: HashSet<&str> = HashSet::new();
+    for p in &world.state_params {
+        set.insert(p);
+    }
+    for s in &world.states {
+        set.insert(&s.name);
+    }
+    for g in &world.grafts {
+        if let Some(name) = &g.as_name {
+            set.insert(name);
+        }
+    }
+    set
+}
+
+/// A graft's argument list checked against the graph it is about to
+/// splice, in the host world it is written in — the check a graft's world
+/// checks already ran ([`check_binding_list`]), repeated at the splice so
+/// it holds of the very graph spliced, whichever declarations table found
+/// it.
+pub(crate) fn check_graft_args(
+    graft: &ResolvedGraft,
+    host: &ResolvedWorld,
+    graph: &ResolvedWorld,
+) -> Result<(), CompileError> {
+    let tapes: HashSet<&str> = host.tapes.iter().map(|t| t.name.as_str()).collect();
+    check_binding_list(
+        &SigInfo::declared(graph),
+        &graft.args,
+        &state_targets(host),
+        &tapes,
+        graft.target_span,
+    )
+}
+
+/// Arity + argument-KIND checks of one argument list against a signature.
+/// Tape params take tape targets (`tapes`, the host world's); state params
+/// take state names (`states`, the host world's) or terminators. Map
+/// LEGALITY (glyph sets, etc.) is the graft/range expander's — this only
+/// checks the kind.
+///
+/// Also the aliasing check (docs/tmt/language.md (reuse)): within ONE
+/// argument list no two TAPE parameters may name the same caller tape.
+/// One physical head cannot serve two callee tapes read and written
+/// through two independent maps, and the lowering mechanisms disagree
+/// about what it would mean. State parameters are exempt — two
+/// continuations legitimately share one target state.
+///
+/// `fallback_span` is where a `missing-arg` points when the list is empty:
+/// the call/graft/bind site itself (there is no first arg to blame).
+fn check_binding_list(
+    sig: &SigInfo,
+    args: &[BindingArg],
+    states: &HashSet<&str>,
+    tapes: &HashSet<&str>,
+    fallback_span: Span,
+) -> Result<(), CompileError> {
+    // arg name -> param kind, with duplicate + unknown detection.
+    let mut arg_seen: HashSet<&str> = HashSet::new();
+    // Caller tape target -> the argument that claimed it. Scoped to this
+    // one argument list: the same tape in two DIFFERENT calls is legal.
+    let mut tape_seen: HashMap<&str, &str> = HashMap::new();
+    for a in args {
+        if !arg_seen.insert(&a.name) {
+            return Err(CompileError {
+                span: a.name_span,
+                kind: CompileErrorKind::DuplicateArg(a.name.clone()),
+            });
+        }
+        let Some((_, kind)) = sig.params.iter().find(|(n, _)| *n == a.name) else {
+            return Err(CompileError {
+                span: a.name_span,
+                kind: CompileErrorKind::UnknownArg(a.name.clone()),
+            });
+        };
+        // Kind first: a target that is not a tape at all is that error,
+        // not an alias.
+        check_arg_kind(a, *kind, states, tapes)?;
+        if *kind == ParamKind::Tape
+            && let BindingValue::Named { target, .. } = &a.value
+            && let Some(first) = tape_seen.insert(target.as_str(), a.name.as_str())
+        {
+            return Err(CompileError {
+                span: a.span,
+                kind: CompileErrorKind::DuplicateTapeTarget {
+                    first: first.to_string(),
+                    second: a.name.clone(),
+                    target: target.clone(),
+                },
+            });
+        }
+    }
+    // Every parameter must be bound.
+    for (pname, _) in &sig.params {
+        if !arg_seen.contains(pname.as_str()) {
+            // Point at the first arg, or the call/graft/bind site when
+            // there are none to blame.
+            let span = args.first().map(|a| a.span).unwrap_or(fallback_span);
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::MissingArg(pname.clone()),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_arg_kind(
+    arg: &BindingArg,
+    kind: ParamKind,
+    states: &HashSet<&str>,
+    tapes: &HashSet<&str>,
+) -> Result<(), CompileError> {
+    match kind {
+        ParamKind::Tape => match &arg.value {
+            BindingValue::Named { target, .. } => {
+                if tapes.contains(target.as_str()) {
+                    Ok(())
+                } else {
+                    Err(CompileError {
+                        span: arg.span,
+                        kind: CompileErrorKind::UnresolvedTapeTarget(target.clone()),
+                    })
+                }
+            }
+            BindingValue::Terminator { .. } => Err(CompileError {
+                span: arg.span,
+                kind: CompileErrorKind::WrongArgKind {
+                    name: arg.name.clone(),
+                    expected: "a tape target",
+                },
+            }),
+        },
+        ParamKind::State => match &arg.value {
+            // A `with map` makes it definitively a tape target — wrong.
+            BindingValue::Named {
+                target, map: None, ..
+            } => {
+                if states.contains(target.as_str()) {
+                    Ok(())
+                } else {
+                    Err(CompileError {
+                        span: arg.span,
+                        kind: CompileErrorKind::UndefinedState(target.clone()),
+                    })
+                }
+            }
+            BindingValue::Named { .. } => Err(CompileError {
+                span: arg.span,
+                kind: CompileErrorKind::WrongArgKind {
+                    name: arg.name.clone(),
+                    expected: "a state or terminator",
+                },
+            }),
+            BindingValue::Terminator { .. } => Ok(()),
+        },
     }
 }
 
@@ -3343,7 +3512,12 @@ fn resolve_world(
     // Tapes: from the signature's tape params (routine/graph).
     let mut tapes: Vec<ResolvedTape> = Vec::new();
     let mut state_params: Vec<String> = Vec::new();
+    let mut param_kinds: Vec<ParamKind> = Vec::with_capacity(sig.params.len());
     for p in &sig.params {
+        param_kinds.push(match p.kind {
+            SigParamKind::Tape { .. } => ParamKind::Tape,
+            SigParamKind::State => ParamKind::State,
+        });
         match &p.kind {
             SigParamKind::Tape {
                 alphabet,
@@ -3426,6 +3600,7 @@ fn resolve_world(
         local: !exported,
         tapes,
         state_params,
+        param_kinds,
         exits,
         declared_noreturn,
         states,
@@ -3594,6 +3769,7 @@ fn resolve_machine_world(
         tapes,
         // A `machine` block has no signature, so it declares no exits.
         state_params: Vec::new(),
+        param_kinds: Vec::new(),
         exits: 0,
         // A `machine` block has no `noreturn` grammar slot at all.
         declared_noreturn: None,
@@ -4610,24 +4786,6 @@ impl WorldCtx<'_> {
         })
     }
 
-    /// The world's state-name space for goto / continuation / state-arg
-    /// resolution: state params, local states, and graft instances.
-    fn state_targets<'w>(&self, world: &'w ResolvedWorld) -> HashSet<&'w str> {
-        let mut set: HashSet<&str> = HashSet::new();
-        for p in &world.state_params {
-            set.insert(p);
-        }
-        for s in &world.states {
-            set.insert(&s.name);
-        }
-        for g in &world.grafts {
-            if let Some(name) = &g.as_name {
-                set.insert(name);
-            }
-        }
-        set
-    }
-
     fn bind_names<'w>(&self, world: &'w ResolvedWorld) -> HashSet<&'w str> {
         world.binds.iter().map(|b| b.name.as_str()).collect()
     }
@@ -4636,7 +4794,7 @@ impl WorldCtx<'_> {
     /// resolution (same world only; `return` context), and `call` target +
     /// argument checks.
     fn check_rules(&mut self, world: &ResolvedWorld, is_routine: bool) -> Result<(), CompileError> {
-        let states = self.state_targets(world);
+        let states = state_targets(world);
         let binds = self.bind_names(world);
         let ns = self.world_ns(world);
         for s in &world.states {
@@ -4737,7 +4895,7 @@ impl WorldCtx<'_> {
     /// targets. `call`s live inside rule transitions; grafts/binds are
     /// declarations.
     fn check_reuse_targets(&mut self, world: &ResolvedWorld) -> Result<(), CompileError> {
-        let states = self.state_targets(world);
+        let states = state_targets(world);
         let binds = self.bind_names(world);
         let tapes: HashSet<&str> = world.tapes.iter().map(|t| t.name.as_str()).collect();
         let ns = self.world_ns(world);
@@ -4877,27 +5035,17 @@ impl WorldCtx<'_> {
         }
     }
 
-    /// Arity + argument-KIND checks against the target's signature — a
+    /// [`check_binding_list`] against the target's signature — a
     /// locally-defined one, or, for a graft of a graph another unit exports,
-    /// the one its declarations carry ([`Self::signature`]). Tape
-    /// params take tape targets (world tapes); state params take state names
-    /// (same-world states) or terminators. Map LEGALITY (glyph sets, etc.) is
-    /// the graft/range expander's — this only checks the kind.
-    ///
-    /// Also the aliasing check (docs/tmt/language.md (reuse)): within ONE
-    /// argument list no two TAPE parameters may name the same caller tape.
-    /// One physical head cannot serve two callee tapes read and written
-    /// through two independent maps, and the lowering mechanisms disagree
-    /// about what it would mean. State parameters are exempt — two
-    /// continuations legitimately share one target state. Every `call`,
+    /// the one its declarations carry ([`Self::signature`]). Every `call`,
     /// `graft`, and `bind` funnels through here, so one check covers all
     /// three. A graft splices its graph before IR exists, so a graft of
     /// another unit's graph is checked here too, against the declared
-    /// signature — nothing later would. An out-of-unit `call`/`bind`
-    /// callee is not checked here: its arg-list check runs against its
-    /// DECLARED signature in `ir::resolve_binding` (docs/formats.md (bound
-    /// calls)), which is also where a call with no declarations for its
-    /// callee at all defers the check to the linker.
+    /// signature, and again at the splice ([`check_graft_args`]). An
+    /// out-of-unit `call`/`bind` callee is not checked here: its arg-list
+    /// check runs against its DECLARED signature in `ir::resolve_binding`
+    /// (docs/formats.md (bound calls)), which is also where a call with no
+    /// declarations for its callee at all defers the check to the linker.
     #[allow(clippy::too_many_arguments)]
     fn check_binding_args(
         &self,
@@ -4911,57 +5059,10 @@ impl WorldCtx<'_> {
         // call/graft/bind site itself (there is no first arg to blame).
         fallback_span: Span,
     ) -> Result<(), CompileError> {
-        let Some(sig) = self.signature(sig_key, want) else {
-            return Ok(());
-        };
-        // arg name -> param kind, with duplicate + unknown detection.
-        let mut arg_seen: HashSet<&str> = HashSet::new();
-        // Caller tape target -> the argument that claimed it. Scoped to this
-        // one argument list: the same tape in two DIFFERENT calls is legal.
-        let mut tape_seen: HashMap<&str, &str> = HashMap::new();
-        for a in args {
-            if !arg_seen.insert(&a.name) {
-                return Err(CompileError {
-                    span: a.name_span,
-                    kind: CompileErrorKind::DuplicateArg(a.name.clone()),
-                });
-            }
-            let Some((_, kind)) = sig.params.iter().find(|(n, _)| *n == a.name) else {
-                return Err(CompileError {
-                    span: a.name_span,
-                    kind: CompileErrorKind::UnknownArg(a.name.clone()),
-                });
-            };
-            // Kind first: a target that is not a tape at all is that error,
-            // not an alias.
-            self.check_arg_kind(a, *kind, states, tapes)?;
-            if *kind == ParamKind::Tape
-                && let BindingValue::Named { target, .. } = &a.value
-                && let Some(first) = tape_seen.insert(target.as_str(), a.name.as_str())
-            {
-                return Err(CompileError {
-                    span: a.span,
-                    kind: CompileErrorKind::DuplicateTapeTarget {
-                        first: first.to_string(),
-                        second: a.name.clone(),
-                        target: target.clone(),
-                    },
-                });
-            }
+        match self.signature(sig_key, want) {
+            Some(sig) => check_binding_list(&sig, args, states, tapes, fallback_span),
+            None => Ok(()),
         }
-        // Every parameter must be bound.
-        for (pname, _) in &sig.params {
-            if !arg_seen.contains(pname.as_str()) {
-                // Point at the first arg, or the call/graft/bind site when
-                // there are none to blame.
-                let span = args.first().map(|a| a.span).unwrap_or(fallback_span);
-                return Err(CompileError {
-                    span,
-                    kind: CompileErrorKind::MissingArg(pname.clone()),
-                });
-            }
-        }
-        Ok(())
     }
 
     /// The signature a binding-argument list is checked against: this
@@ -4979,59 +5080,6 @@ impl WorldCtx<'_> {
         }
         find_external_graph(self.externals, sig_key)
             .map(|(_, world)| Cow::Owned(SigInfo::declared(world)))
-    }
-
-    fn check_arg_kind(
-        &self,
-        arg: &BindingArg,
-        kind: ParamKind,
-        states: &HashSet<&str>,
-        tapes: &HashSet<&str>,
-    ) -> Result<(), CompileError> {
-        match kind {
-            ParamKind::Tape => match &arg.value {
-                BindingValue::Named { target, .. } => {
-                    if tapes.contains(target.as_str()) {
-                        Ok(())
-                    } else {
-                        Err(CompileError {
-                            span: arg.span,
-                            kind: CompileErrorKind::UnresolvedTapeTarget(target.clone()),
-                        })
-                    }
-                }
-                BindingValue::Terminator { .. } => Err(CompileError {
-                    span: arg.span,
-                    kind: CompileErrorKind::WrongArgKind {
-                        name: arg.name.clone(),
-                        expected: "a tape target",
-                    },
-                }),
-            },
-            ParamKind::State => match &arg.value {
-                // A `with map` makes it definitively a tape target — wrong.
-                BindingValue::Named {
-                    target, map: None, ..
-                } => {
-                    if states.contains(target.as_str()) {
-                        Ok(())
-                    } else {
-                        Err(CompileError {
-                            span: arg.span,
-                            kind: CompileErrorKind::UndefinedState(target.clone()),
-                        })
-                    }
-                }
-                BindingValue::Named { .. } => Err(CompileError {
-                    span: arg.span,
-                    kind: CompileErrorKind::WrongArgKind {
-                        name: arg.name.clone(),
-                        expected: "a state or terminator",
-                    },
-                }),
-                BindingValue::Terminator { .. } => Ok(()),
-            },
-        }
     }
 
     fn warn_undeclared(&mut self, name: &str, span: Span) {

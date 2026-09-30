@@ -2090,3 +2090,204 @@ machine {
         assert!(text.contains("[missing-arg]"), "{argv:?}: {text}");
     }
 }
+
+/// A declared graph whose signature interleaves tape and state parameters.
+const INTERLEAVED_LIB_TMC: &str = "\
+namespace il {
+  export alphabet bits { '_', '0', '1' }
+  export graph g(tape a: bits, state s1, tape b: bits, state s2) {
+    entry state s { ['0', *] -> goto s1; [*, *] -> goto s2; }
+  }
+}
+";
+
+/// Grafts `il::g` leaving BOTH `s1` (a state) and `b` (a tape) unbound.
+const INTERLEAVED_CONSUMER: &str = "\
+use il::bits;
+use il::g;
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry graft g(a = x, s2 = fin) as gg;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// [`INTERLEAVED_CONSUMER`]'s in-unit twin, the graft on the same line and
+/// column.
+const INTERLEAVED_LOCAL: &str = "\
+alphabet bits { '_', '0', '1' }
+graph g(tape a: bits, state s1, tape b: bits, state s2) { entry state s { ['0', *] -> goto s1; [*, *] -> goto s2; } }
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry graft g(a = x, s2 = fin) as gg;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// With parameters of both kinds unbound, `missing-arg` names the first one
+/// in SIGNATURE order — `s1`, a state written before the tape `b` — for a
+/// graph read from its header and from its source alike, exactly as the
+/// local graft does: same position AND same message. Mutation: stop
+/// recording the signature's parameter order on the resolved world (the
+/// declared signature listing tapes first) — the library graft then names
+/// `b` and the message differs.
+#[test]
+fn a_library_graft_names_the_first_unbound_parameter_in_signature_order() {
+    let dir = scratch("lib_graft_interleaved");
+    let lib_src = write_file(&dir, "il.tmc", INTERLEAVED_LIB_TMC);
+    let header = interface(&dir, &lib_src, "il.tmh");
+
+    let local_src = write_file(&dir, "loc.tmc", INTERLEAVED_LOCAL);
+    let out = dir.join("loc.tmo");
+    let local = execute(&args(&[
+        "compile",
+        local_src.to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("the local twin must fail");
+    let local = local.replace(local_src.to_str().unwrap(), "<src>");
+    assert!(local.contains("<src>:6:17: error:"), "{local}");
+    assert!(
+        local.contains("missing binding argument for parameter `s1`"),
+        "{local}"
+    );
+
+    for (route, decls) in [("header", &header), ("source", &lib_src)] {
+        let name = format!("ext_{route}.tmc");
+        let err = compile_extern_err(&dir, &name, INTERLEAVED_CONSUMER, decls);
+        let err = err.replace(dir.join(&name).to_str().unwrap(), "<src>");
+        assert_eq!(
+            err, local,
+            "{route}: the library graft names another parameter"
+        );
+    }
+}
+
+/// A library graph `nlib::w` whose body grafts
+/// `std::binaryNumbers::goToNumberGraph(num = t, done = out)` — well formed
+/// against the embedded standard library, which is what `nlib` was checked
+/// against when it was read.
+const SHADOW_NLIB_TMC: &str = "\
+namespace nlib {
+  export graph w(tape t: std::binaryNumbers::symbols, state out) {
+    entry graft std::binaryNumbers::goToNumberGraph(num = t, done = out) as inner;
+  }
+}
+";
+
+const SHADOW_CONSUMER: &str = "\
+use nlib::w;
+machine {
+  tape x: std::binaryNumbers::symbols;
+  entry graft w(t = x, out = fin) as ww;
+  state fin { [*] -> stop; }
+}
+";
+
+/// A user source re-declaring `std::binaryNumbers::goToNumberGraph` with
+/// one more tape parameter, `PARAMS` spliced in. Given to the consumer's
+/// compile by `--extern`, it is the graph the consumer's table finds for
+/// `nlib::w`'s nested graft — not the one `nlib` was checked against.
+const SHADOW_FAKESTD: &str = "\
+namespace std {
+  namespace binaryNumbers {
+    export alphabet symbols { '_', '0', '1', '$', '^' }
+    export graph goToNumberGraph(PARAMS) {
+      entry state s { [*, *] -> goto done; }
+    }
+  }
+}
+";
+
+/// Run the real `tmt compile` on [`SHADOW_CONSUMER`] with `nlib` given by
+/// its source and by its header, each alongside a shadowing standard
+/// library whose graph takes `params`; return each route's exit code and
+/// combined output.
+fn shadowed_nested_graft(tag: &str, params: &str) -> Vec<(Option<i32>, String)> {
+    let dir = scratch(tag);
+    let nlib = write_file(&dir, "nlib.tmc", SHADOW_NLIB_TMC);
+    let header = interface(&dir, &nlib, "nlib.tmh");
+    let fake = write_file(
+        &dir,
+        "fakestd.tmc",
+        &SHADOW_FAKESTD.replace("PARAMS", params),
+    );
+    let cons = write_file(&dir, "cons.tmc", SHADOW_CONSUMER);
+    let out = dir.join("cons.tmo");
+    [&nlib, &header]
+        .into_iter()
+        .map(|lib| {
+            let run = std::process::Command::new(env!("CARGO_BIN_EXE_tmt"))
+                .args([
+                    "compile",
+                    cons.to_str().unwrap(),
+                    "--extern",
+                    lib.to_str().unwrap(),
+                    "--extern",
+                    fake.to_str().unwrap(),
+                    "-o",
+                    out.to_str().unwrap(),
+                ])
+                .output()
+                .expect("tmt runs");
+            (
+                run.status.code(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&run.stdout),
+                    String::from_utf8_lossy(&run.stderr)
+                ),
+            )
+        })
+        .collect()
+}
+
+/// A nested graft inside a library graph is checked against the graph the
+/// splice actually uses. Here that graph (a user `--extern` shadowing the
+/// standard library's) takes a tape parameter `extra` BEFORE `num` that the
+/// nested graft never binds: a coded `missing-arg`, through the source and
+/// the header route alike — never a panic. Mutation: drop the argument
+/// check at the splice (`expand::build_composite`'s call to
+/// `compiler::check_graft_args`) — both routes abort in the splice, exit
+/// 101, "panicked" in the output.
+#[test]
+fn a_nested_library_graft_is_checked_against_the_graph_it_splices() {
+    for (code, text) in shadowed_nested_graft(
+        "lib_graft_shadowed_nested",
+        "tape extra: symbols, tape num: symbols, state done",
+    ) {
+        assert!(!text.contains("panicked"), "{text}");
+        assert_ne!(code, Some(101), "{text}");
+        assert_eq!(code, Some(1), "{text}");
+        assert!(
+            text.contains("missing binding argument for parameter `extra`"),
+            "{text}"
+        );
+        assert!(text.contains("[missing-arg]"), "{text}");
+    }
+}
+
+/// The companion shape: the shadowing graph's unbound `extra` comes AFTER
+/// `num`. Without the splice-time check the splice paired the arguments
+/// with the wrong graph's tapes and reported `identity-glyph-mismatch`,
+/// about glyphs; it is the same unbound parameter as above and now reads
+/// as one. Mutation: drop the splice-time check — both routes report
+/// `identity-glyph-mismatch` instead.
+#[test]
+fn a_nested_library_graft_missing_a_later_parameter_is_missing_arg() {
+    for (code, text) in shadowed_nested_graft(
+        "lib_graft_shadowed_nested_after",
+        "tape num: symbols, tape extra: symbols, state done",
+    ) {
+        assert_eq!(code, Some(1), "{text}");
+        assert!(
+            text.contains("missing binding argument for parameter `extra`"),
+            "{text}"
+        );
+        assert!(text.contains("[missing-arg]"), "{text}");
+    }
+}

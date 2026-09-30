@@ -1187,10 +1187,14 @@ pub(crate) fn check_named_map_decl(
 
 /// Build a graft's [`Composite`] (per graph tape) plus its continuation
 /// substitution (graph state-param → the host continuation the graft binds).
-/// The compiler's world checks guarantee every parameter is bound with a
-/// kind-correct argument — against the graph's local signature, or its
-/// declared one for a graph another unit exports — so the "impossible"
-/// branches are invariants.
+/// The argument list is checked first, against `graph` itself — the very
+/// graph being spliced ([`crate::compiler::check_graft_args`]). The world
+/// checks already ran that check when the graft was read, but a nested
+/// graft inside a library graph was checked against the graph ITS unit's
+/// declarations named, while the splice looks the target up in this
+/// compile's table, which may name a different graph. Checking here makes
+/// every parameter bound with a kind-correct argument by construction, so
+/// the "impossible" branches below are invariants.
 /// `host_owner`/`graph_owner`: the modules `host` and `graph` respectively
 /// belong to — usually the SAME module (an in-unit graft, or a nested graft
 /// inside one library graph reaching a sibling of the same library), but
@@ -1204,6 +1208,7 @@ fn build_composite(
     graph: &ResolvedWorld,
     graph_owner: &Resolved,
 ) -> Result<(Composite, HashMap<String, Transition2>), CompileError> {
+    crate::compiler::check_graft_args(graft, host, graph)?;
     let args: HashMap<&str, &BindingArg> =
         graft.args.iter().map(|a| (a.name.as_str(), a)).collect();
 
