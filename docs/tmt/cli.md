@@ -1366,10 +1366,11 @@ The graph comes in three views, one at a time:
   notation: `1–16` for a run of indices, `{1,3}` for any other set,
   `*×13` for thirteen identical cells. The rule and the notation, with
   worked cases, are in `docs/formats.md (graph label notation)`.
-- **`--raw`** draws one arrow per row, exactly as the IR lists them —
-  the view that matches `-S` listings row for row, and the one the
-  optimizer walkthroughs use (`docs/tmt/optimizer.md (reading the
-  examples)`).
+- **`--raw`** draws one arrow per expanded IR row, in the IR's own row
+  order — the view the optimizer walkthroughs use
+  (`docs/tmt/optimizer.md (reading the examples)`). It is not the `-S`
+  listing's shape: that listing folds repeated rows with `.rept` and
+  sorts each state's rows into dispatch bands.
 - **`--shape`** draws one arrow per pair of states (or state and
   terminal node), labelled with the number of rows behind it. A call
   row that reaches a state through both its `then` and one of its exits

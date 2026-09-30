@@ -255,6 +255,31 @@ fn the_shape_view_counts_rows_per_state_pair() {
     assert_eq!(merging_world().to_mermaid_view(GraphView::Shape), expected);
 }
 
+/// The raw view of rows that WOULD merge keeps every one of them, in IR
+/// order.
+///
+/// Mutation: route the raw view through the merged path; the call rows
+/// and the writing rows collapse.
+#[test]
+fn the_raw_view_keeps_rows_that_would_merge() {
+    let expected = r#"flowchart TD
+    S0["s0"]
+    S1["s1"]
+    T_stp(("stp"))
+    S0 -->|"[1,0] call ns::r exit #0"| S1
+    S0 -->|"[1,0] call ns::r exit #1"| S0
+    S0 -->|"[1,0] call ns::r"| S1
+    S0 -->|"[3,*] w[1,-]"| S1
+    S0 -->|"[2,0] call ns::r exit #0"| S1
+    S0 -->|"[2,0] call ns::r exit #1"| S0
+    S0 -->|"[2,0] call ns::r"| S1
+    S0 -->|"[0,*] w[1,-]"| S1
+    S1 -->|"[*,*]"| T_stp
+"#;
+    assert_eq!(merging_world().to_mermaid_view(GraphView::Raw), expected);
+    assert_eq!(merging_world().to_mermaid(), expected);
+}
+
 /// The default view is the merged one, and `to_mermaid` stays the raw one.
 ///
 /// Mutation: make `Raw` the `GraphView` default.
@@ -491,10 +516,51 @@ fn rows_with_different_bindings_never_merge() {
     assert_eq!(merge_rows(&rules).len(), 2);
 }
 
+/// A transition from a small pool of every kind the merge key tells
+/// apart: gotos, the terminators and returns, and calls that differ in
+/// callee, binding, exits and `then` — so two rows agree on one often,
+/// and a merge across two that differ only there would show.
+fn arb_transition() -> impl Strategy<Value = IrTransition> {
+    use mtc_turing_machine::ir::IrTapeBinding;
+    let then = prop_oneof![
+        Just(None),
+        (0u32..3).prop_map(|state| Some(IrThen::Goto { state })),
+        Just(Some(IrThen::Return)),
+        Just(Some(IrThen::Stop)),
+    ];
+    let call = (0u32..2, prop::option::of(0u32..2), 0usize..3, then).prop_map(
+        |(callee, binding, exits, then)| IrTransition::CallThen {
+            target: format!("ns::r{callee}"),
+            binding: binding
+                .map(|caller_tape| {
+                    vec![IrTapeBinding {
+                        caller_tape,
+                        pairs: Vec::new(),
+                        param: None,
+                        map_written: false,
+                        open: false,
+                    }]
+                })
+                .unwrap_or_default(),
+            exits: (0..exits as u32).collect(),
+            then,
+        },
+    );
+    prop_oneof![
+        4 => (0u32..3).prop_map(|state| IrTransition::Goto { state }),
+        1 => Just(IrTransition::Stop),
+        1 => Just(IrTransition::Halt),
+        1 => Just(IrTransition::Return),
+        1 => (0u32..2).prop_map(|exit| IrTransition::ReturnExit { exit }),
+        1 => Just(IrTransition::TailCall { target: "ns::t".into() }),
+        3 => call,
+    ]
+}
+
 /// Random states: a few tapes over small alphabets, rows drawn from a few
 /// actions, so merges, near-merges, overlaps and exact duplicates are all
 /// common.
-fn arb_state() -> impl Strategy<Value = Vec<IrRule>> {
+fn arb_random_state() -> impl Strategy<Value = Vec<IrRule>> {
     (1usize..=4, 2u32..=4).prop_flat_map(|(arity, card)| {
         let cell = prop_oneof![
             1 => Just(IrCell::Wildcard),
@@ -502,13 +568,13 @@ fn arb_state() -> impl Strategy<Value = Vec<IrRule>> {
         ];
         let row = (
             prop::collection::vec(cell, arity),
-            0u32..3,
+            arb_transition(),
             any::<bool>(),
             0u32..2,
         )
-            .prop_map(|(pattern, target, debugger, write)| {
-                let mut r = rule(pattern, IrTransition::Goto { state: target });
-                r.debugger = debugger && target == 0;
+            .prop_map(|(pattern, transition, debugger, write)| {
+                let mut r = rule(pattern, transition);
+                r.debugger = debugger && write == 0;
                 if write == 1 {
                     r.write = Some(vec![IrWrite::Keep; r.pattern.len()]);
                 }
@@ -518,12 +584,54 @@ fn arb_state() -> impl Strategy<Value = Vec<IrRule>> {
     })
 }
 
+/// A state that needs a second sweep, planted at random values and
+/// followed by random rows: `[c,*,d]` and `[a,*,d]` (one action) are kept
+/// apart by `[a,b',*]` between them, which overlaps the second; that row
+/// merges upward into `[a,b,*]` (another action) in the second cell, and
+/// only a later sweep can then merge the first two
+/// (`merging_repeats_until_nothing_changes` is the fixed instance).
+fn arb_second_sweep_state() -> impl Strategy<Value = Vec<IrRule>> {
+    (
+        0u32..3,
+        1u32..3,
+        0u32..3,
+        1u32..3,
+        0u32..3,
+        arb_transition(),
+        arb_transition(),
+        arb_random_state(),
+    )
+        .prop_filter_map(
+            "two distinct actions over three tapes",
+            |(a, dc, b, db, d, k, k2, noise)| {
+                if k == k2 {
+                    return None;
+                }
+                let (c, b2) = ((a + dc) % 3, (b + db) % 3);
+                let mut rules = vec![
+                    rule(vec![ix(a), ix(b), ANY], k2.clone()),
+                    rule(vec![ix(c), ANY, ix(d)], k.clone()),
+                    rule(vec![ix(a), ix(b2), ANY], k2),
+                    rule(vec![ix(a), ANY, ix(d)], k),
+                ];
+                rules.extend(noise.into_iter().filter(|r| r.pattern.len() == 3));
+                Some(rules)
+            },
+        )
+}
+
+fn arb_state() -> impl Strategy<Value = Vec<IrRule>> {
+    prop_oneof![3 => arb_random_state(), 1 => arb_second_sweep_state()]
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(2000))]
 
     /// Mutations that redden it: merge rows differing in two cells;
     /// union a `*` cell with a set; drop the disjointness requirement
-    /// (exact duplicate rows collapse into one); drop the order guard.
+    /// (exact duplicate rows collapse into one); drop the order guard;
+    /// stop after one sweep; key rows on anything less than the whole
+    /// transition.
     #[test]
     fn merging_is_lossless_on_generated_states(rules in arb_state()) {
         if let Err(e) = check_state(&rules) {

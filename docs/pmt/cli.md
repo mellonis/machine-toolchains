@@ -736,9 +736,9 @@ input kind:
   same block; the merged view draws that pair as one edge labelled
   `{MF,!MF}` (`docs/formats.md (graph label notation)`). Everywhere else
   it is identical to the raw view — there is no vector to compress —
-  and in the final CFG of an `-O1` build, where the check-fold pass has
-  already turned every such check into a plain `goto`, the two views
-  coincide.
+  and in the final CFG of an `-O1` build with the default pipeline,
+  where the check-fold pass has already turned every such check into a
+  plain `goto`, the two views coincide (not under `--fno-check-fold`).
 - **`--raw`** draws one edge per successor, both arms of every `check`.
 - **`--shape`** draws one edge per pair of blocks, labelled with the
   number of raw edges behind it (`2` for the agreeing `check`, `1`

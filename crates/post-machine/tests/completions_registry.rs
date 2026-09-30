@@ -262,3 +262,31 @@ fn ir_graph_variant_choices_are_all_accepted_by_the_real_parser() {
     let bogus = execute(&args(&["ir", "graph", "--variant", "sideways"]));
     assert!(matches!(&bogus, Err(message) if message.contains("unknown variant")));
 }
+
+/// `ir graph`'s `--raw` and `--shape` pick one view each, so the registry
+/// files them in one exclusive group — the shells then withhold the other
+/// once one is written — and the real parser refuses the pair, the
+/// registry's group and the CLI's rule stating the same thing.
+///
+/// Mutation: drop `.exclusive("graph-view")` from either flag.
+#[test]
+fn ir_graph_view_flags_are_one_exclusive_group() {
+    let reg = registry();
+    let ir_graph = find(&reg, &["ir", "graph"]);
+    let group = |name: &str| {
+        ir_graph
+            .flags
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("ir graph should register {name}"))
+            .exclusive_group
+            .clone()
+    };
+    assert_eq!(group("--raw").as_deref(), Some("graph-view"));
+    assert_eq!(group("--shape").as_deref(), Some("graph-view"));
+    let both = execute(&args(&["ir", "graph", "--raw", "--shape", "x.ir.json"]));
+    assert!(
+        matches!(&both, Err(message) if message.contains("mutually exclusive")),
+        "{both:?}"
+    );
+}
