@@ -517,15 +517,52 @@ mod tests {
     /// dependency, matching the zero-new-deps constraint; house
     /// convention has no shared test-support module, so each file defines
     /// its own local helper).
-    fn temp_tree() -> PathBuf {
+    fn temp_tree() -> ScratchDir {
         static N: AtomicU32 = AtomicU32::new(0);
         let d = std::env::temp_dir().join(format!(
             "pmt-overlay-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&d).unwrap();
-        d
+        ScratchDir::fresh(d)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -541,7 +578,7 @@ mod tests {
         let view =
             project_view(&root.join("app.pmc"), &mut cache).expect("app.pmc is a target member");
 
-        assert_eq!(view.root, root);
+        assert_eq!(view.root, *root);
         assert!(view.stdlib);
         assert_eq!(view.siblings, vec![root.join("shared.pmc")]);
     }
@@ -609,7 +646,7 @@ mod tests {
         let mut cache = ManifestCache::new();
         let view = project_view(&sub.join("deep.pmc"), &mut cache)
             .expect("the lint-only sub/pmt.json is transparent; the root manifest is found");
-        assert_eq!(view.root, root);
+        assert_eq!(view.root, *root);
     }
 
     #[test]
@@ -772,7 +809,7 @@ mod tests {
         .unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: true,
             siblings: vec![sibling.clone()],
             library_paths: vec![],
@@ -813,7 +850,7 @@ mod tests {
         fs::write(&sibling, ".func pub_one\nstp\n.func priv_one local\nstp\n").unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling.clone()],
             library_paths: vec![],
@@ -885,7 +922,7 @@ mod tests {
         fs::write(&as_library, &library_bytes).unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![as_source],
             library_paths: vec![as_library],
@@ -938,7 +975,7 @@ mod tests {
         // source supplying `ns::dup` regardless of whether the library
         // leg contributed anything at all.
         let library_only_view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![],
             library_paths: vec![library.clone()],
@@ -956,7 +993,7 @@ mod tests {
         );
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling.clone()],
             library_paths: vec![library],
@@ -985,7 +1022,7 @@ mod tests {
         fs::write(&fine, "export good() { right; }\n").unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![broken, fine],
             library_paths: vec![],
@@ -1008,7 +1045,8 @@ mod tests {
         // round-trip load-bearing: without one, a bug that stopped
         // percent-encoding (or decoding) would go uncaught, since every
         // character in an unescaped path is already its own encoding.
-        let root = temp_tree().join("has space");
+        let tree = temp_tree();
+        let root = tree.join("has space");
         fs::create_dir_all(&root).unwrap();
         let sibling = root.join("sibling.pmc");
         fs::write(&sibling, "export old() { right; }\n").unwrap();
@@ -1021,7 +1059,7 @@ mod tests {
         open_docs.insert(uri, live);
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling],
             library_paths: vec![],
@@ -1048,7 +1086,7 @@ mod tests {
             let path = root.join(format!("s{i}.pmc"));
             fs::write(&path, format!("export f{i}() {{ right; }}\n")).unwrap();
             let view = ProjectView {
-                root: root.clone(),
+                root: root.to_path_buf(),
                 stdlib: false,
                 siblings: vec![path],
                 library_paths: vec![],
@@ -1067,7 +1105,7 @@ mod tests {
         let path = root.join("changing.pmc");
         fs::write(&path, "export old() { right; }\n").unwrap();
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![path.clone()],
             library_paths: vec![],
@@ -1132,15 +1170,52 @@ mod faithfulness {
     /// convention has no shared test-support module, so each file
     /// defines its own local helper — mirrors `overlay::tests`' own
     /// copy).
-    fn temp_tree() -> PathBuf {
+    fn temp_tree() -> ScratchDir {
         static N: AtomicU32 = AtomicU32::new(0);
         let d = std::env::temp_dir().join(format!(
             "pmt-faithfulness-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&d).unwrap();
-        d
+        ScratchDir::fresh(d)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// Loads one already-resolved source path per its extension, exactly

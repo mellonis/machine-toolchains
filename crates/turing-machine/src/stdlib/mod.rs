@@ -334,13 +334,51 @@ mod tests {
     /// A fresh scratch directory under `std::env::temp_dir()`, unique per
     /// call (process id + an atomic counter — this crate has no tempfile
     /// dependency, matching the zero-new-deps constraint).
-    fn unique_tmp_dir(label: &str) -> PathBuf {
+    fn unique_tmp_dir(label: &str) -> ScratchDir {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
+        ScratchDir::fresh(std::env::temp_dir().join(format!(
             "tmt-stdlib-roster-test-{label}-{}-{n}",
             std::process::id()
-        ))
+        )))
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// Hand-rolled percent-decoding, mirroring [`path_to_file_uri`]'s own

@@ -1701,6 +1701,7 @@ mod tests {
         let path = dir.join("empty.tmt");
         std::fs::write(&path, block.to_bytes().unwrap()).unwrap();
         let err = build_tapes(path.to_str().unwrap()).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(err.contains("empty alphabet"), "got: {err}");
     }
 }
