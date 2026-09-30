@@ -1381,8 +1381,9 @@ from 139 arrows to 46 — its sixteen `call pushTok` rows on one state
 become one arrow labelled `[1–16,*×13] call pushTok` — while the two
 512-row arithmetic routines stay at 2,049 arrows each. Their writes
 depend on the digits they read, so two rows that write the same digit
-read different digits in two cells at once (`1+2` and `2+1`), and a
-union of those would describe pairs that write something else. The
+differ in at least two read cells (in `addInto`'s state `digitA`,
+`[1,*,*,*,3,*,*,*,2]` and `[1,*,*,*,4,*,*,*,1]` write the same), and a
+per-cell union of those would describe reads that write something else. The
 shape view (five arrows each) is the readable one there.
 
 ### `tmt ir footprints`
