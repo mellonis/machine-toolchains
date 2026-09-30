@@ -12,6 +12,7 @@ use wasm_bindgen::prelude::*;
 
 use inner::Lang;
 use inner::diagnostics::{CheckError, CheckOptions};
+use inner::ir::{GraphView, IrError, IrStage};
 use inner::program::SourceFile;
 use inner::session::SessionError;
 
@@ -21,6 +22,9 @@ export type Lang = "pmc" | "tmc" | "pma" | "tma";
 export type SourceFile = "user" | "std";
 export interface CheckOptions { allow?: string[]; warn?: string[] }
 export interface BuildOptions { optLevel?: 0 | 1 }
+export interface IrOptions { optLevel?: 0 | 1; stage?: "lowered" | "final" }
+export interface IrGraphOptions extends IrOptions { view?: "merged" | "shape" | "raw" }
+export interface IrGraph { name: string; mermaid: string }
 export type FormatResult = { ok: true; text: string } | { ok: false; error: Diagnostic };
 export type BuildResult =
   | { ok: true; program: Program; diagnostics: Diagnostic[] }
@@ -62,6 +66,46 @@ fn lang(s: &str) -> Result<Lang, JsError> {
     })
 }
 
+/// A language that has an IR — a source language. `pma`/`tma` are
+/// refused the way an unknown name is, since the assembler has no IR.
+fn source_lang(s: &str) -> Result<Lang, JsError> {
+    match Lang::parse(s) {
+        Some(l) if !l.is_asm() => Ok(l),
+        _ => Err(JsError::new(&format!(
+            "unknown lang `{s}`; expected \"pmc\" or \"tmc\""
+        ))),
+    }
+}
+
+/// The IR options shared by `ir` and `irGraph`: `optLevel` as `build`
+/// reads it (anything but 0 is 1), and `stage` (default `lowered`).
+fn ir_options(opts: &JsValue) -> Result<(u8, IrStage), JsError> {
+    let opt_level: u8 = match js::number(opts, "optLevel") {
+        Some(0.0) => 0,
+        _ => 1,
+    };
+    let stage = match js::string(opts, "stage").map_err(|m| JsError::new(&m))? {
+        None => IrStage::default(),
+        Some(s) => IrStage::parse(&s).ok_or_else(|| {
+            JsError::new(&format!(
+                "unknown stage `{s}`; expected \"lowered\" or \"final\""
+            ))
+        })?,
+    };
+    Ok((opt_level, stage))
+}
+
+fn ir_err(e: IrError) -> JsError {
+    match e {
+        // `source_lang` already refused the assembly languages.
+        IrError::NoIr(lang) => JsError::new(&format!(
+            "unknown lang `{}`; expected \"pmc\" or \"tmc\"",
+            lang.as_str()
+        )),
+        IrError::Compile(d) => JsError::new(&format!("{} [{}]", d.message, d.code)),
+    }
+}
+
 fn session_err(e: SessionError) -> JsError {
     JsError::new(&match e {
         SessionError::Stopped => "session already stopped".to_string(),
@@ -84,7 +128,8 @@ fn source_file(s: Option<String>) -> Result<SourceFile, JsError> {
 }
 
 /// Stateless entry points: the lint channel, the formatter, the build,
-/// the stdlib text, and the tape-block codec.
+/// the compiler IR and its graph, the stdlib text, and the tape-block
+/// codec.
 #[wasm_bindgen]
 pub struct Toolchain;
 
@@ -147,6 +192,42 @@ impl Toolchain {
             }
         }
         Ok(o.into())
+    }
+
+    /// The compiler IR of a source-language program: the JSON document
+    /// `compile --emit-ir=STAGE` writes (`docs/formats.md (IR JSON)`). A
+    /// source that does not compile throws its fatal diagnostic.
+    pub fn ir(
+        lang_name: &str,
+        source: &str,
+        #[wasm_bindgen(unchecked_param_type = "IrOptions | undefined")] opts: JsValue,
+    ) -> Result<String, JsError> {
+        let lang = source_lang(lang_name)?;
+        let (opt_level, stage) = ir_options(&opts)?;
+        inner::ir::ir(lang, source, opt_level, stage).map_err(ir_err)
+    }
+
+    /// The IR's Mermaid graph, one entry per world (`.tmc`) or function
+    /// (`.pmc`): the flowchart `ir graph` prints under each `%% name`
+    /// header, in the view `opts.view` names (default `merged`).
+    #[wasm_bindgen(js_name = irGraph, unchecked_return_type = "IrGraph[]")]
+    pub fn ir_graph(
+        lang_name: &str,
+        source: &str,
+        #[wasm_bindgen(unchecked_param_type = "IrGraphOptions | undefined")] opts: JsValue,
+    ) -> Result<JsValue, JsError> {
+        let lang = source_lang(lang_name)?;
+        let (opt_level, stage) = ir_options(&opts)?;
+        let view = match js::string(&opts, "view").map_err(|m| JsError::new(&m))? {
+            None => GraphView::default(),
+            Some(s) => GraphView::parse(&s).ok_or_else(|| {
+                JsError::new(&format!(
+                    "unknown view `{s}`; expected \"merged\", \"shape\" or \"raw\""
+                ))
+            })?,
+        };
+        let graphs = inner::ir::ir_graph(lang, source, opt_level, stage, view).map_err(ir_err)?;
+        Ok(js::ir_graphs(&graphs))
     }
 
     /// The embedded standard library of `lang`'s architecture — the exact

@@ -2,7 +2,8 @@
 // End-to-end over the BUILT bundle (not the Rust crate): load the web-target
 // glue from bytes, then for both languages check → format → build → run,
 // verifying manifest checksums, the line table, and a size ceiling; then
-// the assembly languages, the tape-block codec, and the stdlib's lines.
+// the assembly languages, the tape-block codec, the stdlib's lines, and
+// the IR with its graph.
 //
 //   node scripts/wasm-smoke.mjs target/wasm-bundle/dist
 import { createHash } from "node:crypto";
@@ -274,6 +275,37 @@ check(threw, "unknown lang throws");
   eq(runToEnd(s).outcome.kind, "stopped", "…and the run finishes");
   eq(Array.from(s.snapshot(0).cells.slice(0, 3)), [1, 1, 1], "…with the library's effect on the tape");
   s.stop(); p.free();
+}
+
+// --- the IR and its graph ----------------------------------------------
+{
+  // Two moving rows share an action (merged into one `[{1,2}] m[>]` arrow);
+  // `hop` only forwards, which -O1 threads away.
+  const TMC_IR = "alphabet ab { '_', 'a', 'b' }\n\nmachine {\n  tape main: ab;\n\n  entry state scan {\n    ['a'] -> move [>] goto scan;\n    ['b'] -> move [>] goto scan;\n    ['_'] -> goto hop;\n  }\n  state hop { [*] -> goto done; }\n  state done { [*] -> stop; }\n}\n";
+  const lowered = JSON.parse(Toolchain.ir("tmc", TMC_IR, undefined));
+  check(Number.isInteger(lowered.version) && lowered.worlds[0].name === "main", "tmc ir is the IR document");
+  check(Toolchain.ir("tmc", TMC_IR, { stage: "lowered" }) === Toolchain.ir("tmc", TMC_IR, undefined), "the default stage is lowered");
+  check(Toolchain.ir("tmc", TMC_IR, { optLevel: 1, stage: "final" }) !== Toolchain.ir("tmc", TMC_IR, { optLevel: 1 }), "-O1 final differs from lowered");
+  check(Toolchain.ir("tmc", TMC_IR, { optLevel: 0, stage: "final" }) === Toolchain.ir("tmc", TMC_IR, { optLevel: 0 }), "-O0 final is lowered");
+  check(JSON.parse(Toolchain.ir("pmc", PMC_INC, undefined)).functions[0].name === "main", "pmc ir is the CFG document");
+  const merged = Toolchain.irGraph("tmc", TMC_IR, undefined);
+  eq(merged.map(g => g.name), ["main"], "irGraph has one entry per world");
+  check(merged[0].mermaid.startsWith("flowchart TD\n") && merged[0].mermaid.includes("[{1,2}] m[>]"), "the default view is merged");
+  check(Toolchain.irGraph("tmc", TMC_IR, { view: "raw" })[0].mermaid.includes("\"[1] m[>]\""), "view raw draws one arrow per row");
+  check(/-->\|"\d+"\|/.test(Toolchain.irGraph("tmc", TMC_IR, { view: "shape" })[0].mermaid), "view shape labels arrows with counts");
+  check(Toolchain.irGraph("pmc", PMC_INC, undefined).length === 1, "pmc irGraph has one entry per function");
+  for (const [what, call] of [
+    ["pma", () => Toolchain.ir("pma", ".func main\n        stp\n", undefined)],
+    ["tma", () => Toolchain.irGraph("tma", "", undefined)],
+    ["an unknown lang", () => Toolchain.ir("cobol", "", undefined)],
+    ["an unknown stage", () => Toolchain.ir("tmc", TMC_IR, { stage: "after:inline" })],
+    ["an unknown view", () => Toolchain.irGraph("tmc", TMC_IR, { view: "dense" })],
+    ["a broken source", () => Toolchain.ir("tmc", "machine {", undefined)],
+  ]) {
+    let threw = false;
+    try { call(); } catch { threw = true; }
+    check(threw, `ir/irGraph throw on ${what}`);
+  }
 }
 
 // --- size ceiling ------------------------------------------------------

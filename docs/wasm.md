@@ -2,7 +2,8 @@
 
 The toolchains run in a browser. `mtc-wasm` is the crate that exposes them
 to JavaScript: compile, lint, format and disassemble `.pmc` and `.tmc`
-sources, assemble `.pma` and `.tma` text, read and write tape-block
+sources and draw their compiler IR, assemble `.pma` and `.tma` text,
+read and write tape-block
 snapshots, and run the linked program in a session the page drives. The
 bundle it builds to is attached to every release.
 
@@ -42,8 +43,10 @@ Three classes; every other type is a plain JavaScript object, declared in
   canonical whitespace-only text, or that fatal. `build(lang, source,
   { optLevel? })` compiles with the line table on, links against the
   embedded stdlib, and returns a `Program` plus the compile channel's
-  warnings — or the fatal as one error. `stdlibSource(lang)` returns the
-  standard library's text (below). `decodeTapeBlock(bytes)` and
+  warnings — or the fatal as one error. `ir(lang, source, opts)` and
+  `irGraph(lang, source, opts)` return the compiler IR and its Mermaid
+  graph (below). `stdlibSource(lang)` returns the standard library's
+  text (below). `decodeTapeBlock(bytes)` and
   `encodeTapeBlock(block)` are the tape-block codec (below).
 - **`Program`**: `tapes()` (one `{ name, glyphs }` per band — the
   machine block's alphabets for `.tmc`; blank and mark for `.pmc`),
@@ -63,7 +66,8 @@ Three classes; every other type is a plain JavaScript object, declared in
   session borrows only the process-wide arch registry, not the program —
   so a page may rebuild a program while an earlier run is in flight.
 - **Trailing options arguments are required-but-nullable, not optional.**
-  `check`'s and `build`'s options argument and `session`'s `seeds` and
+  `check`'s, `build`'s, `ir`'s and `irGraph`'s options argument and
+  `session`'s `seeds` and
   `limits` are typed `T | undefined` in `mtc_wasm.d.ts`, without the `?`
   a genuinely optional parameter would carry — a generator limitation on
   the version this bundle pins, not a design choice. Pass `undefined`
@@ -194,6 +198,48 @@ stamped from. `mapJson()` shows the same two strings in each function's
 grafts a graph, so its rows map to the graph's lines rather than the
 routine header's; and the entry byte before a function's first mapped
 row is the function's with `line: null`, as everywhere.
+
+## The IR and its graph
+
+Two stateless calls expose what `--emit-ir` and `ir graph` expose on the
+command line, for the source languages only:
+
+```ts
+export interface IrOptions { optLevel?: 0 | 1; stage?: "lowered" | "final" }
+export interface IrGraphOptions extends IrOptions { view?: "merged" | "shape" | "raw" }
+export interface IrGraph { name: string; mermaid: string }
+
+Toolchain.ir(lang: string, source: string, opts: IrOptions | undefined): string
+Toolchain.irGraph(lang: string, source: string, opts: IrGraphOptions | undefined): IrGraph[]
+```
+
+`lang` is `"pmc"` or `"tmc"`.
+
+`ir` returns the JSON document `compile --emit-ir=STAGE` writes for the
+same source at the same optimization level, byte for byte — the `.pmc`
+CFG or the `.tmc` state graph, each carrying its own version number
+(`docs/formats.md (IR JSON)`); a `.pmc` document is the normal build
+column, as on the command line. `optLevel` reads as `build` reads it
+(`0`, or anything else for `-O1`, the default). `stage` picks the
+snapshot: `"lowered"`, the default, is the graph straight from the
+source — one state per `state` block, one row per rule — and `"final"`
+is what codegen received, which at `-O1` carries shapes the source never
+had. At `-O0` the two are the same document. The per-pass `after:<pass>`
+stages stay on the command line.
+
+`irGraph` returns one entry per world (`.tmc`) or function (`.pmc`), in
+the document's order: its name, and the flowchart `ir graph` prints
+under that name's `%% name` header, in the view `view` names — the
+merged default, `"shape"` or `"raw"`, the three views of `docs/tmt/cli.md
+(tmt ir)` and `docs/pmt/cli.md (pmt ir)`. A merged label uses the
+notation `docs/formats.md (graph label notation)` defines, so a page that
+draws its own labels from `ir`'s document can write the same text.
+
+Both throw for `"pma"` and `"tma"` — the assembler has no IR — with the
+same message as an unknown `lang`. An unknown `stage` or `view` throws,
+and so does a source that does not compile: the thrown message is the
+fatal diagnostic's, followed by its code in brackets. `check` is the
+call that reports that diagnostic with a position.
 
 ## Positions
 
