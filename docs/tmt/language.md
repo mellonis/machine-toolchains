@@ -801,15 +801,26 @@ entry state s {
 }
 ```
 
-The one arrangement that genuinely dies is a **second all-wildcard rule**:
-once one catch-all matches every input, a later catch-all can never fire.
-The compiler warns (`unreachable-rule`) and drops it. That narrowness is
-the point — *only* a second catch-all qualifies. An exact or partial rule
-written after a catch-all is not dead; it sorts into an earlier band and
-stays reachable, which is exactly what the example above relies on. The
-broader "an earlier rule already covers this one" reasoning is lint's
-richer `dead-rule` analysis (`docs/tmt/lint.md`), run at lint time over
-the same bands.
+Order alone therefore kills a rule only when an earlier rule has the
+very same pattern. The compiler checks three shapes of that:
+
+- A **second all-wildcard rule**: once one catch-all matches every
+  input, a later catch-all can never fire. The compiler warns
+  (`unreachable-rule`) and drops it.
+- A rule whose pattern — after range and set expansion — is
+  **identical to an earlier rule's and carries a wildcard**: both rows
+  land in the partial band, where source order decides, so the later
+  row can never fire. The compiler warns (`shadowed-rule`), once per
+  duplicated row, at the later rule.
+- Two **identical wildcard-free rows**: an exact-row conflict, the
+  error `exact-row-conflict` (below).
+
+That narrowness is the point — each check needs an *identical* earlier
+pattern. An exact or partial rule written after a catch-all is not dead;
+it sorts into an earlier band and stays reachable, which is exactly what
+the example above relies on. The broader "an earlier rule already covers
+this one" reasoning is lint's richer `dead-rule` analysis
+(`docs/tmt/lint.md`), run at lint time over the same bands.
 
 Rows in the exact band may never overlap: two wildcard-free rules that
 match the same input are an **exact-row conflict**, rejected at compile

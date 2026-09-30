@@ -279,6 +279,12 @@ fn compile_spec() -> CommandSpec {
                 "--nostdlib",
                 "do not read the embedded standard library's declarations",
             ),
+            FlagSpec::value(
+                "--allow",
+                "suppress a compile warning code (repeatable)",
+                ValueHint::Text,
+            )
+            .repeatable(),
             FlagSpec::boolean("-Werror", "treat warnings as errors"),
             FlagSpec::boolean("-v", "render the compile report (passes, rounds)"),
             FlagSpec::value("-o", "output path", ValueHint::File(any_file())),
@@ -386,7 +392,7 @@ fn build_spec() -> CommandSpec {
             FlagSpec::boolean("-Werror", "treat post-refinement warnings as errors"),
             FlagSpec::value(
                 "--allow",
-                "suppress a link warning code (repeatable)",
+                "suppress a compile or link warning code (repeatable)",
                 ValueHint::Text,
             )
             .repeatable(),

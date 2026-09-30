@@ -1085,7 +1085,7 @@ machine {
 
 ```
 $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo dce.tmc
-dce.tmc:5:9: warning: state `orphan` is unreachable in `main`
+dce.tmc:5:9: warning: state `orphan` is unreachable in `main` [unreachable-state]
 opt: 2 round(s)
   dce main: 1 change(s)
 $ tmt ir graph lowered.ir.json --function main
@@ -1106,7 +1106,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:dce -o alive.tmo dce.tmc
-dce.tmc:5:9: warning: state `orphan` is unreachable in `main`
+dce.tmc:5:9: warning: state `orphan` is unreachable in `main` [unreachable-state]
 $ tmt ir graph alive.ir.json --function main
 ```
 

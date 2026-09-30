@@ -221,10 +221,12 @@ pub(crate) const HEADER_RULES: &[&str] = &["unused-import", "contract-clause-ove
 
 /// True when `code` names any rule in this crate's `.tmc` tables, its `.tma`
 /// additions ([`tma::TMA_RULES`]), core's arch-agnostic asm rule table
-/// (`mtc_core::asm::lint::RULES`), OR core's link-warning catalog
-/// (`mtc_core::linker::DIAGNOSTIC_CODES`) — the shared allow namespace, five
-/// surfaces wide. One `tmt.json` serves both languages, so a `.tma`-only
-/// code must not error when validated for a `.tmc` file, and vice versa.
+/// (`mtc_core::asm::lint::RULES`), core's link-warning catalog
+/// (`mtc_core::linker::DIAGNOSTIC_CODES`), OR the compiler's own warning
+/// registry ([`crate::compiler::WARNING_CODES`]) — the shared allow
+/// namespace, six surfaces wide. One `tmt.json` serves both languages, so a
+/// `.tma`-only code must not error when validated for a `.tmc` file, and
+/// vice versa.
 pub(crate) fn known_code(code: &str) -> bool {
     RULES.iter().any(|(c, _)| *c == code)
         || OPT_IN_RULES.iter().any(|(c, _)| *c == code)
@@ -235,6 +237,10 @@ pub(crate) fn known_code(code: &str) -> bool {
         // suppress them with no new key (docs/tmt/lint.md (the allow
         // namespace)).
         || mtc_core::linker::DIAGNOSTIC_CODES.iter().any(|(c, _)| *c == code)
+        // The sixth: compile warnings, which `--allow` on `compile`/`build`
+        // and `lint.allow` in manifest-mode `build` suppress
+        // (docs/tmt/cli.md (compile warnings)).
+        || crate::compiler::WARNING_CODES.iter().any(|(c, _)| *c == code)
 }
 
 /// `--allow`/`--warn` codes must each name a real rule (typo protection), over
@@ -557,6 +563,19 @@ export routine mark(tape t: bits writes { '0', '1' } never writes { '1' });
                 !RULES.iter().any(|(c, _)| c == code),
                 "{code} is not a lint rule"
             );
+            assert!(validate_allow(&[(*code).to_string()]).is_ok(), "{code}");
+        }
+    }
+
+    /// The sixth surface: every compile-warning code is a known code, so
+    /// `--allow` on `compile`/`build` and `lint.allow` in `tmt.json` may
+    /// name one. Mutation it catches: drop the `WARNING_CODES` arm of
+    /// `known_code` and `shadowed-rule` — a compile warning and no lint
+    /// rule — is rejected.
+    #[test]
+    fn validate_allow_also_accepts_compile_warning_codes() {
+        assert!(!RULES.iter().any(|(c, _)| *c == "shadowed-rule"));
+        for (code, _) in crate::compiler::WARNING_CODES {
             assert!(validate_allow(&[(*code).to_string()]).is_ok(), "{code}");
         }
     }

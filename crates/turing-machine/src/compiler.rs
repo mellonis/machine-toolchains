@@ -532,6 +532,46 @@ macro_rules! code_registry {
     };
 }
 
+/// Every code a compile WARNING can carry, with its one-line meaning — the
+/// front end's counterpart of [`CompileErrorKind::CODES`]. The CLI brackets
+/// the code onto every rendered warning, `--allow` and `lint.allow` accept
+/// it (`crate::lint::validate_allow`), and the published table in
+/// docs/tmt/cli.md (compile warnings) is set-compared against this list
+/// both ways. An emitter pushing a code missing from it fails the
+/// crate's emitter-vs-registry scan. `unused-import` and `unused-routine`
+/// are also lint rules of the same name (docs/tmt/lint.md).
+pub const WARNING_CODES: &[(&str, &str)] = &[
+    (
+        "empty-expansion",
+        "A rule of a grafted graph maps no host symbol to one of its match cells at this splice, so it expands to zero rows there and can never fire in this instance.",
+    ),
+    (
+        "expansion-threshold",
+        "A rule's ranges and sets expand to more rows than the compiler's cost threshold.",
+    ),
+    (
+        "shadowed-rule",
+        "A rule whose pattern, after range and set expansion, is identical to an earlier rule's in the same state and carries a wildcard: the later row can never fire.",
+    ),
+    (
+        "undeclared-external",
+        "A reference to a name defined outside this unit that no `use` declares.",
+    ),
+    (
+        "unreachable-rule",
+        "A second all-wildcard rule in one state: the first already matches every input, so the compiler drops this one.",
+    ),
+    (
+        "unreachable-state",
+        "A state no path from its world's entry reaches.",
+    ),
+    ("unused-import", "A `use` import nothing in the unit names."),
+    (
+        "unused-routine",
+        "A routine that is not exported and that no `call` or `bind` targets.",
+    ),
+];
+
 impl CompileErrorKind {
     code_registry! {
         CompileErrorKind::Lex(_) => "lex-error",

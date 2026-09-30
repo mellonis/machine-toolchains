@@ -46,6 +46,7 @@ FLAGS:
   --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
                      repeatable, in command-line order)
   --nostdlib         do not read the embedded standard library's declarations
+  --allow CODE       suppress a compile warning code (repeatable)
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
 ";
@@ -195,17 +196,33 @@ pub(super) fn render_unresolved(failures: &[crate::header::UnresolvedSource]) ->
     out
 }
 
-pub(super) fn render_warnings(stderr: &mut String, input: &Path, report: &CompileReport) {
+/// Every non-allowed compile warning as `FILE:LINE:COL: warning: MESSAGE
+/// [code]`, one line each (docs/tmt/cli.md (compile warnings)). Returns
+/// how many were printed, which is what `-Werror` counts — an allowed
+/// warning is neither shown nor promoted.
+pub(super) fn render_warnings(
+    stderr: &mut String,
+    input: &Path,
+    report: &CompileReport,
+    allow: &[String],
+) -> usize {
+    let mut n = 0;
     for d in &report.diagnostics {
+        if allow.iter().any(|a| a == d.code) {
+            continue;
+        }
+        n += 1;
         let _ = writeln!(
             stderr,
-            "{}:{}:{}: warning: {}",
+            "{}:{}:{}: warning: {} [{}]",
             input.display(),
             d.span.start.line,
             d.span.start.col,
-            d.message
+            d.message,
+            d.code
         );
     }
+    n
 }
 
 /// Every non-allowed link warning, in the compile-warning format
@@ -338,6 +355,11 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     }
     let mut options = parse_compile_options(&mut args);
     let emit_asm = args.flag("-S");
+    // `--allow` draws from the shared namespace `tmt lint`, `tmt link` and
+    // `tmt build` validate against, so a typo aborts up front
+    // (docs/tmt/lint.md (the allow namespace)).
+    let allow = args.values("--allow")?;
+    crate::lint::validate_allow(&allow).map_err(|e| e.to_string())?;
     let werror = args.flag("-Werror");
     let verbose = args.flag("-v");
     let emit_ir = take_emit_ir(&mut args)?;
@@ -373,14 +395,13 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     })?;
 
     let mut stderr = String::new();
-    render_warnings(&mut stderr, input, &out.report);
+    let warned = render_warnings(&mut stderr, input, &out.report, &allow);
     if verbose {
         render_opt_report(&mut stderr, &out.report);
     }
-    if werror && !out.report.diagnostics.is_empty() {
+    if werror && warned > 0 {
         return Err(format!(
-            "{stderr}-Werror: {} warning(s) treated as errors",
-            out.report.diagnostics.len()
+            "{stderr}-Werror: {warned} warning(s) treated as errors"
         ));
     }
 

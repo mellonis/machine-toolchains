@@ -55,8 +55,12 @@ tmt: unknown lint rule `no-such-rule`
 
 `--allow` and `--warn` draw from the UNION of every catalog `tmt` knows:
 the `.tmc` rules, the opt-in rule, the `.tma` additions, core's
-arch-agnostic assembly rules, and — the fifth surface — the linker's own
-link-warning codes (`docs/tmt/cli.md (link warnings)`). One allow-list
+arch-agnostic assembly rules, the linker's own link-warning codes
+(`docs/tmt/cli.md (link warnings)`), and — the sixth surface — the
+compiler's own warning codes (`docs/tmt/cli.md (compile warnings)`).
+A lint run itself never prints a compile warning, so naming one here is
+inert for `tmt lint`; it is `tmt compile`/`tmt build` that honour it.
+One allow-list
 therefore works for a batch mixing both languages — a `.tma`-only code
 named on a `.tmc` run is accepted and simply inert for that file, and a
 `.tmc`-only code on a `.tma` run likewise. That is what lets a single
@@ -178,7 +182,7 @@ still names it.
 |---|---|
 | `tmt lint` | Yes — per input file, unioned with `--allow`; `--no-config` opts out. |
 | `tmt lsp` (both `.tmc` and `.tma` services) | Yes — per document, mtime-cached, unioned with editor settings; both services watch `**/tmt.json` so an edit re-resolves. |
-| `tmt build` (manifest mode) | Partially — the same file its own project-section discovery already located, unioned with `--allow`, for the link stage only (`docs/tmt/cli.md (link warnings)`); no per-file walk, and compile warnings are unaffected. |
+| `tmt build` (manifest mode) | Partially — the same file its own project-section discovery already located, unioned with `--allow`, for compile warnings and link warnings alike (`docs/tmt/cli.md (compile warnings)`, `docs/tmt/cli.md (link warnings)`); no per-file walk. |
 | `tmt fmt` | No. |
 | every other subcommand | No. |
 
@@ -459,13 +463,16 @@ overlap are a conflict the compiler rejects, not a silent shadow.
 c.tmc:7:5: lint: this rule is unreachable — an earlier rule in `s` already covers it
 ```
 
-`dead-rule` is lint's richer relative of two warnings the compiler raises
-on its own channel (`docs/tmt/language.md`): `unreachable-rule` (a second
-all-wildcard rule — and only that exact shape) and `empty-expansion` (a
+`dead-rule` is lint's richer relative of three warnings the compiler
+raises on its own channel (`docs/tmt/language.md (which rule fires)`,
+`docs/tmt/cli.md (compile warnings)`): `unreachable-rule` (a second
+all-wildcard rule — and only that exact shape), `shadowed-rule` (a
+wildcard-carrying rule whose expanded pattern is identical to an earlier
+one's — identity only, never cover) and `empty-expansion` (a
 rule of a grafted graph that maps to no host symbol at its splice, so it
 expands to zero rows there — `docs/tmt/language.md (pattern ranges)`; a
 rule naming a symbol its own tape lacks is a compile error, not this
-warning). Those two live on the compile channel because compilation must
+warning). Those three live on the compile channel because compilation must
 be total and honest even when lint never runs; `dead-rule` is the fuller
 same-band-cover analysis, done only at lint time.
 

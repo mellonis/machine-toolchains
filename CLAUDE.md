@@ -168,7 +168,7 @@ An embedded `.pmc` string (`include_str!("std.pmc")`, 11 exported `std::` routin
 
 Four lint surfaces — `.pmc`, `.pma`, `.tmc`, `.tma` — share **one allow namespace**. Core owns a closed arch-agnostic `asm::lint` (5 rules driven by `Flow`/`break_opcode`); each arch merges its own over it. `lint.allow` in `pmt.json`/`tmt.json` is **nearest-ancestor, union — never a cascade**. Rulings that are design, not oversight:
 
-- **`unreachable-rule` is deliberately narrow** — only a second all-wildcard rule. Band dispatch keeps exact and partial rules reachable after a catch-all, so a broader rule would be wrong.
+- **`unreachable-rule` is deliberately narrow** — only a second all-wildcard rule. Band dispatch keeps exact and partial rules reachable after a catch-all, so a broader rule would be wrong. Its sibling `shadowed-rule` (expansion-time) is equally narrow: an expanded row IDENTICAL to an earlier one and carrying a wildcard; an identical wildcard-free pair is the error `exact-row-conflict`.
 - **`index-identity-map` is a warn-tier audit, not an error** — omitted-map call/bind index identity is intended semantics (`docs/tmt/language.md`).
 - **`unused-alphabet`/`unused-tape` and `unused-graft-name`/`unused-exit` are export-independent by design.**
 - **Two quickfixes were withheld after probing**: `redundant-identity-pairs` (not byte-identical) and `dead-rule` (silent-miscompile risk); ten more rules carry documented `None` reasons. Re-derive the proof before adding either.

@@ -52,7 +52,7 @@ LINK FLAGS (argv mode only; the manifest declares these):
   -o OUT.tmx            output path
 
 COMMON:
-  --allow CODE          suppress a link warning code (repeatable)
+  --allow CODE          suppress a compile or link warning code (repeatable)
   --no-relax            keep every symbol site in far form
   --call-mech MECH      bound-call lowering: mono | frames | hybrid
   --keep-objects        write each intermediate .tmo next to its source
@@ -235,8 +235,8 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
 /// "no manifest found" wording. Also returns that same file's own
 /// `lint.allow` — from the SAME load the walk already did, never a
 /// second parse of the located path — which both callers union with
-/// their own `--allow` list to suppress link warnings (docs/tmt/lint.md
-/// (the allow namespace)).
+/// their own `--allow` list to suppress compile and link warnings
+/// (docs/tmt/lint.md (the allow namespace)).
 fn discover_project(
     start: &Path,
 ) -> Result<(PathBuf, crate::project::Manifest, Vec<String>), String> {
@@ -487,8 +487,9 @@ fn build_one_target(
     let profile = manifest.profiles.resolve(flags.release_preset);
     let options = manifest_compile_options(profile, flags);
     let werror = profile.werror || flags.werror;
-    // The link stage's allow list is `--allow` unioned with this same
-    // manifest file's own `lint.allow` — no second discovery walk, since
+    // Both stages' allow list — compile warnings and link warnings — is
+    // `--allow` unioned with this same manifest file's own `lint.allow` —
+    // no second discovery walk, since
     // `manifest_allow` already came off the file `discover_project`
     // located (docs/tmt/lint.md (the allow namespace)).
     let allow: Vec<String> = flags
@@ -558,8 +559,10 @@ fn build_one_target(
     let mut stderr = String::new();
     let mut warning_count = 0usize;
     for (path, report) in &reports {
-        warning_count += report.diagnostics.len();
-        render_warnings(&mut stderr, path, report);
+        // The same union allow list the link stage reads: `--allow` plus
+        // the manifest's own `lint.allow` (docs/tmt/cli.md (compile
+        // warnings)). `-Werror` counts what survives it.
+        warning_count += render_warnings(&mut stderr, path, report, &allow);
         if flags.verbose {
             render_opt_report(&mut stderr, report);
         }
@@ -848,8 +851,9 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     let mut stderr = String::new();
     let mut warning_count = 0usize;
     for (path, report) in &reports {
-        warning_count += report.diagnostics.len();
-        render_warnings(&mut stderr, path, report);
+        // Argv mode reads no `tmt.json`, so `--allow` alone — the list its
+        // link stage reads too.
+        warning_count += render_warnings(&mut stderr, path, report, &flags.allow);
         if flags.verbose {
             render_opt_report(&mut stderr, report);
         }

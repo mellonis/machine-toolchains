@@ -7,7 +7,9 @@
 //! in source fails here until the page follows (and vice versa). The
 //! assembly namespace is shared framework territory: its catalog lives
 //! once on `docs/core.md (error codes)` (guarded from the core crate),
-//! and this page must point there rather than fork a copy.
+//! and this page must point there rather than fork a copy. The link- and
+//! compile-warning catalogs get the same two-way compare against their
+//! own registries.
 
 use mtc_turing_machine::CompileErrorKind;
 
@@ -84,6 +86,32 @@ fn the_published_link_warning_catalog_lists_exactly_the_registry_codes() {
         .collect();
     registry.sort();
     assert_eq!(published, registry, "docs/tmt/cli.md (### Link warnings)");
+}
+
+/// The published compile-warning catalog on the CLI page lists exactly
+/// the front end's warning registry — the same two-way set-compare the
+/// other two catalogs get.
+///
+/// Mutation it catches: a code registered without a row (or a row left
+/// behind for a code the registry lacks) and the sorted vectors differ.
+#[test]
+fn the_published_compile_warning_catalog_lists_exactly_the_registry_codes() {
+    let doc = doc();
+    let mut published = table_codes(&section(&doc, "### Compile warnings"));
+    published.sort();
+    assert!(
+        !published.is_empty(),
+        "no `### Compile warnings` table in docs/tmt/cli.md"
+    );
+    let mut registry: Vec<String> = mtc_turing_machine::compiler::WARNING_CODES
+        .iter()
+        .map(|(c, _)| (*c).to_string())
+        .collect();
+    registry.sort();
+    assert_eq!(
+        published, registry,
+        "docs/tmt/cli.md (### Compile warnings)"
+    );
 }
 
 #[test]

@@ -77,6 +77,7 @@ FLAGS:
   --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
                      repeatable, in command-line order)
   --nostdlib         do not read the embedded standard library's declarations
+  --allow CODE       suppress a compile warning code (repeatable)
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
 ```
@@ -116,10 +117,13 @@ clause states. `--release` includes `--strip-asserts`, so a release
 build carries no head-contract check; for a program with no clause it
 changes nothing.
 
-Compile warnings always print to stderr as `FILE:LINE:COL: warning: MESSAGE`.
-`-v` additionally renders the optimizer's report — the number of fixpoint
-rounds and, per round, each pass's change count per world. `-Werror` turns
-every warning into a compile failure.
+Compile warnings always print to stderr as
+`FILE:LINE:COL: warning: MESSAGE [CODE]`, the bracketed code one of the
+"Compile warnings" catalog below. `--allow CODE` suppresses a warning by
+its code (repeatable; an unknown code is refused up front, as on `tmt
+lint`). `-v` additionally renders the optimizer's report — the number of
+fixpoint rounds and, per round, each pass's change count per world.
+`-Werror` turns every warning `--allow` leaves into a compile failure.
 
 ### `-O0` and `-O1`
 
@@ -342,6 +346,36 @@ subsection.
 | `then-required` | A `call`/bind site omits `then`, but its callee is not known (declared to this unit) to be `noreturn` — `then` stays mandatory against an unknown callee or one that can return, since the linker never checks it either way. |
 | `internal-error` | The compiler broke its own invariant — generated assembly failed to assemble, or a compiler-built IR world failed validation. A compiler bug, not a source error; please report it. |
 
+### Compile warnings
+
+A compile warning never stops the compile. It renders as
+`FILE:LINE:COL: warning: MESSAGE [CODE]`, on `tmt compile` and on `tmt
+build`'s compile stage alike:
+
+```
+shadow.tmc:8:5: warning: this rule is unreachable — an earlier rule has the same pattern [K, *] [shadowed-rule]
+```
+
+The codes join the one allow namespace `tmt lint` uses
+(`docs/tmt/lint.md (the allow namespace)`): `--allow CODE` on `tmt
+compile` or `tmt build` suppresses one, and in manifest mode so does
+`lint.allow` in `tmt.json`. `-Werror` counts only the warnings that
+survive the allow list. Allowing a warning only silences it — the rule
+`unreachable-rule` names is still dropped. Two codes are also lint rules
+of the same name, `unused-import` and `unused-routine`
+(`docs/tmt/lint.md`), and one allow entry covers both channels.
+
+| Code | Meaning |
+|---|---|
+| `empty-expansion` | A rule of a grafted graph maps no host symbol to one of its match cells at this splice, so it expands to zero rows there and can never fire in this instance (`docs/tmt/language.md (pattern ranges)`). |
+| `expansion-threshold` | A rule's ranges and sets expand to more rows than the compiler's cost threshold. |
+| `shadowed-rule` | A rule whose pattern, after range and set expansion, is identical to an earlier rule's in the same state and carries a wildcard: the later row can never fire (`docs/tmt/language.md (which rule fires)`). |
+| `undeclared-external` | A reference to a name defined outside this unit that no `use` declares; `tmt build` drops it where the build defines the name (see `tmt build`, below). |
+| `unreachable-rule` | A second all-wildcard rule in one state: the first already matches every input, so the compiler drops this one. |
+| `unreachable-state` | A state no path from its world's entry reaches. |
+| `unused-import` | A `use` import nothing in the unit names — see the lint rule of the same name. |
+| `unused-routine` | A routine that is not exported and that no `call` or `bind` targets — see the lint rule of the same name. |
+
 ## `tmt asm`
 
 ```
@@ -462,8 +496,10 @@ A link warning names a site the linker can see is suspect but will not
 refuse — a callee whose alphabet is narrower than the caller's band, one
 whose glyphs differ at the same width, a call with no continuation
 into a callee that can return, or a routine body returning through an
-exit its signature does not declare. It prints always, in the same format a
-compile warning does, and carries a bracketed code:
+exit its signature does not declare. It prints always and, like a compile
+warning, carries a bracketed code — located by function and offset, or
+by source line when the objects carry debug data, since a link diagnostic
+has no file or column:
 
 ```
 main+0x0001: warning: `sub` reads a 3-symbol alphabet where `main`'s tape 0 is 5 wide [narrow-alphabet]
@@ -549,7 +585,7 @@ LINK FLAGS (argv mode only; the manifest declares these):
   -o OUT.tmx            output path
 
 COMMON:
-  --allow CODE          suppress a link warning code (repeatable)
+  --allow CODE          suppress a compile or link warning code (repeatable)
   --no-relax            keep every symbol site in far form
   --call-mech MECH      bound-call lowering: mono | frames | hybrid
   --keep-objects        write each intermediate .tmo next to its source
@@ -619,10 +655,12 @@ a build is either fully argv-driven or fully manifest-driven.
   rejected: argv mode reads it alone, and manifest mode unions it with
   the manifest's own `lint.allow` — `--allow` on the command line can
   only suppress more, never fewer, of what the manifest already
-  suppresses. `-Werror` covers both stages in both modes: compile
-  warnings (refined against the declared name set first) and, since the
-  link stage now diagnoses too, link warnings — see
-  "### Link warnings" under `tmt link`.
+  suppresses. That one list governs both stages: it names compile-warning
+  codes and link-warning codes alike. `-Werror` covers both stages in
+  both modes, counting what the allow list leaves: compile warnings
+  (refined against the declared name set first) and link warnings — see
+  "### Compile warnings" under `tmt compile` and "### Link warnings"
+  under `tmt link`.
 - **Manifest mode only** (`--run`, `--list-targets`): argv mode has no
   notion of a target or a declared run block for either flag to act on.
 
