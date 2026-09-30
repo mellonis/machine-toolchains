@@ -551,7 +551,7 @@ pub const WARNING_CODES: &[(&str, &str)] = &[
     ),
     (
         "shadowed-rule",
-        "A rule whose pattern, after range and set expansion, is identical to an earlier rule's in the same state and carries a wildcard: the later row can never fire.",
+        "A rule whose pattern, after range and set expansion, is identical to an earlier rule's in the same state and carries a wildcard: the later row can never fire. One warning per pair of rules, naming the earlier rule's position and the first coinciding row.",
     ),
     (
         "undeclared-external",
@@ -559,7 +559,7 @@ pub const WARNING_CODES: &[(&str, &str)] = &[
     ),
     (
         "unreachable-rule",
-        "A second all-wildcard rule in one state: the first already matches every input, so the compiler drops this one.",
+        "A second all-wildcard rule in one state: the first — named by position — already matches every input, so the compiler drops this one.",
     ),
     (
         "unreachable-state",
@@ -2589,19 +2589,22 @@ fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnos
         let mut kept_calls: Vec<ResolvedCall> = Vec::new();
         let mut call_ix = 0usize; // running index into `old_calls` (source order)
         for state in &mut world.states {
-            let mut seen_catch_all = false;
+            // The first catch-all's span, which every later one names.
+            let mut seen_catch_all: Option<Span> = None;
             let old_rules = std::mem::take(&mut state.rules);
             let mut new_rules: Vec<Rule> = Vec::with_capacity(old_rules.len());
             for rule in old_rules {
                 let is_call = matches!(rule.transition, Transition::Call { .. });
                 let is_catch_all = is_all_wildcard_rule(&rule);
-                if is_catch_all && seen_catch_all {
+                if let (true, Some(first)) = (is_catch_all, seen_catch_all) {
                     diagnostics.push(Diagnostic {
                         code: "unreachable-rule",
                         span: rule.span,
-                        message: "this rule can never fire — an earlier all-wildcard rule in \
-                                  this state already matches every input"
-                            .to_string(),
+                        message: format!(
+                            "this rule can never fire — an earlier all-wildcard rule at {}:{} \
+                             already matches every input",
+                            first.start.line, first.start.col
+                        ),
                         fix: None,
                     });
                     if is_call {
@@ -2609,7 +2612,9 @@ fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnos
                     }
                     continue;
                 }
-                seen_catch_all |= is_catch_all;
+                if is_catch_all && seen_catch_all.is_none() {
+                    seen_catch_all = Some(rule.span);
+                }
                 if is_call {
                     kept_calls.push(old_calls[call_ix].clone());
                     call_ix += 1;

@@ -1928,10 +1928,42 @@ fn render_pattern(pattern: &[Cell], glyphs: &[Vec<String>]) -> String {
     format!("[{}]", cells.join(", "))
 }
 
+/// One shadowing pair of SOURCE rules within a world: the earlier rule's
+/// span, the later rule's span, and every distinct expanded pattern of the
+/// later rule an identical earlier row shadows, in first-seen order. Keyed
+/// on the pair across the whole world, so a range rule's many expanded
+/// rows, and a graph's body spliced by several grafts, each warn once
+/// (docs/tmt/language.md (which rule fires)).
+struct Shadow {
+    earlier: Span,
+    later: Span,
+    patterns: Vec<String>,
+}
+
+/// One `shadowed-rule` warning per [`Shadow`], at the later rule, naming
+/// the earlier rule's position and the first shadowed row.
+fn shadow_warnings(shadows: Vec<Shadow>, warn: &mut Vec<Diagnostic>) {
+    for s in shadows {
+        let more = match s.patterns.len() - 1 {
+            0 => String::new(),
+            n => format!(" and {n} more rows"),
+        };
+        warn.push(Diagnostic {
+            code: "shadowed-rule",
+            span: s.later,
+            message: format!(
+                "this rule is unreachable — the rule at {}:{} already matches {}{more}",
+                s.earlier.start.line, s.earlier.start.col, s.patterns[0]
+            ),
+            fix: None,
+        });
+    }
+}
+
 fn check_state_rows(
     state: &ExpandedState,
     glyphs: &[Vec<String>],
-    warn: &mut Vec<Diagnostic>,
+    shadows: &mut Vec<Shadow>,
 ) -> Result<(), CompileError> {
     for j in 0..state.rules.len() {
         let pj = &state.rules[j].pattern;
@@ -1939,16 +1971,25 @@ fn check_state_rows(
             if state.rules[i].pattern == *pj {
                 if is_all_wild(pj) || pj.iter().any(|c| matches!(c, Cell::Wild)) {
                     // A partial/full wildcard duplicate is a shadow (the later
-                    // row is unreachable); warn, don't fail.
-                    warn.push(Diagnostic {
-                        code: "shadowed-rule",
-                        span: state.rules[j].span,
-                        message: format!(
-                            "this rule is unreachable — an earlier rule has the same pattern {}",
-                            render_pattern(pj, glyphs)
-                        ),
-                        fix: None,
-                    });
+                    // row is unreachable); recorded against its pair of
+                    // source rules, warned once per pair by the caller.
+                    let (earlier, later) = (state.rules[i].span, state.rules[j].span);
+                    let pattern = render_pattern(pj, glyphs);
+                    match shadows
+                        .iter_mut()
+                        .find(|s| s.earlier == earlier && s.later == later)
+                    {
+                        Some(s) => {
+                            if !s.patterns.contains(&pattern) {
+                                s.patterns.push(pattern);
+                            }
+                        }
+                        None => shadows.push(Shadow {
+                            earlier,
+                            later,
+                            patterns: vec![pattern],
+                        }),
+                    }
                 } else {
                     // Two exact (wildcard-free) rows matching the same tuple.
                     return Err(CompileError {
@@ -2037,9 +2078,13 @@ pub(crate) fn expand(
             .iter()
             .map(|t| Ok(alphabet_glyphs(&t.alphabet, resolved)?.to_vec()))
             .collect::<Result<_, CompileError>>()?;
+        // Shadows collect across the whole world before any warns, so a
+        // graph spliced by several grafts reports its pair once.
+        let mut shadows = Vec::new();
         for st in &states {
-            check_state_rows(st, &per_tape_glyphs, &mut diagnostics)?;
+            check_state_rows(st, &per_tape_glyphs, &mut shadows)?;
         }
+        shadow_warnings(shadows, &mut diagnostics);
 
         worlds.push(ExpandedWorld {
             kind: world.kind,

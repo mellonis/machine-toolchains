@@ -806,12 +806,19 @@ very same pattern. The compiler checks three shapes of that:
 
 - A **second all-wildcard rule**: once one catch-all matches every
   input, a later catch-all can never fire. The compiler warns
-  (`unreachable-rule`) and drops it.
+  (`unreachable-rule`), naming the first catch-all's position, and
+  drops it.
 - A rule whose pattern — after range and set expansion — is
   **identical to an earlier rule's and carries a wildcard**: both rows
   land in the partial band, where source order decides, so the later
-  row can never fire. The compiler warns (`shadowed-rule`), once per
-  duplicated row, at the later rule.
+  row can never fire. The compiler warns (`shadowed-rule`) once per
+  pair of rules — at the later rule, naming the earlier rule's position
+  and the first coinciding row, however many expanded rows coincide or
+  grafts splice the pair:
+
+  ```
+  range.tmc:8:5: warning: this rule is unreachable — the rule at 7:5 already matches [a, *] and 3 more rows [shadowed-rule]
+  ```
 - Two **identical wildcard-free rows**: an exact-row conflict, the
   error `exact-row-conflict` (below).
 

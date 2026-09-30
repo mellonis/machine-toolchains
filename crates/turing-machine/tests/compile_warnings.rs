@@ -96,10 +96,11 @@ fn compile(
 }
 
 /// The issue's shape: a partial rule written twice gives exactly one
-/// warning, located at the LATER rule and tagged with its code.
+/// warning, located at the LATER rule, naming the EARLIER rule's position
+/// and tagged with its code.
 ///
 /// Mutation it catches: render the warning without its `[code]` suffix
-/// and the line no longer ends with `[shadowed-rule]`.
+/// (or without the earlier rule's position) and the line differs.
 #[test]
 fn a_duplicate_partial_rule_prints_one_tagged_warning() {
     let dir = scratch("compile_warnings_shadowed");
@@ -111,15 +112,168 @@ fn a_duplicate_partial_rule_prints_one_tagged_warning() {
     assert_eq!(
         lines[0],
         format!(
-            "{}:8:5: warning: this rule is unreachable — an earlier rule has the same \
-             pattern [K, *] [shadowed-rule]",
+            "{}:8:5: warning: this rule is unreachable — the rule at 7:5 already \
+             matches [K, *] [shadowed-rule]",
             src.display()
         )
     );
 }
 
+/// A range rule written twice: four duplicated expanded rows, ONE warning
+/// naming the first row and counting the rest.
+///
+/// Mutation it catches: the per-pair dedupe dropped, and each expanded
+/// row warns on its own line (four lines).
+#[test]
+fn a_duplicate_range_rule_warns_once_for_all_its_rows() {
+    let dir = scratch("compile_warnings_range");
+    let src = write(
+        &dir,
+        "range.tmc",
+        "\
+alphabet ab { '_', 'a', 'b', 'c', 'd' }
+
+machine {
+  tape a: ab;
+  tape b: ab;
+  entry state s {
+    ['a'..'d', *] -> stop;
+    ['a'..'d', *] -> halt;
+    [*, *] -> stop;
+  }
+}
+",
+    );
+    let out = compile(&src, &dir, &[]).expect("compiles");
+    let lines = warning_lines(&out.stderr);
+    assert_eq!(lines.len(), 1, "{}", out.stderr);
+    assert_eq!(
+        lines[0],
+        format!(
+            "{}:8:5: warning: this rule is unreachable — the rule at 7:5 already \
+             matches [a, *] and 3 more rows [shadowed-rule]",
+            src.display()
+        )
+    );
+}
+
+/// A graph whose body carries a duplicate rule, grafted twice into one
+/// world: both splices shadow the same pair of source rules, so ONE
+/// warning, positioned in the graph's own body.
+///
+/// Mutation it catches: the dedupe keyed per state rather than per
+/// world, and each splice warns on its own line (two lines).
+#[test]
+fn a_graph_grafted_twice_warns_once_for_its_duplicate_rule() {
+    let dir = scratch("compile_warnings_graft_twice");
+    let src = write(
+        &dir,
+        "graft2.tmc",
+        "\
+alphabet ab { '_', 'K' }
+
+graph g(tape t: ab, tape u: ab, state done) {
+  entry state s {
+    ['K', *] -> done;
+    ['K', *] -> done;
+    [*, *] -> done;
+  }
+}
+
+machine {
+  tape a: ab;
+  tape b: ab;
+  entry graft g(t = a, u = b, done = g2) as g1;
+  graft g(t = a, u = b, done = fin) as g2;
+  state fin { [*, *] -> stop; }
+}
+",
+    );
+    let out = compile(&src, &dir, &[]).expect("compiles");
+    let lines = warning_lines(&out.stderr);
+    assert_eq!(lines.len(), 1, "{}", out.stderr);
+    assert_eq!(
+        lines[0],
+        format!(
+            "{}:6:5: warning: this rule is unreachable — the rule at 5:5 already \
+             matches [K, *] [shadowed-rule]",
+            src.display()
+        )
+    );
+}
+
+/// Two DIFFERENT later rules, each shadowed by the same earlier rule: two
+/// warnings, one per later rule.
+///
+/// Mutation it catches: the dedupe keyed on the earlier rule alone, and
+/// the second later rule's warning is swallowed (one line).
+#[test]
+fn two_later_rules_shadowed_by_one_rule_warn_separately() {
+    let dir = scratch("compile_warnings_two_later");
+    let src = write(
+        &dir,
+        "two.tmc",
+        "\
+alphabet ab { '_', 'K' }
+
+machine {
+  tape a: ab;
+  tape b: ab;
+  entry state s {
+    ['K', *] -> stop;
+    ['K', *] -> halt;
+    ['K', *] -> stop;
+    [*, *] -> stop;
+  }
+}
+",
+    );
+    let out = compile(&src, &dir, &[]).expect("compiles");
+    let lines = warning_lines(&out.stderr);
+    assert_eq!(lines.len(), 2, "{}", out.stderr);
+    assert!(
+        lines[0].contains(":8:5: warning: this rule is unreachable — the rule at 7:5 ")
+            && lines[1].contains(":9:5: warning: this rule is unreachable — the rule at 7:5 "),
+        "{}",
+        out.stderr
+    );
+}
+
+/// Two identical wildcard-free rows stay the fatal `exact-row-conflict`,
+/// untouched by the warning's dedupe.
+///
+/// Mutation it catches: the exact-row branch folded into the warning path.
+#[test]
+fn an_identical_exact_pair_is_still_a_conflict_error() {
+    let dir = scratch("compile_warnings_exact");
+    let src = write(
+        &dir,
+        "exact.tmc",
+        "\
+alphabet ab { '_', 'K' }
+
+machine {
+  tape a: ab;
+  entry state s {
+    ['K'] -> stop;
+    ['K'] -> halt;
+    [*] -> stop;
+  }
+}
+",
+    );
+    let err = compile(&src, &dir, &[]).expect_err("an exact-row conflict is fatal");
+    assert!(
+        err.starts_with(&format!("{}:7:5: error: ", src.display()))
+            && err.ends_with("[exact-row-conflict]"),
+        "{err}"
+    );
+}
+
+/// A second catch-all names the first one's position.
+///
 /// Mutation it catches: the `[code]` suffix dropped from the compile
-/// renderer, for this code as for the other.
+/// renderer, or the earlier catch-all's position left out of the message.
 #[test]
 fn a_second_catch_all_prints_its_own_code() {
     let dir = scratch("compile_warnings_catch_all");
@@ -127,11 +281,13 @@ fn a_second_catch_all_prints_its_own_code() {
     let out = compile(&src, &dir, &[]).expect("a warning does not fail the compile");
     let lines = warning_lines(&out.stderr);
     assert_eq!(lines.len(), 1, "{}", out.stderr);
-    assert!(
-        lines[0].starts_with(&format!("{}:7:5: warning: ", src.display()))
-            && lines[0].ends_with(" [unreachable-rule]"),
-        "{}",
-        lines[0]
+    assert_eq!(
+        lines[0],
+        format!(
+            "{}:7:5: warning: this rule can never fire — an earlier all-wildcard rule at \
+             6:5 already matches every input [unreachable-rule]",
+            src.display()
+        )
     );
 }
 
@@ -289,13 +445,59 @@ fn rust_files(root: &Path, dir: &Path, skip: &[&str], out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The code literal of every bare `Diagnostic { … code: "…" … }`
-/// construction in `text`: a `Diagnostic {` not preceded by an identifier
-/// character (so `LinkDiagnostic {` and `ServiceDiagnostic {` are not
-/// matched), then the first `code: "` within the next few lines.
-fn emitted_codes(text: &str) -> Vec<String> {
+/// What [`scan_emitters`] finds in one source text.
+#[derive(Debug, Default, PartialEq)]
+struct Scan {
+    /// The code literal of every scannable construction.
+    codes: Vec<String>,
+    /// The 1-based line of every `Diagnostic {` whose code is NOT a string
+    /// literal (a `const`, a variable, the `code,` shorthand) or whose
+    /// `code` field the scan cannot find — a construction the guard cannot
+    /// check, so it fails rather than passing it silently.
+    unscannable: Vec<usize>,
+}
+
+/// The first `code` field inside the construction starting at `lines[0]`
+/// (the construction's own line and the next few): `Some(Ok(literal))`
+/// for `code: "…"`, `Some(Err(()))` for any other `code` expression,
+/// `None` when no `code` field appears at all.
+fn code_field(lines: &[&str]) -> Option<Result<String, ()>> {
+    for line in lines {
+        let mut from = 0;
+        while let Some(pos) = line[from..].find("code") {
+            let at = from + pos;
+            from = at + "code".len();
+            let before_ok = !line[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            let after = line[from..].trim_start();
+            if !before_ok {
+                continue;
+            }
+            if let Some(value) = after.strip_prefix(':') {
+                let value = value.trim_start();
+                return Some(match value.strip_prefix('"') {
+                    Some(rest) => Ok(rest[..rest.find('"').expect("closing quote")].to_string()),
+                    None => Err(()),
+                });
+            }
+            if after.starts_with(',') || after.starts_with('}') || after.is_empty() {
+                // The `code` field shorthand: the value is a binding.
+                return Some(Err(()));
+            }
+        }
+    }
+    None
+}
+
+/// Every bare `Diagnostic { … }` construction in `text` — a `Diagnostic {`
+/// not preceded by an identifier character, so `LinkDiagnostic {` and
+/// `ServiceDiagnostic {` are not matched — sorted into a checkable string
+/// literal code or an unscannable one.
+fn scan_emitters(text: &str) -> Scan {
     let lines: Vec<&str> = text.lines().collect();
-    let mut codes = Vec::new();
+    let mut scan = Scan::default();
     for (i, line) in lines.iter().enumerate() {
         let mut from = 0;
         while let Some(pos) = line[from..].find("Diagnostic {") {
@@ -308,17 +510,42 @@ fn emitted_codes(text: &str) -> Vec<String> {
             if preceded_by_ident {
                 continue;
             }
-            for next in lines.iter().skip(i).take(6) {
-                if let Some(start) = next.find("code: \"") {
-                    let rest = &next[start + "code: \"".len()..];
-                    let end = rest.find('"').expect("closing quote");
-                    codes.push(rest[..end].to_string());
-                    break;
-                }
+            let window = &lines[i..(i + 6).min(lines.len())];
+            let mut first = window.to_vec();
+            first[0] = &line[at + "Diagnostic {".len()..];
+            match code_field(&first) {
+                Some(Ok(code)) => scan.codes.push(code),
+                Some(Err(())) | None => scan.unscannable.push(i + 1),
             }
         }
     }
-    codes
+    scan
+}
+
+/// The scan itself, over synthetic sources: a literal is read, and a
+/// `const`, a variable, the shorthand, and a construction with no visible
+/// `code` field are each reported by line instead of passing.
+///
+/// Mutation it catches: the scan falling back to "no literal found, skip
+/// it" — each non-literal case then lands in neither list.
+#[test]
+fn the_emitter_scan_fails_closed_on_a_non_literal_code() {
+    let text = "\
+let a = Diagnostic {
+    code: \"lit-code\",
+};
+let b = Diagnostic {
+    code: SOME_CONST,
+};
+let c = Diagnostic { span, code, message, fix: None };
+let d = LinkDiagnostic { code: OTHER };
+let e = Diagnostic {
+    span,
+};
+";
+    let scan = scan_emitters(text);
+    assert_eq!(scan.codes, vec!["lit-code".to_string()]);
+    assert_eq!(scan.unscannable, vec![4, 7, 9]);
 }
 
 /// The front end's emitters and the published registry name the same
@@ -327,21 +554,35 @@ fn emitted_codes(text: &str) -> Vec<String> {
 /// the type system; this is a SOURCE SCAN instead, over every file of the
 /// crate except the lint catalog (`lint/`, guarded by its own rule
 /// tables) and the language server (`lsp/`, which only re-publishes).
-/// It sees only a code written as a literal in a `Diagnostic { … }`
-/// construction — a code computed at run time would slip past it, and
-/// none exists today. The floor keeps the scan from passing vacuously.
+/// It reads a code written as a string literal in a `Diagnostic { … }`
+/// construction; any other `code` expression fails the guard by file and
+/// line rather than slipping past it. The floor keeps the scan from
+/// passing vacuously.
 ///
 /// Mutation it catches: emit a code the registry lacks (or retire an
-/// emitter and leave its row behind) and the sets differ.
+/// emitter and leave its row behind) and the sets differ; emit one through
+/// a `const` and the unscannable list is non-empty.
 #[test]
 fn every_front_end_warning_code_is_registered() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&root, &root, &["lint", "lsp"], &mut files);
-    let mut emitted: Vec<String> = files
-        .iter()
-        .flat_map(|f| emitted_codes(&std::fs::read_to_string(f).unwrap()))
-        .collect();
+    let mut emitted: Vec<String> = Vec::new();
+    let mut unscannable: Vec<String> = Vec::new();
+    for f in &files {
+        let scan = scan_emitters(&std::fs::read_to_string(f).unwrap());
+        emitted.extend(scan.codes);
+        unscannable.extend(
+            scan.unscannable
+                .iter()
+                .map(|line| format!("{}:{line}", f.display())),
+        );
+    }
+    assert!(
+        unscannable.is_empty(),
+        "unscannable emitter — use a string literal or add it to the registry \
+         explicitly: {unscannable:#?}"
+    );
     emitted.sort();
     emitted.dedup();
     assert!(emitted.len() >= 8, "the scan found only {emitted:?}");

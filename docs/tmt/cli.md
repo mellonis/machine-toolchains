@@ -353,7 +353,17 @@ A compile warning never stops the compile. It renders as
 build`'s compile stage alike:
 
 ```
-shadow.tmc:8:5: warning: this rule is unreachable — an earlier rule has the same pattern [K, *] [shadowed-rule]
+shadow.tmc:8:5: warning: this rule is unreachable — the rule at 7:5 already matches [K, *] [shadowed-rule]
+```
+
+A `shadowed-rule` warning is one per pair of source rules — the later
+rule, located, and the earlier one it names by position — however many
+of their expanded rows coincide, and however many grafts splice the
+pair into one world. It quotes the first coinciding row and counts the
+rest; a range rule written twice reads:
+
+```
+range.tmc:8:5: warning: this rule is unreachable — the rule at 7:5 already matches [a, *] and 3 more rows [shadowed-rule]
 ```
 
 The codes join the one allow namespace `tmt lint` uses
@@ -369,9 +379,9 @@ of the same name, `unused-import` and `unused-routine`
 |---|---|
 | `empty-expansion` | A rule of a grafted graph maps no host symbol to one of its match cells at this splice, so it expands to zero rows there and can never fire in this instance (`docs/tmt/language.md (pattern ranges)`). |
 | `expansion-threshold` | A rule's ranges and sets expand to more rows than the compiler's cost threshold. |
-| `shadowed-rule` | A rule whose pattern, after range and set expansion, is identical to an earlier rule's in the same state and carries a wildcard: the later row can never fire (`docs/tmt/language.md (which rule fires)`). |
+| `shadowed-rule` | A rule whose pattern, after range and set expansion, is identical to an earlier rule's in the same state and carries a wildcard: the later row can never fire. One warning per pair of rules, naming the earlier rule's position and the first coinciding row (`docs/tmt/language.md (which rule fires)`). |
 | `undeclared-external` | A reference to a name defined outside this unit that no `use` declares; `tmt build` drops it where the build defines the name (see `tmt build`, below). |
-| `unreachable-rule` | A second all-wildcard rule in one state: the first already matches every input, so the compiler drops this one. |
+| `unreachable-rule` | A second all-wildcard rule in one state: the first — named by position — already matches every input, so the compiler drops this one. |
 | `unreachable-state` | A state no path from its world's entry reaches. |
 | `unused-import` | A `use` import nothing in the unit names — see the lint rule of the same name. |
 | `unused-routine` | A routine that is not exported and that no `call` or `bind` targets — see the lint rule of the same name. |

@@ -181,7 +181,7 @@ still names it.
 | Surface | Reads `tmt.json` |
 |---|---|
 | `tmt lint` | Yes — per input file, unioned with `--allow`; `--no-config` opts out. |
-| `tmt lsp` (both `.tmc` and `.tma` services) | Yes — per document, mtime-cached, unioned with editor settings; both services watch `**/tmt.json` so an edit re-resolves. |
+| `tmt lsp` (both `.tmc` and `.tma` services) | Yes — per document, mtime-cached, unioned with editor settings; both services watch `**/tmt.json` so an edit re-resolves. The list filters lint findings only: the editor still shows every compile warning, whatever `lint.allow` names. |
 | `tmt build` (manifest mode) | Partially — the same file its own project-section discovery already located, unioned with `--allow`, for compile warnings and link warnings alike (`docs/tmt/cli.md (compile warnings)`, `docs/tmt/cli.md (link warnings)`); no per-file walk. |
 | `tmt fmt` | No. |
 | every other subcommand | No. |
