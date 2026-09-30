@@ -1022,9 +1022,13 @@ machine {
 }
 
 /// State parameters are exempt from the aliasing check: two continuations
-/// legitimately share one target state, out of unit as in it. Mutation:
-/// keying the aliasing check on every named argument rather than on the
-/// declared TAPE parameters only; `hit = done, miss = done` is refused.
+/// legitimately share one target state, out of unit as in it. The machine
+/// also has a TAPE named `done`, so the shared target passes the host-tape
+/// condition and only the tape-parameter filter keeps the two state
+/// arguments out of the aliasing check. Mutation: keying the aliasing
+/// check on every named argument rather than on the declared TAPE
+/// parameters only; `hit = done, miss = done` is refused as
+/// `duplicate-tape-target`.
 #[test]
 fn two_state_arguments_sharing_one_state_compile_with_declarations() {
     let dir = scratch("symbolic_state_alias");
@@ -1045,8 +1049,9 @@ namespace mylib {
 use mylib::bits;
 machine {
   tape data: bits;
-  entry state go { [*] -> call mylib::pick(n = data, hit = done, miss = done) then done; }
-  state done { [*] -> stop; }
+  tape done: bits;
+  entry state go { [*, *] -> call mylib::pick(n = data, hit = done, miss = done) then done; }
+  state done { [*, *] -> stop; }
 }
 ",
     );
