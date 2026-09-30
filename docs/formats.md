@@ -1338,7 +1338,9 @@ pre-version-4 document has neither field.
 - Per-transition tags (`kind` field, snake_case): `goto` (`state`),
   `call_then` (`target`, an optional `binding`, an `exits` list of same-world
   resume states, and an OPTIONAL `then` resume point that is itself a
-  `goto`/`return`/`stop`/`halt` when present — absent only for a call in
+  `goto`/`return`/`return_exit`/`stop`/`halt` when present (`return_exit`
+  leaving the ENCLOSING routine through its exit `exit`, what `then
+  <state parameter>` lowers to) — absent only for a call in
   TAIL POSITION, the source having omitted `then` against a callee KNOWN
   to be `noreturn`; codegen still emits an instruction there, a
   synthesized safety trap rather than nothing, so a `noreturn` claim that

@@ -1724,22 +1724,22 @@ mod tests {
                     alphabet: "ab".to_string(),
                     alphabet_span: Span::new(1, 19, 1, 21),
                     volatile: false,
-                    writes: Some(crate::parser::ContractClause {
+                    writes: Some(Box::new(crate::parser::ContractClause {
                         elems: vec![crate::parser::AlphabetElem::Single(SymLit::Glyph {
                             value: "0".to_string(),
                             span: Span::new(1, 31, 1, 34),
                         })],
                         kw_span: Span::new(1, 22, 1, 28),
                         span: Span::new(1, 22, 1, 36),
-                    }),
-                    never_writes: Some(crate::parser::ContractClause {
+                    })),
+                    never_writes: Some(Box::new(crate::parser::ContractClause {
                         elems: vec![crate::parser::AlphabetElem::Single(SymLit::Glyph {
                             value: "1".to_string(),
                             span: Span::new(1, 52, 1, 55),
                         })],
                         kw_span: Span::new(1, 37, 1, 49),
                         span: Span::new(1, 37, 1, 57),
-                    }),
+                    })),
                     enters: None,
                     leaves: None,
                 },

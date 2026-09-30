@@ -3551,8 +3551,8 @@ fn resolve_world(
                 };
                 let enters = clause(enters.as_deref(), "enters")?;
                 let leaves = clause(leaves.as_deref(), "leaves")?;
-                let writes = clause(writes.as_ref(), "writes")?;
-                let never_writes = clause(never_writes.as_ref(), "never writes")?;
+                let writes = clause(writes.as_deref(), "writes")?;
+                let never_writes = clause(never_writes.as_deref(), "never writes")?;
                 tapes.push(ResolvedTape {
                     name: p.name.clone(),
                     name_span: p.name_span,
@@ -4619,8 +4619,8 @@ impl WorldCtx<'_> {
                 } = &p.kind
                 {
                     let clauses = [
-                        writes.as_ref(),
-                        never_writes.as_ref(),
+                        writes.as_deref(),
+                        never_writes.as_deref(),
                         enters.as_deref(),
                         leaves.as_deref(),
                     ];

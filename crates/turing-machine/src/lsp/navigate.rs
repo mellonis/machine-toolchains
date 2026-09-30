@@ -175,8 +175,8 @@ fn sig_tapes(sig: &Signature) -> Vec<WorldTape<'_>> {
                 alphabet: alphabet.as_str(),
                 alphabet_span: *alphabet_span,
                 volatile: *volatile,
-                writes: writes.as_ref(),
-                never_writes: never_writes.as_ref(),
+                writes: writes.as_deref(),
+                never_writes: never_writes.as_deref(),
             }),
             SigParamKind::State => None,
         })

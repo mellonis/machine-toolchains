@@ -238,20 +238,21 @@ pub enum SigParamKind {
         alphabet: String,
         alphabet_span: Span,
         volatile: bool,
+        // The four contract clauses below are all boxed, one policy for
+        // all of them: unboxed they would make this variant dwarf
+        // `State`'s zero-byte payload, and they are signature-only, so
+        // the indirection never touches a world-body hot path.
         /// A declared `writes { … }` clause, signature-only (never present
         /// on a machine tape declaration).
-        writes: Option<ContractClause>,
+        writes: Option<Box<ContractClause>>,
         /// A declared `never writes { … }` clause, signature-only: the
         /// symbols the body never writes, subtracted from the `writes`
         /// set (or from the whole alphabet when there is none).
-        never_writes: Option<ContractClause>,
+        never_writes: Option<Box<ContractClause>>,
         /// A declared `enters { … }` clause, signature-only: the symbols
         /// the head may be sitting on when a call transfers control into
         /// this parameter's tape. Canonical order: after `writes`/
-        /// `never writes`, before `leaves`. Boxed (alongside `leaves`) to keep
-        /// this variant from dwarfing `State`'s zero-byte payload — a
-        /// signature-only pair, so the indirection never touches a
-        /// world-body hot path.
+        /// `never writes`, before `leaves`.
         enters: Option<Box<ContractClause>>,
         /// A declared `leaves { … }` clause, signature-only: the symbols
         /// the head may be sitting on when control returns. Canonical
@@ -1803,8 +1804,8 @@ impl Parser<'_> {
             // has no meaning the way `writes {}`/`never writes {}` do (an
             // explicit empty SET) — `EmptyHeadClause` catches it right
             // where it is parsed.
-            let mut writes: Option<ContractClause> = None;
-            let mut never_writes: Option<ContractClause> = None;
+            let mut writes: Option<Box<ContractClause>> = None;
+            let mut never_writes: Option<Box<ContractClause>> = None;
             let mut enters: Option<Box<ContractClause>> = None;
             let mut leaves: Option<Box<ContractClause>> = None;
             loop {
@@ -1834,7 +1835,7 @@ impl Parser<'_> {
                             CompileErrorKind::DuplicateContractClause { what: "writes" },
                         ));
                     }
-                    writes = Some(self.contract_clause()?);
+                    writes = Some(Box::new(self.contract_clause()?));
                 } else if self.at_kw("never") {
                     if enters.is_some() || leaves.is_some() {
                         let before = if enters.is_some() { "enters" } else { "leaves" };
@@ -1854,7 +1855,7 @@ impl Parser<'_> {
                             },
                         ));
                     }
-                    never_writes = Some(self.contract_clause()?);
+                    never_writes = Some(Box::new(self.contract_clause()?));
                 } else if self.at_kw("preserves") {
                     // `.tmc` 0.1's spelling of `never writes`. No longer a
                     // keyword — it names things again — but an identifier
@@ -1912,8 +1913,8 @@ impl Parser<'_> {
             let last_span = leaves
                 .as_deref()
                 .or(enters.as_deref())
-                .or(never_writes.as_ref())
-                .or(writes.as_ref())
+                .or(never_writes.as_deref())
+                .or(writes.as_deref())
                 .map_or(alphabet_span, |c| c.span);
             Ok(SigParam {
                 kind: SigParamKind::Tape {

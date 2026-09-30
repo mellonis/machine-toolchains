@@ -144,7 +144,7 @@ fn world_sig<'a>(program: &'a Program, world_name: &str) -> Option<(&'a [SigPara
 fn writes_clause_for<'a>(params: &'a [SigParam], tape_name: &str) -> Option<&'a ContractClause> {
     let p = params.iter().find(|p| p.name == tape_name)?;
     match &p.kind {
-        SigParamKind::Tape { writes, .. } => writes.as_ref(),
+        SigParamKind::Tape { writes, .. } => writes.as_deref(),
         SigParamKind::State => None,
     }
 }
