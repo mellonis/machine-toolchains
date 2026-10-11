@@ -96,6 +96,18 @@ machine {
 }
 ";
 
+    const UFV_NEAR_RIGHT: &str = "\
+alphabet digit { '_', '0', '1', '2' }
+machine {
+  tape t: digit;
+  tape u: digit;
+  entry state go {
+    [0..1 as a, 0..1 as b] -> write [{1 + a}, {1 * (0 + b)}] move [>, >] goto go;
+    [*, *] -> stop;
+  }
+}
+";
+
     /// Mutation: a `check` that never pushes.
     #[test]
     fn an_unread_binding_is_reported() {
@@ -114,6 +126,15 @@ machine {
     #[test]
     fn a_binding_read_inside_a_fold_is_used() {
         let ds = findings(UFV_NEAR);
+        assert!(ds.is_empty(), "{ds:?}");
+    }
+
+    /// Mutation: do not descend into the right operand in `collect_reads`
+    /// (`b` sits on the right of `*` inside a parenthesised right operand,
+    /// and `a` on the right of `+`).
+    #[test]
+    fn a_binding_read_on_the_right_of_an_operator_is_used() {
+        let ds = findings(UFV_NEAR_RIGHT);
         assert!(ds.is_empty(), "{ds:?}");
     }
 }

@@ -26,11 +26,6 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
         if world.kind == WorldKind::Machine {
             continue;
         }
-        // A bodiless world (a declaration read from a header) has nothing to
-        // inspect: every parameter would look inert.
-        if world.states.is_empty() && world.grafts.is_empty() {
-            continue;
-        }
         if makes_transparent_reuse(ctx, world) {
             continue;
         }
@@ -124,6 +119,20 @@ machine {
     fn a_parameter_passed_on_moved_or_reached_transparently_is_used() {
         let ds = findings(UTP_NEAR);
         assert!(ds.is_empty(), "{ds:?}");
+    }
+
+    /// A contract clause alone is not a use: it constrains writes the body
+    /// never makes. Mutation: count a parameter carrying a `writes` clause as
+    /// used (skip any tape whose `writes` is `Some`).
+    #[test]
+    fn a_contract_clause_alone_is_not_a_use() {
+        let src = UTP.replace("tape u: ab)", "tape u: ab writes { '_' })");
+        let ds = findings(&src);
+        assert_eq!(ds.len(), 1, "{ds:?}");
+        assert_eq!(
+            ds[0].message,
+            "tape parameter `u` of `r` is never read, written, moved, or passed on"
+        );
     }
 
     /// Mutation: skip exported worlds.

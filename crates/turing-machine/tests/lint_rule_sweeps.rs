@@ -82,10 +82,10 @@ fn offenders(code: &str) -> Vec<String> {
     out
 }
 
-/// Mutation: drop the transparent-reuse early return from `unused-tape`'s
-/// `check` — every machine whose only reuse is an argument-less call into
-/// another unit would fire. Not necessarily on today's corpus; the rule's
-/// own tests pin that direction.
+/// A regression guard with no single discriminating mutation on today's
+/// corpus: no shipped machine is reported with or without the transparent
+/// early return. The transparent direction is carried by the rule's own
+/// `a_transparent_call_into_another_unit_touches_every_tape`.
 #[test]
 fn no_shipped_tmc_reports_unused_tape() {
     let found = offenders("unused-tape");

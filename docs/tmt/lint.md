@@ -415,6 +415,9 @@ moves, and never passes on to a `call`, `graft` or `bind` — the definition
 no argument list (a transparent call) binds tapes by position and counts as
 touching every one. It fires regardless of `export`: nobody else can use a
 parameter.
+A contract clause (`writes`, `enters` and the like) alone is not a use: it
+constrains what a body does to the tape, and a body that never touches the
+tape has nothing to constrain.
 
 ```
 b.tmc:2:28: lint: tape parameter `u` of `r` is never read, written, moved, or passed on
