@@ -1194,3 +1194,68 @@ fn an_undeclared_exit_merges_with_site_warnings_in_offset_order() {
         out.report.diagnostics
     );
 }
+
+const DUP_A: &str = "\
+.func main
+        call    helper
+        stp
+.func helper
+        ret
+";
+
+const DUP_B: &str = "\
+.func helper
+        ret
+";
+
+/// Mutation it catches: render `DuplicateSymbol` without its two input
+/// names — the equality and the text assertion both fail.
+#[test]
+fn a_duplicate_symbol_names_both_inputs() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A), asm(DUP_B)],
+        &[],
+        LinkOptions {
+            labels: vec![Some("a.o".into()), Some("b.o".into())],
+            ..Default::default()
+        },
+    )
+    .expect_err("two user definitions of one name");
+    assert_eq!(
+        err,
+        LinkError::DuplicateSymbol {
+            name: "helper".into(),
+            first: "a.o".into(),
+            second: "b.o".into(),
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "duplicate symbol `helper`: defined by a.o and by b.o"
+    );
+}
+
+/// Mutation it catches: `input_name` ignoring `sources` — `first` becomes
+/// `input #0`.
+#[test]
+fn a_link_error_falls_back_to_sources_then_position() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A), asm(DUP_B)],
+        &[],
+        LinkOptions {
+            sources: vec![Some("src/a.x".into()), None],
+            ..Default::default()
+        },
+    )
+    .expect_err("two user definitions of one name");
+    assert_eq!(
+        err,
+        LinkError::DuplicateSymbol {
+            name: "helper".into(),
+            first: "src/a.x".into(),
+            second: "input #1".into(),
+        }
+    );
+}

@@ -562,6 +562,23 @@ pub(super) fn parse_call_mech(raw: Option<String>) -> Result<CallMech, String> {
     }
 }
 
+/// How a link error names each input (docs/core.md (linking)): a unit or
+/// object by the path it was given as, a `-l` library as ``library `NAME` ``,
+/// the embedded standard library as `the standard library` — in the
+/// linker's own input order: units, then libraries, then the stdlib.
+pub(crate) fn link_labels(
+    units: &[String],
+    libraries: &[String],
+    stdlib: bool,
+) -> Vec<Option<String>> {
+    units
+        .iter()
+        .map(|u| Some(u.clone()))
+        .chain(libraries.iter().map(|l| Some(format!("library `{l}`"))))
+        .chain(stdlib.then(|| Some("the standard library".to_string())))
+        .collect()
+}
+
 pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     if args.help() {
@@ -609,6 +626,7 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
             // name — sidecar provenance is a build-driver concern
             // (docs/formats.md (map sidecar)).
             sources: Vec::new(),
+            labels: link_labels(&inputs, &lib_names, !nostdlib),
         },
     )
     .map_err(|e| e.to_string())?;

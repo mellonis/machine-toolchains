@@ -18,8 +18,8 @@ use crate::optimizer::OptLevel;
 use crate::stdlib;
 
 use super::build::{
-    find_library, out_path, read_object, render_link_report, render_opt_report, render_warnings,
-    sidecar_path, take_disabled_passes,
+    find_library, link_labels, out_path, read_object, render_link_report, render_opt_report,
+    render_warnings, sidecar_path, take_disabled_passes,
 };
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
@@ -469,6 +469,11 @@ fn build_one_target(
         flags,
         &output,
         &unit_sources,
+        &link_labels(
+            &manifest.effective_sources(target),
+            &libs.link,
+            manifest.stdlib,
+        ),
     )
     .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
@@ -483,6 +488,7 @@ fn build_one_target(
 /// site (docs/pmt/cli.md (build)). Returns the (possibly empty) `-v`
 /// chunk; the caller owns concatenating it onto its own accumulated
 /// stderr.
+#[allow(clippy::too_many_arguments)]
 fn link_and_write(
     name: &str,
     target: &crate::project::Target,
@@ -491,6 +497,7 @@ fn link_and_write(
     flags: &Flags,
     output: &Path,
     unit_sources: &[Option<PathBuf>],
+    labels: &[Option<String>],
 ) -> Result<String, String> {
     // The sidecar path anchors the provenance strings, so it is resolved
     // BEFORE the link (docs/formats.md (map sidecar)).
@@ -504,6 +511,7 @@ fn link_and_write(
             relax: !flags.no_relax,
             entry: target.entry.clone(),
             sources: sidecar_sources(&map_path, unit_sources),
+            labels: labels.to_vec(),
             ..Default::default()
         },
     )
@@ -703,7 +711,7 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     // failure anywhere in it carries the warnings already rendered above
     // rather than dropping them on an early `?` return
     // (docs/pmt/cli.md (build)).
-    let tail = link_and_write_argv(&objects, &libraries, flags, &files[0], &unit_sources)
+    let tail = link_and_write_argv(&objects, &libraries, flags, files, &unit_sources)
         .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
     Ok(CliOutput::ok(String::new(), stderr))
@@ -718,10 +726,10 @@ fn link_and_write_argv(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
     flags: &Flags,
-    first_file: &str,
+    files: &[String],
     unit_sources: &[Option<PathBuf>],
 ) -> Result<String, String> {
-    let target = out_path(Path::new(first_file), flags.out.clone(), "pmx");
+    let target = out_path(Path::new(&files[0]), flags.out.clone(), "pmx");
     let map_path = sidecar_path(&target);
     // Argv mode links with the default entry symbol and call mechanism,
     // exactly as `pmt link` does; `sources` carries the units' sidecar
@@ -732,6 +740,7 @@ fn link_and_write_argv(
         LinkOptions {
             relax: !flags.no_relax,
             sources: sidecar_sources(&map_path, unit_sources),
+            labels: link_labels(files, &flags.lib_names, !flags.nostdlib),
             ..Default::default()
         },
     )

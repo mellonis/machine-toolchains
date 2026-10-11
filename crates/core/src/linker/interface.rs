@@ -326,16 +326,10 @@ pub(super) fn rebind<'a>(
 pub(super) fn check_graft_drift(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
-    sources: &[Option<String>],
+    names: &[Option<String>],
 ) -> Result<(), LinkError> {
     let inputs: Vec<&ObjectFile> = objects.iter().chain(libraries).collect();
-    let name_of = |i: usize| -> String {
-        sources
-            .get(i)
-            .and_then(Option::as_ref)
-            .cloned()
-            .unwrap_or_else(|| format!("input #{i}"))
-    };
+    let name_of = |i: usize| -> String { super::input_name(names, i) };
     // First-wins exporter map, in the namespace's own order.
     let mut exporter: HashMap<&str, (usize, u32)> = HashMap::new();
     for (i, obj) in inputs.iter().enumerate() {
@@ -371,16 +365,10 @@ pub(super) fn check_graft_drift(
 pub(super) fn check_imported_alphabets(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
-    sources: &[Option<String>],
+    names: &[Option<String>],
 ) -> Result<(), LinkError> {
     let inputs: Vec<&ObjectFile> = objects.iter().chain(libraries).collect();
-    let name_of = |i: usize| -> String {
-        sources
-            .get(i)
-            .and_then(Option::as_ref)
-            .cloned()
-            .unwrap_or_else(|| format!("input #{i}"))
-    };
+    let name_of = |i: usize| -> String { super::input_name(names, i) };
     // First-wins exporter map, in the namespace's own order.
     let mut exporter: HashMap<&str, (usize, &Vec<String>)> = HashMap::new();
     for (i, obj) in inputs.iter().enumerate() {
@@ -479,7 +467,7 @@ mod tests {
     #[test]
     fn rebind_points_every_site_at_its_arena_record() {
         let objects = numeric_fixture();
-        let order = crate::linker::resolve::resolve(&objects, &[], "main")
+        let order = crate::linker::resolve::resolve(&objects, &[], "main", &[])
             .expect("the fixture resolves")
             .order;
         // Non-vacuity: every assertion below lives inside a zip over
@@ -600,7 +588,7 @@ mod tests {
     #[test]
     fn resolve_labels_clears_the_label_it_consumes() {
         let objects = labelled_fixture();
-        let order = crate::linker::resolve::resolve(&objects, &[], "main")
+        let order = crate::linker::resolve::resolve(&objects, &[], "main", &[])
             .expect("the fixture resolves")
             .order;
         let arena = resolve_bindings(&order).expect("a labelled binding resolves");

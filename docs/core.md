@@ -653,6 +653,9 @@ Objects in, one executable image out, in two phases.
 **Resolution** builds the namespace and walks reachability:
 
 - Duplicate exported symbols across user objects are a link-time error.
+- A link error that concerns two inputs names both: a driver labels each
+  input it hands the linker (a path, a library name, the standard
+  library), and an unlabelled input is named by its position.
 - Libraries resolve **first-wins** and may be shadowed by a user object
   defining the same exported symbol — shadowing is an opt-in property of
   exported names.

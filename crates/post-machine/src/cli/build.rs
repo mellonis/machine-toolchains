@@ -264,6 +264,23 @@ Writes OUT.pmx and the OUT.pmx.map sidecar (function ranges; label/line
 info when the objects carry -g debug data).
 ";
 
+/// How a link error names each input (docs/core.md (linking)): a unit or
+/// object by the path it was given as, a `-l` library as ``library `NAME` ``,
+/// the embedded standard library as `the standard library` — in the
+/// linker's own input order: units, then libraries, then the stdlib.
+pub(crate) fn link_labels(
+    units: &[String],
+    libraries: &[String],
+    stdlib: bool,
+) -> Vec<Option<String>> {
+    units
+        .iter()
+        .map(|u| Some(u.clone()))
+        .chain(libraries.iter().map(|l| Some(format!("library `{l}`"))))
+        .chain(stdlib.then(|| Some("the standard library".to_string())))
+        .collect()
+}
+
 pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     if args.help() {
@@ -297,6 +314,7 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
         &libraries,
         LinkOptions {
             relax,
+            labels: link_labels(&inputs, &lib_names, !nostdlib),
             ..Default::default()
         },
     )

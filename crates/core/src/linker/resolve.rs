@@ -127,11 +127,12 @@ impl ColumnPair {
 /// have. Consistent with first-wins, and unreachable from compiler output —
 /// the two-column compiler emits `{Normal, Volatile}` or a lone `Both` for
 /// a name, never a mix — so it is recorded here rather than special-cased.
-fn object_columns(
-    object: &ObjectFile,
+fn object_columns<'o>(
+    object: &'o ObjectFile,
     oi: usize,
     strict: bool,
-) -> Result<Vec<(&str, ColumnPair)>, LinkError> {
+    names: &[Option<String>],
+) -> Result<Vec<(&'o str, ColumnPair)>, LinkError> {
     let mut order: Vec<&str> = Vec::new();
     let mut pairs: HashMap<&str, ColumnPair> = HashMap::new();
     for symbol in &object.symbols {
@@ -144,7 +145,11 @@ fn object_columns(
             ColumnPair::default()
         });
         if pair.fill(variant_of(object, blob), (oi, blob)).is_err() && strict {
-            return Err(LinkError::DuplicateSymbol(symbol.name.clone()));
+            return Err(LinkError::DuplicateSymbol {
+                name: symbol.name.clone(),
+                first: super::input_name(names, oi),
+                second: super::input_name(names, oi),
+            });
         }
     }
     Ok(order.into_iter().map(|name| (name, pairs[name])).collect())
@@ -249,6 +254,7 @@ pub(crate) fn resolve<'a>(
     objects: &'a [ObjectFile],
     libraries: &'a [ObjectFile],
     entry: &str,
+    names: &[Option<String>],
 ) -> Result<Resolved<'a>, LinkError> {
     let all: Vec<&ObjectFile> = objects.iter().chain(libraries).collect();
     let Some(first) = all.first() else {
@@ -265,18 +271,24 @@ pub(crate) fn resolve<'a>(
     // Namespace: user objects (dup = error), then libraries (first-wins).
     // Each name maps to its column PAIR, filled from one object.
     let mut namespace: HashMap<&str, ColumnPair> = HashMap::new();
+    let mut owner: HashMap<&str, usize> = HashMap::new();
     for (oi, object) in objects.iter().enumerate() {
-        for (name, pair) in object_columns(object, oi, true)? {
+        for (name, pair) in object_columns(object, oi, true, names)? {
             if namespace.insert(name, pair).is_some() {
-                return Err(LinkError::DuplicateSymbol(name.to_string()));
+                return Err(LinkError::DuplicateSymbol {
+                    name: name.to_string(),
+                    first: super::input_name(names, owner[name]),
+                    second: super::input_name(names, oi),
+                });
             }
+            owner.insert(name, oi);
         }
     }
     for (li, library) in libraries.iter().enumerate() {
         // First-wins, silent: a name already defined — by a user object or
         // an earlier library — keeps the definition it has, both columns
         // of it, so a name's columns never span two inputs.
-        for (name, pair) in object_columns(library, objects.len() + li, false)? {
+        for (name, pair) in object_columns(library, objects.len() + li, false, names)? {
             namespace.entry(name).or_insert(pair);
         }
     }
@@ -537,7 +549,7 @@ mod tests {
                 ("second", &["helper"]),
             ],
         );
-        let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
+        let r = resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         assert_eq!(names, vec!["main", "helper", "second"]);
         assert_eq!(r.order[0].calls, vec![(2, 1), (7, 2)]); // holes at 2 and 7
@@ -547,7 +559,7 @@ mod tests {
     fn dead_functions_are_dropped_and_may_be_broken() {
         // "dead" calls a missing symbol — fine, it's unreachable.
         let a = obj(0x7E, &[("main", &[]), ("dead", &["missing"])]);
-        let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
+        let r = resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap();
         assert_eq!(r.order.len(), 1);
         assert_eq!(r.order[0].name, "main");
     }
@@ -555,7 +567,7 @@ mod tests {
     #[test]
     fn reachable_unresolved_errors_sorted() {
         let a = obj(0x7E, &[("main", &["zeta", "alpha"])]);
-        let e = resolve(std::slice::from_ref(&a), &[], "main").unwrap_err();
+        let e = resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap_err();
         assert_eq!(
             e,
             LinkError::Unresolved(vec!["alpha".into(), "zeta".into()])
@@ -572,6 +584,7 @@ mod tests {
             std::slice::from_ref(&user),
             std::slice::from_ref(&lib),
             "main",
+            &[],
         )
         .unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
@@ -586,6 +599,7 @@ mod tests {
             std::slice::from_ref(&needy),
             std::slice::from_ref(&lib),
             "main",
+            &[],
         )
         .unwrap();
         assert_eq!(r2.order.len(), 2); // library's go pulled in
@@ -596,24 +610,31 @@ mod tests {
     fn duplicate_user_symbols_error_but_library_shadowing_does_not() {
         let a = obj(0x7E, &[("main", &[]), ("f", &[])]);
         let b = obj(0x7E, &[("f", &[])]);
-        let e = resolve(&[a.clone(), b], &[], "main").unwrap_err();
-        assert_eq!(e, LinkError::DuplicateSymbol("f".into()));
+        let e = resolve(&[a.clone(), b], &[], "main", &[]).unwrap_err();
+        assert_eq!(
+            e,
+            LinkError::DuplicateSymbol {
+                name: "f".into(),
+                first: "input #0".into(),
+                second: "input #1".into(),
+            }
+        );
         let lib1 = obj(0x7E, &[("f", &[])]);
         let lib2 = obj(0x7E, &[("f", &[])]);
-        assert!(resolve(std::slice::from_ref(&a), &[lib1, lib2], "main").is_ok()); // first-wins, silent
+        assert!(resolve(std::slice::from_ref(&a), &[lib1, lib2], "main", &[]).is_ok()); // first-wins, silent
     }
 
     #[test]
     fn no_main_and_arch_mismatch() {
         let a = obj(0x7E, &[("helper", &[])]);
         assert_eq!(
-            resolve(std::slice::from_ref(&a), &[], "main").unwrap_err(),
+            resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap_err(),
             LinkError::NoEntrySymbol("main".into())
         );
         let b = obj(0x11, &[("main", &[])]);
         let mixed = [obj(0x7E, &[("x", &[])]), b];
         assert_eq!(
-            resolve(&mixed, &[], "main").unwrap_err(),
+            resolve(&mixed, &[], "main", &[]).unwrap_err(),
             LinkError::ArchMismatch {
                 expected: 0x7E,
                 found: 0x11
@@ -719,7 +740,7 @@ mod tests {
         );
         let b = obj_with_locals(0x7E, &[("api", &["helper"]), ("helper", &[])], &["helper"]);
         let objs = [a, b];
-        let r = resolve(&objs, &[], "main").unwrap();
+        let r = resolve(&objs, &[], "main", &[]).unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         // main, its own helper, api, api's own helper: BOTH helpers linked.
         assert_eq!(names, vec!["main", "helper", "api", "helper"]);
@@ -730,7 +751,7 @@ mod tests {
         // Object B's `helper` is local; A's external ref must NOT see it.
         let a = obj(0x7E, &[("main", &["helper"])]);
         let b = obj_with_locals(0x7E, &[("helper", &[])], &["helper"]);
-        let e = resolve(&[a, b], &[], "main").unwrap_err();
+        let e = resolve(&[a, b], &[], "main", &[]).unwrap_err();
         assert_eq!(e, LinkError::Unresolved(vec!["helper".into()]));
     }
 
@@ -746,7 +767,7 @@ mod tests {
         let mut a = obj(0x7E, &[("main", &[]), ("main", &[])]);
         a.blobs[1].push(0x0E);
         a.variants = Some(vec![BlobVariant::Normal, BlobVariant::Volatile]);
-        let r = resolve(std::slice::from_ref(&a), &[], "main").expect("a variant pair links");
+        let r = resolve(std::slice::from_ref(&a), &[], "main", &[]).expect("a variant pair links");
         let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         assert_eq!(names, vec!["main"], "one definition reaches the image");
         assert_eq!(
@@ -759,8 +780,12 @@ mod tests {
         let mut untagged = a.clone();
         untagged.variants = None;
         assert_eq!(
-            resolve(std::slice::from_ref(&untagged), &[], "main").unwrap_err(),
-            LinkError::DuplicateSymbol("main".into())
+            resolve(std::slice::from_ref(&untagged), &[], "main", &[]).unwrap_err(),
+            LinkError::DuplicateSymbol {
+                name: "main".into(),
+                first: "input #0".into(),
+                second: "input #0".into(),
+            }
         );
     }
 
@@ -786,7 +811,7 @@ mod tests {
         };
 
         let volatile = build(true);
-        let r = resolve(std::slice::from_ref(&volatile), &[], "main").unwrap();
+        let r = resolve(std::slice::from_ref(&volatile), &[], "main", &[]).unwrap();
         let linked: Vec<&[u8]> = r.order.iter().map(|f| f.blob.as_ref()).collect();
         assert_eq!(
             linked,
@@ -797,7 +822,7 @@ mod tests {
 
         // The same object with the bit clear is today's link, unchanged.
         let normal = build(false);
-        let r = resolve(std::slice::from_ref(&normal), &[], "main").unwrap();
+        let r = resolve(std::slice::from_ref(&normal), &[], "main", &[]).unwrap();
         let linked: Vec<&[u8]> = r.order.iter().map(|f| f.blob.as_ref()).collect();
         assert_eq!(
             linked,
@@ -825,6 +850,7 @@ mod tests {
             std::slice::from_ref(&user),
             std::slice::from_ref(&lib),
             "main",
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -839,6 +865,7 @@ mod tests {
             std::slice::from_ref(&plain),
             std::slice::from_ref(&lib),
             "main",
+            &[],
         )
         .unwrap();
         assert!(r.variant_fallbacks.is_empty(), "{:?}", r.variant_fallbacks);
@@ -855,6 +882,7 @@ mod tests {
             std::slice::from_ref(&user),
             std::slice::from_ref(&lib),
             "main",
+            &[],
         )
         .unwrap();
         assert!(r.variant_fallbacks.is_empty(), "{:?}", r.variant_fallbacks);
@@ -869,7 +897,7 @@ mod tests {
         // at the entry lookup or it reads as a clean link.
         let mut a = variant_obj(0x7E, &[("main", BlobVariant::Normal, &[][..])]);
         a.program_volatile = true;
-        let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
+        let r = resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap();
         assert_eq!(r.order[0].blob.as_ref(), a.blobs[0].as_slice());
         assert_eq!(r.variant_fallbacks, vec!["main".to_string()]);
     }
@@ -885,7 +913,7 @@ mod tests {
                 ],
             );
             a.program_volatile = program_volatile;
-            let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
+            let r = resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap();
             let linked: Vec<&[u8]> = r.order.iter().map(|f| f.blob.as_ref()).collect();
             assert_eq!(
                 linked,
@@ -916,8 +944,12 @@ mod tests {
                 &[("main", tags[0], &[][..]), ("main", tags[1], &[][..])],
             );
             assert_eq!(
-                resolve(std::slice::from_ref(&a), &[], "main").unwrap_err(),
-                LinkError::DuplicateSymbol("main".into()),
+                resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap_err(),
+                LinkError::DuplicateSymbol {
+                    name: "main".into(),
+                    first: "input #0".into(),
+                    second: "input #0".into(),
+                },
                 "{tags:?} is not a legal column pair"
             );
         }
@@ -953,6 +985,7 @@ mod tests {
             std::slice::from_ref(&user),
             std::slice::from_ref(&lib),
             "main",
+            &[],
         )
         .unwrap();
         assert_eq!(r.variant_fallbacks, vec!["f".to_string()]);
@@ -986,7 +1019,7 @@ mod tests {
             ],
         );
         let libs = [first, second];
-        let r = resolve(std::slice::from_ref(&caller), &libs, "main").unwrap();
+        let r = resolve(std::slice::from_ref(&caller), &libs, "main", &[]).unwrap();
         assert_eq!(r.variant_fallbacks, vec!["g".to_string()]);
         let g = r
             .order
@@ -1012,8 +1045,12 @@ mod tests {
         );
         let b = variant_obj(0x7E, &[("f", BlobVariant::Volatile, &[][..])]);
         assert_eq!(
-            resolve(&[a, b], &[], "main").unwrap_err(),
-            LinkError::DuplicateSymbol("f".into())
+            resolve(&[a, b], &[], "main", &[]).unwrap_err(),
+            LinkError::DuplicateSymbol {
+                name: "f".into(),
+                first: "input #0".into(),
+                second: "input #1".into(),
+            }
         );
     }
 
@@ -1024,7 +1061,7 @@ mod tests {
         let a = obj(0x7E, &[("main", &["api"]), ("helper", &[])]);
         let b = obj_with_locals(0x7E, &[("api", &["helper"]), ("helper", &[])], &["helper"]);
         let objs = [a, b];
-        let r = resolve(&objs, &[], "main").unwrap();
+        let r = resolve(&objs, &[], "main", &[]).unwrap();
         // api's call resolved into object B (site-identity, not name):
         let api = r.order.iter().position(|f| f.name == "api").unwrap();
         let callee_idx = r.order[api].calls[0].1;
@@ -1066,7 +1103,7 @@ mod tests {
         // relocation — the BFS must still reach it and keep it in `order`.
         let mut a = obj(0x7E, &[("main", &[]), ("sub", &[])]);
         push_bound(&mut a, 1, "sub");
-        let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
+        let r = resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         assert_eq!(names, vec!["main", "sub"]);
         // hole at 1 -> order index 1, carrying the source record.
@@ -1081,7 +1118,7 @@ mod tests {
         // `alt` is unreachable from main; entry=alt makes it the BFS root
         // and drops main instead.
         let a = obj(0x7E, &[("main", &[]), ("alt", &[])]);
-        let r = resolve(std::slice::from_ref(&a), &[], "alt").unwrap();
+        let r = resolve(std::slice::from_ref(&a), &[], "alt", &[]).unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         assert_eq!(names, vec!["alt"]);
         assert_eq!(r.dropped, vec!["main".to_string()]);
@@ -1093,14 +1130,14 @@ mod tests {
         // undefined relocation callee.
         let mut a = obj(0x7E, &[("main", &[])]);
         push_bound(&mut a, 1, "ghost");
-        let e = resolve(std::slice::from_ref(&a), &[], "main").unwrap_err();
+        let e = resolve(std::slice::from_ref(&a), &[], "main", &[]).unwrap_err();
         assert_eq!(e, LinkError::Unresolved(vec!["ghost".into()]));
     }
 
     #[test]
     fn missing_entry_symbol_is_named() {
         let a = obj(0x7E, &[("main", &[])]);
-        let e = resolve(std::slice::from_ref(&a), &[], "start").unwrap_err();
+        let e = resolve(std::slice::from_ref(&a), &[], "start", &[]).unwrap_err();
         assert_eq!(e, LinkError::NoEntrySymbol("start".into()));
     }
 

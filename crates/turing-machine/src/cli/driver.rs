@@ -19,9 +19,9 @@ use crate::optimizer::OptLevel;
 use crate::stdlib;
 
 use super::build::{
-    find_library_for_build, out_path, parse_call_mech, read_object, render_link_diagnostics,
-    render_link_report, render_opt_report, render_warnings, sidecar_path, take_disabled_passes,
-    werror_message,
+    find_library_for_build, link_labels, out_path, parse_call_mech, read_object,
+    render_link_diagnostics, render_link_report, render_opt_report, render_warnings, sidecar_path,
+    take_disabled_passes, werror_message,
 };
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
@@ -525,9 +525,11 @@ fn build_one_target(
     // libraries — resolved together through the one shared fixpoint
     // (docs/tmt/project.md (Declaration derivation)); a header-only
     // library's absent object is never in `libraries` to begin with.
-    let (sibling_declarations, library_declarations, mut libraries) =
+    let (sibling_declarations, library_declarations, library_pairs) =
         resolve_target_declarations(&source_paths, &libs.link, &dirs, manifest.stdlib)
             .map_err(|e| format!("{read_err_prefix}{e}"))?;
+    let (library_names, mut libraries): (Vec<String>, Vec<ObjectFile>) =
+        library_pairs.into_iter().unzip();
     if manifest.stdlib {
         libraries.push(stdlib::object().clone());
     }
@@ -591,6 +593,11 @@ fn build_one_target(
         &allow,
         &output,
         &unit_sources,
+        &link_labels(
+            &manifest.effective_sources(target),
+            &library_names,
+            manifest.stdlib,
+        ),
     )
     .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
@@ -629,6 +636,7 @@ fn link_and_write(
     allow: &[String],
     output: &Path,
     unit_sources: &[Option<PathBuf>],
+    labels: &[Option<String>],
 ) -> Result<(String, usize), String> {
     // The sidecar path anchors the provenance strings, so it is resolved
     // BEFORE the link (docs/formats.md (map sidecar)).
@@ -646,6 +654,7 @@ fn link_and_write(
                 .or_else(|| manifest.effective_call_mech(target))
                 .unwrap_or_default(),
             sources: sidecar_sources(&map_path, unit_sources),
+            labels: labels.to_vec(),
         },
     )
     .map_err(|e| format!("target `{name}`: {e}"))?;
@@ -813,12 +822,14 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     // the same rule manifest mode's `build_one_target` applies
     // (docs/tmt/project.md (Declaration derivation)); a header-only
     // library's absent object is never in `libraries` to begin with.
-    let (sibling_declarations, library_declarations, mut libraries) = resolve_target_declarations(
+    let (sibling_declarations, library_declarations, library_pairs) = resolve_target_declarations(
         &source_paths,
         &flags.lib_names,
         &flags.search_dirs,
         !flags.nostdlib,
     )?;
+    let (library_names, mut libraries): (Vec<String>, Vec<ObjectFile>) =
+        library_pairs.into_iter().unzip();
     if !flags.nostdlib {
         libraries.push(stdlib::object().clone());
     }
@@ -868,9 +879,15 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     // failure anywhere in it carries the warnings already rendered above
     // rather than dropping them on an early `?` return
     // (docs/tmt/cli.md (build)).
-    let (tail, link_warnings) =
-        link_and_write_argv(&objects, &libraries, flags, &files[0], &unit_sources)
-            .map_err(|e| format!("{stderr}{e}"))?;
+    let (tail, link_warnings) = link_and_write_argv(
+        &objects,
+        &libraries,
+        flags,
+        files,
+        &unit_sources,
+        &library_names,
+    )
+    .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
     // The inner refusal already kept the write from happening; this outer
     // check carries the accumulated stderr — compile warnings plus link
@@ -896,10 +913,11 @@ fn link_and_write_argv(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
     flags: &Flags,
-    first_file: &str,
+    files: &[String],
     unit_sources: &[Option<PathBuf>],
+    library_names: &[String],
 ) -> Result<(String, usize), String> {
-    let target = out_path(Path::new(first_file), flags.out.clone(), "tmx");
+    let target = out_path(Path::new(&files[0]), flags.out.clone(), "tmx");
     let map_path = sidecar_path(&target);
     // Argv mode threads relax / entry / call_mech explicitly — there is
     // no default to lean on for `call_mech` once the flag exists (TM's
@@ -913,6 +931,7 @@ fn link_and_write_argv(
             entry: flags.entry.clone(),
             call_mech: flags.call_mech.unwrap_or_default(),
             sources: sidecar_sources(&map_path, unit_sources),
+            labels: link_labels(files, library_names, !flags.nostdlib),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -1050,7 +1069,14 @@ fn resolve_target_declarations(
     library_names: &[String],
     library_dirs: &[String],
     stdlib: bool,
-) -> Result<(Vec<Resolved>, Vec<(String, Resolved)>, Vec<ObjectFile>), String> {
+) -> Result<
+    (
+        Vec<Resolved>,
+        Vec<(String, Resolved)>,
+        Vec<(String, ObjectFile)>,
+    ),
+    String,
+> {
     let mut sources = Vec::with_capacity(source_paths.len() + library_names.len());
     for path in source_paths {
         sources.push(crate::header::DeclarationSource {
@@ -1087,11 +1113,13 @@ fn resolve_target_declarations(
     Ok((
         sibling_declarations,
         library_declarations,
-        link_library_objects(library_objects),
+        link_library_objects(library_names, library_objects),
     ))
 }
 
-/// The OBJECTS a target's declared libraries hand the linker: one per
+/// The OBJECTS a target's declared libraries hand the linker, each paired
+/// with the `-l` name it was found under (the name a link error gives it,
+/// docs/core.md (linking)): one per
 /// entry that found a real `<name>.tmo` on the search path, in the same
 /// order [`find_library_for_build`] resolved them — a header-only
 /// library (`find_library_for_build`'s own `None`) contributes nothing
@@ -1101,8 +1129,16 @@ fn resolve_target_declarations(
 /// a build hands the linker directly, rather than only inferring it
 /// indirectly from link success or failure — `LinkReport` itself names
 /// no per-object list a caller could check instead.
-fn link_library_objects(library_objects: Vec<Option<ObjectFile>>) -> Vec<ObjectFile> {
-    library_objects.into_iter().flatten().collect()
+fn link_library_objects(
+    names: &[String],
+    library_objects: Vec<Option<ObjectFile>>,
+) -> Vec<(String, ObjectFile)> {
+    names
+        .iter()
+        .cloned()
+        .zip(library_objects)
+        .filter_map(|(name, object)| object.map(|o| (name, o)))
+        .collect()
 }
 
 /// The declarations table for compiling unit `i` of `paths`, in the
@@ -1457,8 +1493,9 @@ machine {
     fn link_library_objects_drops_a_header_only_entry() {
         let a = placeholder_object(1);
         let b = placeholder_object(2);
-        let objects = link_library_objects(vec![Some(a.clone()), None, Some(b.clone())]);
-        assert_eq!(objects, vec![a, b]);
+        let names = ["a".to_string(), "h".to_string(), "b".to_string()];
+        let objects = link_library_objects(&names, vec![Some(a.clone()), None, Some(b.clone())]);
+        assert_eq!(objects, vec![("a".to_string(), a), ("b".to_string(), b)]);
     }
 
     // ---- `--strip-asserts` manifest-mode flag-beats-profile pair ---------

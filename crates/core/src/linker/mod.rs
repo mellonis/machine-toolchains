@@ -18,7 +18,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LinkError {
-    DuplicateSymbol(String),
+    /// One exported name defined by two inputs (docs/core.md (linking)).
+    /// `first`/`second` are the two inputs' names, as `input_name` renders
+    /// them; equal when one input defines the name twice.
+    DuplicateSymbol {
+        name: String,
+        first: String,
+        second: String,
+    },
     Unresolved(Vec<String>),
     /// The BFS entry symbol (default `main`, or the `--entry` override) is
     /// not defined by any linked object. Carries the entry name so a
@@ -198,7 +205,21 @@ pub enum LinkError {
 impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DuplicateSymbol(name) => write!(f, "duplicate symbol: {name}"),
+            Self::DuplicateSymbol {
+                name,
+                first,
+                second,
+            } if first == second => {
+                write!(f, "duplicate symbol `{name}`: defined twice by {first}")
+            }
+            Self::DuplicateSymbol {
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "duplicate symbol `{name}`: defined by {first} and by {second}"
+            ),
             Self::Unresolved(names) => write!(f, "unresolved symbols: {}", names.join(", ")),
             Self::NoEntrySymbol(name) => write!(f, "no `{name}` entry symbol"),
             Self::ArchMismatch { expected, found } => write!(
@@ -446,6 +467,21 @@ pub struct LinkOptions {
     /// default) stamps nothing; a non-empty vector shorter than the input
     /// list leaves the uncovered tail without provenance.
     pub sources: Vec<Option<String>>,
+    /// How a link error names each input (docs/core.md (linking)), indexed
+    /// like `sources` — user objects, then libraries. `None`, or a vector
+    /// shorter than the input list, falls back to the input's `sources`
+    /// entry, then to `input #i`. Never written to the map sidecar.
+    pub labels: Vec<Option<String>>,
+}
+
+/// The name a link error gives input `i`: `names[i]` when present,
+/// otherwise `input #i`.
+pub(super) fn input_name(names: &[Option<String>], i: usize) -> String {
+    names
+        .get(i)
+        .and_then(Option::as_ref)
+        .cloned()
+        .unwrap_or_else(|| format!("input #{i}"))
 }
 
 impl Default for LinkOptions {
@@ -455,6 +491,7 @@ impl Default for LinkOptions {
             entry: None,
             call_mech: CallMech::Hybrid,
             sources: Vec::new(),
+            labels: Vec::new(),
         }
     }
 }
@@ -636,15 +673,25 @@ pub fn link(
     options: LinkOptions,
 ) -> Result<LinkOutput, LinkError> {
     let entry = options.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
-    let resolved = resolve::resolve(objects, libraries, entry)?;
+    let names: Vec<Option<String>> = (0..objects.len() + libraries.len())
+        .map(|i| {
+            options
+                .labels
+                .get(i)
+                .cloned()
+                .flatten()
+                .or_else(|| options.sources.get(i).cloned().flatten())
+        })
+        .collect();
+    let resolved = resolve::resolve(objects, libraries, entry, &names)?;
 
     // Graft provenance is object-level and reachability does not gate it:
     // a unit either spliced that body or it did not
     // (docs/core.md (graft drift)).
-    interface::check_graft_drift(objects, libraries, &options.sources)?;
+    interface::check_graft_drift(objects, libraries, &names)?;
     // Same header-only rule, over imported alphabets instead of grafted
     // graphs (docs/core.md (graft drift)).
-    interface::check_imported_alphabets(objects, libraries, &options.sources)?;
+    interface::check_imported_alphabets(objects, libraries, &names)?;
 
     let arch = objects
         .first()
@@ -845,7 +892,7 @@ pub fn resolve_names(
     libraries: &[ObjectFile],
     entry: &str,
 ) -> Result<ResolvedNames, LinkError> {
-    let resolved = resolve::resolve(objects, libraries, entry)?;
+    let resolved = resolve::resolve(objects, libraries, entry, &[])?;
     let n = objects.len();
     Ok(ResolvedNames {
         reached: resolved
