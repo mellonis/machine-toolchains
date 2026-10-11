@@ -608,6 +608,7 @@ the tables capability.
 | `unknown-table-label` | tables | a table-space label that does not resolve — an operand naming no table, or dispatch targets outside the one owning function |
 | `bad-signature` | tables | a `.routine` signature problem — a duplicate directive, no `.func` of its name, tapes outside 1..=16, an alpha list length mismatch, or a function left unsigned in a file that signs any |
 | `bad-frame` | tables | a `.frame`/`.map`/`.exits` violation — a duplicate `.map k`, an index at or past the frame arity, an orphan directive with no open `.frame`, a map pair that unpins blank |
+| `undeclared-exit` | tables | a routine's body returns through an exit (`retx #k`) at or above the `exits=` count its `.routine` line declares |
 
 The linker and the VM do not participate in this namespace: a link
 error renders as a prose message with no bracketed code, and a trap is

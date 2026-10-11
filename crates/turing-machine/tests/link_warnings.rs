@@ -3,6 +3,7 @@
 
 use std::process::Command;
 
+use mtc_core::formats::object::{ObjectFile, SymbolDef};
 use mtc_turing_machine::cli::execute;
 
 fn args(list: &[&str]) -> Vec<String> {
@@ -308,6 +309,29 @@ fn manifest_mode_prints_the_warning_and_still_succeeds_by_default() {
 
 // --- undeclared-exit -----------------------------------------------------
 
+/// Assemble `src`, then set `routine`'s declared exit count to `exits` in
+/// the object's interface — the one way a body returning through an
+/// undeclared exit reaches the linker now that the assembler refuses it.
+fn declaring_exits(src: &str, routine: &str, exits: u8) -> ObjectFile {
+    let mut obj = mtc_turing_machine::asm::assemble(src, false).unwrap();
+    let blob = obj
+        .symbols
+        .iter()
+        .find_map(|s| match s.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } if s.name == routine => {
+                Some(blob)
+            }
+            _ => None,
+        })
+        .expect("the routine is defined");
+    obj.interface
+        .as_mut()
+        .expect("the object has an interface")
+        .routines[blob as usize]
+        .exits = exits;
+    obj
+}
+
 /// A hand-written callee declaring two exits whose second branch returns
 /// through exit 2 — what `tmt compile -S` prints for a two-exit routine,
 /// with its `retx #1` edited to `retx #2`.
@@ -343,6 +367,32 @@ done:
         hlt
 ";
 
+/// The assembler refuses the body above: its routine declares two exits and
+/// the second branch returns through exit 2.
+///
+/// Mutation it catches: drop the check in the core assembler and the file
+/// assembles.
+#[test]
+fn the_assembler_refuses_a_return_through_an_undeclared_exit() {
+    let dir = scratch("link_warnings_assembler_refuses");
+    let src = dir.join("fire.tma");
+    std::fs::write(&src, UNDECLARED_EXIT).unwrap();
+    let err = execute(&args(&[
+        "asm",
+        src.to_str().unwrap(),
+        "-o",
+        dir.join("fire.tmo").to_str().unwrap(),
+    ]))
+    .expect_err("a return through an undeclared exit does not assemble");
+    let text = err.to_string();
+    assert!(
+        text.contains(
+            "15:9: error: `sub` returns through exit 2, but its signature declares 2 exit(s) [undeclared-exit]"
+        ),
+        "{text}"
+    );
+}
+
 /// End to end on the CLI: a FRAMES link of the body above succeeds and
 /// prints the `undeclared-exit` warning naming the callee and the index.
 /// Frames is passed explicitly because the default mechanism copies a
@@ -354,16 +404,15 @@ done:
 #[test]
 fn a_return_through_an_undeclared_exit_warns_on_the_cli() {
     let dir = scratch("link_warnings_undeclared_exit");
-    let src = dir.join("fire.tma");
-    std::fs::write(&src, UNDECLARED_EXIT).unwrap();
     let obj = dir.join("fire.tmo");
-    execute(&args(&[
-        "asm",
-        src.to_str().unwrap(),
-        "-o",
-        obj.to_str().unwrap(),
-    ]))
-    .expect("assembles");
+    // The assembler refuses this body, so the object is built with a third
+    // declared exit and lowered back to the two its call site binds.
+    let built = declaring_exits(
+        &UNDECLARED_EXIT.replace("exits=2, noreturn", "exits=3, noreturn"),
+        "sub",
+        2,
+    );
+    std::fs::write(&obj, built.to_bytes()).unwrap();
     let out = execute(&args(&[
         "link",
         obj.to_str().unwrap(),

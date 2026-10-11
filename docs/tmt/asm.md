@@ -112,6 +112,8 @@ set)`. What belongs here is how they are *spelled*:
 - **`trap` and `retx` take an immediate.** `#<n>` is a single unsigned
   byte, `0`..=`255`, written with a leading `#` (`trap #0`, `retx #1`).
   It is distinct from a symbol or a label — it carries a raw number.
+  In a routine whose `.routine` line declares `exits=N`, `retx #k` needs
+  `k < N`; otherwise the file does not assemble (`undeclared-exit`).
 - **`call.m <target>, <frame>`** pairs a call target with a `.frame`
   label from the tables section. The operand's two halves are a rel
   displacement and, after link, a call-site index

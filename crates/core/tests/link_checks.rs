@@ -7,7 +7,7 @@
 //! convention), so core stays provably arch-agnostic.
 
 use mtc_core::asm::{ArchSyntax, AsmCaps, Flow, RelaxPair, SyntaxEntry, assemble};
-use mtc_core::formats::object::ObjectFile;
+use mtc_core::formats::object::{ObjectFile, SymbolDef};
 use mtc_core::linker::{CallMech, LinkError, LinkOptions, link};
 use mtc_core::vm::OperandKind;
 
@@ -124,6 +124,29 @@ fn fake_syntax() -> ArchSyntax {
 
 fn asm(src: &str) -> ObjectFile {
     assemble(&fake_syntax(), ARCH, src, false).expect("assembles")
+}
+
+/// Assemble `src`, then set `routine`'s declared exit count to `exits` in
+/// the object's interface — the one way a body returning through an
+/// undeclared exit reaches the linker now that the assembler refuses it.
+fn declaring_exits(src: &str, routine: &str, exits: u8) -> ObjectFile {
+    let mut obj = asm(src);
+    let blob = obj
+        .symbols
+        .iter()
+        .find_map(|s| match s.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } if s.name == routine => {
+                Some(blob)
+            }
+            _ => None,
+        })
+        .expect("the routine is defined");
+    obj.interface
+        .as_mut()
+        .expect("the object has an interface")
+        .routines[blob as usize]
+        .exits = exits;
+    obj
 }
 
 const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid];
@@ -1372,6 +1395,13 @@ miss:   stp
     )
 }
 
+/// `two_exit_callee`, its callee declaring THREE exits: a body returning
+/// through exit 2 then assembles, and `declaring_exits(…, "sub", 2)` lowers
+/// the count back to what the call site's two labels bind.
+fn three_exit_callee(last: &str) -> String {
+    two_exit_callee(last).replace("exits=2", "exits=3")
+}
+
 /// The blob offset `two_exit_callee` puts its varied instruction at.
 const VARIED_OFFSET: u32 = 4;
 
@@ -1393,8 +1423,8 @@ fn undeclared_exits(out: &mtc_core::linker::LinkOutput) -> Vec<&mtc_core::linker
 /// `k >= exits`) and the frames link reports nothing.
 #[test]
 fn a_return_through_an_undeclared_exit_warns() {
-    let src = two_exit_callee("retx    #2");
-    let out = link(&fake_syntax(), &[asm(&src)], &[], opts(CallMech::Frames))
+    let obj = || declaring_exits(&three_exit_callee("retx    #2"), "sub", 2);
+    let out = link(&fake_syntax(), &[obj()], &[], opts(CallMech::Frames))
         .expect("a warning does not stop the link");
     let ds = undeclared_exits(&out);
     assert_eq!(ds.len(), 1, "{:?}", out.report.diagnostics);
@@ -1406,9 +1436,68 @@ fn a_return_through_an_undeclared_exit_warns() {
         ds[0].message
     );
 
-    let err = link(&fake_syntax(), &[asm(&src)], &[], opts(CallMech::Mono))
+    let err = link(&fake_syntax(), &[obj()], &[], opts(CallMech::Mono))
         .expect_err("a copying mechanism refuses the same body");
     assert!(matches!(err, LinkError::BadBinding { .. }), "{err:?}");
+}
+
+/// A body returning through exit 2 of a routine that declares two is
+/// refused by the assembler itself, at the offending instruction.
+///
+/// Mutation it catches: drop the check in `assemble_lowered` — the file
+/// assembles.
+#[test]
+fn a_return_through_an_undeclared_exit_does_not_assemble() {
+    const SRC: &str = "\
+.routine sub, tapes=1, alpha=(3), exits=2
+.param p, ('_', '0', '1')
+.section code
+.func sub
+        retx    #2
+";
+    let err = assemble(&fake_syntax(), ARCH, SRC, false).unwrap_err();
+    assert_eq!(
+        err.kind,
+        mtc_core::asm::AsmErrorKind::UndeclaredExit {
+            routine: "sub".into(),
+            exit: 2,
+            declared: 2
+        }
+    );
+    assert_eq!(err.span.start.line, 5);
+}
+
+/// The in-range near miss for the assembler: exit 1 of two is declared.
+///
+/// Mutation it catches: an off-by-one bound (`k + 1 >= declared`) and this
+/// honest body stops assembling.
+#[test]
+fn a_return_through_a_declared_exit_assembles() {
+    const SRC: &str = "\
+.routine sub, tapes=1, alpha=(3), exits=2
+.param p, ('_', '0', '1')
+.section code
+.func sub
+        retx    #1
+";
+    assert!(assemble(&fake_syntax(), ARCH, SRC, false).is_ok());
+}
+
+/// The operand-kind near miss for the assembler: `trap #2` shares
+/// `retx`'s `Imm8` operand but falls through rather than returning.
+///
+/// Mutation it catches: classifying an exit return by operand kind alone
+/// and this trap stops assembling.
+#[test]
+fn a_trap_with_an_exit_sized_immediate_assembles() {
+    const SRC: &str = "\
+.routine sub, tapes=1, alpha=(3), exits=2
+.param p, ('_', '0', '1')
+.section code
+.func sub
+        trap    #2
+";
+    assert!(assemble(&fake_syntax(), ARCH, SRC, false).is_ok());
 }
 
 /// The in-range near miss: exit 1 of two is declared.
@@ -1459,7 +1548,7 @@ fn an_undeclared_exit_merges_with_site_warnings_in_offset_order() {
     const SRC: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3)
+.routine sub, tapes=1, alpha=(3), exits=1
 .param p, ('_', '0', '1')
 .routine leaf, tapes=1, alpha=(2)
 .param q, ('_', '0')
@@ -1474,8 +1563,13 @@ fn an_undeclared_exit_merges_with_site_warnings_in_offset_order() {
 .func leaf
         ret
 ";
-    let out = link(&fake_syntax(), &[asm(SRC)], &[], opts(CallMech::Frames))
-        .expect("warnings do not stop the link");
+    let out = link(
+        &fake_syntax(),
+        &[declaring_exits(SRC, "sub", 0)],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect("warnings do not stop the link");
     let in_sub: Vec<_> = out
         .report
         .diagnostics

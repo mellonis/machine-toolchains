@@ -8,7 +8,7 @@ use super::lower::{
     FrameTapeMap, LoweredSource, SourceDst, SourceFunction, SourceItem, SourceOperand, SourceRow,
     SourceTable, SourceTapeBinding, SpannedName, VecElem, lower_source,
 };
-use super::syntax::{ArchSyntax, Flow};
+use super::syntax::{ArchSyntax, Flow, SyntaxEntry};
 use super::{AsmError, AsmErrorKind};
 use crate::diagnostics::Span;
 use crate::formats::object::{
@@ -245,6 +245,39 @@ pub(crate) fn assemble_lowered(
     };
     if tagged && (!lowered.tables.is_empty() || lowered.signatures.is_some()) {
         return Err(refuse_table_records());
+    }
+
+    // A routine that declares its exits may not return through one it does
+    // not (docs/core.md (error codes)). The one predicate the linker's copy
+    // path reads classifies the instruction, so the assembler learns no
+    // opcode; it runs ahead of the per-function loop, so the first
+    // offending function in source order is the one reported.
+    if let Some(iface) = &lowered.interface {
+        for (function, routine) in functions.iter().zip(&iface.routines) {
+            let declared = routine.exits;
+            for item in &function.items {
+                if let SourceItem::Instr {
+                    span,
+                    opcode,
+                    operand: SourceOperand::Imm(k),
+                    ..
+                } = item
+                    && *k >= declared
+                    && syntax
+                        .by_opcode(*opcode)
+                        .is_some_and(SyntaxEntry::is_exit_return)
+                {
+                    return Err(err(
+                        *span,
+                        AsmErrorKind::UndeclaredExit {
+                            routine: function.name.clone(),
+                            exit: *k,
+                            declared,
+                        },
+                    ));
+                }
+            }
+        }
     }
 
     let mut symbols: Vec<Symbol> = functions

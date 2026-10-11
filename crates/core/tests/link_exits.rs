@@ -6,7 +6,7 @@
 //! convention), so core stays provably arch-agnostic.
 
 use mtc_core::asm::{ArchSyntax, AsmCaps, Flow, RelaxPair, SyntaxEntry, assemble};
-use mtc_core::formats::object::ObjectFile;
+use mtc_core::formats::object::{ObjectFile, SymbolDef};
 use mtc_core::linker::{CallMech, LinkError, LinkOptions, LinkOutput, link};
 use mtc_core::vm::OperandKind;
 
@@ -136,6 +136,29 @@ fn fake_syntax() -> ArchSyntax {
 
 fn asm(src: &str) -> ObjectFile {
     assemble(&fake_syntax(), ARCH, src, false).expect("assembles")
+}
+
+/// Assemble `src`, then set `routine`'s declared exit count to `exits` in
+/// the object's interface — the one way a body returning through an
+/// undeclared exit reaches the linker now that the assembler refuses it.
+fn declaring_exits(src: &str, routine: &str, exits: u8) -> ObjectFile {
+    let mut obj = asm(src);
+    let blob = obj
+        .symbols
+        .iter()
+        .find_map(|s| match s.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } if s.name == routine => {
+                Some(blob)
+            }
+            _ => None,
+        })
+        .expect("the routine is defined");
+    obj.interface
+        .as_mut()
+        .expect("the object has an interface")
+        .routines[blob as usize]
+        .exits = exits;
+    obj
 }
 
 const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid];
@@ -560,7 +583,7 @@ k:      wr      [1]
 const BODY_OVERRUNS_ITS_EXITS: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=2
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -955,7 +978,7 @@ fn a_body_returning_through_an_undeclared_exit_is_refused() {
     for mech in [CallMech::Mono, CallMech::Hybrid] {
         let err = link(
             &fake_syntax(),
-            &[asm(BODY_OVERRUNS_ITS_EXITS)],
+            &[declaring_exits(BODY_OVERRUNS_ITS_EXITS, "sub", 1)],
             &[],
             opts(mech),
         )

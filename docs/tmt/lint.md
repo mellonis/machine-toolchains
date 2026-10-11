@@ -957,9 +957,12 @@ never reported.
 
 A `retx #k` whose `k` is at or past the exit count of the frame active
 when it runs — the return always traps (`docs/tmt/isa.md`). This is a
-defect the assembler cannot refuse on its own, because the governing
+defect the assembler cannot refuse in general, because the governing
 exit count belongs to the frame descriptor a `call.m` installs, not to
-the returning function.
+the returning function. A routine whose own `.routine` line declares its
+exits is checked by the assembler itself (`undeclared-exit`,
+`docs/core.md (error codes)`); this rule covers the returns a frame
+descriptor governs.
 
 ```
 f.tma:23:9: lint: retx #3 is out of range — the governing frame declares 1 exit(s) (valid #0..#0), so this return always traps

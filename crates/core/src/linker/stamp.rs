@@ -52,7 +52,7 @@ use super::engine::{
 };
 use super::resolve::FuncRef;
 use crate::asm::decode::{self, Body, DecodedOperand};
-use crate::asm::{ArchSyntax, Flow, MatchRowClass, SyntaxEntry, classify_match_row};
+use crate::asm::{ArchSyntax, Flow, MatchRowClass, classify_match_row};
 use crate::formats::object::{BoundCall, RoutineSig};
 use crate::vm::OperandKind;
 
@@ -1372,17 +1372,6 @@ fn body_has_return(syntax: &ArchSyntax, blob: &[u8]) -> bool {
         })
 }
 
-/// Whether a dialect instruction is a multi-exit return: an `Imm8`
-/// operand naming the exit, with `Stop` flow. The flow is what tells it
-/// apart from a trap that carries the same operand kind but falls
-/// through, and the dialect needs no field of its own to say so
-/// (docs/core.md (link warnings)). The splice rewrite and the
-/// undeclared-exit scan both read this one predicate, so the two can
-/// never disagree about which instruction leaves through an exit.
-fn is_exit_return(entry: &SyntaxEntry) -> bool {
-    entry.operand == OperandKind::Imm8 && entry.flow == Flow::Stop
-}
-
 /// Every multi-exit return in `blob`, as `(blob offset, exit index)` in
 /// ascending offset order — the sibling of [`body_has_return`] for the
 /// other way a body leaves. `pub(super)`: `engine::check_sites` compares
@@ -1397,7 +1386,7 @@ pub(super) fn body_exits(syntax: &ArchSyntax, blob: &[u8]) -> Vec<(u32, u8)> {
                 operand: DecodedOperand::Imm(k),
             } => syntax
                 .by_mnemonic(mnemonic)
-                .filter(|e| is_exit_return(e))
+                .filter(|e| e.is_exit_return())
                 .map(|_| (d.addr, k)),
             _ => None,
         })
@@ -1957,7 +1946,7 @@ fn build_stamp(
                 blob.extend_from_slice(&blob_bytes[old_addr as usize..(old_addr + d.len) as usize]);
             }
             OperandKind::Imm8 => {
-                if is_exit_return(entry) {
+                if entry.is_exit_return() {
                     // A multi-exit return. Inside an exit-bearing splice
                     // it becomes a jump to exit `k` of the site's vector;
                     // anywhere else it is a frames instruction the base
