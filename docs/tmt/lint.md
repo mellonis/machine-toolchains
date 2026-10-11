@@ -394,7 +394,9 @@ binds. A tape is untouched when, across every rule of the machine world,
 its pattern cell is a wildcard (or omitted), its write cell keeps (`-`, or
 omitted), and its move cell stays (`.`, or omitted) — and it is never
 passed as a binding argument to a `call`/`graft`/`bind`, where a spliced
-or called subgraph could touch it out of the machine's own view.
+or called subgraph could touch it out of the machine's own view. An
+argument-less `call`, `graft` or `bind` into another unit binds the
+machine's tapes by position, so a machine making one touches every tape.
 
 ```
 b.tmc:4:3: lint: tape `scratch` is never read, written, or moved
