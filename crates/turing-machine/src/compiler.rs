@@ -3995,6 +3995,12 @@ fn find_external_map<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a R
 /// declarations table carry this target at all) and `expand.rs` (the
 /// splice itself, and its recursive nested grafts) call it.
 ///
+/// Two modules can no longer carry one name as a routine in one and as a
+/// graph in another (a module defining the name in any kind is compared
+/// against what the table publishes, docs/tmt/language.md (declarations)),
+/// so this graph-only lookup and `footprint::find_external` always agree on
+/// the module a name comes from.
+///
 /// Returns the OWNING module alongside the world, mirroring
 /// `footprint::find_external`'s own shape — `expand.rs` needs it: a spliced
 /// graph's own tape alphabets and any of ITS OWN nested graft targets

@@ -1704,7 +1704,13 @@ caught at the first compile. Doc lines and comments are not part of a
 declaration. A header also PRINTS the non-exported declarations an
 exported body needs; those are not published, and a unit's own definition
 of the same name is not a second declaration of anything the header
-offers.
+offers. A declaration read from a compiled object compares its state
+parameters by position, since an object keeps no names for them; two
+readings that both carry names must agree on them. A name conflicts when
+ANY two of its readings disagree, whatever the order they are given in.
+To resolve the error, keep one declaration per name: regenerate a header
+with `tmt interface` after changing its unit, or remove the stale or
+duplicate declaration.
 
 What a compile is given to read is a matter for the tools rather than the
 language: `tmt compile --extern FILE`, the sibling sources and libraries

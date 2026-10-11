@@ -825,6 +825,9 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
 /// must publish it identically, or the compile is refused
 /// `conflicting-declaration` before any lookup runs (docs/tmt/language.md
 /// (declarations)), exactly as the linker refuses a name two inputs define.
+/// That also rules out two modules carrying one name as a routine here and
+/// as a graph for `compiler::find_external_graph`: this lookup matches any
+/// kind, that one only graphs, and the two can no longer disagree.
 pub(crate) fn find_external<'a>(
     externals: &[&'a Resolved],
     path: &str,

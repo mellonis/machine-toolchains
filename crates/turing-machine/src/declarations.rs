@@ -133,33 +133,35 @@ impl Declarations {
     }
 
     /// Two modules publishing one name differently (docs/tmt/language.md
-    /// (declarations)): the first later module whose form of a name does
-    /// not agree with the first module's, reported at `0:0` like every
-    /// compile-wide error. Identical forms merge, whatever their origins;
-    /// fewer than two modules cannot conflict (the editor's per-keystroke
-    /// path has one).
+    /// (declarations)), reported at `0:0` like every compile-wide error. A
+    /// name conflicts iff ANY two of its published forms disagree —
+    /// `PublishedForm::agrees` is not transitive (a nameless state
+    /// parameter agrees with any name), so each new reading is tested
+    /// against every distinct reading already seen, never only the first.
+    /// The origins named are the first disagreeing pair in table order,
+    /// the earlier origin first. Identical forms merge, whatever their
+    /// origins; fewer than two modules cannot conflict (the editor's
+    /// per-keystroke path has one).
     pub(crate) fn check_conflicts(&self) -> Result<(), CompileError> {
         if self.modules.len() < 2 {
             return Ok(());
         }
-        let mut first: BTreeMap<String, (&Origin, PublishedForm)> = BTreeMap::new();
+        let mut seen: BTreeMap<String, Vec<(&Origin, PublishedForm)>> = BTreeMap::new();
         for (origin, resolved) in self.entries() {
             for (name, form) in module_forms(resolved) {
-                match first.get(&name) {
-                    None => {
-                        first.insert(name, (origin, form));
-                    }
-                    Some((first_origin, first_form)) if !first_form.agrees(&form) => {
-                        return Err(CompileError {
-                            span: Span::point(0, 0),
-                            kind: CompileErrorKind::ConflictingDeclaration {
-                                name,
-                                first: first_origin.describe(),
-                                second: origin.describe(),
-                            },
-                        });
-                    }
-                    Some(_) => {}
+                let readings = seen.entry(name.clone()).or_default();
+                if let Some((earlier, _)) = readings.iter().find(|(_, f)| !f.agrees(&form)) {
+                    return Err(CompileError {
+                        span: Span::point(0, 0),
+                        kind: CompileErrorKind::ConflictingDeclaration {
+                            name,
+                            first: earlier.describe(),
+                            second: origin.describe(),
+                        },
+                    });
+                }
+                if !readings.iter().any(|(_, f)| *f == form) {
+                    readings.push((origin, form));
                 }
             }
         }

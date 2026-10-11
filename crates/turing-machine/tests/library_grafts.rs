@@ -1620,12 +1620,16 @@ fn a_library_grafts_declared_write_set_is_believed() {
 /// (docs/tmt/language.md (declarations)), so the two modules cannot share
 /// a table: the second one read is refused as `conflicting-declaration`,
 /// in either `--extern` order, before any graft could meet the ambiguity.
+/// This also makes the old ambiguity unreachable by construction: a graft's
+/// footprint can no longer meet two modules carrying one name as a routine
+/// and as a graph, because a module DEFINING the name in any kind (private
+/// included) is compared against what the table publishes under it.
 ///
 /// Mutation: let forms of different kinds agree in
 /// `PublishedForm::agrees` — the table is then accepted and the host is
 /// refused for `writes-outside-contract` instead.
 #[test]
-fn a_graft_reads_its_clause_from_the_module_the_body_comes_from() {
+fn a_routine_and_a_graph_published_under_one_name_conflict() {
     const ROUTINE_MODULE: &str = "\
 namespace lib {
   export alphabet bits { '_', '0', '1' }

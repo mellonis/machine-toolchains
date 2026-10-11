@@ -260,8 +260,10 @@ fn declares(module: &Resolved, name: &str) -> bool {
 
 /// The unit's own definitions against what the table publishes under the
 /// same names (docs/tmt/language.md (declarations)): a name the table's
-/// FIRST publishing module declares differently is refused at the unit's
-/// definition. A later module disagreeing with that first one is
+/// ANY publishing module declares differently is refused at the unit's
+/// definition (`agrees` is not transitive, so every reading is tested; the
+/// origin named is the first disagreeing one in table order). Two table
+/// modules disagreeing with each other is
 /// [`Declarations::check_conflicts`]' business. Private own definitions
 /// are compared too; a module's non-exported items are not published and
 /// so are not compared against.
@@ -292,12 +294,13 @@ pub(crate) fn check_own_against_table(
         return Ok(());
     }
     for (name, (span, own)) in own_forms(program, resolved, externals, mode, provenance) {
-        let first = candidates
-            .iter()
-            .find_map(|(origin, forms)| forms.get(&name).map(|form| (origin, form)));
-        if let Some((origin, form)) = first
-            && !own.agrees(form)
-        {
+        let clash = candidates.iter().find_map(|(origin, forms)| {
+            forms
+                .get(&name)
+                .filter(|form| !own.agrees(form))
+                .map(|_| origin)
+        });
+        if let Some(origin) = clash {
             return Err(CompileError {
                 span,
                 kind: CompileErrorKind::ConflictingDeclaration {
@@ -424,7 +427,119 @@ mod tests {
         );
     }
 
-    /// Mutation: doc lines inside the published form.
+    fn object_reading() -> Resolved {
+        crate::header::declarations_from_object(&own_object(), &Declarations::none())
+            .expect("the object reads")
+    }
+
+    fn text_reading(path: &str, text: &str) -> Resolved {
+        crate::header::read_extern(Path::new(path), text, &Declarations::none()).expect("reads")
+    }
+
+    /// Three readings of `lib::r` — an object's (nameless state
+    /// parameters), a text one naming it `done`, a text one naming it
+    /// `fin` — conflict wherever the object reading sits in the table:
+    /// `agrees` is not transitive, so every reading must be tested against
+    /// every other. Mutation: compare each reading only against the first
+    /// one seen (`Declarations::check_conflicts`).
+    #[test]
+    fn three_readings_conflict_whatever_the_position_of_the_object_reading() {
+        let others = [("own.tmc", OWN), ("own_fin.tmc", OWN_FIN)];
+        for position in 0..3 {
+            let mut decls = Declarations::none();
+            let mut texts = others.iter();
+            for i in 0..3 {
+                if i == position {
+                    decls.push(Origin::Library("own".into()), object_reading());
+                } else {
+                    let (path, text) = texts.next().unwrap();
+                    decls.push(
+                        Origin::Extern(PathBuf::from(path)),
+                        text_reading(path, text),
+                    );
+                }
+            }
+            let err = analyze_with(C8, &decls).unwrap_err();
+            assert!(
+                matches!(&err.kind, Kind::ConflictingDeclaration { name, .. } if name == "lib::r"),
+                "object at {position}: {err:?}"
+            );
+        }
+    }
+
+    /// The near miss: the object reading and two text readings that agree
+    /// with each other merge, wherever the object sits. Mutation: treat
+    /// the object reading's nameless parameters as disagreeing.
+    #[test]
+    fn an_object_reading_and_two_agreeing_text_readings_merge_in_any_position() {
+        let others = [("own.tmc", OWN), ("own_copy.tmc", OWN)];
+        for position in 0..3 {
+            let mut decls = Declarations::none();
+            let mut texts = others.iter();
+            for i in 0..3 {
+                if i == position {
+                    decls.push(Origin::Library("own".into()), object_reading());
+                } else {
+                    let (path, text) = texts.next().unwrap();
+                    decls.push(
+                        Origin::Extern(PathBuf::from(path)),
+                        text_reading(path, text),
+                    );
+                }
+            }
+            assert!(analyze_with(C8, &decls).is_ok(), "object at {position}");
+        }
+    }
+
+    /// The own-definition check tests the unit against EVERY reading of
+    /// the name: the object reading (nameless) agrees with a unit naming
+    /// its state `fin`, the text reading naming it `done` does not.
+    /// Mutation: compare only against the first reading of the name
+    /// (`check_own_against_table`).
+    #[test]
+    fn an_own_definition_is_tested_against_every_reading_of_its_name() {
+        let mut decls = Declarations::none();
+        decls.push(Origin::Library("own".into()), object_reading());
+        decls.push(
+            Origin::Extern(PathBuf::from("own.tmc")),
+            text_reading("own.tmc", OWN),
+        );
+        let err = analyze_with(OWN_FIN, &decls).unwrap_err();
+        assert!(
+            matches!(&err.kind, Kind::ConflictingDeclaration { first, second, .. }
+                if first == "this unit" && second == "`own.tmc`"),
+            "{err:?}"
+        );
+    }
+
+    /// A PRIVATE own routine, graph or set is a definition of its name
+    /// too, compared with what the table publishes. Mutation: filter the
+    /// unit's routines (resp. graphs, sets) to the exported ones in
+    /// `own_forms`.
+    #[test]
+    fn a_private_own_routine_graph_or_set_conflicts_with_a_published_name() {
+        let machine = "machine {\n  tape t: lib::ab;\n  entry state s { [*] -> stop; }\n}\n";
+        let bodies = [
+            "routine r(tape t: lib::ab writes { 'a' }, state done) {\n    entry state s { [*] -> goto done; }\n  }",
+            "graph r(tape t: lib::ab, state done) {\n    entry state s { [*] -> goto done; }\n  }",
+            "set r { 'a' }",
+        ];
+        for body in bodies {
+            let src = format!("use lib::ab;\nnamespace lib {{\n  {body}\n}}\n{machine}");
+            let err = analyze_with(&src, &table(&[("l1.tmh", L1)])).unwrap_err();
+            assert!(
+                matches!(&err.kind, Kind::ConflictingDeclaration { name, first, .. }
+                    if name == "lib::r" && first == "this unit"),
+                "{body}: {err:?}"
+            );
+        }
+    }
+
+    /// Doc lines are not part of a declaration: the same header with and
+    /// without a `?` doc line merges. `PublishedForm` has no docs field,
+    /// so no one-line mutation of it exists; this guards the comparison
+    /// against any change that compares text-derived data (the module's
+    /// docs table, the raw header text), which makes it fail.
     #[test]
     fn a_doc_line_is_not_part_of_a_declaration() {
         let documented = L1.replace(

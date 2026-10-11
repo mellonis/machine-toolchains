@@ -209,7 +209,12 @@ repeatable. Two files declaring one name must declare it identically — a
 unit's source and its header, one library given twice — or the compile
 fails `conflicting-declaration`; the same holds against the embedded
 standard library, which is read last, and against the unit's own
-definitions (`docs/tmt/language.md (declarations)`).
+definitions (`docs/tmt/language.md (declarations)`). To fix the error, keep
+one declaration per name: after changing a unit, regenerate its header
+with `tmt interface` (a stale header beside its unit is the usual cause),
+or drop the file that declares the name differently. A declaration read
+from a compiled object compares its state parameters by position, since an
+object keeps no names for them.
 
 `--nostdlib` drops the embedded standard library from that lookup —
 `std::…` names then behave like any other external, contributing the
