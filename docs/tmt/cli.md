@@ -483,9 +483,10 @@ Linking always appends the embedded standard library as an implicit last
 library unless `--nostdlib` is given (`docs/tmt/stdlib.md`). It is linked
 *lazily*, through the same reachability pass as everything else, so a
 program that calls nothing from it pays nothing — the stdlib's routines
-simply appear in the dropped list under `-v`. Libraries are first-wins, so
-command-line objects and explicit `-l` libraries shadow a stdlib definition
-of the same name.
+simply appear in the dropped list under `-v`. A command-line object or an
+explicit `-l` library defining a name the stdlib also defines is a
+duplicate-symbol error once the program reaches it; `--nostdlib` is the way
+to replace the library.
 
 Explicit `-l NAME` resolves `NAME.tmo` against the `-L` directories in the
 order given, and errors if it is not found on any of them. There is no

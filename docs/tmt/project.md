@@ -118,9 +118,9 @@ cross-target build order for a bare `tmt build`.
 | `call-mech` | `"mono"` \| `"frames"` \| `"hybrid"` | project-level value | This target's bound-call lowering, overriding the project default. |
 | `run` | object | absent | Optional run settings for `tmt build --run` — see The `run` block below. |
 
-Library resolution is **first-wins** in declared order, and a user
-definition of the same exported symbol silently shadows a library's — no
-warning is emitted (`docs/core.md (linking)`). Linking is lazy by
+A name a declared library defines may not also be defined by a source, or
+by an earlier library, once the program reaches it
+(`docs/core.md (linking)`). Linking is lazy by
 reachability, so a declared library that no effective source references
 contributes nothing to the output.
 

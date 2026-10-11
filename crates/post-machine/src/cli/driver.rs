@@ -887,9 +887,9 @@ fn load_units(
 }
 
 /// Phase two: compile every `.pmc` unit with the settled column and
-/// collect the objects IN INPUT ORDER — the linker's namespace is
-/// first-wins, so the order an input was written in is part of the
-/// build's meaning and survives the two-phase split.
+/// collect the objects IN INPUT ORDER — the order an input was written in
+/// survives the two-phase split, so a link error names inputs in the order
+/// the user wrote them.
 fn compile_units(
     units: Vec<Unit>,
     options: &CompileOptions,
@@ -935,13 +935,12 @@ fn write_object(source: &Path, object: &ObjectFile) -> Result<(), String> {
 /// the bit would flip the columns of a program the linker then resolves
 /// as normal, and the two builds would emit different code.
 ///
-/// So: walk the inputs in the order the linker's namespace is built —
-/// the units first, then the libraries — take the first that defines
-/// `entry`, and read its bit alone. First-in-order matches first-wins,
-/// and a library only ever owns the entry when no unit does, exactly as
-/// `resolve` fills its namespace with `or_insert`. Two units defining
-/// `entry` is a duplicate-symbol link error whichever bit is chosen, so
-/// the tie is broken deterministically and not diagnosed here; nothing
+/// So: walk the inputs in the order the linker lists them — the units
+/// first, then the libraries — take the first that defines `entry`, and
+/// read its bit alone. Two inputs defining `entry` (two units, or a unit
+/// and a library) is a duplicate-symbol link error whichever bit is
+/// chosen, reported by the linker after this helper runs, so the tie is
+/// broken deterministically and not diagnosed here; nothing
 /// defining it at all is a `NoEntrySymbol` link error, and the column is
 /// moot — normal, which is also the linker's assumption.
 ///
@@ -1133,9 +1132,10 @@ mod tests {
             DEFAULT_ENTRY
         ));
 
-        // A unit that owns the entry outranks any library: the linker's
-        // namespace takes user objects first, and a library copy is
-        // silently shadowed.
+        // The helper answers "units first, then the first library" for
+        // the column choice. A unit AND a library both defining the entry
+        // is a duplicate-symbol link error the linker reports after this
+        // helper runs; these assertions are about the helper, not the link.
         let owning_units = vec![source("main() { @util(); }")];
         assert!(!entry_owner_is_volatile(
             &owning_units,
@@ -1143,8 +1143,8 @@ mod tests {
             DEFAULT_ENTRY
         ));
 
-        // Between libraries it is first-wins in link order, which is why
-        // the stdlib riding last can never displace a `-l` library.
+        // Between libraries the first in link order answers; two
+        // libraries defining the entry are likewise a link error.
         let both = vec![volatile_entry.clone(), plain_entry.clone()];
         assert!(entry_owner_is_volatile(&[], &both, DEFAULT_ENTRY));
         let reversed = vec![plain_entry, volatile_entry];

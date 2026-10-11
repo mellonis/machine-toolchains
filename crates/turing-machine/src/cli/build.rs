@@ -608,9 +608,10 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     for name in &lib_names {
         libraries.push(find_library(name, &search_dirs)?);
     }
-    // The embedded stdlib links last (first-wins means -l objects and the
-    // command-line inputs shadow it), lazily via reachability, unless opted
-    // out. Mirrors the pmt `link` wiring.
+    // The embedded stdlib links last, lazily via reachability, unless opted
+    // out; a command-line object or `-l` library defining a `std::` name
+    // the program reaches is a duplicate-symbol error, not a shadowing.
+    // Mirrors the pmt `link` wiring.
     if !nostdlib {
         libraries.push(crate::stdlib::object().clone());
     }

@@ -624,9 +624,10 @@ mod tests {
     }
 
     /// Libraries resolve lazily: only what `main` reaches is linked, and a
-    /// library's broken, unreached function never errors. Mutation: report
-    /// every name two inputs define, reached or not — not applicable here
-    /// (one definer each); this pins the lazy half the test above lost.
+    /// library's broken, unreached function never errors. Mutation: walk
+    /// every library function eagerly, as if each were a root — the
+    /// unreached function's `ghost` reference becomes an unresolved name
+    /// and `unwrap` panics.
     #[test]
     fn libraries_resolve_lazily() {
         let needy = obj(0x7E, &[("main", &["go"])]);

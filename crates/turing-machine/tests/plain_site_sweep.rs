@@ -1,7 +1,8 @@
 //! An `#[ignore]`d measurement instrument, not a correctness test: it
 //! assembles or compiles every shipped program standalone, resolves each
-//! plain call site's callee itself (the linker's own first-wins order —
-//! unit then stdlib — without running the real linker), and reports what
+//! plain call site's callee itself (the unit first, then the stdlib —
+//! the shipped corpus never defines a name the stdlib also defines — without
+//! running the real linker), and reports what
 //! the planned plain-site size check WOULD say, so the check's blast
 //! radius is known before it becomes an error. Run it with
 //! `cargo test -p mtc-turing-machine --test plain_site_sweep -- --ignored --nocapture`.
@@ -57,7 +58,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
 /// EXTERNAL symbol, so a lookup confined to one object would report
 /// nothing about the exact sites this sweep exists to measure. `extra`
 /// is the stdlib object (and, for a multi-unit target, its siblings),
-/// searched after the object itself — the linker's own first-wins order.
+/// searched after the object itself.
 /// Reported, never asserted.
 fn report(path: &Path, obj: &ObjectFile, extra: &[&ObjectFile], framed_call_opcode: Option<u8>) {
     let Some(sigs) = obj.signatures.as_ref() else {

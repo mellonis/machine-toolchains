@@ -393,13 +393,6 @@ the observables above are joined by the sequence of reads and writes the
 device actually sees — Volatile programs above, and
 `docs/pmt/optimizer.md (volatile builds)` for the passes that costs.
 
-**Interposition:** `-O1`'s inline pass binds intra-module calls at compile
-time, so if you shadow one of a library's *internal* callees (see
-`docs/pmt/stdlib.md`), the override only affects call sites that survive
-optimization — the linker only guarantees interposition for call sites it
-actually still sees as calls. A library that must stay fully interposable
-should be built with `--fno-inline`.
-
 ## The IR artifact
 
 The compiler's intermediate representation — a per-function control-flow

@@ -420,8 +420,9 @@ to do. When the twins do start costing more than their counterparts, that is
 the mark working.
 
 In every other respect a twin is an ordinary exported routine: it links, it
-is reachable or dropped, and it is shadowed by a same-named definition of
-your own on exactly the same terms as the routine it mirrors.
+is reachable or dropped, and a definition of your own under its name is a
+duplicate-symbol link error once the program calls it, exactly as for the
+routine it mirrors.
 
 ## The shipped header
 
@@ -470,12 +471,11 @@ entirely at link.
   representation boundary too — the delimited `minusOne` pulls in its three
   delimited callees and the bare `invertNumber` under them, and the twin of
   that same `minusOne` pulls in the twins of all four.
-- **Symbol resolution.** The stdlib is appended *last*, and libraries resolve
-  first-wins, so command-line objects and explicit `-l` libraries shadow it.
-  Exporting a routine under the same qualified name in your own source
-  therefore overrides the library's, silently and by design — it is the same
-  symbol, and user code wins that arbitration
-  (`docs/tmt/language.md (namespaces)`).
+- **Symbol resolution.** The stdlib is appended *last*. A qualified name has
+  one definition in a link: defining a routine under a `std::` name your
+  program calls is a duplicate-symbol error naming your unit and the
+  standard library. To replace the library, build with `--nostdlib` and link
+  your own set (`docs/tmt/cli.md (--nostdlib)`).
 - **`--nostdlib`.** Opts out entirely. A program that still references a
   `std::` name then fails at link with an unresolved symbol
   (`docs/tmt/cli.md (--nostdlib)`).

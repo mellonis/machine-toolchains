@@ -652,15 +652,20 @@ Objects in, one executable image out, in two phases.
 
 **Resolution** builds the namespace and walks reachability:
 
-- Duplicate exported symbols across user objects are a link-time error.
+- An exported name has one definition in a link. Two user objects
+  defining one name are a link-time error whether or not the program
+  reaches it; a name a library also defines — against a user object or
+  another library, the embedded standard library included — is an error
+  once the program reaches it, so two libraries that happen to share a
+  name nothing calls still link together. Inside ONE library object a
+  name recorded twice keeps its first record; compiler output never
+  produces that shape.
 - A link error that concerns two inputs names both: a driver labels each
   input it hands the linker (a path, a library name, the standard
   library), and an unlabelled input is named by its position.
-- Libraries resolve **first-wins** and may be shadowed by a user object
-  defining the same exported symbol — shadowing is an opt-in property of
-  exported names.
 - A **local** symbol binds directly within its own object and never goes
-  through the namespace, so it can neither shadow nor be shadowed. This
+  through the namespace, so it can neither collide with nor be hidden by
+  another object's symbol of the same name. This
   is the linking-visibility rule every source language's private-by-
   default visibility rests on.
 - Reachability is a BFS from the entry symbol — `main` by default (the
@@ -686,10 +691,9 @@ and the rules around that pair are narrow on purpose:
   or `both` (which claims each). Claiming a column twice is a duplicate
   however the two are tagged, so `{normal, volatile}` is the ONLY
   same-name pair one object may carry.
-- A name's two columns always come from ONE input. A user object's
-  definition shadows a library's whole pair, and library first-wins
-  keeps a pair whole too — the columns of one name never span two
-  inputs.
+- A name's two columns always come from ONE input: a definition is one
+  input's column pair, and a second input offering the same name is a
+  duplicate whatever its columns.
 - An object with no variant records at all reads as all-`normal`
   (`docs/formats.md (MO)`): it offers one column, which is what makes
   every legacy and hand-assembled object link unchanged.
@@ -987,8 +991,8 @@ without anyone hand-authoring a signature.
 An imported alphabet is verified the same way: a unit that imports an
 alphabet by name records the glyph list it compiled against, the link
 stage compares it against the exporting object's own declaration, and a
-mismatch stops the link — first-wins over the same namespace order, and
-unchecked when no input exports that alphabet.
+mismatch stops the link, and is unchecked when no input exports that
+alphabet.
 
 ## The composition engine
 

@@ -639,8 +639,10 @@ everywhere above, unchanged.
 
 Within the overlay, a name resolves in exactly the order the linker
 resolves it: the document's own local declarations first, then the
-declared sources, then the declared libraries (first library wins on a
-name collision), and the embedded standard library **last**. What a
+declared sources, then the declared libraries, and the embedded standard
+library **last**. The order only decides what the editor shows when two
+of them define one name, which the linker refuses once the program
+reaches it (`docs/core.md (linking)`). What a
 declared source contributes is not simply "exported symbols" on both
 toolchains: for `.pmc` it is exactly that — an unexported function never
 crosses the boundary. For `.tmc` the rule is per world kind, since only
@@ -650,10 +652,9 @@ contributes, exported or not, because a graph is spliced into a world
 rather than called; and a `machine` world always contributes its `main`
 regardless of `export` — the grammar does not accept `export` on a
 `machine` block at all, and the linker reaches its `main` unconditionally.
-Because the standard library resolves last, a project that legitimately
-shadows it with its own `namespace std { export … }` gets an editor that
-follows the project's own definition, not the embedded one, the same way
-the linker would.
+A project that defines a `std::` name of its own sees its own definition
+in the editor; the linker refuses the pair once the program reaches the
+name.
 
 A project may declare `"stdlib": false`; doing so removes the `std::`
 surface entirely — no completion candidates, no hover, and no
@@ -719,11 +720,12 @@ that is a documented policy choice, not a faithfulness gap.) Both crates
 carry a fixture that builds both sides of one small project — the
 overlay through the real service, the linker through the same
 effective-source-order dispatch the build driver uses — and compares
-them file-for-file, including the shadowed-stdlib case above.
+them file-for-file, and pin that a reached sibling-versus-standard-library
+collision is a link error.
 
 ### Caveats
 
-Five limitations are real and worth stating plainly rather than glossing
+Six limitations are real and worth stating plainly rather than glossing
 over:
 
 - **Lexical path identity.** Membership and sibling lookup compare paths
@@ -753,6 +755,9 @@ over:
   declared set at a time. A document belonging to two targets, where a
   name is declared only in one target's sources, can show no warning in
   the editor while building the other target alone would still emit one.
+- **Duplicate definitions are not reported yet.** A name a sibling and a
+  library (or the standard library) both define resolves to the sibling
+  here, while the linker refuses the program that reaches it.
 - **Silent degradation on a broken sibling or a missing library.** A
   declared sibling that fails to read from disk, or whose text fails to
   parse, contributes an *empty* export list to the overlay rather than
@@ -897,9 +902,9 @@ never holds a stdlib entry to begin with.
 
 Both surfaces, and completion in a `use` path or a `call`/`bind` target,
 consult the project overlay FIRST (**Cross-file resolution**, above): a
-project that defines its own `namespace std { export routine … }` shadows
-the embedded routine of the same mangled name, exactly as the linker
-resolves it.
+project that defines its own `namespace std { export routine … }` is what
+the editor shows for that name; the linker refuses the pair once the
+program reaches it.
 
 ## The `.tma` service
 
