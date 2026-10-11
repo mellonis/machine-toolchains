@@ -574,3 +574,87 @@ fn an_object_given_to_extern_is_refused_by_its_magic() {
     let ok = compile(&dir, &caller, &["--extern", header.to_str().unwrap()]);
     assert!(ok.is_ok(), "{:?}", ok.err());
 }
+
+const U: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  export routine h2(tape t: marks) {
+    entry state s { [*] -> write ['x'] return; }
+  }
+}
+";
+
+const UC: &str = "\
+use lib::marks;
+use lib::h2;
+routine c(tape t: marks writes { 'x' }) {
+  entry state s { [*] -> call h2(t = t) then done; }
+  state done { [*] -> return; }
+}
+";
+
+const UC_NONE: &str = "\
+use lib::marks;
+use lib::h2;
+routine c(tape t: marks writes {}) {
+  entry state s { [*] -> call h2(t = t) then done; }
+  state done { [*] -> return; }
+}
+";
+
+/// A `.tmc` read for its declarations believes the inferred write set its
+/// generated header prints, so a caller whose contract matches that set
+/// compiles through either route. Mutation: skip the writes step of
+/// `header::settle_declarations` — the `.tmc` route believes the whole
+/// alphabet again and fails `writes-outside-contract`.
+#[test]
+fn a_source_read_believes_the_write_set_its_header_prints() {
+    let dir = scratch("source_read_writes");
+    let u = write(&dir, "u.tmc", U);
+    let header = execute(&[
+        "interface".into(),
+        u.to_str().unwrap().into(),
+        "--nostdlib".into(),
+    ])
+    .expect("interface");
+    let u_tmh = write(&dir, "u.tmh", &header.stdout);
+    let uc = write(&dir, "uc.tmc", UC);
+    for route in [&u_tmh, &u] {
+        let out = compile(
+            &dir,
+            &uc,
+            &["--nostdlib", "--extern", route.to_str().unwrap()],
+        );
+        assert!(out.is_ok(), "{}: {:?}", route.display(), out.err());
+    }
+}
+
+/// The near miss: a caller promising to write nothing is refused through
+/// both routes. Mutation: publish the EMPTY set for an uncontracted tape —
+/// the `.tmc` route then accepts it.
+#[test]
+fn a_source_read_still_refuses_what_the_header_refuses() {
+    let dir = scratch("source_read_refuses");
+    let u = write(&dir, "u.tmc", U);
+    let header = execute(&[
+        "interface".into(),
+        u.to_str().unwrap().into(),
+        "--nostdlib".into(),
+    ])
+    .expect("interface");
+    let u_tmh = write(&dir, "u.tmh", &header.stdout);
+    let uc = write(&dir, "uc.tmc", UC_NONE);
+    for route in [&u_tmh, &u] {
+        let err = compile(
+            &dir,
+            &uc,
+            &["--nostdlib", "--extern", route.to_str().unwrap()],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("[writes-outside-contract]"),
+            "{}: {err}",
+            route.display()
+        );
+    }
+}

@@ -155,10 +155,11 @@ unless opted out — the same objects-then-libraries-then-stdlib order the
 linker itself resolves names in.
 
 A `.tmc` sibling is read LENIENTLY: a routine's declared shape is its
-signature, and its body contributes one fact only — its `noreturn`,
-inferred from the body exactly as `tmt interface` infers it, so a caller
+signature, and its body contributes what its generated header would
+print — its `noreturn` and its uncontracted tapes' inferred write sets,
+inferred from the body exactly as `tmt interface` infers them, so a caller
 may omit `then` against a sibling it could omit it against through that
-sibling's generated header — but a GRAPH's body is kept in full — a graph's only form is its
+sibling's generated header, and is held to the same write sets — but a GRAPH's body is kept in full — a graph's only form is its
 source, so this is what makes a sibling's exported graph graftable by
 another sibling, exactly as a library's own header does. A `.tma`/`.tmo`
 sibling is assembled/loaded and its OBJECT's own interface feeds the

@@ -325,9 +325,10 @@ fn canonical(text: &str) -> Result<String, String> {
 /// cannot omit it — this is what makes a sibling's or a library's
 /// exported graph graftable); anything else (a `.tmc`) is read LENIENTLY
 /// as [`ReadMode::Program`]: bodies and a `machine` block are accepted
-/// and a routine's body contributes one fact [`Resolved`] keeps — its
-/// `noreturn`, inferred exactly as `tmt interface` infers it
-/// ([`inferred_returns`]) — while a graph's body is read and kept exactly as
+/// and a routine's body contributes what its generated header would print
+/// ([`settle_declarations`]) — its `noreturn`, inferred exactly as `tmt
+/// interface` infers it ([`inferred_returns`]), and its uncontracted
+/// tapes' inferred write sets — while a graph's body is read and kept exactly as
 /// the strict arm keeps it. Text has no container magic to tell a header
 /// from a full source by, so — exactly as in `cli/interface.rs` — the
 /// extension is the one place it IS the signal, never a second front end.
@@ -372,11 +373,28 @@ fn read_declarations_with_mode(
     externals: &Declarations,
 ) -> Result<Resolved, CompileError> {
     let analysis = compiler::analyze_with_mode(source, externals, mode)?;
+    let mut resolved = analysis.resolved;
+    settle_declarations(&analysis.program, &mut resolved, externals, mode);
+    Ok(resolved)
+}
+
+/// Settle what a declarations reading of `program` publishes
+/// (docs/tmt/language.md (declarations)): stamp every graph's digest,
+/// settle every routine's `noreturn` from its body, and — for a
+/// [`ReadMode::Program`] read only — publish each routine/graph tape's
+/// write set as the header prints it. The ONE place the lenient read
+/// settles these facts.
+pub(crate) fn settle_declarations(
+    program: &Program,
+    resolved: &mut Resolved,
+    externals: &Declarations,
+    mode: ReadMode,
+) {
     // Every graph world DOES carry its body (see the mode doc above), so
     // this is exactly where a later graft of one needs its digest to come
     // from — this module's own AST is about to be dropped, and `Resolved`
     // alone carries no way to recompute it (`stamp_graph_digests`).
-    let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
+    let footprint = footprint::infer_resolved_with(resolved, &externals.modules());
     // A routine's `noreturn` is the one fact a consumer reads off a
     // routine world that a lenient `.tmc` read would otherwise lose: the
     // body is about to be dropped with the AST, and `ir::known_noreturn`
@@ -385,8 +403,7 @@ fn read_declarations_with_mode(
     // interface` prints it by — a strict read (a header, or an object's
     // rendered one) has no bodies, `returns` is empty, and every world
     // keeps its declared clause untouched.
-    let returns = inferred_returns(&analysis.program, &analysis.resolved, externals);
-    let mut resolved = analysis.resolved;
+    let returns = inferred_returns(program, resolved, externals);
     for world in resolved
         .worlds
         .iter_mut()
@@ -399,8 +416,33 @@ fn read_declarations_with_mode(
         world.declared_noreturn =
             noreturn.then(|| world.declared_noreturn.unwrap_or(world.name_span));
     }
-    stamp_graph_digests(&analysis.program, &mut resolved, &footprint);
-    Ok(resolved)
+    // Stamped BEFORE the write sets below are rewritten: the digest is
+    // computed from the tapes as the source declared them (the printed
+    // signature goes through `published_writes` either way, so the order
+    // cannot change a digest; stamping first makes that independent of it).
+    stamp_graph_digests(program, resolved, &footprint);
+    // A routine's or graph's tape publishes the set its header would
+    // print (`published_writes`): the declared effective set where a
+    // clause exists, else the body's inferred set. Never for a header
+    // read: a bodiless routine's inferred set is empty, and publishing it
+    // would claim the routine writes nothing.
+    if mode == ReadMode::Program {
+        for world in resolved
+            .worlds
+            .iter_mut()
+            .filter(|w| w.kind != WorldKind::Machine)
+        {
+            for i in 0..world.tapes.len() {
+                let inferred = footprint
+                    .worlds
+                    .get(&world.name)
+                    .and_then(|wf| wf.tapes.get(i).copied());
+                let tape = &mut world.tapes[i];
+                tape.writes = Some(published_writes(tape, inferred));
+                tape.never_writes = None;
+            }
+        }
+    }
 }
 
 /// The ONE path from a compiled object to a [`Declarations`] module
@@ -439,8 +481,12 @@ pub(crate) fn declarations_from_object(
         message,
         code: OBJECT_INTERFACE_UNREADABLE,
     })?;
-    read_declarations_with_mode(&text, ReadMode::DeclarationsOnly, externals).map_err(|e| {
-        UnresolvedSource {
+    read_declarations_with_mode(&text, ReadMode::DeclarationsOnly, externals)
+        .map(|mut resolved| {
+            resolved.from_object = true;
+            resolved
+        })
+        .map_err(|e| UnresolvedSource {
             message: format!(
                 "{}:{}: error: {} [{}]",
                 e.span.start.line,
@@ -449,8 +495,7 @@ pub(crate) fn declarations_from_object(
                 e.kind.code()
             ),
             code: e.kind.code(),
-        }
-    })
+        })
 }
 
 /// A sentinel [`UnresolvedSource::code`] for the one `declarations_from_
@@ -634,6 +679,7 @@ fn empty_resolved() -> Resolved {
         worlds: Vec::new(),
         entry_world: None,
         docs: HashMap::new(),
+        from_object: false,
     }
 }
 
@@ -2106,7 +2152,7 @@ fn map_pairs_text(map: &SymMap) -> String {
 /// One comma-`, `-joined pair list — shared by an inline `with map { … }`
 /// ([`map_pairs_text`]) and a named map's own declared body
 /// ([`map_lines`]).
-fn map_pair_list_text(pairs: &[MapPair]) -> String {
+pub(crate) fn map_pair_list_text(pairs: &[MapPair]) -> String {
     pairs
         .iter()
         .map(|pair| {

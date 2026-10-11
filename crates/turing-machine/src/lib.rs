@@ -29,6 +29,7 @@ pub mod optimizer;
 pub mod parser;
 pub(crate) mod patterns;
 mod project;
+pub(crate) mod published;
 pub mod rept_emit;
 pub mod stdlib;
 pub mod syntax;

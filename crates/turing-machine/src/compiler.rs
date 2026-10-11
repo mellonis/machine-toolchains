@@ -1198,6 +1198,10 @@ pub(crate) struct ResolvedAlphabet {
     pub name_span: Span,
     /// Glyph labels in position order; `glyphs[0]` is the blank.
     pub glyphs: Vec<String>,
+    /// Whether this unit declares the alphabet with `export`. An alphabet
+    /// copied in from another unit's declarations (a tape's cross-unit
+    /// reference) is `false`: it is published by its own unit, never twice.
+    pub exported: bool,
 }
 
 impl ResolvedAlphabet {
@@ -1662,6 +1666,10 @@ pub(crate) struct Resolved {
     /// it). World-local state / graft / bind docs ride on the worlds' AST
     /// nodes, not here.
     pub docs: HashMap<String, Doc>,
+    /// Whether this module was read from a compiled object's interface
+    /// (`header::declarations_from_object`), whose state parameters carry
+    /// minted names rather than the author's (`published::module_forms`).
+    pub from_object: bool,
 }
 
 /// One resolved world (a `machine` block, a `routine`, or a `graph`).
@@ -3392,6 +3400,7 @@ fn resolve_all_alphabets(
                 name: full,
                 name_span: a.name_span,
                 glyphs,
+                exported: a.exported,
             },
         );
     }
@@ -3499,6 +3508,7 @@ fn resolve_module(
         worlds,
         entry_world,
         docs,
+        from_object: false,
     })
 }
 
@@ -3879,6 +3889,7 @@ fn resolve_tape_alphabet(
                         name: r.full.clone(),
                         name_span: span,
                         glyphs: glyphs.to_vec(),
+                        exported: false,
                     });
                 return Ok((r.full, card));
             }

@@ -1682,13 +1682,15 @@ each routine's tapes with their glyph lists, declared effective write
 set, and declared `enters`/`leaves` head-position clauses (when
 written), its `state` parameter count, and its declared `noreturn`
 clause.
-The `machine` block contributes nothing and is not needed. The write set
-is a DECLARED fact here, never an inferred one: a routine that declares
-no `writes` clause is read as able to write its whole alphabet. So is
-`noreturn` when the reading has no body to walk (a header); a `.tmc`
-read leniently infers it from the body exactly as `tmt interface` does,
-and a routine whose body cannot be expanded falls back to its declared
-clause.
+The `machine` block contributes nothing and is not needed. A header
+states each tape's write set. A `.tmc` read for its declarations
+publishes the same set its header would print: the declared effective
+set where the tape declares `writes` or `never writes`, and otherwise
+the set its body is inferred to write — so the two readings of one unit
+never disagree. `noreturn` is likewise stated by a header (a reading with
+no body to walk); a `.tmc` read leniently infers it from the body exactly
+as `tmt interface` does, and a routine whose body cannot be expanded
+falls back to its declared clause.
 
 What a compile is given to read is a matter for the tools rather than the
 language: `tmt compile --extern FILE`, the sibling sources and libraries
@@ -1705,7 +1707,7 @@ which is read unless switched off (`docs/tmt/cli.md (--extern and
 - a **`.tmc`** used as a declarations source is read LENIENTLY: it is an
   ordinary program, and the `machine` block it happens to carry is simply
   not used. A routine's body contributes its inferred `noreturn` and
-  nothing else. A graph's body is kept, so a sibling's exported graph is
+  its uncontracted tapes' inferred write sets. A graph's body is kept, so a sibling's exported graph is
   graftable exactly as a header's is.
 
 Both readings run the one `.tmc` grammar. There is no separate header

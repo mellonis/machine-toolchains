@@ -202,8 +202,9 @@ contributes the whole alphabet. `FILE`'s extension decides how it is read,
 never a second front end: a `.tmh` is read STRICTLY, the same shape `tmt
 interface` enforces on a header (a routine body or a `machine` block is an
 error); anything else — a `.tmc` — is read LENIENTLY as a full program,
-where any `machine` block is unused and a routine's body contributes only
-its `noreturn`, inferred exactly as `tmt interface` infers it. The flag is
+where any `machine` block is unused and a routine's body contributes its
+`noreturn` and its uncontracted tapes' write sets, inferred exactly as
+`tmt interface` infers them. The flag is
 repeatable, and order is meaningful: modules are consulted in command-line
 order, with the embedded standard library consulted last — so a `--extern
 std.tmh` of the user's own shadows the built-in `std` when both are
