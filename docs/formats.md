@@ -701,10 +701,10 @@ any interface content in a file — a `.param` line, a `.graph`, a
 signature and its full set of `.param` lines. A file with signatures and
 no interface content is unaffected: that is the ordinary version-3 shape.
 
-`.graph <name>, <digest>[, private]` records a graph this unit **exports** and the
-digest of the body a grafting unit must have spliced; `.grafted <name>,
-<digest>` records a library graph this unit **spliced** and the digest it
-spliced. Both stand in the code section before the first `.func`, and
+`.graph <name>, <digest>[, private]` records every graph the unit's header
+prints and the digest of the body a grafting unit must have spliced;
+`.grafted <name>, <digest>` records every library graph this unit
+**spliced**, nested ones included, and the digest it spliced. Both stand in the code section before the first `.func`, and
 both write the digest as an unsigned decimal `u32`. They are
 object-level, not per-function, but they still oblige the all-or-none
 rule above — a digest is meaningless without the interface it is checked

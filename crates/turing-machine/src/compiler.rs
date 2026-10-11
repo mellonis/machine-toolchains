@@ -4629,7 +4629,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     let ext_modules = options.externals.modules();
     let footprint = crate::footprint::infer_resolved_with(&analysis.resolved, &ext_modules);
     let exported_graphs =
-        crate::header::exported_graph_digests(&analysis.program, &analysis.resolved, &footprint);
+        crate::header::interface_graph_digests(&analysis.program, &analysis.resolved, &footprint);
     // Every DISTINCT library graph this unit spliced anywhere (a direct
     // graft, or one reached through another library graph's own nested
     // grafts) — `expand::expand` records the name at the point its target

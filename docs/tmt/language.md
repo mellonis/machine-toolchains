@@ -1103,15 +1103,10 @@ header by hand: a graph's digest covers the body **as the header printer
 renders it**, so a reference spelled differently but equivalently — a
 qualified path where the printer would print a bare name — digests
 differently and trips the drift check at link. Doc lines, comments,
-whitespace and unrelated declarations do not move it.
-
-The digest covers what the body SPELLS, which has one limit worth
-knowing: a body that names a glyph set in a pattern cell, or a named map
-at a `graft` inside it, digests that NAME, not the set's members
-or the map's pairs. Changing a set's members or a map's pairs, with the
-body's own text untouched, leaves the digest where it was and raises no
-drift at link — regenerate a library's header and rebuild its consumers
-after such a change.
+whitespace and unrelated declarations do not move it. It also covers what
+the body names: the members of every glyph set a pattern cell names and
+the pairs of every named map an argument names, so changing either moves
+the digest.
 
 ### `bind`
 
@@ -1893,8 +1888,10 @@ link stage re-checks what it can:
 - A grafted graph's body is digested on both sides — the exporting unit
   records the digest of the body it published, the consuming unit the
   digest of the body it spliced — and a mismatch stops the link
-  (`docs/core.md (graft drift)`). An imported alphabet is verified the
-  same way.
+  (`docs/core.md (graft drift)`). Every graph a splice pulls in is
+  recorded, a graph nested inside another included, and a library records
+  every graph its header prints, so each is checked by name. An imported
+  alphabet is verified the same way.
 - A routine's declared `noreturn` is re-read from the linked body, so a
   header that claims it falsely is reported where it matters — at a call
   site written without a continuation ("Routines").

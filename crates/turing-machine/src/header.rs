@@ -147,7 +147,7 @@
 //! nothing. The source arm never had this problem: a `machine` block has
 //! no `export` keyword to make it eligible in the first place.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -1096,24 +1096,8 @@ fn render_source(
     // that is the `use`-line rule's own job, exactly as an external
     // alphabet/map reference already is, and there is no local declaration
     // for this render to print for it regardless.
-    let mut referenced_graphs: HashSet<&str> = HashSet::new();
-    let mut graph_frontier: Vec<&ResolvedWorld> = program
-        .graphs
-        .iter()
-        .filter(|g| g.exported)
-        .filter_map(|g| worlds.get(full_name(&g.ns, &g.name).as_str()).copied())
-        .collect();
-    while let Some(world) = graph_frontier.pop() {
-        for graft in &world.grafts {
-            let target = graft.target.as_str();
-            if let Some(&target_world) = worlds.get(target)
-                && target_world.kind == WorldKind::Graph
-                && referenced_graphs.insert(target)
-            {
-                graph_frontier.push(target_world);
-            }
-        }
-    }
+    let printed_graphs = printed_graph_names(program, resolved);
+    let referenced_graphs: HashSet<&str> = printed_graphs.iter().map(String::as_str).collect();
     // A graph this render will PRINT (exported, or reached from a printed
     // graph's own body) — the same test the alphabet/map/`use`-line rules
     // below extend to cover it with.
@@ -1730,15 +1714,105 @@ pub(crate) fn graph_digest(
     resolved: &Resolved,
     footprint: &FootprintTable,
 ) -> u32 {
-    let text = graph_body_lines(graph, world, resolved, footprint).join("\n");
+    let mut text = graph_body_lines(graph, world, resolved, footprint).join("\n");
+    // The content a body names only by name (docs/tmt/language.md (grafting a
+    // graph from another unit)): every glyph set a pattern cell names and every
+    // named map an argument names, each once, by qualified name — so a change
+    // to a member or a pair moves the digest. Nothing is appended for a body
+    // that names neither, which keeps every such digest where it was.
+    let mut named: BTreeMap<String, String> = BTreeMap::new();
+    for state in &world.states {
+        for rule in &state.rules {
+            for cell in &rule.pattern.cells {
+                if let PatternCellKind::SetRef {
+                    resolved: Some(m), ..
+                } = &cell.kind
+                {
+                    let members: Vec<String> = m
+                        .members
+                        .iter()
+                        .map(|g| crate::patterns::label_spelling(&g.label))
+                        .collect();
+                    named.insert(
+                        m.set.clone(),
+                        format!("set {} {{ {} }}", m.set, members.join(", ")),
+                    );
+                }
+            }
+        }
+    }
+    let mut take_args = |args: &[BindingArg]| {
+        for a in args {
+            if let BindingValue::Named { map: Some(m), .. } = &a.value
+                && let Some((name, _)) = &m.named
+            {
+                let open = if m.open.is_some() { ", *" } else { "" };
+                named.insert(
+                    name.clone(),
+                    format!("map {} {{ {}{open} }}", name, map_pair_list_text(&m.pairs)),
+                );
+            }
+        }
+    };
+    for g in &world.grafts {
+        take_args(&g.args);
+    }
+    for b in &world.binds {
+        take_args(&b.args);
+    }
+    for c in &world.calls {
+        if let ResolvedCallTarget::Routine { args, .. } = &c.target {
+            take_args(args);
+        }
+    }
+    if !named.is_empty() {
+        text.push('\n');
+        text.push_str(&named.into_values().collect::<Vec<_>>().join("\n"));
+    }
     crc32(text.as_bytes())
 }
 
-/// Every graph THIS unit exports, with [`graph_digest`] — the exporting
-/// half of the graft-drift check (docs/formats.md (routine interfaces)):
-/// `compiler::compile` writes these as `.graph <name>, <digest>` lines,
-/// which the assembler parses back into `Interface::graphs`.
-pub(crate) fn exported_graph_digests(
+/// Every graph this unit's header prints: each exported graph and, by
+/// mangled name, every local graph an exported body reaches through its
+/// grafts, transitively (docs/tmt/language.md (headers)). A target this
+/// unit does not itself declare (a nested `std::…` graft) is not this
+/// unit's to print.
+pub(crate) fn printed_graph_names(program: &Program, resolved: &Resolved) -> BTreeSet<String> {
+    let worlds: HashMap<&str, &ResolvedWorld> = resolved
+        .worlds
+        .iter()
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut frontier: Vec<&ResolvedWorld> = Vec::new();
+    for g in program.graphs.iter().filter(|g| g.exported) {
+        let full = full_name(&g.ns, &g.name);
+        if let Some(&w) = worlds.get(full.as_str()) {
+            names.insert(full);
+            frontier.push(w);
+        }
+    }
+    while let Some(world) = frontier.pop() {
+        for graft in &world.grafts {
+            let target = graft.target.as_str();
+            if let Some(&target_world) = worlds.get(target)
+                && target_world.kind == WorldKind::Graph
+                && names.insert(target.to_string())
+            {
+                frontier.push(target_world);
+            }
+        }
+    }
+    names
+}
+
+/// `.graph` records for every graph [`printed_graph_names`] names, each with
+/// its [`graph_digest`] — the exporting half of the graft-drift check
+/// (docs/formats.md (routine interfaces)): `compiler::compile` writes these
+/// as `.graph <name>, <digest>` lines (`, private` for a graph the header
+/// prints without exporting), which the assembler parses back into
+/// `Interface::graphs`.
+pub(crate) fn interface_graph_digests(
     program: &Program,
     resolved: &Resolved,
     footprint: &FootprintTable,
@@ -1748,17 +1822,20 @@ pub(crate) fn exported_graph_digests(
         .iter()
         .map(|w| (w.name.as_str(), w))
         .collect();
+    let printed = printed_graph_names(program, resolved);
     program
         .graphs
         .iter()
-        .filter(|g| g.exported)
         .filter_map(|graph| {
             let full = full_name(&graph.ns, &graph.name);
+            if !printed.contains(&full) {
+                return None;
+            }
             let world = worlds.get(full.as_str())?;
             Some(ExportedGraph {
                 digest: graph_digest(graph, world, resolved, footprint),
                 name: full,
-                exported: true,
+                exported: graph.exported,
             })
         })
         .collect()

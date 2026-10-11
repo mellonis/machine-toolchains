@@ -1292,11 +1292,17 @@ fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
         &header,
     );
     let lib = compile_alone(MEMO_LIB_TMC);
+    let recorded: Vec<&str> = consumer.grafts.iter().map(|g| g.graph.as_str()).collect();
     assert_eq!(
-        consumer.grafts.len(),
-        1,
-        "the purely local `lib::walker` must not be recorded: {:?}",
+        recorded,
+        ["lib::relay", "lib::walker"],
+        "{:?}",
         consumer.grafts
+    );
+    assert_eq!(
+        graft_digest_of(&consumer, "lib::walker"),
+        graph_digest_of(&lib, "lib::walker"),
+        "`lib::walker` is recorded with the library's digest, not the consumer's own"
     );
     assert_eq!(
         graft_digest_of(&consumer, "lib::relay"),
@@ -1357,13 +1363,19 @@ fn a_librarys_nested_graft_does_not_leak_into_a_consumers_own_graph() {
         CONSUMER_MEMO_COLLISION_LIBRARY_FIRST,
         &header,
     );
+    let lib = compile_alone(MEMO_LIB_TMC);
+    let recorded: Vec<&str> = consumer.grafts.iter().map(|g| g.graph.as_str()).collect();
     assert_eq!(
-        consumer.grafts.len(),
-        1,
-        "the purely local `lib::walker` must not be recorded: {:?}",
+        recorded,
+        ["lib::relay", "lib::walker"],
+        "{:?}",
         consumer.grafts
     );
-    assert_eq!(consumer.grafts[0].graph, "lib::relay");
+    assert_eq!(
+        graft_digest_of(&consumer, "lib::walker"),
+        graph_digest_of(&lib, "lib::walker"),
+        "`lib::walker` is recorded with the library's digest, not the consumer's own"
+    );
 }
 
 /// A declared graph's own NESTED graft target can resolve fine when its
@@ -1490,15 +1502,16 @@ fn a_diamond_shaped_shared_target_is_not_a_cycle() {
     let lib_src = write_file(&dir, "diamond.tmc", DIAMOND_LIB_TMC);
     let header = interface(&dir, &lib_src, "diamond.tmh");
     let consumer = compile_extern(&dir, "diamond_app", CONSUMER_DIAMOND, &header);
+    // Every library graph the splice pulled in is recorded, once each, in
+    // first-encountered order: `diamond_d`, reached through both `diamond_b`
+    // and `diamond_c`, appears a single time.
+    let recorded: Vec<&str> = consumer.grafts.iter().map(|g| g.graph.as_str()).collect();
     assert_eq!(
-        consumer.grafts.len(),
-        1,
-        "only the direct `diamond_a` graft is recorded on the consumer's \
-         own object — diamond_b/c/d are folded into diamond_a's own \
-         canonical body, not separate top-level splices: {:?}",
+        recorded,
+        ["diamond_a", "diamond_b", "diamond_d", "diamond_c"],
+        "{:?}",
         consumer.grafts
     );
-    assert_eq!(consumer.grafts[0].graph, "diamond_a");
 }
 
 // ── the write footprint across a library graft ───────────────────────────
@@ -2369,4 +2382,277 @@ fn a_user_std_graph_beside_the_embedded_one_conflicts() {
         );
         assert!(text.contains("[conflicting-declaration]"), "{text}");
     }
+}
+
+// ── what a graph's digest covers, and which graphs are recorded ──────────
+
+/// Exports `walker` (its cells name the non-exported set `hid` and the
+/// exported set `vis`) and `relay` (its body grafts `walker` through the
+/// non-exported named map `hmap`). `HID` and `HMAP` are substituted.
+const DIGEST_LIB: &str = "\
+export alphabet marks { '_', 'x', 'y', 'z' }
+set hid { HID }
+export set vis { 'z', '_' }
+map hmap: marks -> marks { HMAP }
+export graph walker(tape t: marks, state done) {
+  entry state w {
+    [hid] -> write ['z'] goto done;
+    [vis] -> goto done;
+    [*]   -> goto done;
+  }
+}
+export graph relay(tape a: marks, state done) {
+  entry graft walker(t = a with map hmap, done = done) as inner;
+}
+";
+
+const GRAFTS_WALKER: &str = "\
+use marks;
+use walker;
+machine {
+  tape t: marks;
+  entry graft walker(t = t, done = stop) as w;
+}
+";
+
+const GRAFTS_RELAY: &str = "\
+use marks;
+use relay;
+machine {
+  tape t: marks;
+  entry graft relay(a = t, done = stop) as r;
+}
+";
+
+const SWAP_MAP: &str = "'x' -> 'z', 'z' -> 'x'";
+const CYCLE_MAP: &str = "'x' -> 'z', 'z' -> 'y', 'y' -> 'x'";
+
+fn digest_lib(hid: &str, hmap: &str) -> String {
+    DIGEST_LIB.replace("HID", hid).replace("HMAP", hmap)
+}
+
+fn frames() -> LinkOptions {
+    LinkOptions {
+        call_mech: mtc_core::linker::CallMech::Frames,
+        ..Default::default()
+    }
+}
+
+/// The members of a glyph set a pattern cell names are part of the graph's
+/// digest. **Mutation:** `graph_digest` appending nothing — the two
+/// exporters digest `walker` identically again.
+#[test]
+fn a_set_member_change_moves_the_digest() {
+    let wide = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let wide_again = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let narrow = compile_alone(&digest_lib("'x'", SWAP_MAP));
+    assert_ne!(
+        graph_digest_of(&wide, "walker"),
+        graph_digest_of(&narrow, "walker")
+    );
+    // Near miss: the same members digest alike.
+    assert_eq!(
+        graph_digest_of(&wide, "walker"),
+        graph_digest_of(&wide_again, "walker")
+    );
+}
+
+/// The pairs of a named map an argument names are part of the digest of
+/// the graph whose body names it. **Mutation:** `graph_digest` appending
+/// only the sets (no maps) — the two `relay` digests are equal again.
+#[test]
+fn a_named_map_pair_change_moves_the_digest() {
+    let a = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let b = compile_alone(&digest_lib("'x', 'y'", CYCLE_MAP));
+    let c = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    assert_ne!(graph_digest_of(&a, "relay"), graph_digest_of(&b, "relay"));
+    assert_eq!(graph_digest_of(&a, "relay"), graph_digest_of(&c, "relay"));
+}
+
+/// A consumer built against the header of an exporter whose set had other
+/// members is refused at link; one built against the matching object links.
+/// **Mutation:** the exporter recording a digest the consumer's reading of
+/// the header does not reproduce (the exported digest xor 1) — the matching
+/// pair is refused too.
+#[test]
+fn a_consumer_built_against_an_older_set_is_refused_at_link() {
+    let dir = scratch("digest_set_link");
+    let lib = write_file(&dir, "lib.tmc", &digest_lib("'x', 'y'", SWAP_MAP));
+    let header = interface(&dir, &lib, "lib.tmh");
+    let consumer = compile_extern(&dir, "walker_app", GRAFTS_WALKER, &header);
+    let narrow = compile_alone(&digest_lib("'x'", SWAP_MAP));
+    let err =
+        link(&[consumer.clone(), narrow], &[], frames()).expect_err("a changed set must be drift");
+    assert!(
+        matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "walker"),
+        "{err}"
+    );
+    let wide = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    link(&[consumer, wide], &[], frames()).unwrap_or_else(|e| panic!("matching pair: {e}"));
+}
+
+/// A graph grafted inside another graph of the SAME library is spliced into
+/// the consumer too, so it is recorded with the digest the consumer read.
+/// **Mutation:** record a splice only when the target misses the current
+/// owner's graph map — `walker` disappears from the list.
+#[test]
+fn a_graph_nested_from_the_same_library_is_recorded() {
+    let dir = scratch("digest_nested_record");
+    let lib = write_file(&dir, "lib.tmc", &digest_lib("'x', 'y'", SWAP_MAP));
+    let header = interface(&dir, &lib, "lib.tmh");
+    let consumer = compile_extern(&dir, "relay_app", GRAFTS_RELAY, &header);
+    let names: Vec<&str> = consumer.grafts.iter().map(|g| g.graph.as_str()).collect();
+    assert_eq!(names, ["relay", "walker"]);
+    let exporter = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    for g in &consumer.grafts {
+        assert_eq!(
+            g.digest,
+            graph_digest_of(&exporter, &g.graph),
+            "{}",
+            g.graph
+        );
+    }
+}
+
+/// A set changed inside a graph that another graph of the library grafts is
+/// drift for the consumer of the outer graph. **Mutation:** the nested
+/// record missing from the consumer, or the exporter not recording
+/// `walker` — the link succeeds. Near miss: the unchanged exporter links.
+#[test]
+fn a_set_change_inside_a_nested_graph_is_refused_at_link() {
+    let dir = scratch("digest_nested_link");
+    let lib = write_file(&dir, "lib.tmc", &digest_lib("'x', 'y'", SWAP_MAP));
+    let header = interface(&dir, &lib, "lib.tmh");
+    let consumer = compile_extern(&dir, "relay_app", GRAFTS_RELAY, &header);
+    let narrow = compile_alone(&digest_lib("'x'", SWAP_MAP));
+    let err = link(&[consumer.clone(), narrow], &[], frames())
+        .expect_err("a changed nested set must be drift");
+    assert!(
+        matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "walker"),
+        "{err}"
+    );
+    let wide = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    link(&[consumer, wide], &[], frames()).unwrap_or_else(|e| panic!("matching pair: {e}"));
+}
+
+/// A graph the header prints but does not export is recorded by its
+/// exporter as a private record. **Mutation:** `interface_graph_digests`
+/// filtering by `exported`, or recording the graph as exported.
+#[test]
+fn a_printed_private_graph_is_recorded_by_its_exporter() {
+    let lib = compile_alone(MEMO_LIB_TMC);
+    let records = &lib.interface.as_ref().unwrap().graphs;
+    let walker = records
+        .iter()
+        .find(|g| g.name == "lib::walker")
+        .unwrap_or_else(|| panic!("no record for lib::walker in {records:?}"));
+    assert!(!walker.exported, "a non-exported graph is a private record");
+    let relay = records.iter().find(|g| g.name == "lib::relay").unwrap();
+    assert!(relay.exported);
+}
+
+const MEMO_CONSUMER: &str = "\
+use lib::marks;
+use lib::relay;
+machine {
+  tape t: marks;
+  entry graft relay(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+/// `MEMO_LIB_TMC` with one more row in its private `walker`: `walker`'s
+/// digest moves, `relay`'s does not (its inferred write set is unchanged).
+fn memo_lib_walker_edit() -> String {
+    MEMO_LIB_TMC.replace(
+        "['x'] -> write ['y'] goto done;\n      [*]   -> goto done;",
+        "['x'] -> write ['y'] goto done;\n      ['y'] -> goto done;\n      [*]   -> goto done;",
+    )
+}
+
+/// Another library with its OWN private `lib::walker` (a different body),
+/// reached only by its exported `lib::relay2`.
+const OTHER_PRIVATE_WALKER_LIB: &str = "\
+namespace lib {
+  alphabet marks { '_', 'x', 'y' }
+  map flip: marks -> marks { 'x' -> 'y', 'y' -> 'x' }
+
+  graph walker(tape t: marks, state done) {
+    entry state w {
+      ['y'] -> write ['x'] goto done;
+      [*]   -> goto done;
+    }
+  }
+
+  export graph relay2(tape a: marks, state done) {
+    entry graft walker(t = a with map flip, done = done) as inner;
+  }
+}
+";
+
+/// A change inside a graph the header prints but does not export is drift
+/// for the consumer of the exported graph reaching it. **Mutation:**
+/// `interface_graph_digests` recording only exported graphs — the private
+/// `lib::walker` has no record and the edit goes unnoticed.
+#[test]
+fn a_change_inside_a_private_nested_graph_is_refused_at_link() {
+    let dir = scratch("digest_private_link");
+    let lib_src = write_file(&dir, "lib.tmc", MEMO_LIB_TMC);
+    let header = interface(&dir, &lib_src, "lib.tmh");
+    let consumer = compile_extern(&dir, "memo_app", MEMO_CONSUMER, &header);
+    let lib = compile_alone(MEMO_LIB_TMC);
+    assert_eq!(
+        graph_digest_of(&lib, "lib::relay"),
+        graph_digest_of(&compile_alone(&memo_lib_walker_edit()), "lib::relay"),
+        "the edit must leave relay's own digest alone"
+    );
+    link(&[consumer.clone(), lib], &[], frames())
+        .unwrap_or_else(|e| panic!("the matching library must link: {e}"));
+    let edited = compile_alone(&memo_lib_walker_edit());
+    let err = link(&[consumer, edited], &[], frames()).expect_err("private drift");
+    assert!(
+        matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "lib::walker"),
+        "{err}"
+    );
+}
+
+/// Two libraries with differing private graphs under one name link
+/// together, and the consumer's record matches the provider it came from,
+/// in either library order. **Mutation:** `interface_graph_digests`
+/// recording the private graph as exported — the two `lib::walker` records
+/// then conflict at link.
+#[test]
+fn differing_private_graphs_of_two_libraries_link_and_match_their_provider() {
+    let dir = scratch("digest_private_two");
+    let lib_src = write_file(&dir, "lib.tmc", MEMO_LIB_TMC);
+    let header = interface(&dir, &lib_src, "lib.tmh");
+    let consumer = compile_extern(&dir, "memo_app", MEMO_CONSUMER, &header);
+    let memo = compile_alone(MEMO_LIB_TMC);
+    let other = compile_alone(OTHER_PRIVATE_WALKER_LIB);
+    link(
+        &[consumer.clone(), memo.clone(), other.clone()],
+        &[],
+        frames(),
+    )
+    .unwrap_or_else(|e| panic!("[memo, other]: {e}"));
+    link(&[consumer, other, memo], &[], frames()).unwrap_or_else(|e| panic!("[other, memo]: {e}"));
+}
+
+/// A private `.graph` record survives the emitted assembly text and
+/// reassembly byte-identically. **Mutation:** `codegen` printing the record
+/// without its `, private` word — the text no longer carries it and the
+/// reassembled object records the graph as exported.
+#[test]
+fn a_private_graph_record_reassembles_byte_identically() {
+    let out = compile(
+        OTHER_PRIVATE_WALKER_LIB,
+        CompileOptions {
+            externals: Declarations::none(),
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile: {e}"));
+    assert!(out.tma.contains(", private"), "{}", out.tma);
+    let reassembled = assemble(&out.tma, false).unwrap_or_else(|e| panic!("reassemble: {e}"));
+    assert_eq!(reassembled, out.object);
 }

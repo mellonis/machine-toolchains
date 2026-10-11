@@ -41,7 +41,7 @@
 //! and fall-through is selected instead.
 //!
 //! Object-level, before any world's `.routine`: `.graph <name>, <digest>` for
-//! every graph this unit exports and `.grafted <name>, <digest>` for every
+//! every graph this unit's header prints and `.grafted <name>, <digest>` for every
 //! library graph it spliced (docs/formats.md (routine interfaces)) —
 //! [`emit_program`]'s own two extra arguments, computed by the compiler
 //! rather than by anything IR-level, since a graph is consumed by grafting
@@ -220,10 +220,12 @@ pub fn emit_program(
     }
 
     // Object-level interface digests, before the first `.func` (docs/formats.md
-    // (routine interfaces)): every exported graph, then every spliced library
+    // (routine interfaces)): every graph the header prints (`, private` for
+    // one it prints without exporting), then every spliced library
     // graph, each in this unit's own accumulation order.
     for g in graphs {
-        e.push(format!(".graph {}, {}", g.name, g.digest), 0);
+        let private = if g.exported { "" } else { ", private" };
+        e.push(format!(".graph {}, {}{private}", g.name, g.digest), 0);
     }
     for g in grafts {
         e.push(format!(".grafted {}, {}", g.graph, g.digest), 0);

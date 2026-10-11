@@ -1599,6 +1599,7 @@ fn expand_own_states(
 fn expand_grafts_into<'a>(
     host: &ResolvedWorld,
     resolved: &'a Resolved,
+    root: &'a Resolved,
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
     ext_modules: &[&'a Resolved],
     memo: &mut HashMap<(usize, String), GraphExpansion>,
@@ -1612,12 +1613,15 @@ fn expand_grafts_into<'a>(
     let mut graft_entry: Option<String> = None;
 
     for graft in &host.grafts {
-        // A target absent from THIS unit's own graph map was resolved
+        // A target absent from the host's own graph map was resolved
         // through the declarations table (`compiler::resolve_world_reuse`'s
         // own check already proved it is present one place or the other) —
         // a library graph read from a header, `docs/tmt/language.md
-        // (headers)`. Record it (deduped) so `compiler::compile` can emit
-        // its `.grafted` digest line. `graph_owner` is the module `graph`
+        // (headers)`. Every graph owned by a module other than `root` (the
+        // unit being compiled) is a library graph, however deep in a
+        // library's own nesting it sits: record it (deduped, first
+        // encountered) so `compiler::compile` can emit its `.grafted`
+        // digest line. `graph_owner` is the module `graph`
         // itself belongs to — `resolved` (this function's own, i.e. the
         // HOST's owner) for a local target, the declaring library's module
         // for an external one — never assumed to be `resolved` once the
@@ -1636,9 +1640,6 @@ fn expand_grafts_into<'a>(
         let (graph, graph_owner) = match graphs.get(graft.target.as_str()) {
             Some(&g) => (g, resolved),
             None => {
-                if !spliced_external.iter().any(|n| n == &graft.target) {
-                    spliced_external.push(graft.target.clone());
-                }
                 match crate::compiler::find_external_graph(ext_modules, graft.target.as_str()) {
                     Some((owner, g)) => (g, owner),
                     None => {
@@ -1658,11 +1659,16 @@ fn expand_grafts_into<'a>(
                 }
             }
         };
+        if !std::ptr::eq(graph_owner, root) && !spliced_external.iter().any(|n| n == &graft.target)
+        {
+            spliced_external.push(graft.target.clone());
+        }
         let gx = expand_graph(
             graft.target.as_str(),
             graphs,
             ext_modules,
             resolved,
+            root,
             memo,
             warn,
             spliced_external,
@@ -1792,11 +1798,13 @@ fn module_id(owner: &Resolved) -> usize {
 /// completes) would not catch one if it existed. `name` may be a LOCAL graph
 /// (in `graphs`) or a library graph reached only through `ext_modules` —
 /// either way a miss in `graphs` falls back to the declarations table.
+#[allow(clippy::too_many_arguments)]
 fn expand_graph<'a>(
     name: &str,
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
     ext_modules: &[&'a Resolved],
     resolved: &'a Resolved,
+    root: &'a Resolved,
     memo: &mut HashMap<(usize, String), GraphExpansion>,
     warn: &mut Vec<Diagnostic>,
     spliced_external: &mut Vec<String>,
@@ -1857,6 +1865,7 @@ fn expand_graph<'a>(
     let graft_entry = expand_grafts_into(
         world,
         owner,
+        root,
         &owner_graphs,
         ext_modules,
         memo,
@@ -2068,6 +2077,7 @@ pub(crate) fn expand(
         let mut alias = HashMap::new();
         let graft_entry = expand_grafts_into(
             world,
+            resolved,
             resolved,
             &graphs,
             &ext_modules,
