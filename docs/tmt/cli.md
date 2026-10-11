@@ -302,7 +302,7 @@ subsection.
 | `range-outside-alphabet` | A range in a pattern cell or a contract clause has no walk over the alphabet it is written against, which it walks in declared order: a cell range's endpoint is not a symbol of the alphabet, or the second endpoint comes first in it. |
 | `empty-set-in-pattern` | A pattern cell names a glyph set with no members, so the rule can never match. |
 | `duplicate-name` | Two entities (alphabet, map, routine, graph, or namespace) share one name in one scope — including a top-level `main`, which is reserved for the entry world in every unit, library or program (`docs/tmt/language.md (program structure)`). |
-| `conflicting-declaration` | Two declarations of one qualified name disagree: two declaration sources publish it differently, or this unit defines a name its declarations publish differently (the message names both origins). Identical declarations — a unit's source and its up-to-date header, one library reached twice — are one declaration. |
+| `conflicting-declaration` | Two declarations of one qualified name disagree: two declaration sources publish it differently, or this unit defines a name its declarations publish differently, or this unit would splice two different graphs under one name (the message names both origins). Identical declarations — a unit's source and its up-to-date header, one library reached twice — are one declaration. |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
 | `duplicate-pattern-binding` | One rule's pattern binds a name twice (`[0..7 as x, 0..7 as x]`) — the message names both cells and the state; give each binding its own name. |
 | `too-many-tapes` | A world declares more than 16 tapes. |

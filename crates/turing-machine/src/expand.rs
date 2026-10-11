@@ -68,7 +68,21 @@ pub(crate) struct Expanded {
     /// first-encountered order — `compiler::compile`'s own input for the
     /// `.grafted <name>, <digest>` lines it writes (docs/formats.md (routine
     /// interfaces)).
-    pub spliced_external_graphs: Vec<String>,
+    pub spliced_external_graphs: Vec<SplicedGraph>,
+}
+
+/// One library graph a compile spliced, as the body was spliced: its name,
+/// the digest stamped on the owning module's copy of it (`None` only if a
+/// declarations producer failed to stamp it), the index of that module in
+/// the external-module list, and the span of the graft that first brought
+/// it in. Two records of one name differ in digest, and
+/// `compiler::compile` refuses that case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SplicedGraph {
+    pub name: String,
+    pub digest: Option<u32>,
+    pub module: usize,
+    pub span: Span,
 }
 
 /// One emitted world — a machine block or a routine, after expansion.
@@ -1607,7 +1621,7 @@ fn expand_grafts_into<'a>(
     namegen: &mut NameGen,
     out: &mut Vec<ExpandedState>,
     alias: &mut HashMap<String, String>,
-    spliced_external: &mut Vec<String>,
+    spliced_external: &mut Vec<SplicedGraph>,
 ) -> Result<Option<String>, CompileError> {
     let mut dedup: HashMap<Vec<u8>, String> = HashMap::new();
     let mut graft_entry: Option<String> = None;
@@ -1659,9 +1673,28 @@ fn expand_grafts_into<'a>(
                 }
             }
         };
-        if !std::ptr::eq(graph_owner, root) && !spliced_external.iter().any(|n| n == &graft.target)
+        if !std::ptr::eq(graph_owner, root)
+            && let Some(module) = ext_modules
+                .iter()
+                .position(|m| std::ptr::eq(*m, graph_owner))
         {
-            spliced_external.push(graft.target.clone());
+            // The digest is the one stamped on the body ACTUALLY spliced —
+            // taken from its owning module here, never looked up by name
+            // afterwards, since two modules may carry different graphs
+            // under one name. The same body reached again (a diamond, or
+            // two modules publishing it identically) is one record.
+            let digest = graph.digest;
+            if !spliced_external
+                .iter()
+                .any(|s| s.name == graft.target && s.digest == digest)
+            {
+                spliced_external.push(SplicedGraph {
+                    name: graft.target.clone(),
+                    digest,
+                    module,
+                    span: graft.target_span,
+                });
+            }
         }
         let gx = expand_graph(
             graft.target.as_str(),
@@ -1807,7 +1840,7 @@ fn expand_graph<'a>(
     root: &'a Resolved,
     memo: &mut HashMap<(usize, String), GraphExpansion>,
     warn: &mut Vec<Diagnostic>,
-    spliced_external: &mut Vec<String>,
+    spliced_external: &mut Vec<SplicedGraph>,
 ) -> Result<GraphExpansion, CompileError> {
     // `owner`: the module `world` itself belongs to — `resolved` (this
     // call's own host scope) for a local target, or the declaring
@@ -2061,7 +2094,7 @@ pub(crate) fn expand(
     // nested grafts — recorded once, first-encountered order
     // (`expand_grafts_into`'s own doc). `compiler::compile` turns this into
     // the `.grafted` digest lines.
-    let mut spliced_external_graphs: Vec<String> = Vec::new();
+    let mut spliced_external_graphs: Vec<SplicedGraph> = Vec::new();
 
     for (idx, world) in resolved.worlds.iter().enumerate() {
         if world.kind == WorldKind::Graph {

@@ -1106,7 +1106,8 @@ differently and trips the drift check at link. Doc lines, comments,
 whitespace and unrelated declarations do not move it. It also covers what
 the body names: the members of every glyph set a pattern cell names and
 the pairs of every named map an argument names, so changing either moves
-the digest.
+the digest. The digest follows the order they are written in: reordering
+a set's members or a map's pairs moves it too.
 
 ### `bind`
 
@@ -1915,6 +1916,11 @@ happens to share a name with one the graph uses is a different alphabet,
 and an omitted map between the two is `identity-glyph-mismatch` rather
 than a silent identity. A named map given at such a site is checked
 against the library graph's own parameter alphabets, for the same reason.
+One unit has one body per graph name: a unit that would splice two
+different graphs under one qualified name, say the private graphs of two
+libraries that happen to share a name, is refused with
+`conflicting-declaration`, naming both origins. The same body reached by
+two paths, or published identically by two libraries, is one graph.
 
 Two limits are current, not permanent. A library graph's body may reach
 only its own unit's declarations and the standard library's — a graph

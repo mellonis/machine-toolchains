@@ -2656,3 +2656,292 @@ fn a_private_graph_record_reassembles_byte_identically() {
     let reassembled = assemble(&out.tma, false).unwrap_or_else(|e| panic!("reassemble: {e}"));
     assert_eq!(reassembled, out.object);
 }
+
+// ── one name, one spliced body ───────────────────────────────────────────
+
+/// Three libraries sharing the exported alphabet `lib::marks`. `PRIV_A`
+/// and `PRIV_B` carry DIFFERENT private `lib::walker` graphs; `PRIV_C`'s
+/// is identical to `PRIV_A`'s.
+fn private_walker_lib(export: &str, body_rule: &str, extra_row: &str) -> String {
+    format!(
+        "\
+namespace lib {{
+  export alphabet marks {{ '_', 'x', 'y' }}
+  graph walker(tape t: marks, state done) {{
+    entry state w {{
+      {body_rule}
+      {extra_row}
+      [*]   -> goto done;
+    }}
+  }}
+  export graph {export}(tape a: marks, state done) {{
+    entry graft walker(t = a, done = done) as inner;
+  }}
+}}
+"
+    )
+}
+
+const ROW_A: &str = "['x'] -> write ['y'] goto done;";
+const ROW_B: &str = "['y'] -> write ['x'] goto done;";
+
+fn lib_a() -> String {
+    private_walker_lib("outerA", ROW_A, "")
+}
+fn lib_b() -> String {
+    private_walker_lib("outerB", ROW_B, "")
+}
+fn lib_c() -> String {
+    private_walker_lib("outerC", ROW_A, "")
+}
+
+const GRAFTS_OUTER_A: &str = "\
+use lib::marks;
+use lib::outerA;
+machine {
+  tape t: marks;
+  entry graft outerA(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+const GRAFTS_OUTER_B: &str = "\
+use lib::marks;
+use lib::outerB;
+machine {
+  tape t: marks;
+  entry graft outerB(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+/// Grafts `outerA` then `OTHER`.
+fn grafts_both(other: &str) -> String {
+    format!(
+        "\
+use lib::marks;
+use lib::outerA;
+use lib::{other};
+machine {{
+  tape t: marks;
+  entry graft outerA(a = t, done = mid) as r;
+  state mid {{ [*] -> goto fin; }}
+  graft {other}(a = t, done = fin) as s;
+  state fin {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+/// `tmt compile SRC --nostdlib --extern H1 --extern H2 ...`, in the order
+/// given; `Ok(object)` or the compile fatal.
+fn compile_extern_many(
+    dir: &Path,
+    name: &str,
+    src: &str,
+    headers: &[&PathBuf],
+) -> Result<ObjectFile, String> {
+    let input = write_file(dir, name, src);
+    let out = dir.join(format!("{name}.tmo"));
+    let mut argv = vec![
+        "compile".to_string(),
+        input.to_str().unwrap().to_string(),
+        "--nostdlib".to_string(),
+    ];
+    for h in headers {
+        argv.push("--extern".to_string());
+        argv.push(h.to_str().unwrap().to_string());
+    }
+    argv.push("-o".to_string());
+    argv.push(out.to_str().unwrap().to_string());
+    let result = execute(&argv)?;
+    assert_eq!(result.code, 0, "{name}: {}", result.stderr);
+    Ok(ObjectFile::from_bytes(&std::fs::read(&out).unwrap()).unwrap())
+}
+
+/// A consumer of ONE export records the digest of the body it spliced —
+/// the owning library's private record — whichever order the headers are
+/// given in, and links with just that library. **Mutation:** `compile`
+/// looking the recorded digest up by name across the declarations (first
+/// match) instead of taking it from the module that owns the spliced body —
+/// the header order `[b, a]` records the other library's digest.
+#[test]
+fn a_nested_private_graph_is_recorded_with_its_owners_digest_in_either_header_order() {
+    let dir = scratch("digest_owner_order");
+    let a = write_file(&dir, "la.tmc", &lib_a());
+    let b = write_file(&dir, "lb.tmc", &lib_b());
+    let ha = interface(&dir, &a, "la.tmh");
+    let hb = interface(&dir, &b, "lb.tmh");
+    let obj_a = compile_alone(&lib_a());
+    let obj_b = compile_alone(&lib_b());
+    assert_ne!(
+        graph_digest_of(&obj_a, "lib::walker"),
+        graph_digest_of(&obj_b, "lib::walker"),
+        "the fixture needs two different private walkers"
+    );
+    for (tag, order) in [("ab", [&ha, &hb]), ("ba", [&hb, &ha])] {
+        let consumer =
+            compile_extern_many(&dir, &format!("app_{tag}"), GRAFTS_OUTER_A, &order).unwrap();
+        assert_eq!(
+            graft_digest_of(&consumer, "lib::walker"),
+            graph_digest_of(&obj_a, "lib::walker"),
+            "header order {tag}"
+        );
+        link(&[consumer.clone(), obj_a.clone()], &[], frames())
+            .unwrap_or_else(|e| panic!("header order {tag}: {e}"));
+        // Near miss: the same consumer also links with both libraries.
+        link(&[consumer, obj_a.clone(), obj_b.clone()], &[], frames())
+            .unwrap_or_else(|e| panic!("header order {tag}, both libraries: {e}"));
+    }
+}
+
+/// One compile that splices two DIFFERENT graphs under one qualified name
+/// is refused, naming both origins — the body spliced first first — in
+/// either header order. **Mutation:** no refusal (keep the first record) —
+/// the compile succeeds and the second body goes unrecorded.
+#[test]
+fn two_different_bodies_under_one_name_are_conflicting_declarations() {
+    let dir = scratch("digest_two_bodies");
+    let ha = interface(&dir, &write_file(&dir, "la.tmc", &lib_a()), "la.tmh");
+    let hb = interface(&dir, &write_file(&dir, "lb.tmc", &lib_b()), "lb.tmh");
+    for (tag, order) in [("ab", [&ha, &hb]), ("ba", [&hb, &ha])] {
+        let err = compile_extern_many(&dir, &format!("both_{tag}"), &grafts_both("outerB"), &order)
+            .expect_err("two bodies under one name must be refused");
+        assert!(err.contains("[conflicting-declaration]"), "{tag}: {err}");
+        assert!(err.contains("`lib::walker`"), "{tag}: {err}");
+        let first = err.find("la.tmh").unwrap_or_else(|| panic!("{tag}: {err}"));
+        let second = err.find("lb.tmh").unwrap_or_else(|| panic!("{tag}: {err}"));
+        assert!(
+            first < second,
+            "{tag}: the body spliced first is named first: {err}"
+        );
+    }
+}
+
+/// Near miss: two libraries whose private walkers are IDENTICAL, both
+/// exports grafted, compile to one `lib::walker` record and link with
+/// both libraries in either order.
+#[test]
+fn identical_bodies_under_one_name_are_one_record() {
+    let dir = scratch("digest_same_bodies");
+    let ha = interface(&dir, &write_file(&dir, "la.tmc", &lib_a()), "la.tmh");
+    let hc = interface(&dir, &write_file(&dir, "lc.tmc", &lib_c()), "lc.tmh");
+    let obj_a = compile_alone(&lib_a());
+    let obj_c = compile_alone(&lib_c());
+    for (tag, order) in [("ac", [&ha, &hc]), ("ca", [&hc, &ha])] {
+        let consumer =
+            compile_extern_many(&dir, &format!("same_{tag}"), &grafts_both("outerC"), &order)
+                .unwrap_or_else(|e| panic!("{tag}: {e}"));
+        let walkers = consumer
+            .grafts
+            .iter()
+            .filter(|g| g.graph == "lib::walker")
+            .count();
+        assert_eq!(walkers, 1, "{tag}: {:?}", consumer.grafts);
+        link(
+            &[consumer.clone(), obj_a.clone(), obj_c.clone()],
+            &[],
+            frames(),
+        )
+        .unwrap_or_else(|e| panic!("{tag}: {e}"));
+        link(&[consumer, obj_c.clone(), obj_a.clone()], &[], frames())
+            .unwrap_or_else(|e| panic!("{tag}, swapped: {e}"));
+    }
+}
+
+/// A change inside the OWNING library's private walker after the consumer
+/// was built is drift, for each of two libraries separately.
+/// **Mutation:** `compile` looking the recorded digest up by name — with
+/// the headers given `[b, a]` the consumer of `outerA` records `lb`'s
+/// digest, so the unedited link is a false drift and the edited one names
+/// the wrong library.
+#[test]
+fn a_change_in_the_owning_librarys_private_walker_is_drift_for_each_library() {
+    let dir = scratch("digest_owner_drift");
+    let ha = interface(&dir, &write_file(&dir, "la.tmc", &lib_a()), "la.tmh");
+    let hb = interface(&dir, &write_file(&dir, "lb.tmc", &lib_b()), "lb.tmh");
+    let edited_a = compile_alone(&private_walker_lib("outerA", ROW_A, "['y'] -> goto done;"));
+    let edited_b = compile_alone(&private_walker_lib("outerB", ROW_B, "['x'] -> goto done;"));
+    let cons_a = compile_extern_many(&dir, "drift_a", GRAFTS_OUTER_A, &[&hb, &ha]).unwrap();
+    let cons_b = compile_extern_many(&dir, "drift_b", GRAFTS_OUTER_B, &[&hb, &ha]).unwrap();
+    for (what, consumer, original, edited) in [
+        ("a", cons_a, compile_alone(&lib_a()), edited_a),
+        ("b", cons_b, compile_alone(&lib_b()), edited_b),
+    ] {
+        link(&[consumer.clone(), original], &[], frames())
+            .unwrap_or_else(|e| panic!("{what}: the unedited library must link: {e}"));
+        let err = link(&[consumer, edited], &[], frames())
+            .expect_err(&format!("an edited private walker of {what} must be drift"));
+        assert!(
+            matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "lib::walker"),
+            "{what}: {err}"
+        );
+    }
+}
+
+/// `GRAFTS_OUTER_A` over a LOCAL alphabet — an imported alphabet is the
+/// documented no-directive exception to reassembly.
+const LOCAL_ALPHABET_OUTER_A: &str = "\
+alphabet localMarks { '_', 'x', 'y' }
+use lib::outerA;
+machine {
+  tape t: localMarks;
+  entry graft outerA(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+/// A consumer's nested `.grafted` line survives the emitted assembly text
+/// and reassembly byte-identically. **Mutation:** record a splice only when
+/// the target misses the current owner's graph map — the nested line is
+/// absent from the text.
+#[test]
+fn a_consumer_with_nested_grafted_lines_reassembles_byte_identically() {
+    let dir = scratch("digest_nested_reassemble");
+    let ha = interface(&dir, &write_file(&dir, "la.tmc", &lib_a()), "la.tmh");
+    let input = write_file(&dir, "app.tmc", LOCAL_ALPHABET_OUTER_A);
+    let tma_path = dir.join("app.tma");
+    let result = execute(&args(&[
+        "compile",
+        input.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        ha.to_str().unwrap(),
+        "-S",
+        "-o",
+        tma_path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    let text = std::fs::read_to_string(&tma_path).unwrap();
+    assert!(text.contains(".grafted lib::walker"), "{text}");
+    let obj = compile_extern_many(&dir, "app_obj", LOCAL_ALPHABET_OUTER_A, &[&ha]).unwrap();
+    assert_eq!(assemble(&text, false).unwrap(), obj);
+}
+
+/// The digest follows the WRITTEN order of a glyph set's members and of a
+/// named map's pairs. **Mutation:** sorting the member list (sets) or the
+/// pair list (maps) before appending — the reordered variants digest alike.
+#[test]
+fn the_digest_follows_the_written_order_of_set_members_and_map_pairs() {
+    let base = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let same = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let reordered_set = compile_alone(&digest_lib("'y', 'x'", SWAP_MAP));
+    let reordered_map = compile_alone(&digest_lib("'x', 'y'", "'z' -> 'x', 'x' -> 'z'"));
+    assert_eq!(
+        graph_digest_of(&base, "walker"),
+        graph_digest_of(&same, "walker")
+    );
+    assert_ne!(
+        graph_digest_of(&base, "walker"),
+        graph_digest_of(&reordered_set, "walker")
+    );
+    assert_eq!(
+        graph_digest_of(&base, "relay"),
+        graph_digest_of(&same, "relay")
+    );
+    assert_ne!(
+        graph_digest_of(&base, "relay"),
+        graph_digest_of(&reordered_map, "relay")
+    );
+}

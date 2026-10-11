@@ -704,8 +704,11 @@ no interface content is unaffected: that is the ordinary version-3 shape.
 `.graph <name>, <digest>[, private]` records every graph the unit's header
 prints and the digest of the body a grafting unit must have spliced;
 `.grafted <name>, <digest>` records every library graph this unit
-**spliced**, nested ones included, and the digest it spliced. Both stand in the code section before the first `.func`, and
-both write the digest as an unsigned decimal `u32`. They are
+**spliced**, nested ones included, and the digest it spliced; a unit
+records one `.grafted` line per name, since one compile never splices two
+different graphs under one name. Both stand in the code section before
+the first `.func`, and both write the digest as an unsigned decimal
+`u32`. They are
 object-level, not per-function, but they still oblige the all-or-none
 rule above — a digest is meaningless without the interface it is checked
 against.
@@ -722,7 +725,11 @@ A `.graph` line may be marked `private`: the unit prints that graph in its
 header without exporting it. A private record never conflicts with another
 input's record of the same name; it only lets the link check a consumer
 that spliced the graph, which must match at least one input's private
-record when no input exports the name.
+record when no input exports the name. That check has a known limit: a
+consumer's record of a graph no input exports is satisfied by ANY input's
+matching private record, so when two libraries carry identical private
+graphs of one name and one of them later changes, the other's record
+still satisfies the consumer.
 
 **Glyph literals and glyph lists.** A glyph literal is any **non-empty**
 content in single quotes — `'x'`, `'ab'`, `'->'` — so one grapheme, an

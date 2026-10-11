@@ -4632,8 +4632,10 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
         crate::header::interface_graph_digests(&analysis.program, &analysis.resolved, &footprint);
     // Every DISTINCT library graph this unit spliced anywhere (a direct
     // graft, or one reached through another library graph's own nested
-    // grafts) — `expand::expand` records the name at the point its target
-    // missed the local graph map; the digest itself was stamped onto that
+    // grafts) — `expand::expand` records each at the splice, with the digest
+    // stamped onto the body actually spliced (its owning module's copy), never
+    // looked up by name here: two modules may carry different graphs under
+    // one name. The digest was stamped onto that
     // graph's `ResolvedWorld` when its declarations module was read, since
     // this unit has no AST of its own to recompute it from. Every producer
     // of a `Declarations` table stamps every graph world it carries
@@ -4644,16 +4646,42 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     // reachable from ordinary source.
     let mut spliced_grafts: Vec<GraftProvenance> =
         Vec::with_capacity(expanded.spliced_external_graphs.len());
-    for name in &expanded.spliced_external_graphs {
-        let digest = find_external_graph(&ext_modules, name)
-            .and_then(|(_, w)| w.digest)
-            .ok_or_else(|| CompileError {
-                span: Span::point(0, 0),
-                kind: CompileErrorKind::Internal(format!(
-                    "graph `{name}` was reached through the declarations table but carries \
-                     no stamped digest"
-                )),
-            })?;
+    let mut spliced_grafts_origins: Vec<(String, usize)> = Vec::new();
+    for spliced in &expanded.spliced_external_graphs {
+        let name = &spliced.name;
+        // One name, one body: a unit that splices two DIFFERENT graphs under
+        // one qualified name is refused, naming the origin of the body
+        // spliced first and of the one that conflicts with it
+        // (docs/tmt/language.md (grafting a graph from another unit)).
+        if let Some(earlier) = spliced_grafts_origins
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, m)| *m)
+        {
+            let describe = |m: usize| {
+                options
+                    .externals
+                    .origin_of(ext_modules[m])
+                    .map(|o| o.describe())
+                    .unwrap_or_else(|| "a declarations module".to_string())
+            };
+            return Err(CompileError {
+                span: spliced.span,
+                kind: CompileErrorKind::ConflictingDeclaration {
+                    name: name.clone(),
+                    first: describe(earlier),
+                    second: describe(spliced.module),
+                },
+            });
+        }
+        let digest = spliced.digest.ok_or_else(|| CompileError {
+            span: Span::point(0, 0),
+            kind: CompileErrorKind::Internal(format!(
+                "graph `{name}` was reached through the declarations table but carries \
+                 no stamped digest"
+            )),
+        })?;
+        spliced_grafts_origins.push((name.clone(), spliced.module));
         spliced_grafts.push(GraftProvenance {
             graph: name.clone(),
             digest,
