@@ -4069,18 +4069,16 @@ pub(crate) fn find_external_graph<'a>(
 }
 
 /// The routine world `name` names in the declarations table, first module
-/// first — kind-filtered, unlike `Declarations::routine`. Returns the
-/// owning module alongside the world, mirroring [`find_external_graph`].
+/// first, text readings before an object reading
+/// ([`crate::declarations::first_reading`]) — kind-filtered, unlike
+/// `Declarations::routine`. Returns the owning module alongside the world,
+/// mirroring [`find_external_graph`].
 pub(crate) fn find_external_routine<'a>(
     externals: &[&'a Resolved],
     name: &str,
 ) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
-    externals.iter().find_map(|module| {
-        module
-            .worlds
-            .iter()
-            .find(|w| w.kind == WorldKind::Routine && w.name == name)
-            .map(|w| (*module, w))
+    crate::declarations::first_reading(externals, |w| {
+        w.kind == WorldKind::Routine && w.name == name
     })
 }
 
@@ -5173,6 +5171,7 @@ impl WorldCtx<'_> {
                         &b.args,
                         &states,
                         &tapes,
+                        // Unreachable: the list is non-empty here.
                         b.target_span,
                     )?;
                 }

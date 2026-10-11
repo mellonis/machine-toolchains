@@ -1718,6 +1718,10 @@ offers. A declaration read from a compiled object compares its state
 parameters by position, since an object keeps no names for them; two
 readings that both carry names must agree on them. A name conflicts when
 ANY two of its readings disagree, whatever the order they are given in.
+When a routine is declared both by a header or source and by an object,
+callers use the names the text declaration gives, whatever the order the
+declarations are given in; an object alone offers only the names its
+generated header prints.
 To resolve the error, keep one declaration per name: regenerate a header
 with `tmt interface` after changing its unit, or remove the stale or
 duplicate declaration.

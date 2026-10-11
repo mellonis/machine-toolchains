@@ -52,6 +52,31 @@ pub struct Declarations {
     modules: Vec<(Origin, Resolved)>,
 }
 
+/// The reading of a declared world a caller is checked and lowered
+/// against: the first TEXT-provenance module's world satisfying `want`, in
+/// table order, and an object-rendered module's (`Resolved::from_object`)
+/// only when no text module has one. An object reading carries minted
+/// state-parameter names where a text reading carries the authored ones,
+/// and the table may hold both because they agree
+/// (`PublishedForm::agrees`); text readings of one name agree on those
+/// names, so which text reading is taken is immaterial, and preferring
+/// text makes the result independent of `--extern`/library order
+/// (docs/tmt/language.md (declarations)). The one rule behind
+/// [`Declarations::routine`] and `compiler::find_external_routine`, so the
+/// argument check and the IR lowering can never read different readings.
+pub(crate) fn first_reading<'a>(
+    modules: &[&'a Resolved],
+    want: impl Fn(&ResolvedWorld) -> bool,
+) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
+    let find = |object: bool| {
+        modules
+            .iter()
+            .filter(|m| m.from_object == object)
+            .find_map(|m| m.worlds.iter().find(|w| want(w)).map(|w| (*m, w)))
+    };
+    find(false).or_else(|| find(true))
+}
+
 impl Declarations {
     /// No external declarations known — what the embedded stdlib's own
     /// analysis passes to avoid consulting its own `OnceLock` while it is
@@ -180,9 +205,7 @@ impl Declarations {
     /// signature's are; when they are not, the checks defer to the
     /// linker (docs/formats.md (bound calls)).
     pub(crate) fn routine(&self, name: &str) -> Option<&ResolvedWorld> {
-        self.modules()
-            .into_iter()
-            .find_map(|m| m.worlds.iter().find(|w| w.name == name))
+        first_reading(&self.modules(), |w| w.name == name).map(|(_, w)| w)
     }
 
     /// How many declaration modules this carries — the public shape of

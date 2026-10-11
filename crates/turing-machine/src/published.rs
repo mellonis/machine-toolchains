@@ -325,10 +325,12 @@ mod tests {
     const L1: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' });\n}\n";
     const L2: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state done);\n}\n";
     const C8: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r(t = t) then stop; }\n}\n";
-    /// The same caller with an argument-less (transparent) call: the object
-    /// reading names its state parameter differently from the text ones, so
-    /// no argument list is valid against every reading of `lib::r`.
+    /// The same caller with an argument-less (transparent) call, which is
+    /// never checked by name: the pure merge property, free of which
+    /// reading a named list would be checked against.
     const C8_TRANSPARENT: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r() then stop; }\n}\n";
+    /// A valid named caller against the text readings' parameter names.
+    const C8_NAMED: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r(t = t, done = stop) then stop; }\n}\n";
     const OWN: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state done) {\n    entry state s { [*] -> goto done; }\n  }\n}\nmachine {\n  tape t: lib::ab;\n  entry state s { [*] -> call lib::r(t = t, done = stop) then stop; }\n}\n";
     const OWN_FIN: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state fin) {\n    entry state s { [*] -> goto fin; }\n  }\n}\nmachine {\n  tape t: lib::ab;\n  entry state s { [*] -> call lib::r(t = t, fin = stop) then stop; }\n}\n";
     const C_OWN: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r(t = t, done = stop) then stop; }\n}\n";
@@ -495,7 +497,88 @@ mod tests {
                 analyze_with(C8_TRANSPARENT, &decls).is_ok(),
                 "object at {position}"
             );
+            assert!(
+                analyze_with(C8_NAMED, &decls).is_ok(),
+                "named caller, object at {position}"
+            );
         }
+    }
+
+    /// The table in `object` position `position` among three readings of
+    /// `lib::r`: the object's and two agreeing text ones.
+    fn three_readings(position: usize) -> Declarations {
+        let others = [("own.tmc", OWN), ("own_copy.tmc", OWN)];
+        let mut decls = Declarations::none();
+        let mut texts = others.iter();
+        for i in 0..3 {
+            if i == position {
+                decls.push(Origin::Library("own".into()), object_reading());
+            } else {
+                let (path, text) = texts.next().unwrap();
+                decls.push(
+                    Origin::Extern(PathBuf::from(path)),
+                    text_reading(path, text),
+                );
+            }
+        }
+        decls
+    }
+
+    /// A caller naming the text readings' state parameter compiles whatever
+    /// the position of the object reading: the argument check reads the
+    /// text reading, never the object's minted names. Mutation: take the
+    /// first reading regardless of provenance (`declarations::first_reading`
+    /// ignoring `from_object`) — position 0 reports `unknown-arg`.
+    #[test]
+    fn a_named_caller_compiles_whatever_the_position_of_the_object_reading() {
+        for position in 0..3 {
+            let decls = three_readings(position);
+            if let Err(e) = analyze_with(C8_NAMED, &decls) {
+                panic!("object at {position}: {e:?}");
+            }
+        }
+    }
+
+    /// With only the object reading, the minted name is the one on offer
+    /// and an authored name is not invented. Mutation: drop the object
+    /// fallback in `first_reading` (the minted-name caller then compiles
+    /// as an unchecked external and the authored-name one is not refused).
+    #[test]
+    fn an_object_reading_alone_offers_only_its_minted_names() {
+        let mut decls = Declarations::none();
+        decls.push(Origin::Library("own".into()), object_reading());
+        let minted = C8_NAMED.replace("done", "exit0");
+        if let Err(e) = analyze_with(&minted, &decls) {
+            panic!("minted name refused: {e:?}");
+        }
+        let err = analyze_with(C8_NAMED, &decls).unwrap_err();
+        assert!(
+            matches!(&err.kind, Kind::UnknownArg(n) if n == "done"),
+            "{err:?}"
+        );
+    }
+
+    /// The IR lowering reads the same reading as the check: the compiled
+    /// object is identical whichever position the object reading takes.
+    /// Mutation: revert the rule in `Declarations::routine` only — with the
+    /// object reading first, lowering sees the minted name and refuses
+    /// `done`.
+    #[test]
+    fn the_lowering_reads_the_same_reading_whatever_the_order() {
+        let compile_at = |position: usize| {
+            crate::compiler::compile(
+                C8_NAMED,
+                crate::compiler::CompileOptions {
+                    externals: three_readings(position),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("object at {position}: {e:?}"))
+            .object
+        };
+        let first = format!("{:?}", compile_at(0));
+        assert_eq!(first, format!("{:?}", compile_at(1)));
+        assert_eq!(first, format!("{:?}", compile_at(2)));
     }
 
     /// The own-definition check tests the unit against EVERY reading of
