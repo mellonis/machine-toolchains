@@ -316,6 +316,11 @@ pub(super) fn rebind<'a>(
 /// lists every (input, name, record) in input order; `consumed` holds every
 /// name some input consumes; `users` is how many inputs are user objects.
 ///
+/// The error names two inputs: the first exporter in input order and the
+/// first exporter whose record differs from it (when only user objects
+/// are contested, the first user exporter and the first user exporter
+/// that differs from it).
+///
 /// Records compare by value: two inputs exporting one name with equal
 /// records are one export. A name whose records differ is a conflict when
 /// some input consumes it or when both differing exporters are user

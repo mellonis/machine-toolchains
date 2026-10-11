@@ -980,7 +980,9 @@ The exporter is the one input that exports the graph; two inputs exporting
 it with identical digests count as one. Two inputs exporting it with
 DIFFERENT digests are a link error when any input grafts it, and always
 when both are user objects — the link could not say which body the
-consumer spliced.
+consumer spliced. The error names the first exporter in input order and the
+first exporter whose record differs from it (among user objects only, when
+the conflict is between user objects with nothing grafting the graph).
 
 A graph record may be marked private: a unit prints the graph in its header
 without exporting it. A private record never conflicts with another input's

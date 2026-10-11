@@ -1129,3 +1129,43 @@ fn v4_pair_reserved_flags_rejected() {
         Err(FormatError::Malformed("reserved map-pair flags"))
     ));
 }
+
+/// Index of the private graph record's exported byte in `v4_sample`'s
+/// encoding: the record's digest (7) is followed by that byte (0).
+fn private_graph_flag_index(bytes: &[u8]) -> usize {
+    let hits: Vec<usize> = bytes
+        .windows(5)
+        .enumerate()
+        .filter(|(_, w)| *w == [7, 0, 0, 0, 0])
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hits.len(), 1, "the digest pattern must be unique: {hits:?}");
+    hits[0] + 4
+}
+
+/// A graph record's exported byte is 0 or 1; anything else is malformed.
+/// Mutation it catches: accept any other value as exported (`_ => true`
+/// in the reader's flag match).
+#[test]
+fn a_graph_exported_byte_other_than_zero_or_one_is_rejected() {
+    let mut bytes = v4_sample().to_bytes();
+    let at = private_graph_flag_index(&bytes);
+    bytes[at] = 2;
+    crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+    assert!(matches!(
+        ObjectFile::from_bytes(&bytes),
+        Err(FormatError::Malformed("graph exported byte"))
+    ));
+}
+
+/// A buffer that ends where the exported byte should be is a typed error,
+/// never a panic. Mutation it catches: read the byte with a defaulting
+/// accessor (e.g. `unwrap_or(1)`) instead of the checked `u8()`.
+#[test]
+fn a_graph_record_truncated_before_its_exported_byte_is_rejected() {
+    let mut bytes = v4_sample().to_bytes();
+    let at = private_graph_flag_index(&bytes);
+    bytes.truncate(at);
+    crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+    assert!(ObjectFile::from_bytes(&bytes).is_err());
+}

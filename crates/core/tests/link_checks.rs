@@ -743,6 +743,39 @@ fn two_user_objects_exporting_one_graph_differently_are_refused() {
     assert_eq!(err, graph_conflict("lib::findA", "input #0", "input #1"));
 }
 
+/// The near miss of the test below: the same two differing library
+/// alphabet exports, but nobody imports `lib::bits`, so they link.
+/// Mutation it catches: `check_imported_alphabets` marking every exported
+/// alphabet as consumed.
+#[test]
+fn differing_library_alphabet_exports_nobody_imports_link() {
+    let bits = |glyphs: [&str; 3]| mtc_core::formats::object::ExportedAlphabet {
+        name: "lib::bits".to_string(),
+        glyphs: glyphs.iter().map(|g| g.to_string()).collect(),
+    };
+    let mut lib_a = asm(&exporter(1));
+    lib_a
+        .interface
+        .as_mut()
+        .unwrap()
+        .alphabets
+        .push(bits(["_", "0", "1"]));
+    let mut lib_b = asm(&exporter_b(1));
+    lib_b
+        .interface
+        .as_mut()
+        .unwrap()
+        .alphabets
+        .push(bits(["_", "1", "0"]));
+    link(
+        &fake_syntax(),
+        &[asm(&plain_main())],
+        &[lib_a, lib_b],
+        opts(CallMech::Frames),
+    )
+    .expect("an unimported differing library alphabet export links");
+}
+
 /// Two libraries export `lib::bits` with different glyph orders and a
 /// consumer imports it. Mutation it catches: leave the alphabet exporter
 /// map first-wins — the consumer agrees with the first library.
