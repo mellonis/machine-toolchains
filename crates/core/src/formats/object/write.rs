@@ -521,6 +521,7 @@ impl ObjectFile {
                 for graph in &iface.graphs {
                     put_u32(&mut out, pool.intern(&graph.name));
                     put_u32(&mut out, graph.digest);
+                    out.push(u8::from(graph.exported));
                 }
                 put_u32(
                     &mut out,

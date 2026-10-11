@@ -515,10 +515,18 @@ fn v4_sample() -> ObjectFile {
             name: "bits".into(),
             glyphs: vec!["_".into(), "0".into(), "1".into(), "#".into()],
         }],
-        graphs: vec![ExportedGraph {
-            name: "lib::findA".into(),
-            digest: 0xDEAD_BEEF,
-        }],
+        graphs: vec![
+            ExportedGraph {
+                name: "lib::findA".into(),
+                digest: 0xDEAD_BEEF,
+                exported: true,
+            },
+            ExportedGraph {
+                name: "lib::step".into(),
+                digest: 7,
+                exported: false,
+            },
+        ],
         imports: Vec::new(),
     });
     obj.grafts = vec![GraftProvenance {

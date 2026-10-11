@@ -250,7 +250,8 @@ interface (present iff flags bit 5 is set; requires flags bit 1), once
                 u8 returns (0 = noreturn)
                 then once: u32 alphabet count, per alphabet: u32 name,
                 u8 glyph count, count × u32 glyph;
-                u32 graph count, per graph: u32 name, u32 digest;
+                u32 graph count, per graph: u32 name, u32 digest,
+                u8 exported (1 exported, 0 private);
                 u32 import count, per import: u32 name, u32 glyph count,
                 count × u32 glyph
 graft provenance (unconditional at version 4):
@@ -369,8 +370,9 @@ case, which is exactly the case that forces version 4.
   function's interface or none at all.
 - **Exported alphabets, graphs, and imported alphabets** close the
   interface section: an exported alphabet is a name plus its glyphs in
-  band order; a graph is a name plus the `u32` **digest** of the body a
-  grafting unit must have spliced; an **imported alphabet** is a name
+  band order; a graph is a name, the `u32` **digest** of the body a
+  grafting unit must have spliced, and a byte saying whether the graph is
+  exported (`1`) or only recorded privately (`0`); an **imported alphabet** is a name
   plus the glyph list the unit compiled against, for the linker to
   compare against the exporting object's own declaration
   (`docs/core.md (graft drift)`).
@@ -699,7 +701,7 @@ any interface content in a file — a `.param` line, a `.graph`, a
 signature and its full set of `.param` lines. A file with signatures and
 no interface content is unaffected: that is the ordinary version-3 shape.
 
-`.graph <name>, <digest>` records a graph this unit **exports** and the
+`.graph <name>, <digest>[, private]` records a graph this unit **exports** and the
 digest of the body a grafting unit must have spliced; `.grafted <name>,
 <digest>` records a library graph this unit **spliced** and the digest it
 spliced. Both stand in the code section before the first `.func`, and
@@ -708,12 +710,19 @@ object-level, not per-function, but they still oblige the all-or-none
 rule above — a digest is meaningless without the interface it is checked
 against.
 
-At link, every recorded `.grafted` digest is checked against the matching
-`.graph` digest of the object that exports it, when one is present in the
-link — first-wins in the linker's own namespace order, exactly as a symbol
-resolves. A graph no input to the link exports is **not** checked: that is
-a header-only library, the one place a header's own declaration is
-trusted outright rather than verified against a compiled object.
+At link, every recorded `.grafted` digest is checked against the `.graph`
+digest of the input that exports it, when one is present in the link;
+identical exports from several inputs count as one, and differing ones are
+a link error when the graph is grafted (`docs/core.md (graft drift)`). A
+graph no input to the link records is **not** checked: that is a
+header-only library, the one place a header's own declaration is trusted
+outright rather than verified against a compiled object.
+
+A `.graph` line may be marked `private`: the unit prints that graph in its
+header without exporting it. A private record never conflicts with another
+input's record of the same name; it only lets the link check a consumer
+that spliced the graph, which must match at least one input's private
+record when no input exports the name.
 
 **Glyph literals and glyph lists.** A glyph literal is any **non-empty**
 content in single quotes — `'x'`, `'ab'`, `'->'` — so one grapheme, an

@@ -976,9 +976,21 @@ name and the digest of the body it actually spliced. When both objects
 are in the link the two must agree, and a mismatch stops it — the
 consumer compiled against a header that has drifted from its object.
 
-A graph no input exports is not checked. That is a header-only library,
-and it is the one place a header is trusted; the trust is deliberate and
-recorded here rather than discovered.
+The exporter is the one input that exports the graph; two inputs exporting
+it with identical digests count as one. Two inputs exporting it with
+DIFFERENT digests are a link error when any input grafts it, and always
+when both are user objects — the link could not say which body the
+consumer spliced.
+
+A graph record may be marked private: a unit prints the graph in its header
+without exporting it. A private record never conflicts with another input's
+record of the same name, between any pair of inputs. It only lets the link
+check a consumer that spliced the graph, which must match at least one
+input's private record when no input exports the name.
+
+A graph no input records at all is not checked. That is a header-only
+library, and it is the one place a header is trusted; the trust is
+deliberate and recorded here rather than discovered.
 
 Both sides of that comparison are ordinary compiler output: the TM-1
 compiler records a graph it exports and a graph it spliced on every
@@ -990,9 +1002,10 @@ without anyone hand-authoring a signature.
 
 An imported alphabet is verified the same way: a unit that imports an
 alphabet by name records the glyph list it compiled against, the link
-stage compares it against the exporting object's own declaration, and a
-mismatch stops the link, and is unchecked when no input exports that
-alphabet.
+stage compares it against the one export of that alphabet (two identical
+exports counting as one), and a mismatch stops the link. Differing exports
+of an imported alphabet are the same link error as for a graph. The import
+is unchecked when no input exports that alphabet.
 
 ## The composition engine
 

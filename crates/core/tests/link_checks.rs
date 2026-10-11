@@ -602,16 +602,57 @@ fn a_graft_with_no_exporter_in_the_link_is_unchecked() {
         .expect("an unexported graft is not checked");
 }
 
-/// A user object that ALSO exports the graph shadows the library's
-/// export, exactly as a user symbol shadows a library one: the consumer
-/// is checked against the user object's digest, not the library's.
-///
-/// Mutation it catches: resolve the exporter last-wins (or library-first)
-/// and the consumer, which agrees with the user object and disagrees
-/// with the library, is refused.
-#[test]
-fn a_user_export_shadows_a_library_export_for_the_check() {
-    const USER_EXPORTER: &str = "\
+/// `exporter`'s twin under another routine name, so two of them in one link
+/// contest only the graph export, never a symbol.
+fn exporter_b(digest: u32) -> String {
+    format!(
+        "\
+.graph lib::findA, {digest}
+.routine lib::other, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func lib::other
+        ret
+"
+    )
+}
+
+/// An entry that grafts nothing and calls nothing.
+fn plain_main() -> String {
+    "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func main
+        stp
+"
+    .to_string()
+}
+
+/// A library-shaped object carrying a PRIVATE record of `lib::step` and a
+/// routine `lib::<tag>`, so two of them contest no symbol.
+fn private_exporter(tag: &str, digest: u32) -> String {
+    format!(
+        "\
+.graph lib::step, {digest}, private
+.routine lib::{tag}, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func lib::{tag}
+        ret
+"
+    )
+}
+
+/// A consumer that grafted `lib::step` with the given digest and calls
+/// nothing the exporters define.
+fn step_consumer(digest: u32) -> String {
+    consumer(digest)
+        .replace("lib::findA", "lib::step")
+        .replace("call    lib::facade", "stp")
+}
+
+const USER_EXPORTER: &str = "\
 .graph lib::findA, 42
 .routine helper, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
@@ -619,13 +660,235 @@ fn a_user_export_shadows_a_library_export_for_the_check() {
 .func helper
         ret
 ";
-    link(
+
+fn graph_conflict(name: &str, first: &str, second: &str) -> LinkError {
+    LinkError::ConflictingExport {
+        what: "graph",
+        name: name.into(),
+        first: first.into(),
+        second: second.into(),
+    }
+}
+
+/// Two libraries export `lib::findA` with different digests and the
+/// consumer grafts it: the link cannot tell which body the consumer
+/// spliced. Mutation it catches: keep the first-wins exporter map — the
+/// consumer agrees with the first library and the link succeeds.
+#[test]
+fn two_library_graph_exports_that_differ_are_refused_when_grafted() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(&consumer(42))],
+        &[asm(&exporter(42)), asm(&exporter_b(7))],
+        opts(CallMech::Frames),
+    )
+    .expect_err("two differing exports of a grafted graph");
+    assert_eq!(err, graph_conflict("lib::findA", "input #1", "input #2"));
+}
+
+/// A user object and a library export the graph differently and the
+/// consumer grafts it. Mutation it catches: prefer the user object's
+/// export silently (the old shadowing) — the consumer agrees with it and
+/// the link succeeds.
+#[test]
+fn a_user_export_and_a_library_export_that_differ_are_refused_when_grafted() {
+    let err = link(
         &fake_syntax(),
         &[asm(&consumer(42)), asm(USER_EXPORTER)],
         &[asm(&exporter(7))],
         opts(CallMech::Frames),
     )
-    .expect("the user object's export wins, and it agrees");
+    .expect_err("a user export and a library export that differ");
+    assert_eq!(err, graph_conflict("lib::findA", "input #1", "input #2"));
+}
+
+/// Mutation it catches: compare exporters per input instead of per record
+/// — two identical exports are then a conflict.
+#[test]
+fn identical_graph_exports_are_one_export() {
+    link(
+        &fake_syntax(),
+        &[asm(&consumer(42))],
+        &[asm(&exporter(42)), asm(&exporter_b(42))],
+        opts(CallMech::Frames),
+    )
+    .expect("identical exports count as one");
+}
+
+/// Nothing grafts the graph, and both exporters are libraries: the
+/// differing records are a header-only standing, not a conflict.
+/// Mutation it catches: ignore consumption and refuse every differing pair.
+#[test]
+fn differing_graph_exports_nothing_grafts_link() {
+    link(
+        &fake_syntax(),
+        &[asm(&plain_main())],
+        &[asm(&exporter(42)), asm(&exporter_b(7))],
+        opts(CallMech::Frames),
+    )
+    .expect("an unconsumed differing library export links");
+}
+
+/// Mutation it catches: drop the both-user-objects arm — nothing grafts
+/// the graph, so only that arm refuses.
+#[test]
+fn two_user_objects_exporting_one_graph_differently_are_refused() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(&exporter(42)), asm(&exporter_b(7)), asm(&plain_main())],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect_err("two user objects exporting one graph differently");
+    assert_eq!(err, graph_conflict("lib::findA", "input #0", "input #1"));
+}
+
+/// Two libraries export `lib::bits` with different glyph orders and a
+/// consumer imports it. Mutation it catches: leave the alphabet exporter
+/// map first-wins — the consumer agrees with the first library.
+#[test]
+fn two_library_alphabet_exports_that_differ_are_refused_when_imported() {
+    let bits = |glyphs: [&str; 3]| mtc_core::formats::object::ExportedAlphabet {
+        name: "lib::bits".to_string(),
+        glyphs: glyphs.iter().map(|g| g.to_string()).collect(),
+    };
+    let mut lib_a = asm(&exporter(1));
+    lib_a
+        .interface
+        .as_mut()
+        .unwrap()
+        .alphabets
+        .push(bits(["_", "0", "1"]));
+    let mut lib_b = asm(&exporter_b(1));
+    lib_b
+        .interface
+        .as_mut()
+        .unwrap()
+        .alphabets
+        .push(bits(["_", "1", "0"]));
+    let mut app = asm(&consumer(1));
+    app.interface
+        .as_mut()
+        .unwrap()
+        .imports
+        .push(mtc_core::formats::object::ImportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into(), "1".into()],
+        });
+    let err = link(
+        &fake_syntax(),
+        &[app],
+        &[lib_a, lib_b],
+        opts(CallMech::Frames),
+    )
+    .expect_err("two differing exports of an imported alphabet");
+    assert_eq!(
+        err,
+        LinkError::ConflictingExport {
+            what: "alphabet",
+            name: "lib::bits".into(),
+            first: "input #1".into(),
+            second: "input #2".into(),
+        }
+    );
+}
+
+/// A `private` graph record assembles, carries `exported: false`, and the
+/// disassembler prints it back. Mutation it catches: the disassembler
+/// dropping `, private` — the reassembled record is exported.
+#[test]
+fn a_private_graph_record_round_trips_through_text() {
+    let obj = asm(&private_exporter("a", 7));
+    assert_eq!(
+        obj.interface.as_ref().unwrap().graphs,
+        vec![mtc_core::formats::object::ExportedGraph {
+            name: "lib::step".into(),
+            digest: 7,
+            exported: false,
+        }]
+    );
+    let text = mtc_core::asm::disassemble_object(&fake_syntax(), &obj);
+    assert!(text.contains(".graph lib::step, 7, private\n"), "{text}");
+    let again = asm(&text);
+    assert_eq!(again.interface, obj.interface);
+    assert_eq!(again.to_bytes(), obj.to_bytes());
+}
+
+/// Mutation it catches: feed private records into the conflict pass — the
+/// user-user arm then refuses two private records of one name.
+#[test]
+fn differing_private_graphs_of_two_user_objects_link() {
+    link(
+        &fake_syntax(),
+        &[
+            asm(&plain_main()),
+            asm(&private_exporter("a", 1)),
+            asm(&private_exporter("b", 2)),
+        ],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect("private records never conflict");
+}
+
+/// The near miss of the test above: the same two graphs EXPORTED.
+/// Mutation it catches: ignore the exported flag too.
+#[test]
+fn differing_exported_graphs_of_two_user_objects_are_refused() {
+    let exported = |tag: &str, digest: u32| private_exporter(tag, digest).replace(", private", "");
+    let err = link(
+        &fake_syntax(),
+        &[
+            asm(&plain_main()),
+            asm(&exported("a", 1)),
+            asm(&exported("b", 2)),
+        ],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect_err("two exported records that differ");
+    assert_eq!(err, graph_conflict("lib::step", "input #1", "input #2"));
+}
+
+/// A graft of a graph no input exports must match at least one private
+/// record. Mutation it catches: compare only against the FIRST private
+/// record — digest 2 belongs to the second.
+#[test]
+fn a_graft_of_a_private_graph_matches_any_provider() {
+    link(
+        &fake_syntax(),
+        &[asm(&step_consumer(2))],
+        &[
+            asm(&private_exporter("a", 1)),
+            asm(&private_exporter("b", 2)),
+        ],
+        opts(CallMech::Frames),
+    )
+    .expect("the second private record matches");
+}
+
+/// Mutation it catches: leave private records unchecked — digest 3
+/// matches neither and links silently.
+#[test]
+fn a_graft_of_a_private_graph_no_provider_matches_is_drift() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(&step_consumer(3))],
+        &[
+            asm(&private_exporter("a", 1)),
+            asm(&private_exporter("b", 2)),
+        ],
+        opts(CallMech::Frames),
+    )
+    .expect_err("no private record matches");
+    assert_eq!(
+        err,
+        LinkError::GraftDrift {
+            graph: "lib::step".into(),
+            consumer: "input #0".into(),
+            library: "input #1".into(),
+        }
+    );
 }
 
 /// Mutation it catches: compare only the alphabet NAMES and a drifted

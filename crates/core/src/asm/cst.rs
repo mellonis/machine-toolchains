@@ -69,6 +69,8 @@ pub(crate) const EXITS_OPERAND_WORD: &str = "exits";
 pub(crate) const PARAM_WORD: &str = ".param";
 pub(crate) const GRAPH_WORD: &str = ".graph";
 pub(crate) const GRAFTED_WORD: &str = ".grafted";
+/// The optional third operand of `.graph`: the record is not exported.
+pub(crate) const PRIVATE_WORD: &str = "private";
 
 /// The interface-tier directive family, shaped under
 /// [`AsmCaps::interface`] and reported precisely by lower when malformed
@@ -433,6 +435,9 @@ pub struct ParamDirectiveCst {
 pub struct DigestDirectiveCst {
     /// `.grafted` (true) versus `.graph` (false).
     pub grafted: bool,
+    /// `.graph <name>, <digest>, private`: the record is not exported.
+    /// Always false for `.grafted`.
+    pub private: bool,
     pub name: String,
     pub name_span: Span,
     pub digest: u32,
@@ -1612,8 +1617,17 @@ fn digest_directive(
     span: Span,
     trailing: &Option<TrailingComment>,
 ) -> Option<DigestDirectiveCst> {
-    let [name_tok, comma, digest_tok] = &body[1..] else {
-        return None;
+    // `.graph` alone may carry a third operand, the word `private`.
+    let (name_tok, comma, digest_tok, private) = match &body[1..] {
+        [name_tok, comma, digest_tok] => (name_tok, comma, digest_tok, false),
+        [name_tok, comma, digest_tok, comma2, flag]
+            if !grafted
+                && matches!(comma2.kind, AsmTokenKind::Comma)
+                && word_text(flag) == Some(PRIVATE_WORD) =>
+        {
+            (name_tok, comma, digest_tok, true)
+        }
+        _ => return None,
     };
     let name = word_text(name_tok)?;
     if !matches!(comma.kind, AsmTokenKind::Comma) {
@@ -1622,6 +1636,7 @@ fn digest_directive(
     let (digest, digest_span) = canonical_u32(digest_tok)?;
     Some(DigestDirectiveCst {
         grafted,
+        private,
         name: name.to_string(),
         name_span: name_tok.span(),
         digest,
@@ -2866,15 +2881,28 @@ L1:     rgt
     }
 
     #[test]
+    fn a_graph_directive_may_carry_the_private_flag() {
+        let cst = parse_asm_cst_with(".graph lib::g, 42, private ; d\n", caps_interface());
+        let AsmItemKind::DigestDirective(d) = &cst.items[0].kind else {
+            panic!("{:?}", cst.items[0].kind);
+        };
+        assert!(d.private && !d.grafted);
+        assert_eq!(d.digest, 42);
+    }
+
+    #[test]
     fn malformed_digest_directives_stay_lines() {
         for src in [
-            ".graph g",             // no digest
-            ".graph g 1",           // no comma
-            ".graph g, 007",        // non-canonical spelling
-            ".graph g, 0x2A",       // the asm lexer has no hex literal
-            ".grafted g, 1, 2",     // one digest only
-            ".grafted 1, 2",        // the name is a word
-            ".graph g, 4294967296", // one past the u32 ceiling
+            ".graph g",                // no digest
+            ".graph g 1",              // no comma
+            ".graph g, 007",           // non-canonical spelling
+            ".graph g, 0x2A",          // the asm lexer has no hex literal
+            ".grafted g, 1, 2",        // one digest only
+            ".grafted 1, 2",           // the name is a word
+            ".graph g, 4294967296",    // one past the u32 ceiling
+            ".graph g, 1, public",     // the only third operand is `private`
+            ".graph g, 1, private, x", // and nothing follows it
+            ".grafted g, 1, private",  // `.grafted` takes no flag
         ] {
             let cst = parse_asm_cst_with(src, caps_interface());
             assert!(

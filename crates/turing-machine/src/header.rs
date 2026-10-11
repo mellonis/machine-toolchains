@@ -1705,6 +1705,7 @@ pub(crate) fn exported_graph_digests(
             Some(ExportedGraph {
                 digest: graph_digest(graph, world, resolved, footprint),
                 name: full,
+                exported: true,
             })
         })
         .collect()

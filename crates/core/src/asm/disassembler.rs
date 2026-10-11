@@ -871,7 +871,8 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
     if syntax.caps.interface {
         if let Some(iface) = &obj.interface {
             for graph in &iface.graphs {
-                text.push_str(&format!(".graph {}, {}\n", graph.name, graph.digest));
+                let flag = if graph.exported { "" } else { ", private" };
+                text.push_str(&format!(".graph {}, {}{flag}\n", graph.name, graph.digest));
             }
         }
         for graft in &obj.grafts {
@@ -3085,6 +3086,7 @@ A:      stp
             iface.graphs.push(ExportedGraph {
                 name: "lib::g".to_string(),
                 digest: 7,
+                exported: true,
             });
             iface.imports.push(ImportedAlphabet {
                 name: "other::wide".to_string(),
@@ -3146,6 +3148,7 @@ A:      stp
             iface.graphs.push(ExportedGraph {
                 name: "lib::g".to_string(),
                 digest: 7,
+                exported: true,
             });
             iface.alphabets.push(ExportedAlphabet {
                 name: "bits".to_string(),

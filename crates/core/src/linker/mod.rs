@@ -104,6 +104,16 @@ pub enum LinkError {
         consumer: String,
         library: String,
     },
+    /// Two inputs export one graph or one alphabet with different records
+    /// — digests or glyph lists — while some input consumes the name, or
+    /// while both are user objects (docs/core.md (graft drift)). `what` is
+    /// `"graph"` or `"alphabet"`.
+    ConflictingExport {
+        what: &'static str,
+        name: String,
+        first: String,
+        second: String,
+    },
     /// A unit imported an alphabet whose glyph list does not match the
     /// one the exporting object declares: the consumer compiled against a
     /// header that has drifted from its object, so it would read the
@@ -281,6 +291,15 @@ impl std::fmt::Display for LinkError {
                 f,
                 "`{graph}` was grafted into {consumer} from a header that does not \
                  match {library}"
+            ),
+            Self::ConflictingExport {
+                what,
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "the {what} `{name}` is exported differently by {first} and by {second}"
             ),
             Self::AlphabetDrift {
                 alphabet,

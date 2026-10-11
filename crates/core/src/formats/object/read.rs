@@ -433,6 +433,11 @@ impl ObjectFile {
                     graphs.push(ExportedGraph {
                         name: name_of(r.u32()?)?,
                         digest: r.u32()?,
+                        exported: match r.u8()? {
+                            0 => false,
+                            1 => true,
+                            _ => return Err(FormatError::Malformed("graph exported byte")),
+                        },
                     });
                 }
                 let import_count = r.u32()? as usize;

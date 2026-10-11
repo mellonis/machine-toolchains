@@ -1075,6 +1075,7 @@ fn lower_digest_directive(d: &DigestDirectiveCst, ctx: &mut LowerCtx) -> Result<
         ctx.graphs.push(ExportedGraph {
             name: d.name.clone(),
             digest: d.digest,
+            exported: !d.private,
         });
     }
     Ok(())
@@ -1688,7 +1689,7 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
                 "`.param` takes `<name>, (<glyphs>)` and the \
                  `writes=`/`enters=`/`leaves=`/`opaque` suffixes in that order"
             }
-            GRAPH_WORD => "`.graph` takes `<name>, <digest>`",
+            GRAPH_WORD => "`.graph` takes `<name>, <digest>` and an optional `, private`",
             GRAFTED_WORD => "`.grafted` takes `<name>, <digest>`",
             _ => unreachable!("the guard matched an interface directive word"),
         };
@@ -2973,7 +2974,8 @@ stop
             lowered.interface.as_ref().unwrap().graphs,
             vec![ExportedGraph {
                 name: "lib::g".into(),
-                digest: 3_735_928_559
+                digest: 3_735_928_559,
+                exported: true,
             }]
         );
         assert_eq!(
@@ -3054,6 +3056,22 @@ stop
         let lowered = lower_with(iface_caps(), &src).unwrap();
         assert_eq!(lowered.interface.as_ref().unwrap().graphs.len(), 1);
         assert_eq!(lowered.grafts.len(), 1);
+    }
+
+    #[test]
+    fn a_private_graph_lowers_unexported_and_other_third_operands_are_syntax() {
+        let head = ".routine f, tapes=1, alpha=(2)\n.param t, ('_', 'a')\n.func f\nstop\n";
+        let lowered = lower_with(iface_caps(), &format!(".graph g, 5, private\n{head}")).unwrap();
+        assert_eq!(
+            lowered.interface.as_ref().unwrap().graphs,
+            vec![ExportedGraph {
+                name: "g".into(),
+                digest: 5,
+                exported: false,
+            }]
+        );
+        let e = lower_with(iface_caps(), &format!(".graph g, 5, public\n{head}")).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::Syntax(_)), "{e}");
     }
 
     #[test]

@@ -442,3 +442,132 @@ fn a_user_definition_of_a_reached_std_routine_is_refused() {
         "{err}"
     );
 }
+
+/// `lib::ab` with a third glyph, and a routine under another name, so a
+/// link with `R1` contests only the alphabet export.
+const R3: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a', 'b' }
+  export routine q(tape t: ab) {
+    entry state s { [*] -> write ['b'] return; }
+  }
+}
+";
+
+/// `tmt link OBJECTS… --nostdlib -L DIR -l LIB…`, returning the outcome.
+fn link_with(dir: &Path, objects: &[&Path], libs: &[&str]) -> Result<CliOutput, String> {
+    let out = dir.join("out.tmx");
+    let mut argv: Vec<String> = vec!["link".into()];
+    argv.extend(objects.iter().map(|o| o.to_str().unwrap().to_string()));
+    argv.push("--nostdlib".into());
+    if !libs.is_empty() {
+        argv.push("-L".into());
+        argv.push(dir.to_str().unwrap().into());
+    }
+    for lib in libs {
+        argv.push("-l".into());
+        argv.push((*lib).into());
+    }
+    argv.push("-o".into());
+    argv.push(out.to_str().unwrap().into());
+    execute(&argv)
+}
+
+/// Two libraries export `lib::walk` differently and the consumer grafted
+/// the first one's. Mutation: keep the first-wins exporter map — the
+/// consumer agrees with the first library and the link succeeds.
+#[test]
+fn two_libraries_exporting_a_grafted_graph_differently_are_refused() {
+    let dir = scratch("one_def_graph_lib_lib");
+    let (gapp, _g1, _g2) = graph_trio(&dir);
+    let err = link_with(&dir, &[&gapp], &["g1", "g2"]).unwrap_err();
+    assert!(
+        err.contains(
+            "the graph `lib::walk` is exported differently by library `g1` and by library `g2`"
+        ),
+        "{err}"
+    );
+}
+
+/// The same pair in the other order: the consumer now disagrees with the
+/// first library, and the conflict is still what the link reports.
+/// Mutation: run the drift check before the conflict pass — the message
+/// is then the graft drift against the first library.
+#[test]
+fn the_export_conflict_is_reported_before_drift() {
+    let dir = scratch("one_def_graph_order");
+    let (gapp, _g1, _g2) = graph_trio(&dir);
+    let err = link_with(&dir, &[&gapp], &["g2", "g1"]).unwrap_err();
+    assert!(
+        err.contains(
+            "the graph `lib::walk` is exported differently by library `g2` and by library `g1`"
+        ),
+        "{err}"
+    );
+}
+
+/// A byte copy of a library is the same export twice. Mutation: compare
+/// exporters by input instead of by record — the copy is a conflict.
+#[test]
+fn identical_graph_exports_are_one_export() {
+    let dir = scratch("one_def_graph_copy");
+    let (gapp, g1, _g2) = graph_trio(&dir);
+    std::fs::copy(&g1, dir.join("g1copy.tmo")).unwrap();
+    let ok = link_with(&dir, &[&gapp], &["g1", "g1copy"]).unwrap();
+    assert_eq!(ok.code, 0);
+}
+
+/// Differing library exports of a graph nothing grafts still link.
+/// Mutation: refuse every differing pair regardless of consumption.
+#[test]
+fn differing_library_graph_exports_nobody_grafts_link() {
+    let dir = scratch("one_def_graph_unconsumed");
+    let (app, r1, _r2) = routine_trio(&dir);
+    graph_trio(&dir);
+    let ok = link_with(&dir, &[&app, &r1], &["g1", "g2"]).unwrap();
+    assert_eq!(ok.code, 0);
+}
+
+/// Two user objects that export one graph differently are refused even
+/// though nothing grafts it. Mutation: drop the both-user-objects arm.
+#[test]
+fn two_user_objects_exporting_one_graph_differently_are_refused() {
+    let dir = scratch("one_def_graph_user_user");
+    let (app, r1, _r2) = routine_trio(&dir);
+    let (_gapp, g1, g2) = graph_trio(&dir);
+    let err = link_with(&dir, &[&app, &r1, &g1, &g2], &[]).unwrap_err();
+    assert!(
+        err.contains(&format!(
+            "the graph `lib::walk` is exported differently by {} and by {}",
+            g1.display(),
+            g2.display()
+        )),
+        "{err}"
+    );
+}
+
+/// Two libraries export `lib::ab` with different glyph lists and the
+/// application imports it, in either order. Mutation: leave the alphabet
+/// exporter map first-wins — the first order reports a drift against the
+/// second library at best, or links, never the conflict.
+#[test]
+fn two_libraries_exporting_an_imported_alphabet_differently_are_refused() {
+    let dir = scratch("one_def_alphabet_lib_lib");
+    let (app, _r1, _r2) = routine_trio(&dir);
+    let r3 = write(&dir, "r3.tmc", R3);
+    compile_ok(&dir, &r3, "r3.tmo", &[]);
+    let err = link_with(&dir, &[&app], &["r1", "r3"]).unwrap_err();
+    assert!(
+        err.contains(
+            "the alphabet `lib::ab` is exported differently by library `r1` and by library `r3`"
+        ),
+        "{err}"
+    );
+    let err = link_with(&dir, &[&app], &["r3", "r1"]).unwrap_err();
+    assert!(
+        err.contains(
+            "the alphabet `lib::ab` is exported differently by library `r3` and by library `r1`"
+        ),
+        "{err}"
+    );
+}

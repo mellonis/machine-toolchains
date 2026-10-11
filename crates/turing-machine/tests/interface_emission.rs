@@ -141,6 +141,10 @@ fn the_stdlib_code_blobs_are_byte_identical_to_before_the_interface_section() {
 /// states, so the code blobs above do not move, and
 /// `stdlib_header.rs::the_head_clauses_move_the_interface_and_never_the_code`
 /// proves everything outside the interface section identical.
+///
+/// Re-pinned once more when each graph record gained its exported byte:
+/// the stdlib exports twelve graphs, so both objects grew by 12 bytes
+/// (-O0 8005 → 8017, -O1 7945 → 7957), interface section only.
 #[test]
 fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
     let o0 = compile(
@@ -173,12 +177,12 @@ fn the_stdlib_object_is_byte_identical_at_both_opt_levels() {
 
     assert_eq!(
         fingerprint(&o0),
-        (8005, 3792320392),
+        (8017, 3746837814),
         "the -O0 stdlib object's bytes moved"
     );
     assert_eq!(
         fingerprint(&o1),
-        (7945, 3976837933),
+        (7957, 2590308326),
         "the -O1 (release preset) stdlib object's bytes moved"
     );
 }

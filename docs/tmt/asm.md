@@ -206,7 +206,9 @@ The interface surface above is part of that output too. Every compiled
 object describes its interface: a `.routine` signature with its `exits=`
 and `noreturn` fields, one `.param` line per tape carrying the tape's
 glyph list and its published write set, `.graph` and `.grafted` digest
-lines for the graphs it exports and splices, and a comment block for the
+lines for the graphs it exports and splices (a `.graph` line may end in
+`, private`, recording a graph the unit does not export; see
+`docs/formats.md (routine interfaces)`), and a comment block for the
 alphabets it exports and imports. A call into a routine in the SAME unit
 still lowers to the numeric binding form — positional entries, index
 destinations — because the callee's tape order and index space are known

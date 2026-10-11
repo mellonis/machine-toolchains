@@ -270,12 +270,16 @@ pub struct ImportedAlphabet {
     pub glyphs: Vec<String>,
 }
 
-/// A graph the unit exports, with the digest of the body a grafting unit
-/// must have spliced.
+/// A graph the unit records, with the digest of the body a grafting unit
+/// must have spliced. `exported` says whether the graph is part of the
+/// shared namespace: a private record never conflicts with another
+/// input's record of the same name and only serves the link's drift check
+/// (docs/core.md (graft drift)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportedGraph {
     pub name: String,
     pub digest: u32,
+    pub exported: bool,
 }
 
 /// The object's interface section (flags bit 5).

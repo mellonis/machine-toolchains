@@ -207,7 +207,7 @@ proptest! {
                     returns: false,
                 }],
                 alphabets: vec![ExportedAlphabet { name: "ab".into(), glyphs: glyphs[0].clone() }],
-                graphs: vec![ExportedGraph { name: "g".into(), digest }],
+                graphs: vec![ExportedGraph { name: "g".into(), digest, exported: digest % 2 == 0 }],
                 // A fresh name and glyphs that appear nowhere else in the
                 // object, so a missed intern in the pool pass (as opposed
                 // to reusing `glyphs[0]`, which the export/routine passes
