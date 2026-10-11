@@ -193,8 +193,8 @@ stdlib line and a user line with the same number resolve independently.
 A function is `"std"` exactly when the linker recorded the library as
 its origin, so every function reports the one input that defined it (a user
 routine may not share a `std::` name the program reaches — that link is
-refused), and a linker-synthesized copy takes the provenance of the input it was
-stamped from. `mapJson()` shows the same two strings in each function's
+refused), and a linker-synthesized copy takes the provenance of the input
+it was stamped from. `mapJson()` shows the same two strings in each function's
 `source` field (`docs/formats.md (source provenance)`). A `.tmc` routine
 grafts a graph, so its rows map to the graph's lines rather than the
 routine header's; and the entry byte before a function's first mapped

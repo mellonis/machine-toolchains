@@ -492,9 +492,11 @@ $ pmt dis inline.pmx
         stp
 ```
 
-Because inlining binds a call at compile time, a library meant to stay
-fully interposable should be built with `--fno-inline`
-(`docs/pmt/language.md (optimization)`).
+Because inlining binds a call at compile time, a library built with
+`--fno-inline` keeps its internal calls as separate call sites and its
+routines as separate link-time symbols, which is what makes them visible
+in the IR and the disassembly. It does not make a routine replaceable: a
+name has one definition per link (`docs/core.md (linking)`).
 
 **The inline-cap sweep.** `INLINE_MAX_OPS`, the six-op ceiling above, was
 re-measured against a corpus of golden programs (each on its committed
@@ -1493,7 +1495,7 @@ stays the single-file command's job (`docs/pmt/cli.md (build)`).
 Disables one pass for the whole compile, and is repeatable — the names
 are the eleven in the roster above. Two things it is good for: isolating a
 pass while reading IR, as several examples on this page do, and turning
-off `inline` for a library that must stay interposable.
+off `inline` for a library whose routines should stay separate call sites.
 
 ```
 $ pmt compile -O1 -v --fno-cell-state -o cells.pmo cell-state.pmc

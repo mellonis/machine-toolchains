@@ -720,7 +720,7 @@ that is a documented policy choice, not a faithfulness gap.) Both crates
 carry a fixture that builds both sides of one small project — the
 overlay through the real service, the linker through the same
 effective-source-order dispatch the build driver uses — and compares
-them file-for-file, and pin that a reached sibling-versus-standard-library
+them file-for-file, and pins that a reached sibling-versus-standard-library
 collision is a link error.
 
 ### Caveats

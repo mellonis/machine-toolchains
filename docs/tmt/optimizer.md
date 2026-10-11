@@ -423,8 +423,9 @@ L001C:  stp
 A `brk` row inside a spliced callee is copied verbatim into every
 splice, so each instance keeps its own pause address — the same
 per-instance duplication a graft produces. Because inlining binds a call
-at compile time, a library meant to stay interposable should be built
-with `--fno-inline`.
+at compile time, a library built with `--fno-inline` keeps its internal
+calls as separate call sites; this does not make a routine replaceable,
+since a name has one definition per link (`docs/core.md (linking)`).
 
 **The inline-cap sweep.** `INLINE_MAX_RULES`, the six-row ceiling above,
 was re-measured against the hand-written universal Turing machine's
@@ -1461,7 +1462,7 @@ job (`docs/tmt/cli.md (build)`).
 Disables one pass for the whole compile, and is repeatable — the names
 are the eight in the roster above. Two things it is good for: isolating
 a pass while reading IR or assembly, as several examples on this page
-do, and turning off `inline` for a library that must stay interposable.
+do, and turning off `inline` for a library whose routines should stay separate call sites.
 
 ```
 $ tmt compile -O1 -v --fno-dispatch-select -o dr.tmo dead-rows.tmc
