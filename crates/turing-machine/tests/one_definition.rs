@@ -305,3 +305,140 @@ fn an_alphabet_drift_names_the_consumer_and_the_library() {
     assert!(err.contains(&app_o.display().to_string()), "{err}");
     assert!(err.contains("library `r3`"), "{err}");
 }
+
+/// Imports `lib::ab` and calls nothing, so a name two libraries share is
+/// never reached.
+const APP0: &str = "\
+use lib::ab;
+machine {
+  tape t: ab;
+  entry state s { [*] -> stop; }
+}
+";
+
+/// The stdlib's own `goToNumber` signature, re-defined by a user unit:
+/// `tmt interface` prints it identically to `std.tmh`'s line, so the
+/// compile-time one-declaration rule lets it through and the link must
+/// refuse it.
+const OWNSAME: &str = "\
+namespace std {
+  namespace binaryNumbers {
+    export routine goToNumber(tape num: std::binaryNumbers::symbols writes {} leaves { '$' }) {
+      entry state walk {
+        ['$'] -> return;
+        [*]   -> move [>] goto walk;
+      }
+    }
+  }
+}
+
+machine {
+  tape num: std::binaryNumbers::symbols;
+  entry state s { [*] -> call std::binaryNumbers::goToNumber(num = num) then stop; }
+}
+";
+
+/// A user object and a `-l` library both defining a reached name: the
+/// error labels the library as `library r2`. Mutation: `tmt link` does
+/// not label `-l` libraries — the message says `input #1` for it.
+#[test]
+fn a_reached_name_an_object_and_a_library_both_define_is_refused() {
+    let dir = scratch("one_def_obj_lib");
+    let (app, r1, _r2) = routine_trio(&dir);
+    let out = dir.join("ol.tmx");
+    let err = run(&[
+        "link",
+        app.to_str().unwrap(),
+        r1.to_str().unwrap(),
+        "--nostdlib",
+        "-L",
+        dir.to_str().unwrap(),
+        "-l",
+        "r2",
+        "-o",
+        out.to_str().unwrap(),
+    ])
+    .unwrap_err();
+    assert!(
+        err.contains(&format!(
+            "duplicate symbol `lib::r`: defined by {} and by library `r2`",
+            r1.display()
+        )),
+        "{err}"
+    );
+}
+
+/// Two libraries both defining a reached name. Mutation: library against
+/// library is left first-wins — the link succeeds and `unwrap_err` panics.
+#[test]
+fn a_reached_name_two_libraries_define_is_refused() {
+    let dir = scratch("one_def_lib_lib");
+    let (app, _r1, _r2) = routine_trio(&dir);
+    let out = dir.join("ll.tmx");
+    let err = run(&[
+        "link",
+        app.to_str().unwrap(),
+        "--nostdlib",
+        "-L",
+        dir.to_str().unwrap(),
+        "-l",
+        "r1",
+        "-l",
+        "r2",
+        "-o",
+        out.to_str().unwrap(),
+    ])
+    .unwrap_err();
+    assert!(
+        err.contains("duplicate symbol `lib::r`: defined by library `r1` and by library `r2`"),
+        "{err}"
+    );
+}
+
+/// The same two libraries, but the program never reaches the shared name.
+/// Mutation: the check ignores reach — the link is refused and `unwrap`
+/// panics.
+#[test]
+fn an_unreached_name_two_libraries_share_still_links() {
+    let dir = scratch("one_def_unreached");
+    let r1 = write(&dir, "r1.tmc", R1);
+    let r2 = write(&dir, "r2.tmc", R2);
+    let app0 = write(&dir, "app0.tmc", APP0);
+    let app0_o = compile_ok(&dir, &app0, "app0.tmo", &[&r1]);
+    compile_ok(&dir, &r1, "r1.tmo", &[]);
+    compile_ok(&dir, &r2, "r2.tmo", &[]);
+    let out = dir.join("un.tmx");
+    let ok = run(&[
+        "link",
+        app0_o.to_str().unwrap(),
+        "--nostdlib",
+        "-L",
+        dir.to_str().unwrap(),
+        "-l",
+        "r1",
+        "-l",
+        "r2",
+        "-o",
+        out.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(ok.code, 0);
+}
+
+/// A user unit defining a `std::` routine the program calls: the error
+/// labels the embedded library `the standard library`. Mutation: `tmt
+/// build` does not label the stdlib — the message says `input #1`.
+#[test]
+fn a_user_definition_of_a_reached_std_routine_is_refused() {
+    let dir = scratch("one_def_std");
+    let path = write(&dir, "ownsame.tmc", OWNSAME);
+    let out = dir.join("ownsame.tmx");
+    let err = run(&["build", path.to_str().unwrap(), "-o", out.to_str().unwrap()]).unwrap_err();
+    assert!(
+        err.contains(&format!(
+            "duplicate symbol `std::binaryNumbers::goToNumber`: defined by {} and by the standard library",
+            path.display()
+        )),
+        "{err}"
+    );
+}

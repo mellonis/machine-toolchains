@@ -1,5 +1,5 @@
 use mtc_core::formats::object::{BlobVariant, SymbolDef};
-use mtc_core::linker::LinkOptions;
+use mtc_core::linker::{LinkError, LinkOptions};
 use mtc_core::vm::{ArchRegistry, InfiniteTape, Machine, Outcome, RunLimits, RunOptions};
 use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::asm::link;
@@ -201,16 +201,27 @@ fn stdlib_compiles_clean_and_exports_exactly_the_roster() {
     assert_eq!(names, expected);
 }
 
+/// A user definition of a `std::` routine the program calls is a link
+/// error (docs/pmt/stdlib.md (linking semantics)). Mutation: first-wins
+/// restored in `resolve` — the link succeeds and the match fails.
 #[test]
-fn user_namespace_injection_overrides_a_std_routine() {
-    // docs/pmt/stdlib.md interposition: same-namespace export, user beats library.
-    let (marks, head) = run_std(
+fn a_user_definition_of_a_std_routine_it_calls_is_refused() {
+    let out = compile(
         "namespace std { export goToEnd() { 1: left(!); } }\n\
          use std::goToEnd; main() { @goToEnd(!); }",
-        &[M, M, M],
-        1,
+        CompileOptions::default(),
+    )
+    .expect("compiles");
+    let err = link(
+        &[out.object],
+        std::slice::from_ref(stdlib::object()),
+        LinkOptions::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, LinkError::DuplicateSymbol { name, .. } if name == "std::goToEnd"),
+        "{err:?}"
     );
-    assert_eq!((marks, head), (vec![0, 1, 2], 0)); // the override: one left
 }
 
 /// The embedded stdlib is compiled once per process and serves BOTH

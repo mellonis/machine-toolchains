@@ -193,9 +193,11 @@ fn namespace_members_are_bare_inside_qualified_outside() {
     }));
 }
 
+/// The user and the library define one name the program reaches, which is a
+/// link error (docs/pmt/stdlib.md (linking semantics)). Mutation:
+/// first-wins restored in `resolve` — the link succeeds and the match fails.
 #[test]
-fn deliberate_interposition_via_namespace_injection() {
-    // User re-declares inside `std` — same symbol name, user wins.
+fn namespace_injection_of_a_reached_library_name_is_refused() {
     let lib = compile(
         "namespace std { export step() { right; } }",
         CompileOptions::default(),
@@ -206,11 +208,10 @@ fn deliberate_interposition_via_namespace_injection() {
         CompileOptions::default(),
     )
     .unwrap();
-    let linked = link(&[user.object], &[lib.object], LinkOptions::default()).unwrap();
-    let (_, _, head) = run_exe(&linked.executable, &[false], 0);
-    assert_eq!(
-        head, -1,
-        "user's std::step (left) must win over the library's (right)"
+    let err = link(&[user.object], &[lib.object], LinkOptions::default()).unwrap_err();
+    assert!(
+        matches!(&err, LinkError::DuplicateSymbol { name, .. } if name == "std::step"),
+        "{err:?}"
     );
 }
 

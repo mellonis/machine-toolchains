@@ -1249,22 +1249,21 @@ mod faithfulness {
     fn overlay_resolution_matches_linker_resolution_with_provenance() {
         // One target, everything reachable from `main` (see this module's
         // own doc comment): `shared.pmc` a manifest-level source (bare
-        // top-level `helper`, `ns::inner`, and `ns::dup` — the LAST one
-        // deliberately re-declared by the library below too); `app.pmc`
+        // top-level `helper`, `ns::inner`, and `ns::dup`); `app.pmc`
         // the target's own entry, calling every kind of cross-file name
-        // this task's design distinguishes: a bare `.pmc` sibling export,
-        // a qualified `.pmc` sibling export, the SHADOWED qualified name,
-        // a bare `.pma` sibling export, a bare `.pmo`-backed source
+        // this design distinguishes: a bare `.pmc` sibling export,
+        // a qualified `.pmc` sibling export, a bare `.pma` sibling
+        // export, a bare `.pmo`-backed source
         // export, and a `std::` call routed through the separate stdlib
         // channel; `helpers.pma` a `.pma` sibling; `pre.pmo` a `.pmo`
         // declared directly as a target source; `libs/bitops.pmo` a
-        // declared LIBRARY that also defines `ns::dup` (the shadowing
-        // case: the linker's rule is user objects beat libraries) plus an
-        // unrelated `bit_only` export that APP calls too — the ONLY
-        // library-provenance leg in this fixture: every other name has a
-        // `.pmc`/`.pma`/`.pmo` SOURCE contributor, so `bit_only` is what
-        // proves a `.pmo`-shaped overlay answer can also mean "the
-        // declared library", not just "some source `.pmo`".
+        // declared LIBRARY with a single `bit_only` export that APP calls
+        // too — the ONLY library-provenance leg in this fixture: every
+        // other name has a `.pmc`/`.pma`/`.pmo` SOURCE contributor, so
+        // `bit_only` is what proves a `.pmo`-shaped overlay answer can
+        // also mean "the declared library", not just "some source `.pmo`".
+        // Every name has exactly one definer, as the linker requires of a
+        // reached name.
         let root = temp_tree();
         fs::create_dir_all(root.join("libs")).unwrap();
         fs::write(
@@ -1296,7 +1295,7 @@ mod faithfulness {
         fs::write(root.join("pre.pmo"), &pre_bytes).unwrap();
 
         let bitops_bytes = crate::compiler::compile(
-            "namespace ns {\nexport dup() { left; }\n}\nexport bit_only() { right; }\n",
+            "export bit_only() { right; }\n",
             crate::compiler::CompileOptions::default(),
         )
         .expect("bitops's source compiles")
@@ -1406,23 +1405,7 @@ mod faithfulness {
             SymbolOrigin::Object(0),
             "shared.pmc"
         );
-        // THE discriminating assertion: the linker's own, independently
-        // implemented shadowing rule (`resolve::resolve` — user objects
-        // beat libraries) also picks shared.pmc over libs/bitops.pmo. If
-        // the overlay's first-wins ordering (`insert_export`, above) ever
-        // diverged from the linker's — say, libraries were merged before
-        // sources, or a `.pmo` library name were preferred by
-        // registration order rather than by kind — the two independent
-        // answers being compared here (this one, and the overlay's own
-        // `ns::dup` pick asserted above) would disagree, and only THIS
-        // fixture's duplicate-defined `ns::dup` can catch that: every
-        // other name in this fixture has exactly one definer, so picking
-        // the wrong one would be invisible to a name-only comparison.
-        assert_eq!(
-            origin_of("ns::dup"),
-            SymbolOrigin::Object(0),
-            "shared.pmc must win — NOT libs/bitops.pmo"
-        );
+        assert_eq!(origin_of("ns::dup"), SymbolOrigin::Object(0), "shared.pmc");
         assert_eq!(origin_of("asm_fn"), SymbolOrigin::Object(2), "helpers.pma");
         assert_eq!(origin_of("pre_fn"), SymbolOrigin::Object(3), "pre.pmo");
         assert_eq!(
@@ -1491,26 +1474,25 @@ mod faithfulness {
         );
     }
 
+    /// Mutation: first-wins restored in `resolve` — `resolve_names`
+    /// returns Ok and the test reddens.
     #[test]
-    fn overlay_resolution_matches_linker_resolution_for_a_shadowed_std_name() {
-        // The `ns::dup` shape (the sibling-vs-library shadowing case
-        // above), one level over: a sibling's own `namespace std {
-        // export goToEnd() {...} }` mangles to the SAME `std::goToEnd`
-        // key the embedded stdlib roster answers under, creating a
-        // genuine two-definer collision — the embedded stdlib object
-        // really does export a symbol named `std::goToEnd`
+    fn a_sibling_defining_a_reached_std_name_is_a_link_error_the_overlay_does_not_yet_report() {
+        // A sibling's own `namespace std { export goToEnd() {...} }`
+        // mangles to the SAME `std::goToEnd` key the embedded stdlib
+        // roster answers under, creating a genuine two-definer collision
+        // — the embedded stdlib object really does export a symbol named
+        // `std::goToEnd`
         // (`overlay_resolution_matches_linker_resolution_with_provenance`'s
         // own `origin_of("std::goToEnd") == Library(1)` assertion, for
-        // the UNSHADOWED case, already proves this). Both sides must
-        // pick the sibling: the overlay because a name it owns always
-        // wins over the materialized roster, the linker because the
-        // embedded stdlib links as an ordinary library, appended LAST,
-        // behind every declared source — so its own sources-before-
-        // libraries rule already prefers the sibling. This is exactly
-        // the case an overlay that special-cased the `std::` PREFIX
-        // (routing it straight to the materialized roster without ever
-        // consulting the overlay) would get wrong, and it is what
-        // caught that defect originally.
+        // the collision-free case, already proves this). The overlay
+        // picks the sibling: a name it owns always wins over the
+        // materialized roster — exactly the case an overlay that
+        // special-cased the `std::` PREFIX (routing it straight to the
+        // materialized roster without ever consulting the overlay) would
+        // get wrong. The linker refuses the pair once the program
+        // reaches the name (docs/core.md (linking)); the overlay has no
+        // duplicate diagnostic of its own yet (docs/lsp.md (caveats)).
         let root = temp_tree();
         fs::write(
             root.join("pmt.json"),
@@ -1561,18 +1543,11 @@ mod faithfulness {
             .collect();
         let libraries = vec![crate::stdlib::object().clone()];
 
-        let resolved = resolve_names(&objects, &libraries, "main")
-            .expect("std::goToEnd resolves — the sibling, not a genuine unresolved miss");
-        let origin = resolved
-            .reached
-            .iter()
-            .find(|r| r.name == "std::goToEnd")
-            .expect("std::goToEnd is reached from main")
-            .origin;
-        assert_eq!(
-            origin,
-            SymbolOrigin::Object(0),
-            "shared.pmc must win — NOT the embedded stdlib library"
+        let err = resolve_names(&objects, &libraries, "main")
+            .expect_err("the sibling and the embedded stdlib both define a reached name");
+        assert!(
+            matches!(&err, LinkError::DuplicateSymbol { name, .. } if name == "std::goToEnd"),
+            "{err:?}"
         );
     }
 

@@ -161,3 +161,70 @@ fn a_manifest_build_names_both_duplicate_definers() {
         "{err}"
     );
 }
+
+const OVERRIDE: &str = "\
+namespace std { export goToEnd() { 1: left(!); } }
+use std::goToEnd;
+main() { @goToEnd(!); }
+";
+
+const PNEAR: &str = "\
+namespace std { export goToEnd() { 1: left(!); } }
+main() { right; }
+";
+
+/// A user definition of a `std::` routine the program calls: the error
+/// labels the embedded library `the standard library`. Mutation: the PM
+/// driver does not label the stdlib — the message says `input #1`.
+#[test]
+fn a_user_definition_of_a_reached_std_routine_is_refused() {
+    let dir = scratch("override");
+    let path = write(&dir, "override.pmc", OVERRIDE);
+    let out = dir.join("ov.pmx");
+    let err = run(&["build", path.to_str().unwrap(), "-o", out.to_str().unwrap()]).unwrap_err();
+    assert!(
+        err.contains(&format!(
+            "duplicate symbol `std::goToEnd`: defined by {} and by the standard library",
+            path.display()
+        )),
+        "{err}"
+    );
+}
+
+/// The same definition, never called: the program links. Mutation: the
+/// check ignores reach — the build is refused and `unwrap` panics.
+#[test]
+fn an_unreached_user_definition_of_a_std_name_still_links() {
+    let dir = scratch("pnear");
+    let path = write(&dir, "pnear.pmc", PNEAR);
+    let out = dir.join("pn.pmx");
+    run(&["build", path.to_str().unwrap(), "-o", out.to_str().unwrap()]).unwrap();
+}
+
+/// A user object and a `-l` library both defining a reached name.
+/// Mutation: `pmt link` does not label `-l` libraries — `input #1`.
+#[test]
+fn a_reached_name_an_object_and_a_library_both_define_is_refused() {
+    let dir = scratch("obj_lib");
+    let pa = compile_ok(&dir, "pa.pmc", PA);
+    compile_ok(&dir, "pb.pmc", PB);
+    let out = dir.join("pl.pmx");
+    let err = run(&[
+        "link",
+        pa.to_str().unwrap(),
+        "-L",
+        dir.to_str().unwrap(),
+        "-l",
+        "pb",
+        "-o",
+        out.to_str().unwrap(),
+    ])
+    .unwrap_err();
+    assert!(
+        err.contains(&format!(
+            "duplicate symbol `f`: defined by {} and by library `pb`",
+            pa.display()
+        )),
+        "{err}"
+    );
+}
