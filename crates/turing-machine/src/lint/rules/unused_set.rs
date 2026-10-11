@@ -1,11 +1,10 @@
 //! `unused-set`: a `set` declaration (docs/tmt/language.md (glyph sets))
 //! no alphabet body, contract clause, pattern cell, or other set's body
-//! references. Export-independent, mirroring `unused-alphabet` and
-//! `unused-map`: the rule sees this unit only, so an exported set that
-//! another unit imports through this unit's header and uses is still
-//! reported, and a library silences it with the allow list rather than
-//! applying the deletion fix (docs/tmt/lint.md (unused-set)). Detected
-//! source-level over `Resolved`.
+//! references. Like `unused-alphabet` and `unused-map`, an EXPORTED set is
+//! never reported: another unit may import it through this unit's header,
+//! a use this rule cannot see, and the deletion fix would remove what a
+//! consumer needs (docs/tmt/lint.md (unused-set)). Detected source-level
+//! over `Resolved`.
 //!
 //! Usage is decided by `Resolved.set_refs`, recorded at FOUR sites, not a
 //! single uniform one: `SetScope::members` inserts a referenced set's
@@ -43,7 +42,7 @@ use crate::syntax::SetDeclView;
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for (name, set) in &ctx.resolved.sets {
-        if !ctx.resolved.set_refs.contains(name.as_str()) {
+        if !set.exported && !ctx.resolved.set_refs.contains(name.as_str()) {
             let fix = decl_span::<SetDeclView>(ctx, set.name_span).map(|span| Fix {
                 description: format!("delete the unused set `{name}`"),
                 applicability: Applicability::MaybeIncorrect,
@@ -65,6 +64,20 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
 #[cfg(test)]
 mod tests {
     use crate::lint::{LintOptions, lint};
+
+    const EXP: &str = "\
+alphabet digit { '_', '0', '1' }
+export alphabet deadA { '_', 'x' }
+alphabet deadB { '_', 'y' }
+export set deadS { '0' }
+set deadT { '1' }
+export map deadM: digit -> digit { '0' -> '1', '1' -> '0' }
+map deadN: digit -> digit { '0' -> '1', '1' -> '0' }
+machine {
+  tape t: digit;
+  entry state go { ['0'] -> write ['1'] stop; [*] -> stop; }
+}
+";
 
     fn findings(src: &str) -> Vec<mtc_core::diagnostics::Diagnostic> {
         lint(src, LintOptions::default())
@@ -168,5 +181,17 @@ machine {
         let f = findings(src);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].fix.is_some(), "decl_span found the declaration");
+    }
+
+    /// An exported set is never reported (another unit may import it); the
+    /// same declaration without `export` still is, and keeps its fix.
+    /// Mutation: dropping the `exported` skip in `check` — `deadS` returns.
+    #[test]
+    fn an_exported_set_is_not_reported() {
+        let f = findings(EXP);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("deadT"), "{f:?}");
+        assert_eq!((f[0].span.start.line, f[0].span.start.col), (5, 5));
+        assert!(f[0].fix.is_some());
     }
 }

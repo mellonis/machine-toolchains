@@ -1,6 +1,6 @@
-//! Four lint rules over every `.tmc` the repository ships: `unused-tape`,
-//! `unused-tape-parameter`, `unused-fold-variable` and `inert-never-writes`
-//! must stay silent on the corpus (docs/tmt/lint.md (the `.tmc` rules)).
+//! Six lint rules over every `.tmc` the repository ships: `unused-tape`,
+//! `unused-tape-parameter`, `unused-fold-variable`, `inert-never-writes`,
+//! `unused-alphabet` and `unused-map` must stay silent on the corpus (docs/tmt/lint.md (the `.tmc` rules)).
 //!
 //! REGRESSION guards, not evidence that the rules work — each rule's
 //! behavioural fixtures live with the rule itself under
@@ -115,5 +115,23 @@ fn no_shipped_tmc_reports_unused_fold_variable() {
 #[test]
 fn no_shipped_tmc_reports_inert_never_writes() {
     let found = offenders("inert-never-writes");
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// A regression guard with no single discriminating mutation on today's
+/// corpus: no shipped alphabet is exported yet undrawn on. The exported
+/// direction is carried by the rule's own `an_exported_alphabet_is_not_reported`.
+#[test]
+fn no_shipped_tmc_reports_unused_alphabet() {
+    let found = offenders("unused-alphabet");
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}
+
+/// A regression guard with no single discriminating mutation on today's
+/// corpus; the exported direction is carried by the rule's own
+/// `an_exported_map_is_not_reported`.
+#[test]
+fn no_shipped_tmc_reports_unused_map() {
+    let found = offenders("unused-map");
     assert!(found.is_empty(), "{}", found.join("\n"));
 }

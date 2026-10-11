@@ -459,13 +459,14 @@ machine {
         assert!(validate_allow(&["unreachable-code".to_string()]).is_ok());
     }
 
-    /// A header whose one set nothing names: `unused-set` would flag it in
-    /// a `.tmc`. The bodiless routine keeps it a header — the program read
+    /// A header whose one set nothing names (and which is not exported, as
+    /// an exported set is never reported): `unused-set` would flag it in a
+    /// `.tmc`. The bodiless routine keeps it a header — the program read
     /// rejects it.
     const HEADER_UNUSED_SET: &str = "\
 alphabet bit { '_', '1' }
 
-export set ones { '1' }
+set ones { '1' }
 
 export routine clear(tape t: bit writes { '_' });
 ";

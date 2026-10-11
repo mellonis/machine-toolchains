@@ -328,16 +328,12 @@ instance carries no `as` name for a `goto` to redirect onto.
 ### unused-alphabet
 
 An `alphabet` declaration no tape draws on — neither a machine `tape`
-declaration nor a routine/graph signature tape parameter names it. Unlike
-`unused-routine`/`unused-graph`, an **exported** alphabet is flagged too:
-the rule is export-independent by design, and it sees one compilation unit
-only. Another unit CAN use an exported alphabet — it imports it through
-this unit's header or sibling source (`docs/tmt/language.md (alphabets,
-maps and graphs across units)`) — and the rule cannot see that use, so a
-library that exports an alphabet for its consumers and draws no tape on it
-itself is reported. There, the finding is expected and its deletion fix
-must not be applied: silence it with `--allow unused-alphabet` or the
-project file's `lint.allow` ("Project file", above).
+declaration nor a routine/graph signature tape parameter names it. Like
+`unused-routine`/`unused-graph`, an **exported** alphabet is never
+reported: another unit may import it through this unit's header or
+sibling source (`docs/tmt/language.md (alphabets, maps and graphs across
+units)`), which this rule cannot see, and the deletion fix would remove
+what a consumer needs.
 
 ```
 b.tmc:2:10: lint: alphabet `dead` is never used by any tape
@@ -350,10 +346,11 @@ alphabet it documents.
 ### unused-map
 
 A named `map` declaration (`docs/tmt/language.md` (named maps)) nothing
-names with `with map NAME`. Export-independent, exactly as
-`unused-alphabet` is: an exported map another unit imports and uses is
-still reported here, since the rule sees this unit only — silence it the
-same way rather than applying the fix.
+names with `with map NAME`. Like `unused-routine`/`unused-graph`, an
+**exported** map is never reported: another unit may import it through
+this unit's header or sibling source (`docs/tmt/language.md (alphabets,
+maps and graphs across units)`), which this rule cannot see, and the
+deletion fix would remove what a consumer needs.
 
 ```
 b.tmc:3:5: lint: map `dead` is never used by any binding
@@ -367,11 +364,11 @@ run, mirroring `unused-alphabet`'s own fix.
 A `set NAME { … }` declaration (`docs/tmt/language.md (glyph sets)`) —
 a named glyph set, expanded in place wherever an alphabet body, a
 contract clause, a pattern cell, or another set's own body names it —
-that none of those four sites names. Export-independent, exactly as
-`unused-alphabet` and `unused-map` are: an exported set another unit
-imports and uses is still reported here, since the rule sees this unit
-only — silence it with `--allow unused-set` or `lint.allow` rather than
-applying the fix.
+that none of those four sites names. Like `unused-routine`/`unused-graph`,
+an **exported** set is never reported: another unit may import it through
+this unit's header or sibling source (`docs/tmt/language.md (alphabets,
+maps and graphs across units)`), which this rule cannot see, and the
+deletion fix would remove what a consumer needs.
 
 A set named only inside another set's body counts as used for as long as
 that other set is DECLARED — even while the other set is itself reported
@@ -968,7 +965,8 @@ own source, linted where it is written. The `unused-*` declaration rules
 off for a different reason: a header is the list of what a unit offers
 its consumers, so an exported declaration nothing else in the header
 names is its normal shape — the shipped stdlib header's graphs are
-exactly that — not dead code. `--allow` and `tmt.json`'s `lint.allow`
+exactly that — not dead code (an exported declaration is never reported
+in a source either). `--allow` and `tmt.json`'s `lint.allow`
 apply as for any other file, and naming a code that does not run on a
 header is not an error.
 

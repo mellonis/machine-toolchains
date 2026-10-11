@@ -170,7 +170,7 @@ Four lint surfaces — `.pmc`, `.pma`, `.tmc`, `.tma` — share **one allow name
 
 - **`unreachable-rule` is deliberately narrow** — only a second all-wildcard rule. Band dispatch keeps exact and partial rules reachable after a catch-all, so a broader rule would be wrong. Its sibling `shadowed-rule` (expansion-time) is equally narrow: an expanded row IDENTICAL to an earlier one and carrying a wildcard; an identical wildcard-free pair is the error `exact-row-conflict`.
 - **`index-identity-map` is a warn-tier audit, not an error** — omitted-map call/bind index identity is intended semantics (`docs/tmt/language.md`).
-- **`unused-alphabet`/`unused-tape` and `unused-graft-name`/`unused-exit` are export-independent by design.**
+- **`unused-tape`, `unused-graft-name` and `unused-exit` are export-independent by design; `unused-alphabet`, `unused-map` and `unused-set` skip exported declarations.**
 - **Two quickfixes were withheld after probing**: `redundant-identity-pairs` (not byte-identical) and `dead-rule` (silent-miscompile risk); ten more rules carry documented `None` reasons. Re-derive the proof before adding either.
 - **Core's `unused-label` sees labels reached through `Dispatch.targets`/`Frame.exits`.** The old `.tma` force-suppression (400 false findings on the flagship) was **deleted** — do not reintroduce it.
 
