@@ -1359,3 +1359,26 @@ fn an_alphabet_drift_names_the_consumer_and_the_library() {
     assert_eq!(consumer, "app.o");
     assert_eq!(library, "library `lib`");
 }
+
+/// Mutation it catches: the contenders check consulting user objects only.
+#[test]
+fn a_reached_name_a_library_also_defines_is_refused() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A)],
+        &[asm(DUP_B)],
+        LinkOptions {
+            labels: vec![Some("a.o".into()), Some("b.lib".into())],
+            ..Default::default()
+        },
+    )
+    .expect_err("a reached name two inputs define");
+    assert_eq!(
+        err,
+        LinkError::DuplicateSymbol {
+            name: "helper".into(),
+            first: "a.o".into(),
+            second: "b.lib".into(),
+        }
+    );
+}

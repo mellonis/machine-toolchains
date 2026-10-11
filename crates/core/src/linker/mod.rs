@@ -18,9 +18,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LinkError {
-    /// One exported name defined by two inputs (docs/core.md (linking)).
-    /// `first`/`second` are the two inputs' names, as `input_name` renders
-    /// them; equal when one input defines the name twice.
+    /// One exported name defined by two inputs (docs/core.md (linking)):
+    /// two user objects always, a library and any other input once the
+    /// program reaches the name. `first`/`second` are the two inputs'
+    /// names, as `input_name` renders them; equal when one user object
+    /// defines the name twice.
     DuplicateSymbol {
         name: String,
         first: String,
