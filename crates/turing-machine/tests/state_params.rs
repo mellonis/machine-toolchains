@@ -1835,3 +1835,192 @@ fn an_honest_noreturn_header_prints_no_tail_call_warning_with_a_later_state() {
         out.stderr
     );
 }
+
+// A `return` handed to an exit is legal only when the argument list is
+// written in a routine (docs/tmt/language.md (`state` parameters)).
+
+const RETURN_GRAPH: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+graph findA(tape t: ab, state hit, state miss) {
+  entry state s {
+    ['a'] -> hit;
+    ['_'] -> miss;
+    [*]   -> move [>] goto s;
+  }
+}
+";
+
+fn return_graft_in_machine(hit: &str, miss: &str) -> String {
+    format!(
+        "{RETURN_GRAPH}
+machine {{
+  tape main: ab;
+  entry graft findA(t = main, hit = {hit}, miss = {miss}) as seek;
+  state done {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+fn return_graft_in_graph() -> String {
+    format!(
+        "{RETURN_GRAPH}
+graph outer(tape t: ab, state done) {{
+  entry graft findA(t = t, hit = done, miss = return) as seek;
+}}
+
+machine {{
+  tape main: ab;
+  entry graft outer(t = main, done = d) as o;
+  state d {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+const RETURN_ROUTINE: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+routine r(tape t: ab, state done) {
+  entry state s { [*] -> done; }
+}
+";
+
+fn return_bind_in_machine(done: &str) -> String {
+    format!(
+        "{RETURN_ROUTINE}
+machine {{
+  tape main: ab;
+  bind r(t = main, done = {done}) as b;
+  entry state go {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+fn return_call_in_machine(done: &str) -> String {
+    format!(
+        "{RETURN_ROUTINE}
+machine {{
+  tape main: ab;
+  entry state go {{ [*] -> call r(t = main, done = {done}) then stop; }}
+}}
+"
+    )
+}
+
+const RETURN_LIB_GRAFT: &str = "\
+machine {
+  tape t: std::binaryNumbers::symbols;
+  entry graft std::binaryNumbers::goToNumberGraph(num = t, done = return) as g;
+}
+";
+
+/// Compile in memory with the embedded stdlib and return the error's code
+/// and position.
+fn refused_at(src: &str) -> (String, u32, u32) {
+    let err = compile(src, CompileOptions::default()).expect_err("must be refused");
+    (
+        err.kind.code().to_string(),
+        err.span.start.line,
+        err.span.start.col,
+    )
+}
+
+fn refused(code: &str, line: u32, col: u32) -> (String, u32, u32) {
+    (code.to_string(), line, col)
+}
+
+/// Mutation: skip the graft argument lists in `check_reuse_targets`.
+#[test]
+fn return_in_a_machine_graft_is_refused() {
+    assert_eq!(
+        refused_at(&return_graft_in_machine("done", "return")),
+        refused("return-outside-routine", 13, 50)
+    );
+}
+
+/// Mutation: check machine worlds only.
+#[test]
+fn return_in_a_graph_body_graft_is_refused() {
+    assert_eq!(
+        refused_at(&return_graft_in_graph()),
+        refused("return-outside-routine", 12, 47)
+    );
+}
+
+/// The graft's second exit used to leave the machine's own state dead and
+/// warn; the cause is now the refusal, at the first `return`. Mutation:
+/// skip the graft argument lists (the warning path returns).
+#[test]
+fn the_unreachable_state_symptom_is_now_its_cause() {
+    assert_eq!(
+        refused_at(&return_graft_in_machine("return", "return")),
+        refused("return-outside-routine", 13, 37)
+    );
+}
+
+/// Mutation: skip the bind argument lists in `check_reuse_targets`.
+#[test]
+fn return_in_an_unused_machine_bind_is_refused() {
+    assert_eq!(
+        refused_at(&return_bind_in_machine("return")),
+        refused("return-outside-routine", 9, 27)
+    );
+}
+
+/// Mutation: check only grafts of local graphs (drop the check from
+/// `check_graft_args` and the declared-graph path).
+#[test]
+fn return_in_a_machine_graft_of_a_library_graph_is_refused() {
+    assert_eq!(
+        refused_at(RETURN_LIB_GRAFT),
+        refused("return-outside-routine", 3, 67)
+    );
+}
+
+/// The resolver keeps its own refusal of the same terminator, so skipping
+/// the call lists changes nothing observable; what this pins is the
+/// terminator's own column. Mutation: report the argument's span instead
+/// of the terminator's.
+#[test]
+fn return_in_a_machine_call_is_refused() {
+    assert_eq!(
+        refused_at(&return_call_in_machine("return")),
+        refused("return-outside-routine", 9, 51)
+    );
+}
+
+/// Near miss: the same graft in a routine. Mutation: refuse `return` in
+/// every world.
+#[test]
+fn return_in_a_routine_graft_compiles() {
+    let src = format!(
+        "{RETURN_GRAPH}
+routine seek(tape t: ab, state found) {{
+  entry graft findA(t = t, hit = found, miss = return) as g;
+}}
+
+machine {{
+  tape main: ab;
+  entry state go {{ [*] -> call seek(t = main, found = done) then done; }}
+  state done {{ [*] -> stop; }}
+}}
+"
+    );
+    compile(&src, CompileOptions::default()).expect("a routine may bind an exit to its own return");
+}
+
+/// Near miss for the machine shapes: the same graft, bind and call with a
+/// state in place of `return` compile. Mutation: refuse every argument.
+#[test]
+fn a_named_state_in_the_same_machine_shapes_compiles() {
+    for src in [
+        return_graft_in_machine("done", "done"),
+        return_bind_in_machine("go"),
+        return_call_in_machine("go"),
+    ] {
+        compile(&src, CompileOptions::default()).expect("a named state is legal");
+    }
+}

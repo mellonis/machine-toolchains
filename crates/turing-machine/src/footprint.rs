@@ -1935,7 +1935,7 @@ machine {{
             "a target that names no host tape identifies no tape either"
         );
         assert_eq!(
-            site("done = return"),
+            site("done = stop"),
             argless,
             "a terminator arg binds no tape at all — it is a continuation"
         );

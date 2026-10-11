@@ -1001,7 +1001,10 @@ The rules:
   like a tape argument. Its value is a state of the calling world, or a
   terminator — `stop`, `halt`, or, inside a routine, `return`. A
   terminator argument means the callee's exit ends the program (or
-  returns from the *caller*) directly.
+  returns from the *caller*) directly. `return` is legal only in a
+  routine, for a `call`, a `graft` and a `bind` alike: a `graft` in a
+  `machine` or a `graph` body, or a `bind` in a machine whether or not
+  anything calls it, is `return-outside-routine`.
 - A routine's own `state` parameter may be **forwarded** to an inner
   call, which is how a facade delegates its exits without knowing what
   they lead to. It may equally be a `then` continuation — `then <state

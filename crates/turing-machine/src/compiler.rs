@@ -30,7 +30,7 @@ use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
     Graft, Machine, MoveDir, PatternCellKind, Program, QualName, Rule, SetCellMembers, SetDecl,
-    SetMember, SigParamKind, State, SymLit, Transition, WriteCell, WriteCellKind,
+    SetMember, SigParamKind, State, SymLit, TermKind, Transition, WriteCell, WriteCellKind,
     parse_green_from_tokens,
 };
 use crate::patterns::{
@@ -3029,6 +3029,33 @@ pub(crate) fn state_targets(world: &ResolvedWorld) -> HashSet<&str> {
     set
 }
 
+/// A `return` terminator in an argument list is legal only when the list
+/// is written in a routine (docs/tmt/language.md (`state` parameters)):
+/// it binds the callee's exit to the host routine's own return. Checked
+/// by the host's kind alone, before any signature is consulted, so it
+/// holds for a callee whose declarations were never given.
+pub(crate) fn refuse_return_outside_routine(
+    args: &[BindingArg],
+    host: WorldKind,
+) -> Result<(), CompileError> {
+    if host == WorldKind::Routine {
+        return Ok(());
+    }
+    for a in args {
+        if let BindingValue::Terminator {
+            kind: TermKind::Return,
+            span,
+        } = &a.value
+        {
+            return Err(CompileError {
+                span: *span,
+                kind: CompileErrorKind::ReturnOutsideRoutine,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// A graft's argument list checked against the graph it is about to
 /// splice, in the host world it is written in — the check a graft's world
 /// checks already ran ([`check_binding_list`]), repeated at the splice so
@@ -3039,6 +3066,7 @@ pub(crate) fn check_graft_args(
     host: &ResolvedWorld,
     graph: &ResolvedWorld,
 ) -> Result<(), CompileError> {
+    refuse_return_outside_routine(&graft.args, host.kind)?;
     let tapes: HashSet<&str> = host.tapes.iter().map(|t| t.name.as_str()).collect();
     check_binding_list(
         &SigInfo::declared(graph),
@@ -5069,6 +5097,7 @@ impl WorldCtx<'_> {
                     target, args, span, ..
                 } = &rule.transition
                 {
+                    refuse_return_outside_routine(args, world.kind)?;
                     let joined = target.joined();
                     // A single-segment target naming a world-local bind is a
                     // bind-call (the bind carries the binding).
@@ -5103,6 +5132,7 @@ impl WorldCtx<'_> {
         // declarations carry; either way its binding args are checked here,
         // before anything splices it.
         for g in &world.grafts {
+            refuse_return_outside_routine(&g.args, world.kind)?;
             self.check_binding_args(
                 &g.target,
                 &g.target,
@@ -5116,6 +5146,7 @@ impl WorldCtx<'_> {
 
         // bind declarations
         for b in &world.binds {
+            refuse_return_outside_routine(&b.args, world.kind)?;
             if b.external {
                 self.warn_undeclared_if_bare(&b.target, b.target_span, b.external);
                 continue;

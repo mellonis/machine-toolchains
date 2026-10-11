@@ -311,7 +311,7 @@ subsection.
 | `duplicate-state` | Two states (or a state and a graft instance) share one name in one world. |
 | `duplicate-param` | Two signature parameters share one name. |
 | `entry-count` | A world's `entry` count is not exactly one. |
-| `return-outside-routine` | A `return` transition, continuation, or `state` argument outside a routine body. |
+| `return-outside-routine` | A `return` transition, continuation, or argument of a `call`, `graft` or `bind` outside a routine body. |
 | `goto-into-bind` | `goto` targeting a bind name — a bind is a call target, never a state. |
 | `goto-not-a-state` | `goto` targeting a routine or graph — a reuse target, not a state. |
 | `undefined-state` | `goto`, a continuation, or a state argument names no state (or graft instance) in the world. |

@@ -2240,15 +2240,6 @@ mod tests {
         assert!(!worlds[0].tapes[0].opaque);
     }
 
-    /// analyze → expand → lower, expecting the front end to pass and lowering
-    /// to fail; returns the lowering `CompileError`.
-    fn lower_err_of(src: &str) -> CompileError {
-        let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
-        let externals = Declarations::stdlib();
-        let ex = expand(&a.resolved, &externals).unwrap_or_else(|e| panic!("expand failed: {e}"));
-        lower(&ex, &a.resolved, &externals).expect_err("expected lowering to fail")
-    }
-
     const A1: &str = "\
 alphabet ab { '_', 'a', 'b' }
 machine {
@@ -3262,9 +3253,11 @@ machine {
         assert_eq!(exits_of("again"), vec![3, 4]);
     }
 
-    /// `return` as a `state` argument inside the machine world keeps the
-    /// front end's refusal: `main` has no caller to return to. Mutation:
-    /// minting a `Return` resume state regardless of the world kind.
+    /// `return` as a `state` argument inside the machine world is refused
+    /// before lowering is reached: `main` has no caller to return to.
+    /// Mutation: drop the call-list check from the compiler's reuse pass
+    /// (the resolver's own arm then refuses later, at lowering, which
+    /// `analyze` never reaches).
     #[test]
     fn a_return_argument_in_the_machine_world_is_refused() {
         let src = "\
@@ -3277,7 +3270,9 @@ machine {
   entry state go { [*] -> call inner(t = t, hit = return) then fin; }
   state fin { [*] -> stop; }
 }";
-        let e = lower_err_of(src);
+        let Err(e) = analyze(src) else {
+            panic!("expected the front end to refuse");
+        };
         assert_eq!(e.kind.code(), "return-outside-routine");
     }
 
