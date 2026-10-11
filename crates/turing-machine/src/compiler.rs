@@ -238,6 +238,8 @@ pub enum CompileErrorKind {
     WrongTargetKind {
         name: String,
         expected: &'static str,
+        /// The noun phrase for the kind the name actually is.
+        found: &'static str,
     },
     /// A `graft` target names no graph in scope. A graft needs the graph's
     /// source, so an unresolved graft target is fatal (unlike a `call`).
@@ -484,6 +486,10 @@ pub enum AlphabetMiss {
     /// kind — a glyph set, a named map, a routine or a graph. `found` is
     /// that kind's noun phrase.
     NotAnAlphabet { name: String, found: &'static str },
+    /// Reached through `use` or a qualified path, and a declarations module
+    /// given to this compile DOES declare the name — as another kind
+    /// (`found`, a noun phrase).
+    WrongKind { name: String, found: &'static str },
 }
 
 /// [`AlphabetMiss`]'s named-map analog (`CompileErrorKind::UndefinedMap`) —
@@ -496,6 +502,10 @@ pub enum MapMiss {
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
+    /// Reached through `use` or a qualified path, and a declarations module
+    /// given to this compile DOES declare the name — as another kind
+    /// (`found`, a noun phrase).
+    WrongKind { name: String, found: &'static str },
 }
 
 /// [`AlphabetMiss`]'s named-set analog (`CompileErrorKind::UndefinedSet`) —
@@ -529,6 +539,10 @@ pub enum GraphMiss {
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
+    /// Reached through `use` or a qualified path, and a declarations module
+    /// given to this compile DOES declare the name — as another kind
+    /// (`found`, a noun phrase).
+    WrongKind { name: String, found: &'static str },
 }
 
 /// Binds each [`CompileErrorKind`] variant to its stable code exactly
@@ -923,6 +937,13 @@ impl std::fmt::Display for CompileErrorKind {
                      library, whichever this command reads)"
                 )
             }
+            CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::WrongKind { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found} in the declarations given to this compile, not an \
+                     alphabet — a tape's type must be an alphabet"
+                )
+            }
             CompileErrorKind::DuplicateTape(n) => {
                 write!(f, "duplicate tape `{n}` in this world")
             }
@@ -963,8 +984,12 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::UndefinedState(n) => {
                 write!(f, "`{n}` is not a state in this world")
             }
-            CompileErrorKind::WrongTargetKind { name, expected } => {
-                write!(f, "`{name}` is not {expected}")
+            CompileErrorKind::WrongTargetKind {
+                name,
+                expected,
+                found,
+            } => {
+                write!(f, "`{name}` is {found}, not {expected}")
             }
             CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph(n)) => {
                 write!(f, "unknown graph `{n}` — a graft needs the graph's source")
@@ -976,6 +1001,13 @@ impl std::fmt::Display for CompileErrorKind {
                      but its declarations were not given — declare it locally, or supply its \
                      declarations to this compile (an `--extern` file, a sibling source, or a \
                      library, whichever this command reads)"
+                )
+            }
+            CompileErrorKind::UndefinedGraph(GraphMiss::WrongKind { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found} in the declarations given to this compile, not a \
+                     graph — a graft needs a graph's source"
                 )
             }
             CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet(n)) => {
@@ -1155,6 +1187,13 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::UndefinedMap(MapMiss::NoSuchMap(n)) => {
                 write!(f, "unknown map `{n}`")
             }
+            CompileErrorKind::UndefinedMap(MapMiss::WrongKind { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found} in the declarations given to this compile, not a \
+                     named map"
+                )
+            }
             CompileErrorKind::UndefinedMap(MapMiss::DeclarationsNotGiven(n)) => {
                 write!(
                     f,
@@ -1316,9 +1355,15 @@ fn resolve_set_ref<'e>(
             kind: CompileErrorKind::WrongTargetKind {
                 name: name.to_string(),
                 expected: "a set",
+                found: r.kind.map_or("something else", DefKind::noun),
             },
         }),
-        Some(r) => match externals.iter().find_map(|m| m.sets.get(&r.full)) {
+        Some(r) => match external_decls(externals, &r.full)
+            .into_iter()
+            .find_map(|d| match d {
+                ExternalDecl::Set(set) => Some(set),
+                _ => None,
+            }) {
             Some(set) => Ok(SetTarget::External(r.full, set)),
             None => Err(CompileError {
                 span,
@@ -1338,29 +1383,77 @@ fn resolve_set_ref<'e>(
     }
 }
 
+/// One declaration of a name in the declarations table.
+pub(crate) enum ExternalDecl<'a> {
+    Alphabet(&'a ResolvedAlphabet),
+    Set(&'a ResolvedSet),
+    Map(&'a ResolvedMapDecl),
+    World(&'a Resolved, &'a ResolvedWorld),
+}
+
+impl ExternalDecl<'_> {
+    /// The kind this declaration is.
+    pub(crate) fn kind(&self) -> DefKind {
+        match self {
+            ExternalDecl::Alphabet(_) => DefKind::Alphabet,
+            ExternalDecl::Set(_) => DefKind::Set,
+            ExternalDecl::Map(_) => DefKind::Map,
+            ExternalDecl::World(_, w) => match w.kind {
+                WorldKind::Graph => DefKind::Graph,
+                _ => DefKind::Routine,
+            },
+        }
+    }
+}
+
+/// Every declaration of the mangled `name` in the table, module by module
+/// in table order, and within a module alphabet, set, map, then its
+/// routine or graph world (a machine is never a declaration). The ONE
+/// walk every cross-unit lookup reads: a per-kind lookup takes the first
+/// of its kind, and a miss asks the first of any kind what the name is.
+pub(crate) fn external_decls<'a>(externals: &[&'a Resolved], name: &str) -> Vec<ExternalDecl<'a>> {
+    let mut out = Vec::new();
+    for &m in externals {
+        if let Some(a) = m.alphabets.get(name) {
+            out.push(ExternalDecl::Alphabet(a));
+        }
+        if let Some(set) = m.sets.get(name) {
+            out.push(ExternalDecl::Set(set));
+        }
+        if let Some(map) = m.maps.get(name) {
+            out.push(ExternalDecl::Map(map));
+        }
+        for w in &m.worlds {
+            if w.name == name && w.kind != WorldKind::Machine {
+                out.push(ExternalDecl::World(m, w));
+            }
+        }
+    }
+    out
+}
+
 /// The kind a declarations module given to this compile declares the
 /// mangled `name` as, first module first — `None` when none declares it
 /// as an alphabet, a set, a map or a world. What lets a cross-unit miss
 /// say what a name IS instead of claiming its declarations were not given.
-fn external_kind(externals: &[&Resolved], name: &str) -> Option<DefKind> {
-    externals.iter().find_map(|m| {
-        if m.alphabets.contains_key(name) {
-            Some(DefKind::Alphabet)
-        } else if m.sets.contains_key(name) {
-            Some(DefKind::Set)
-        } else if m.maps.contains_key(name) {
-            Some(DefKind::Map)
-        } else {
-            m.worlds
-                .iter()
-                .find(|w| w.name == name)
-                .and_then(|w| match w.kind {
-                    WorldKind::Routine => Some(DefKind::Routine),
-                    WorldKind::Graph => Some(DefKind::Graph),
-                    WorldKind::Machine => None,
-                })
-        }
-    })
+pub(crate) fn external_kind(externals: &[&Resolved], name: &str) -> Option<DefKind> {
+    external_decls(externals, name)
+        .first()
+        .map(ExternalDecl::kind)
+}
+
+/// The miss a cross-unit name that no per-kind lookup answered becomes:
+/// the kind the declarations give it when they declare it at all.
+fn wrong_kind_or<T>(
+    externals: &[&Resolved],
+    full: String,
+    wrong_kind: impl FnOnce(String, &'static str) -> T,
+    not_given: impl FnOnce(String) -> T,
+) -> T {
+    match external_kind(externals, &full) {
+        Some(k) => wrong_kind(full, k.noun()),
+        None => not_given(full),
+    }
 }
 
 /// Everything a set reference resolves against once every set of this
@@ -2101,7 +2194,12 @@ fn resolve_map_ref(
             }
             return Err(CompileError {
                 span,
-                kind: CompileErrorKind::UndefinedMap(MapMiss::DeclarationsNotGiven(r.full)),
+                kind: CompileErrorKind::UndefinedMap(wrong_kind_or(
+                    ext_modules,
+                    r.full,
+                    |name, found| MapMiss::WrongKind { name, found },
+                    MapMiss::DeclarationsNotGiven,
+                )),
             });
         }
     }
@@ -2143,12 +2241,17 @@ fn expand_named_maps_in_args(
     ns: &[String],
 ) -> Result<(), CompileError> {
     let callee_sig: Option<Vec<(String, String)>> = if external {
-        externals.routine(callee_name).map(|w| {
-            w.tapes
-                .iter()
-                .map(|t| (t.name.clone(), t.alphabet.clone()))
-                .collect()
-        })
+        // Any declared world: a graft's target is a graph, a call's or
+        // bind's a routine, and both carry the parameter alphabets site
+        // check 2 reads.
+        crate::declarations::first_reading(&externals.modules(), |w| w.name == callee_name).map(
+            |(_, w)| {
+                w.tapes
+                    .iter()
+                    .map(|t| (t.name.clone(), t.alphabet.clone()))
+                    .collect()
+            },
+        )
     } else {
         callee_tapes.get(callee_name).cloned()
     };
@@ -2952,7 +3055,7 @@ fn has_body(program: &Program, world: &ResolvedWorld) -> bool {
 
 /// The kind of a top-level referenceable entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DefKind {
+pub(crate) enum DefKind {
     Alphabet,
     Set,
     Map,
@@ -2961,7 +3064,7 @@ enum DefKind {
 }
 
 impl DefKind {
-    fn noun(self) -> &'static str {
+    pub(crate) fn noun(self) -> &'static str {
         match self {
             DefKind::Alphabet => "an alphabet",
             DefKind::Set => "a glyph set",
@@ -3987,8 +4090,11 @@ fn resolve_tape_alphabet(
             }
             return Err(CompileError {
                 span,
-                kind: CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::DeclarationsNotGiven(
+                kind: CompileErrorKind::UnresolvedAlphabet(wrong_kind_or(
+                    &externals.modules(),
                     r.full,
+                    |name, found| AlphabetMiss::WrongKind { name, found },
+                    AlphabetMiss::DeclarationsNotGiven,
                 )),
             });
         }
@@ -4020,16 +4126,24 @@ pub(crate) fn find_external_alphabet<'a>(
     externals: &[&'a Resolved],
     name: &str,
 ) -> Option<&'a [String]> {
-    externals
-        .iter()
-        .find_map(|module| module.alphabets.get(name).map(|a| a.glyphs.as_slice()))
+    external_decls(externals, name)
+        .into_iter()
+        .find_map(|d| match d {
+            ExternalDecl::Alphabet(a) => Some(a.glyphs.as_slice()),
+            _ => None,
+        })
 }
 
 /// First-match lookup of a mangled MAP name among external declarations
 /// modules, in table order — [`find_external_alphabet`]'s named-map twin,
 /// over `Resolved::maps`.
 fn find_external_map<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a ResolvedMapDecl> {
-    externals.iter().find_map(|module| module.maps.get(name))
+    external_decls(externals, name)
+        .into_iter()
+        .find_map(|d| match d {
+            ExternalDecl::Map(m) => Some(m),
+            _ => None,
+        })
 }
 
 /// First-match lookup of a mangled GRAPH name among external declarations
@@ -4059,13 +4173,12 @@ pub(crate) fn find_external_graph<'a>(
     externals: &[&'a Resolved],
     name: &str,
 ) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
-    externals.iter().find_map(|module| {
-        module
-            .worlds
-            .iter()
-            .find(|w| w.kind == WorldKind::Graph && w.name == name)
-            .map(|w| (*module, w))
-    })
+    external_decls(externals, name)
+        .into_iter()
+        .find_map(|d| match d {
+            ExternalDecl::World(m, w) if w.kind == WorldKind::Graph => Some((m, w)),
+            _ => None,
+        })
 }
 
 /// The routine world `name` names in the declarations table, first module
@@ -4210,6 +4323,7 @@ fn resolve_world_reuse(
                     kind: CompileErrorKind::WrongTargetKind {
                         name: joined,
                         expected: "a graph",
+                        found: r.kind.map_or("something else", DefKind::noun),
                     },
                 });
             }
@@ -4224,8 +4338,11 @@ fn resolve_world_reuse(
                 } else {
                     return Err(CompileError {
                         span: g.target.span,
-                        kind: CompileErrorKind::UndefinedGraph(GraphMiss::DeclarationsNotGiven(
+                        kind: CompileErrorKind::UndefinedGraph(wrong_kind_or(
+                            &ext_modules,
                             r.full,
+                            |name, found| GraphMiss::WrongKind { name, found },
+                            GraphMiss::DeclarationsNotGiven,
                         )),
                     });
                 }
@@ -5162,6 +5279,18 @@ impl WorldCtx<'_> {
         for b in &world.binds {
             refuse_return_outside_routine(&b.args, world.kind)?;
             if b.external {
+                if find_external_routine(self.externals, &b.target).is_none()
+                    && let Some(k) = external_kind(self.externals, &b.target)
+                {
+                    return Err(CompileError {
+                        span: b.target_span,
+                        kind: CompileErrorKind::WrongTargetKind {
+                            name: b.target.clone(),
+                            expected: "a routine",
+                            found: k.noun(),
+                        },
+                    });
+                }
                 self.warn_undeclared_if_bare(&b.target, b.target_span, b.external);
                 if !b.args.is_empty()
                     && let Some((_, callee)) = find_external_routine(self.externals, &b.target)
@@ -5215,9 +5344,25 @@ impl WorldCtx<'_> {
                 kind: CompileErrorKind::WrongTargetKind {
                     name: joined.to_string(),
                     expected: expected_noun,
+                    found: r.kind.map_or("something else", DefKind::noun),
                 },
             }),
             Some(r) => {
+                // A name another unit declares as a different kind (a
+                // graph is grafted, never called) says so, before the
+                // argument-less exemption or any signature is consulted.
+                if find_external_routine(self.externals, &r.full).is_none()
+                    && let Some(k) = external_kind(self.externals, &r.full)
+                {
+                    return Err(CompileError {
+                        span: target.span,
+                        kind: CompileErrorKind::WrongTargetKind {
+                            name: joined.to_string(),
+                            expected: expected_noun,
+                            found: k.noun(),
+                        },
+                    });
+                }
                 // Absolute-external, or imported-to-external routine. An
                 // argument-less call is the transparent form: tapes bind by
                 // position, nothing to check by name
@@ -5251,11 +5396,12 @@ impl WorldCtx<'_> {
     ) -> Result<(), CompileError> {
         match self.scopes.by_full.get(full) {
             Some(k) if *k == want => Ok(()),
-            Some(_) => Err(CompileError {
+            Some(found) => Err(CompileError {
                 span,
                 kind: CompileErrorKind::WrongTargetKind {
                     name: full.to_string(),
                     expected: expected_noun,
+                    found: found.noun(),
                 },
             }),
             None => Ok(()),
@@ -5465,6 +5611,7 @@ mod tests {
             CompileErrorKind::WrongTargetKind {
                 name: "x".into(),
                 expected: "a routine",
+                found: "a graph",
             },
             CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph("x".into())),
             CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet("x".into())),
@@ -7589,5 +7736,42 @@ machine {
             let src = frags.join(" ");
             let _ = analyze_staged(&src);
         }
+    }
+
+    /// Every cross-unit lookup reads one walk of the declarations table:
+    /// with module 1 declaring `n::x` as a set and module 2 as a graph, the
+    /// graph lookup answers module 2's graph while the kind query answers
+    /// from the first module, `Set`. A real compile would refuse this table
+    /// first (`conflicting-declaration`), so the test drives the lookups
+    /// directly rather than `analyze_with`.
+    /// Mutation: re-growing an independent first-module loop in
+    /// `find_external_graph` that stops at module 1 — `None` instead of
+    /// module 2's graph.
+    #[test]
+    fn the_per_kind_lookups_and_the_kind_query_walk_one_list() {
+        let read = |text: &str| {
+            crate::header::read_extern(
+                std::path::Path::new("m.tmh"),
+                text,
+                &crate::declarations::Declarations::none(),
+            )
+            .expect("reads")
+        };
+        let m1 = read("namespace n { export alphabet ab { '_', 'a' } export set x { 'a' } }");
+        let m2 = read(
+            "namespace n { export alphabet ab { '_', 'a' } export graph x(tape t: ab, state d) { entry state s { [*] -> goto d; } } }",
+        );
+        let mods = [&m1, &m2];
+        let (owner, world) = find_external_graph(&mods, "n::x").expect("module 2's graph");
+        assert!(std::ptr::eq(owner, &m2));
+        assert_eq!(world.kind, WorldKind::Graph);
+        assert_eq!(external_kind(&mods, "n::x"), Some(DefKind::Set));
+        let kinds: Vec<DefKind> = external_decls(&mods, "n::x")
+            .iter()
+            .map(ExternalDecl::kind)
+            .collect();
+        assert_eq!(kinds, [DefKind::Set, DefKind::Graph]);
+        assert!(find_external_routine(&mods, "n::x").is_none());
+        assert_eq!(external_kind(&mods, "n::absent"), None);
     }
 }

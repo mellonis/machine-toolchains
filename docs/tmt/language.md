@@ -955,6 +955,9 @@ compile was given the callee's declarations:
   not declare, one the site never named, or one caller tape backing two
   callee tapes is a link error.
 
+A `call` or `bind` naming a GRAPH another unit declares is
+`wrong-target-kind` — a graph is grafted, never called.
+
 ```
 use hidden;
 …
@@ -1671,9 +1674,11 @@ kind — a glyph set, say — is `unresolved-alphabet` too, and its message
 names the kind it found.)
 
 `undefined-graph`, `undefined-map` and `undefined-set` split the same two ways, for the
-same reason. `undefined-set` has a third reading: a name reached across
-units that the declarations given to this compile DO declare, as
-something other than a set; its message names the kind it found.
+same reason. Each of them, and `unresolved-alphabet`, has a third reading: a
+name reached across units that the declarations given to this compile DO
+declare, as something other than what the site needs (a glyph set where an
+alphabet is expected, an alphabet where a map is, a routine where a graph
+is, an alphabet where a set is); its message names the kind it found.
 
 ## Declarations and headers
 

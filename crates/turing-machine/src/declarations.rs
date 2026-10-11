@@ -193,7 +193,7 @@ impl Declarations {
         Ok(())
     }
 
-    /// The declared world named `name` (a routine), or `None` when no
+    /// The declared ROUTINE named `name` (a graph of that name is not one), or `None` when no
     /// module this compile was given declares it. Modules that publish
     /// one name agree on its form ([`check_conflicts`](Self::check_conflicts)),
     /// so the first match in table order is as good as any — the table's
@@ -205,7 +205,10 @@ impl Declarations {
     /// signature's are; when they are not, the checks defer to the
     /// linker (docs/formats.md (bound calls)).
     pub(crate) fn routine(&self, name: &str) -> Option<&ResolvedWorld> {
-        first_reading(&self.modules(), |w| w.name == name).map(|(_, w)| w)
+        first_reading(&self.modules(), |w| {
+            w.kind == crate::compiler::WorldKind::Routine && w.name == name
+        })
+        .map(|(_, w)| w)
     }
 
     /// How many declaration modules this carries — the public shape of

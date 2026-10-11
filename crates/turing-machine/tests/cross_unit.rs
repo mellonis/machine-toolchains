@@ -1720,3 +1720,116 @@ fn a_correct_call_into_a_declared_routine_compiles() {
     );
     assert!(out.is_ok(), "{:?}", out.err());
 }
+
+const GLIB_TMH: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a' }
+  export graph g(tape t: ab, state done) {
+    entry state w { [*] -> write ['a'] goto done; }
+  }
+}
+";
+
+const CALLG: &str = "\
+use lib::ab;
+machine {
+  tape t: ab;
+  entry state s { [*] -> call lib::g(t = t, done = fin) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+const CALLG_BARE: &str = "\
+use lib::ab;
+machine {
+  tape t: ab;
+  entry state s { [*] -> call lib::g() then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+const BINDG_FULL: &str = "\
+use lib::ab;
+machine {
+  tape t: ab;
+  bind lib::g(t = t, done = fin) as b;
+  entry state s { [*] -> call b() then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+const LOCALG: &str = "\
+alphabet ab { '_', 'a' }
+graph g(tape t: ab, state done) {
+  entry state w { [*] -> write ['a'] goto done; }
+}
+machine {
+  tape t: ab;
+  entry state s { [*] -> call g(t = t) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+fn wrong_kind_error(name: &str, file: &str, src: &str, with_header: bool) -> String {
+    let dir = scratch(name);
+    let header = write(&dir, "glib.tmh", GLIB_TMH);
+    let input = write(&dir, file, src);
+    let mut flags = vec!["--nostdlib"];
+    if with_header {
+        flags.push("--extern");
+        flags.push(header.to_str().unwrap());
+    }
+    compile(&dir, &input, "out.tmo", &flags).unwrap_err()
+}
+
+/// A `call` naming a graph another unit declares is a wrong target kind.
+/// Mutation: no kind check on the out-of-unit call arm — the call compiles
+/// and only the link says `unresolved symbols: lib::g`.
+#[test]
+fn a_call_naming_a_declared_graph_is_wrong_target_kind() {
+    let err = wrong_kind_error("xunit_call_graph", "callg.tmc", CALLG, true);
+    assert!(
+        err.contains(
+            "callg.tmc:4:31: error: `lib::g` is a graph, not a routine [wrong-target-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// The same with no arguments at all, which the argument-less exemption
+/// would otherwise wave through (or report as a missing argument).
+/// Mutation: the kind check placed after the argument-less exemption.
+#[test]
+fn an_argless_call_naming_a_declared_graph_is_wrong_target_kind() {
+    let err = wrong_kind_error("xunit_call_graph_bare", "callg_bare.tmc", CALLG_BARE, true);
+    assert!(
+        err.contains(
+            "callg_bare.tmc:4:31: error: `lib::g` is a graph, not a routine [wrong-target-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// A `bind` naming a declared graph is a wrong target kind.
+/// Mutation: no kind check on the external-bind arm.
+#[test]
+fn a_bind_naming_a_declared_graph_is_wrong_target_kind() {
+    let err = wrong_kind_error("xunit_bind_graph", "bindg_full.tmc", BINDG_FULL, true);
+    assert!(
+        err.contains(
+            "bindg_full.tmc:4:8: error: `lib::g` is a graph, not a routine [wrong-target-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// A local graph called as a routine says what it is.
+/// Mutation: `found` left out of the local message.
+#[test]
+fn a_call_naming_a_local_graph_says_what_it_is() {
+    let err = wrong_kind_error("xunit_call_local_graph", "localg.tmc", LOCALG, false);
+    assert!(
+        err.contains("localg.tmc:7:31: error: `g` is a graph, not a routine [wrong-target-kind]"),
+        "{err}"
+    );
+}

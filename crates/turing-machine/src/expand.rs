@@ -1645,7 +1645,13 @@ fn expand_grafts_into<'a>(
                         return Err(CompileError {
                             span: graft.target_span,
                             kind: CompileErrorKind::UndefinedGraph(
-                                GraphMiss::DeclarationsNotGiven(graft.target.clone()),
+                                match crate::compiler::external_kind(ext_modules, &graft.target) {
+                                    Some(k) => GraphMiss::WrongKind {
+                                        name: graft.target.clone(),
+                                        found: k.noun(),
+                                    },
+                                    None => GraphMiss::DeclarationsNotGiven(graft.target.clone()),
+                                },
                             ),
                         });
                     }

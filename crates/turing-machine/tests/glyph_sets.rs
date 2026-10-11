@@ -343,6 +343,144 @@ fn a_cross_unit_alphabet_named_as_a_set_says_what_it_is() {
     );
 }
 
+const WK_LIB_TMH: &str = "\
+namespace lib {
+  export alphabet dec { '_', '0', '1' }
+  export set someset { '0', '1' }
+  export map m: dec -> dec { '0' -> '0', '1' -> '1' }
+  export routine skip(tape t: dec writes {});
+}
+";
+
+const WK_D1: &str = "\
+use lib::someset;
+
+machine {
+  tape t: someset;
+  entry state s { [*] -> stop; }
+}
+";
+
+const WK_D2: &str = "\
+use lib::dec;
+use lib::skip;
+
+machine {
+  tape t: dec;
+  entry state s { [*] -> call skip(t = t with map lib::dec) then stop; }
+}
+";
+
+const WK_D3: &str = "\
+use lib::dec;
+use lib::skip;
+
+machine {
+  tape t: dec;
+  entry graft skip(t = t) as g;
+}
+";
+
+/// A cross-unit glyph set named as a tape's type says what it is when the
+/// declarations were given, and keeps the not-given reading when they were not.
+/// Mutation: the alphabet miss site not asking `external_kind` — the
+/// message claims the declarations were not given; or building the
+/// wrong-kind reading whenever the lookup misses, without asking whether
+/// anything declares the name — the second compile no longer says so.
+#[test]
+fn a_cross_unit_set_named_as_an_alphabet_says_what_it_is() {
+    let dir = scratch("glyph_sets_set_as_alphabet");
+    let header = write(&dir, "lib.tmh", WK_LIB_TMH);
+    let input = write(&dir, "d1.tmc", WK_D1);
+    let out = dir.join("d1.tmo");
+    let err = execute(&args(&[
+        "compile",
+        input.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("a set is not an alphabet");
+    assert!(
+        err.contains(
+            "d1.tmc:4:11: error: `lib::someset` is a glyph set in the declarations given to \
+             this compile, not an alphabet — a tape's type must be an alphabet [unresolved-alphabet]"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("declarations were not given"), "{err}");
+
+    // Without the declarations the other reading stands.
+    let err = execute(&args(&[
+        "compile",
+        input.to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("nothing declares it");
+    assert!(err.contains("declarations were not given"), "{err}");
+    assert!(err.contains("[unresolved-alphabet]"), "{err}");
+}
+
+/// A cross-unit alphabet named as a `with map` map says what it is.
+/// Mutation: the map miss site not asking `external_kind`.
+#[test]
+fn a_cross_unit_alphabet_named_as_a_map_says_what_it_is() {
+    let dir = scratch("glyph_sets_alphabet_as_map");
+    let header = write(&dir, "lib.tmh", WK_LIB_TMH);
+    let input = write(&dir, "d2.tmc", WK_D2);
+    let out = dir.join("d2.tmo");
+    let err = execute(&args(&[
+        "compile",
+        input.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("an alphabet is not a map");
+    assert!(
+        err.contains(
+            "d2.tmc:6:51: error: `lib::dec` is an alphabet in the declarations given to this \
+             compile, not a named map [undefined-map]"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("declarations were not given"), "{err}");
+}
+
+/// A cross-unit routine grafted as a graph says what it is.
+/// Mutation: the graft miss site not asking `external_kind`.
+#[test]
+fn a_cross_unit_routine_grafted_as_a_graph_says_what_it_is() {
+    let dir = scratch("glyph_sets_routine_as_graph");
+    let header = write(&dir, "lib.tmh", WK_LIB_TMH);
+    let input = write(&dir, "d3.tmc", WK_D3);
+    let out = dir.join("d3.tmo");
+    let err = execute(&args(&[
+        "compile",
+        input.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("a routine is not a graph");
+    assert!(
+        err.contains(
+            "d3.tmc:6:15: error: `lib::skip` is a routine in the declarations given to this \
+             compile, not a graph — a graft needs a graph's source [undefined-graph]"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("declarations were not given"), "{err}");
+}
+
 /// A name nothing declares, in a set position, is its own refusal; a name
 /// that resolves to something other than a set is the wrong-kind one.
 #[test]
