@@ -216,3 +216,92 @@ fn a_graft_drift_names_the_consumer_and_the_library() {
         "{err}"
     );
 }
+
+/// `build` in argv mode labels its units by the paths it was given.
+/// Mutation: the argv-mode `build` link leaves `LinkOptions::labels`
+/// empty — the message then says `input #1` and `input #2`.
+#[test]
+fn an_argv_build_names_both_duplicate_definers() {
+    let dir = scratch("one_def_build_argv");
+    let app = write(&dir, "app.tmc", APP);
+    let r1 = write(&dir, "r1.tmc", R1);
+    let r2 = write(&dir, "r2.tmc", R2);
+    let out = dir.join("b.tmx");
+    let err = run(&[
+        "build",
+        app.to_str().unwrap(),
+        r1.to_str().unwrap(),
+        r2.to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        out.to_str().unwrap(),
+    ])
+    .unwrap_err();
+    assert!(
+        err.contains(&format!(
+            "duplicate symbol `lib::r`: defined by {} and by {}",
+            r1.display(),
+            r2.display()
+        )),
+        "{err}"
+    );
+}
+
+/// `build` in manifest mode labels its units by the raw source strings
+/// the manifest declares. Mutation: the manifest-mode link leaves
+/// `LinkOptions::labels` empty — the
+/// sidecar-relative `sources` fallback then names `../src/r1.tmc`.
+#[test]
+fn a_manifest_build_names_both_duplicate_definers() {
+    let dir = scratch("one_def_build_manifest");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    write(&dir, "src/app.tmc", APP);
+    write(&dir, "src/r1.tmc", R1);
+    write(&dir, "src/r2.tmc", R2);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{ "project": { "stdlib": false, "targets": {
+            "app": { "sources": ["src/app.tmc", "src/r1.tmc", "src/r2.tmc"],
+                     "output": "out/app.tmx" } } } }"#,
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_tmt"))
+        .args(["build", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("duplicate symbol `lib::r`: defined by src/r1.tmc and by src/r2.tmc"),
+        "{err}"
+    );
+}
+
+/// An alphabet drift names the consumer by its path and the exporting
+/// library by its `-l` name. Mutation: `check_imported_alphabets` is
+/// handed no names — the message says `input #0` and `input #1`.
+#[test]
+fn an_alphabet_drift_names_the_consumer_and_the_library() {
+    let dir = scratch("one_def_alphabet_drift");
+    let r1 = write(&dir, "r1.tmc", R1);
+    let r3 = write(&dir, "r3.tmc", &R1.replace("'a'", "'b'"));
+    let app = write(&dir, "app.tmc", APP);
+    let app_o = compile_ok(&dir, &app, "app.tmo", &[&r1]);
+    compile_ok(&dir, &r3, "r3.tmo", &[]);
+    let out = dir.join("ad.tmx");
+    let err = run(&[
+        "link",
+        app_o.to_str().unwrap(),
+        "--nostdlib",
+        "-L",
+        dir.to_str().unwrap(),
+        "-l",
+        "r3",
+        "-o",
+        out.to_str().unwrap(),
+    ])
+    .unwrap_err();
+    assert!(err.contains(&app_o.display().to_string()), "{err}");
+    assert!(err.contains("library `r3`"), "{err}");
+}

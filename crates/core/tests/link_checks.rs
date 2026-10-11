@@ -1259,3 +1259,103 @@ fn a_link_error_falls_back_to_sources_then_position() {
         }
     );
 }
+
+/// A label beats the same input's `sources` entry, and an input with no
+/// label falls back to its own `sources` entry rather than to nothing.
+///
+/// Mutation it catches: in `link`, try `sources` before `labels` — the
+/// first input is then named `src/a.x`.
+#[test]
+fn a_label_wins_over_the_same_inputs_source() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A), asm(DUP_B)],
+        &[],
+        LinkOptions {
+            labels: vec![Some("a.o".into()), None],
+            sources: vec![Some("src/a.x".into()), Some("src/b.x".into())],
+            ..Default::default()
+        },
+    )
+    .expect_err("two user definitions of one name");
+    assert_eq!(
+        err,
+        LinkError::DuplicateSymbol {
+            name: "helper".into(),
+            first: "a.o".into(),
+            second: "src/b.x".into(),
+        }
+    );
+}
+
+/// One input defining a name twice is named once, by its label, in the
+/// "defined twice" wording.
+///
+/// Mutation it catches: delete the `first == second` rendering arm — the
+/// text then reads "defined by a.o and by a.o".
+#[test]
+fn an_in_object_duplicate_names_the_one_input() {
+    let mut object = asm(DUP_B);
+    let again = object.symbols[0].clone();
+    object.symbols.push(again);
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A), object],
+        &[],
+        LinkOptions {
+            labels: vec![Some("a.o".into()), Some("twice.o".into())],
+            ..Default::default()
+        },
+    )
+    .expect_err("one object defining a name twice");
+    assert_eq!(
+        err.to_string(),
+        "duplicate symbol `helper`: defined twice by twice.o"
+    );
+}
+
+/// An alphabet drift names the consumer by its label and the exporting
+/// library by its label.
+///
+/// Mutation it catches: pass `&[]` (or `sources`) to
+/// `check_imported_alphabets` — the message then names `input #0` and
+/// `input #1`.
+#[test]
+fn an_alphabet_drift_names_the_consumer_and_the_library() {
+    let mut lib = asm(&exporter(1));
+    lib.interface
+        .as_mut()
+        .expect("the exporter declares an interface")
+        .alphabets
+        .push(mtc_core::formats::object::ExportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into(), "1".into()],
+        });
+    let mut app = asm(&consumer(1));
+    app.interface
+        .as_mut()
+        .expect("the consumer declares an interface")
+        .imports
+        .push(mtc_core::formats::object::ImportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "1".into(), "0".into()],
+        });
+    let err = link(
+        &fake_syntax(),
+        &[app],
+        &[lib],
+        LinkOptions {
+            labels: vec![Some("app.o".into()), Some("library `lib`".into())],
+            ..opts(CallMech::Frames)
+        },
+    )
+    .expect_err("a drifted import must stop the link");
+    let LinkError::AlphabetDrift {
+        consumer, library, ..
+    } = &err
+    else {
+        panic!("{err:?}");
+    };
+    assert_eq!(consumer, "app.o");
+    assert_eq!(library, "library `lib`");
+}

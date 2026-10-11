@@ -105,3 +105,59 @@ fn a_duplicate_symbol_between_two_objects_names_both() {
         "{err}"
     );
 }
+
+/// `build` in argv mode labels its units by the paths it was given.
+/// Mutation: the argv-mode `build` link leaves `LinkOptions::labels`
+/// empty — `input #0` and `input #1`.
+#[test]
+fn an_argv_build_names_both_duplicate_definers() {
+    let dir = scratch("build_argv");
+    let pa = write(&dir, "pa.pmc", PA);
+    let pb = write(&dir, "pb.pmc", PB);
+    let out = dir.join("b.pmx");
+    let err = run(&[
+        "build",
+        pa.to_str().unwrap(),
+        pb.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ])
+    .unwrap_err();
+    assert!(
+        err.contains(&format!(
+            "duplicate symbol `f`: defined by {} and by {}",
+            pa.display(),
+            pb.display()
+        )),
+        "{err}"
+    );
+}
+
+/// `build` in manifest mode labels its units by the raw source strings
+/// the manifest declares. Mutation: the manifest-mode link leaves
+/// `LinkOptions::labels` empty — the
+/// sidecar-relative `sources` fallback then names `../src/pa.pmc`.
+#[test]
+fn a_manifest_build_names_both_duplicate_definers() {
+    let dir = scratch("build_manifest");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    write(&dir, "src/pa.pmc", PA);
+    write(&dir, "src/pb.pmc", PB);
+    write(
+        &dir,
+        "pmt.json",
+        r#"{ "project": { "targets": { "app": {
+            "sources": ["src/pa.pmc", "src/pb.pmc"], "output": "out/app.pmx" } } } }"#,
+    );
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pmt"))
+        .args(["build", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("duplicate symbol `f`: defined by src/pa.pmc and by src/pb.pmc"),
+        "{err}"
+    );
+}
