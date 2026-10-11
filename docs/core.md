@@ -681,6 +681,16 @@ Objects in, one executable image out, in two phases.
   specialized copy, so a generic routine reached before lowering but left
   with no remaining caller afterward is dropped too, exactly as if the
   first BFS had never reached it.
+- A routine whose body returns through an exit index at or above the
+  exit count its interface declares is refused, under every mechanism
+  and whether or not the entry carries a signature — the assembler
+  already refuses such a body, so only an object built another way can
+  carry one. An exit return is the instruction whose operand is an
+  `Imm8` exit index and whose flow is `Stop`; a trap carrying the same
+  operand kind falls through, which is what tells the two apart. A
+  function with no interface declares nothing and is not checked; the
+  check reads each routine as the objects defined it, before any
+  mechanism lowers anything.
 
 **Build columns.** A name may carry two definitions — the two build
 columns of one function, for architectures whose toolchain compiles both
@@ -926,28 +936,6 @@ author placed there for some other reason reads the same as the
 compiler's own safety trap and warns too — the accepted false positive
 an `--allow` silences.
 
-**A third check grades a routine's BODY against its own interface,
-independent of any call site.** A body that returns through an exit
-index at or above the exit count its interface declares is
-`undeclared-exit`, named at that return instruction: no call site's
-exit vector has an entry for the index. MONO and HYBRID refuse the
-link outright only where they copy the body into an exit-bearing bound
-site. Anywhere else the body is reached — a framed call under FRAMES,
-or a plain call under any mechanism, whether or not the link lowers
-bound calls elsewhere — nothing is copied, the warning is the only
-link-time signal, and the return traps at run time: `ExitOutOfRange`
-under a frame, a profile violation on a base-profile image. The dialect needs no
-table of its own for this: an exit return is the instruction whose
-operand is an `Imm8` exit index and whose flow is `Stop`, the same
-reading the copy path's rewrite of each exit return into a jump
-already relies on, and what tells it apart from a trap carrying the
-same operand kind is that the trap falls through. A function with no
-interface declares nothing and is not graded — a hand-authored frame
-descriptor, not a signature, supplies the exits such a body returns
-through. The scan reads each routine as the objects defined it, before
-any mechanism lowers anything, since a stamped copy carries no
-interface to compare against.
-
 Every finding is raised once, in the composition engine, so a hybrid
 link — which consults two lowering paths — still reports each one
 exactly once. A link whose ENTRY function carries no signature is graded
@@ -963,7 +951,6 @@ Codes are permanent identifiers: they never change meaning.
 | `glyph-mismatch` | A call site binds by index into a callee whose alphabet is the same size but spells different glyphs, so the callee reads the caller's symbols as other symbols. |
 | `narrow-alphabet` | A call site binds by index into a callee whose alphabet is narrower, so the caller's high symbols have no image in it. |
 | `tail-call-no-continuation` | A call site is the last instruction of its function, or is immediately followed by the dialect's own trap, into a callee that can return: an honest return either falls through into whatever the linker places next, or lands on the trap in place of a continuation the source never wrote. |
-| `undeclared-exit` | A routine's body returns through an exit index at or above the exit count its signature declares, so no call site's exit vector has an entry for it: MONO and HYBRID refuse the link only where they copy the body into an exit-bearing bound site; every other call into the body — a framed call, a plain call — links with this warning as the only signal and traps there at run time. |
 
 Errors are outside this catalog and cannot be suppressed.
 

@@ -393,43 +393,142 @@ fn the_assembler_refuses_a_return_through_an_undeclared_exit() {
     );
 }
 
-/// End to end on the CLI: a FRAMES link of the body above succeeds and
-/// prints the `undeclared-exit` warning naming the callee and the index.
-/// Frames is passed explicitly because the default mechanism copies a
-/// lone exit-bearing site into its caller, and a copy of this body is
-/// already refused outright.
+/// The linker refuses an object whose routine returns through an exit its
+/// interface does not declare, under every mechanism. The assembler
+/// refuses this body, so the object is built with a third declared exit
+/// and lowered back to the two its call site binds.
 ///
-/// Mutation it catches: drop the body scan from the linker, or leave the
-/// code out of the registry the CLI renders from, and nothing prints.
+/// Mutation it catches: drop `stamp::check_declared_exits` from `link` —
+/// frames links again and the copying mechanisms say `bad binding`
+/// instead.
 #[test]
-fn a_return_through_an_undeclared_exit_warns_on_the_cli() {
-    let dir = scratch("link_warnings_undeclared_exit");
-    let obj = dir.join("fire.tmo");
-    // The assembler refuses this body, so the object is built with a third
-    // declared exit and lowered back to the two its call site binds.
-    let built = declaring_exits(
-        &UNDECLARED_EXIT.replace("exits=2, noreturn", "exits=3, noreturn"),
-        "sub",
-        2,
-    );
-    std::fs::write(&obj, built.to_bytes()).unwrap();
-    let out = execute(&args(&[
+fn the_linker_refuses_an_object_carrying_one_under_every_mechanism() {
+    let dir = scratch("undeclared_exit_link");
+    let src = UNDECLARED_EXIT.replace("exits=2, noreturn", "exits=3, noreturn");
+    let obj = declaring_exits(&src, "sub", 2);
+    let path = dir.join("fire.tmo");
+    std::fs::write(&path, obj.to_bytes()).unwrap();
+    for mech in ["mono", "frames", "hybrid"] {
+        let err = execute(&args(&[
+            "link",
+            path.to_str().unwrap(),
+            "--nostdlib",
+            "--call-mech",
+            mech,
+            "-o",
+            dir.join(format!("a_{mech}.tmx")).to_str().unwrap(),
+        ]))
+        .expect_err("an undeclared exit stops the link");
+        assert!(
+            err.to_string()
+                .contains("`sub` returns through exit 2, but its signature declares 2 exit(s)"),
+            "{mech}: {err}"
+        );
+    }
+}
+
+/// An unsigned entry making a plain call.
+const MAIN_PLAIN: &str = "\
+.func main
+        call    sub
+        stp
+";
+
+/// Declares three exits so it assembles; the test lowers the count to two.
+const SUB_OVER: &str = "\
+.routine sub, tapes=1, alpha=(3), exits=3
+.param p, ('_', '0', '1')
+.func sub
+        retx    #2
+";
+
+/// The check does not need the entry to carry a signature: this link used
+/// to stop on the entry's missing signature, never reaching the body.
+///
+/// Mutation it catches: keep the scan inside the engine, which an
+/// unsigned entry never reaches — the link then reports the missing
+/// signature instead.
+#[test]
+fn the_link_check_does_not_need_a_signed_entry() {
+    let dir = scratch("undeclared_exit_unsigned_entry");
+    let main = mtc_turing_machine::asm::assemble(MAIN_PLAIN, false).unwrap();
+    let sub = declaring_exits(SUB_OVER, "sub", 2);
+    std::fs::write(dir.join("main_plain.tmo"), main.to_bytes()).unwrap();
+    std::fs::write(dir.join("sub.tmo"), sub.to_bytes()).unwrap();
+    let err = execute(&args(&[
         "link",
-        obj.to_str().unwrap(),
+        dir.join("main_plain.tmo").to_str().unwrap(),
+        dir.join("sub.tmo").to_str().unwrap(),
         "--nostdlib",
-        "--call-mech",
-        "frames",
         "-o",
         dir.join("a.tmx").to_str().unwrap(),
     ]))
-    .expect("a warning does not stop the link");
-    assert_eq!(out.code, 0, "a warning does not fail the link");
+    .expect_err("an undeclared exit stops the link");
     assert!(
-        out.stderr.contains("[undeclared-exit]")
-            && out.stderr.contains("`sub`")
-            && out.stderr.contains("exit 2"),
+        err.to_string()
+            .contains("`sub` returns through exit 2, but its signature declares 2 exit(s)"),
+        "{err}"
+    );
+}
+
+/// `undeclared-exit` is no longer a link-warning code, so `--allow` names
+/// an unknown rule exactly as it does for any other unknown code. The
+/// object is the legal near miss (`retx #1` of two), so nothing else
+/// could stop the link.
+///
+/// Mutation it catches: leave the `undeclared-exit` row in
+/// `DIAGNOSTIC_CODES` and the flag is accepted.
+#[test]
+fn allowing_undeclared_exit_is_an_unknown_code() {
+    let dir = scratch("undeclared_exit_allow");
+    let obj = mtc_turing_machine::asm::assemble(
+        &UNDECLARED_EXIT.replace("retx    #2", "retx    #1"),
+        false,
+    )
+    .unwrap();
+    let path = dir.join("fire_ok.tmo");
+    std::fs::write(&path, obj.to_bytes()).unwrap();
+    let err = execute(&args(&[
+        "link",
+        path.to_str().unwrap(),
+        "--nostdlib",
+        "--allow",
+        "undeclared-exit",
+        "-o",
+        dir.join("a.tmx").to_str().unwrap(),
+    ]))
+    .expect_err("an unknown code is refused");
+    assert!(
+        err.to_string()
+            .contains("unknown lint rule `undeclared-exit`"),
+        "{err}"
+    );
+}
+
+/// A manifest's `lint.allow` is validated against the same table.
+///
+/// Mutation it catches: the manifest loader validating against a list of
+/// its own that still holds the old warning code.
+#[test]
+fn a_manifest_allowing_undeclared_exit_is_refused() {
+    let dir = scratch("undeclared_exit_manifest_allow");
+    std::fs::write(
+        dir.join("tmt.json"),
+        r#"{ "lint": { "allow": ["undeclared-exit"] }, "project": { "targets": { "app": { "sources": ["a.tmc"] } } } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.tmc"),
+        "alphabet a { '_' }\nmachine { tape t: a; entry state s { [*] -> move [>] stop; } }\n",
+    )
+    .unwrap();
+    let out = tmt().args(["build"]).current_dir(&dir).output().unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("unknown lint rule `undeclared-exit` in lint.allow"),
         "{}",
-        out.stderr
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -501,21 +600,22 @@ machine {
 /// control above, links against the embedded stdlib with no
 /// `undeclared-exit` finding: the compiler lowers a state parameter to
 /// the exit its own position names, so an honest body never trips the
-/// scan. The scan runs once, before any mechanism lowers anything, so
-/// one mechanism covers it — FRAMES, the one that never refuses an
-/// exit-bearing body a copying mechanism would. Programs that do not
-/// build standalone (the stdlib itself, a multi-unit target's pieces)
-/// are skipped; the floor keeps the sweep from passing vacuously.
+/// check. An assembly refusal and a link refusal both carry that code
+/// and both count as findings, never as a skip. The check runs once,
+/// before any mechanism lowers anything, so one mechanism covers it.
+/// Programs that do not build standalone (the stdlib itself, a
+/// multi-unit target's pieces) are skipped; the floor keeps the sweep
+/// from passing vacuously.
 ///
-/// Mutation it catches: grade every multi-exit return regardless of its
-/// index, and the control turns this red — the shipped corpus alone
-/// would not, since none of it reaches a `retx`. And let the control
+/// Mutation it catches: refuse every multi-exit return regardless of its
+/// index, and the control is refused and becomes a finding — the shipped
+/// corpus alone would not, since none of it reaches a `retx`. And let the control
 /// stop compiling or linking (it would be skipped like any other
 /// program), and the named check on it turns this red, where the floor
 /// alone would not once one more shipped program links.
 #[test]
 fn no_shipped_program_returns_through_an_undeclared_exit() {
-    use mtc_core::linker::{CallMech, LinkOptions, link};
+    use mtc_core::linker::{CallMech, LinkError, LinkOptions, link};
     use mtc_turing_machine::asm::{assemble, tm1_syntax};
     use mtc_turing_machine::compiler::{CompileOptions, compile};
 
@@ -534,6 +634,10 @@ fn no_shipped_program_returns_through_an_undeclared_exit() {
         let obj = if path.extension().and_then(|s| s.to_str()) == Some("tma") {
             match assemble(&src, false) {
                 Ok(o) => o,
+                Err(e) if e.kind.code() == "undeclared-exit" => {
+                    findings.push(format!("{}: {}", path.display(), e.kind));
+                    continue;
+                }
                 Err(_) => continue,
             }
         } else {
@@ -542,7 +646,7 @@ fn no_shipped_program_returns_through_an_undeclared_exit() {
                 Err(_) => continue,
             }
         };
-        let Ok(out) = link(
+        match link(
             &syntax,
             std::slice::from_ref(&obj),
             std::slice::from_ref(&stdlib),
@@ -550,18 +654,16 @@ fn no_shipped_program_returns_through_an_undeclared_exit() {
                 call_mech: CallMech::Frames,
                 ..Default::default()
             },
-        ) else {
-            continue;
-        };
-        linked += 1;
-        control_linked |= path == control;
-        findings.extend(
-            out.report
-                .diagnostics
-                .into_iter()
-                .filter(|d| d.code == "undeclared-exit")
-                .map(|d| format!("{}: {}", path.display(), d.message)),
-        );
+        ) {
+            Ok(_) => {
+                linked += 1;
+                control_linked |= path == control;
+            }
+            Err(e @ LinkError::UndeclaredExit { .. }) => {
+                findings.push(format!("{}: {e}", path.display()));
+            }
+            Err(_) => continue,
+        }
     }
     assert!(
         linked >= 16,

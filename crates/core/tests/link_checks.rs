@@ -1371,9 +1371,8 @@ won:    nop
 }
 
 /// A callee declaring TWO exits whose body's last instruction is `last`
-/// — the one line the undeclared-exit fixtures vary, so all three put it
-/// at the same blob offset (the assembler's `ent` and `rd` are one byte
-/// each, `retx #0` two).
+/// — the one line the undeclared-exit fixtures vary, so all of them put it
+/// at the same blob offset.
 fn two_exit_callee(last: &str) -> String {
     format!(
         "\
@@ -1402,43 +1401,33 @@ fn three_exit_callee(last: &str) -> String {
     two_exit_callee(last).replace("exits=2", "exits=3")
 }
 
-/// The blob offset `two_exit_callee` puts its varied instruction at.
-const VARIED_OFFSET: u32 = 4;
-
-fn undeclared_exits(out: &mtc_core::linker::LinkOutput) -> Vec<&mtc_core::linker::LinkDiagnostic> {
-    out.report
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == "undeclared-exit")
-        .collect()
-}
-
-/// A body returning through exit 2 of a callee that declares two: the
-/// FRAMES link succeeds (at run time the return traps) and the warning
-/// names the callee, the index and the instruction's own offset. A
-/// copying mechanism already refuses the same body outright, so the mono
-/// half pins that the warning never has to carry that case.
+/// A body returning through exit 2 of a callee that declares two is
+/// refused under every mechanism: FRAMES used to link it (the return only
+/// trapped at run time) and the copying mechanisms said `bad binding`;
+/// now all three name the routine, the index and the declared count.
 ///
-/// Mutation it catches: drop the scan (or compare `k > exits` instead of
-/// `k >= exits`) and the frames link reports nothing.
+/// Mutation it catches: drop `stamp::check_declared_exits` from `link` —
+/// frames links again and the others report `BadBinding`.
 #[test]
-fn a_return_through_an_undeclared_exit_warns() {
-    let obj = || declaring_exits(&three_exit_callee("retx    #2"), "sub", 2);
-    let out = link(&fake_syntax(), &[obj()], &[], opts(CallMech::Frames))
-        .expect("a warning does not stop the link");
-    let ds = undeclared_exits(&out);
-    assert_eq!(ds.len(), 1, "{:?}", out.report.diagnostics);
-    assert_eq!(ds[0].function, "sub");
-    assert_eq!(ds[0].offset, VARIED_OFFSET);
-    assert!(
-        ds[0].message.contains("`sub`") && ds[0].message.contains("exit 2"),
-        "{}",
-        ds[0].message
-    );
-
-    let err = link(&fake_syntax(), &[obj()], &[], opts(CallMech::Mono))
-        .expect_err("a copying mechanism refuses the same body");
-    assert!(matches!(err, LinkError::BadBinding { .. }), "{err:?}");
+fn a_return_through_an_undeclared_exit_is_refused_under_every_mechanism() {
+    for mech in MECHS {
+        let err = link(
+            &fake_syntax(),
+            &[declaring_exits(&three_exit_callee("retx    #2"), "sub", 2)],
+            &[],
+            opts(mech),
+        )
+        .expect_err("an undeclared exit stops the link");
+        assert_eq!(
+            err,
+            LinkError::UndeclaredExit {
+                routine: "sub".into(),
+                exit: 2,
+                declared: 2
+            },
+            "under {mech}"
+        );
+    }
 }
 
 /// A body returning through exit 2 of a routine that declares two is
@@ -1503,17 +1492,12 @@ fn a_trap_with_an_exit_sized_immediate_assembles() {
 /// The in-range near miss: exit 1 of two is declared.
 ///
 /// Mutation it catches: an off-by-one bound (`k + 1 >= exits`) and this
-/// honest body warns.
+/// honest body is refused.
 #[test]
 fn a_return_through_a_declared_exit_is_silent() {
     let src = two_exit_callee("retx    #1");
     for mech in MECHS {
-        let out = link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("links");
-        assert!(
-            undeclared_exits(&out).is_empty(),
-            "{mech}: {:?}",
-            out.report.diagnostics
-        );
+        link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("links");
     }
 }
 
@@ -1521,68 +1505,14 @@ fn a_return_through_a_declared_exit_is_silent() {
 /// and sits at the same offset, but falls through rather than returning.
 ///
 /// Mutation it catches: classifying an exit return by operand kind alone
-/// (every `Imm8` instruction) and this trap reads as exit 2.
+/// (every `Imm8` instruction) and this trap reads as exit 2 and the link
+/// is refused.
 #[test]
 fn a_trap_with_the_same_immediate_is_not_an_exit() {
     let src = two_exit_callee("trap    #2");
     for mech in MECHS {
-        let out = link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("links");
-        assert!(
-            undeclared_exits(&out).is_empty(),
-            "{mech}: {:?}",
-            out.report.diagnostics
-        );
+        link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("links");
     }
-}
-
-/// A body whose interface declares no exits at all yet reaches
-/// `retx #0`, ahead of a narrow plain call later in the same blob: both
-/// findings land in `sub`, and they come out in blob-offset order even
-/// though the site grading and the body scan are two separate walks.
-///
-/// Mutation it catches: append the body scan's findings after the site
-/// grading's without ordering them, and the call's warning (offset 3)
-/// comes out ahead of the return's (offset 1, behind the `ent`).
-#[test]
-fn an_undeclared_exit_merges_with_site_warnings_in_offset_order() {
-    const SRC: &str = "\
-.routine main, tapes=1, alpha=(3)
-.param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
-.param p, ('_', '0', '1')
-.routine leaf, tapes=1, alpha=(2)
-.param q, ('_', '0')
-.section code
-.func main
-        call    sub
-        stp
-.func sub
-        retx    #0
-        call    leaf
-        ret
-.func leaf
-        ret
-";
-    let out = link(
-        &fake_syntax(),
-        &[declaring_exits(SRC, "sub", 0)],
-        &[],
-        opts(CallMech::Frames),
-    )
-    .expect("warnings do not stop the link");
-    let in_sub: Vec<_> = out
-        .report
-        .diagnostics
-        .iter()
-        .filter(|d| d.function == "sub")
-        .map(|d| (d.offset, d.code))
-        .collect();
-    assert_eq!(
-        in_sub,
-        vec![(1, "undeclared-exit"), (3, "narrow-alphabet")],
-        "{:?}",
-        out.report.diagnostics
-    );
 }
 
 const DUP_A: &str = "\

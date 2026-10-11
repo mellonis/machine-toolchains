@@ -2093,12 +2093,10 @@ text, and it remains available as an ordinary identifier.
     `tmt interface` prints is already canonical under `tmt fmt` and has
     been parsed again before it was written
     (`docs/tmt/cli.md (interface)`);
-  - the `enters-unmet` and `unused-set` lint rules, and the
-    `undeclared-exit` link warning: `mono` and `hybrid` refuse the link
-    only where they copy the body into an exit-bearing bound site, and
-    every other call into such a body — a framed call, a plain call —
-    links with this warning as the only signal and traps at run time
-    (`docs/tmt/cli.md (link warnings)`);
+  - the `enters-unmet` and `unused-set` lint rules, and
+    `undeclared-exit`, which refuses at assembly and at link a routine
+    returning through an exit its signature does not declare
+    (`docs/tmt/cli.md (tmt link)`);
   - `leaves` clauses on every tape parameter of the standard library,
     whose prose was corrected in four places where it described the head
     on exit more narrowly than the bodies behave (`docs/tmt/stdlib.md`).

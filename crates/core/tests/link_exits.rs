@@ -966,16 +966,16 @@ fn an_exit_vector_links_under_mono_and_hybrid() {
 }
 
 /// A body that returns through an exit its own interface does not declare
-/// is refused where the splice would have to resolve it. The site's vector
-/// is already pinned to the declared count by name resolution, so this is
-/// the one place the disagreement can be seen at all.
+/// is refused under every mechanism, before any site is lowered. The
+/// splice-level refusal in the copy path (`s.exits.get(k)`) is now only a
+/// defensive second line: for a routine with an interface it cannot be
+/// reached.
 ///
-/// Mutation it catches: index `s.exits` directly instead of taking the
-/// `get(k)` refusal and the splice jumps to whatever follows the vector —
-/// or panics — rather than naming the disagreement.
+/// Mutation it catches: drop `stamp::check_declared_exits` from `link` —
+/// mono and hybrid then report the splice's `BadBinding` and frames links.
 #[test]
 fn a_body_returning_through_an_undeclared_exit_is_refused() {
-    for mech in [CallMech::Mono, CallMech::Hybrid] {
+    for mech in MECHS {
         let err = link(
             &fake_syntax(),
             &[declaring_exits(BODY_OVERRUNS_ITS_EXITS, "sub", 1)],
@@ -983,12 +983,14 @@ fn a_body_returning_through_an_undeclared_exit_is_refused() {
             opts(mech),
         )
         .expect_err("a body overrunning its exit vector must be refused");
-        assert!(
-            matches!(&err, LinkError::BadBinding { callee, message }
-                if callee == "sub"
-                    && message.contains("the body returns through exit 1, but the call site \
-                                         supplies 1 exit(s)")),
-            "under {mech}: {err:?}"
+        assert_eq!(
+            err,
+            LinkError::UndeclaredExit {
+                routine: "sub".into(),
+                exit: 1,
+                declared: 1
+            },
+            "under {mech}"
         );
     }
 }

@@ -212,6 +212,15 @@ pub enum LinkError {
     /// the group, which is not a property the caller can be told to rely
     /// on.
     RecursiveExitBearingCall(String),
+    /// A routine whose body returns through an exit index at or above the
+    /// exit count its interface declares (docs/core.md (linking)). The
+    /// assembler refuses such a body, so only an object built another way
+    /// can carry one.
+    UndeclaredExit {
+        routine: String,
+        exit: u8,
+        declared: u8,
+    },
 }
 
 impl std::fmt::Display for LinkError {
@@ -254,6 +263,14 @@ impl std::fmt::Display for LinkError {
                      sectioned executable header"
                 )
             }
+            Self::UndeclaredExit {
+                routine,
+                exit,
+                declared,
+            } => write!(
+                f,
+                "`{routine}` returns through exit {exit}, but its signature declares {declared} exit(s)"
+            ),
             Self::BadBinding { callee, message } => {
                 write!(f, "bad binding to `{callee}`: {message}")
             }
@@ -428,15 +445,6 @@ pub const DIAGNOSTIC_CODES: &[(&str, &str)] = &[
          followed by the dialect's own trap, into a callee that can return: an \
          honest return either falls through into whatever the linker places next, \
          or lands on the trap in place of a continuation the source never wrote.",
-    ),
-    (
-        "undeclared-exit",
-        "A routine's body returns through an exit index at or above the exit \
-         count its signature declares, so no call site's exit vector has an entry \
-         for it: MONO and HYBRID refuse the link only where they copy the body \
-         into an exit-bearing bound site; every other call into the body — a \
-         framed call, a plain call — links with this warning as the only signal \
-         and traps there at run time.",
     ),
 ];
 
@@ -713,6 +721,10 @@ pub fn link(
     // Same header-only rule, over imported alphabets instead of grafted
     // graphs (docs/core.md (graft drift)).
     interface::check_imported_alphabets(objects, libraries, &names)?;
+    // A body returning through an exit its interface never declared is
+    // refused before anything lowers, whatever the entry carries
+    // (docs/core.md (linking)).
+    stamp::check_declared_exits(syntax, &resolved.order)?;
 
     let arch = objects
         .first()
