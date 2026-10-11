@@ -4068,6 +4068,22 @@ pub(crate) fn find_external_graph<'a>(
     })
 }
 
+/// The routine world `name` names in the declarations table, first module
+/// first — kind-filtered, unlike `Declarations::routine`. Returns the
+/// owning module alongside the world, mirroring [`find_external_graph`].
+pub(crate) fn find_external_routine<'a>(
+    externals: &[&'a Resolved],
+    name: &str,
+) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
+    externals.iter().find_map(|module| {
+        module
+            .worlds
+            .iter()
+            .find(|w| w.kind == WorldKind::Routine && w.name == name)
+            .map(|w| (*module, w))
+    })
+}
+
 /// Resolve one `writes`/`never writes` clause into a symbol-index set in its
 /// tape's own alphabet frame. `None` in, `None` out — an absent clause is not
 /// an empty one: it declares nothing, where `writes {}` declares that nothing
@@ -5149,6 +5165,17 @@ impl WorldCtx<'_> {
             refuse_return_outside_routine(&b.args, world.kind)?;
             if b.external {
                 self.warn_undeclared_if_bare(&b.target, b.target_span, b.external);
+                if !b.args.is_empty()
+                    && let Some((_, callee)) = find_external_routine(self.externals, &b.target)
+                {
+                    check_binding_list(
+                        &SigInfo::declared(callee),
+                        &b.args,
+                        &states,
+                        &tapes,
+                        b.target_span,
+                    )?;
+                }
                 continue;
             }
             self.check_target_kind(&b.target, b.target_span, DefKind::Routine, "a routine")?;
@@ -5191,14 +5218,22 @@ impl WorldCtx<'_> {
                     expected: expected_noun,
                 },
             }),
-            Some(_) => {
-                // Absolute-external, or imported-to-external routine —
-                // allowed; no arg check HERE (no local signature). Its own
-                // arg-list check, against a DECLARED signature when one is
-                // known, runs later in `ir::resolve_binding`
-                // (docs/formats.md (bound calls)); with no declarations at
-                // all it defers to the linker.
-                Ok(())
+            Some(r) => {
+                // Absolute-external, or imported-to-external routine. An
+                // argument-less call is the transparent form: tapes bind by
+                // position, nothing to check by name
+                // (docs/tmt/language.md (calls across units)).
+                if args.is_empty() {
+                    return Ok(());
+                }
+                match find_external_routine(self.externals, &r.full) {
+                    Some((_, callee)) => {
+                        check_binding_list(&SigInfo::declared(callee), args, states, tapes, span)
+                    }
+                    // No declarations: the linker checks the list against
+                    // the object (docs/formats.md (bound calls)).
+                    None => Ok(()),
+                }
             }
             None => {
                 // Bare undeclared external: warn once, stays external.
@@ -5235,10 +5270,10 @@ impl WorldCtx<'_> {
     /// three. A graft splices its graph before IR exists, so a graft of
     /// another unit's graph is checked here too, against the declared
     /// signature, and again at the splice ([`check_graft_args`]). An
-    /// out-of-unit `call`/`bind` callee is not checked here: its arg-list
-    /// check runs against its DECLARED signature in `ir::resolve_binding`
-    /// (docs/formats.md (bound calls)), which is also where a call with no
-    /// declarations for its callee at all defers the check to the linker.
+    /// out-of-unit `call`/`bind` callee is checked by the same
+    /// [`check_binding_list`], against its DECLARED signature, at the call
+    /// and bind sites themselves; with no declarations for it the check
+    /// defers to the linker (docs/formats.md (bound calls)).
     #[allow(clippy::too_many_arguments)]
     fn check_binding_args(
         &self,
@@ -5263,7 +5298,8 @@ impl WorldCtx<'_> {
     /// a graph only — the declared graph the declarations table carries
     /// under that name, the same first-match lookup that resolved the graft
     /// target. `None` leaves the list unchecked here, which only an
-    /// out-of-unit routine reaches (see [`Self::check_binding_args`]).
+    /// out-of-unit routine reaches; its declared signature is read by the
+    /// call and bind sites directly ([`find_external_routine`]).
     fn signature(&self, sig_key: &str, want: DefKind) -> Option<Cow<'_, SigInfo>> {
         if let Some(sig) = self.scopes.sigs.get(sig_key) {
             return Some(Cow::Borrowed(sig));

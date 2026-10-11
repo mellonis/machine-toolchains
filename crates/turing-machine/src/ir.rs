@@ -1585,9 +1585,8 @@ fn order_by_callee_tapes<'a>(
 /// place of an index. `caller_tape` and `src` stay numeric in both forms:
 /// both name THIS unit's own bands and alphabet. When the callee's
 /// declarations are known (`externals`), its tape order and parameter names
-/// are checked here, exactly as a local signature's are — repeated and
-/// unknown argument names, unbound parameters, and two tape arguments
-/// naming one caller tape; when they are not,
+/// are checked by the compiler's shared argument check, exactly as a local
+/// signature's are; this only orders the entries. When they are not known,
 /// the site keeps its source order and every entry is named, which is
 /// exactly what the linker's own `reorder_named` exists to fix up once the
 /// callee's real signature is known.
@@ -1619,57 +1618,10 @@ fn resolve_binding(
         let callee_decl = externals.routine(target);
         let order: Vec<&BindingArg> = match callee_decl {
             Some(sig) => {
-                // Every named arg must name a real declared parameter of
-                // the callee — tape or state — and no name may repeat,
-                // checked here because `order_by_callee_tapes` below only
-                // walks the FORWARD direction (a tape param with no
-                // matching arg): an arg naming nothing the callee declares,
-                // or naming the same parameter twice, would otherwise be
-                // silently dropped or silently overwritten rather than
-                // reported — the silent-failure shape this arc exists to
-                // raise. A legitimate state-param arg is excluded from the
-                // unknown-name check (it never matches a tape name and is
-                // not this branch's to bind), not flagged.
-                let mut seen: HashSet<&str> = HashSet::new();
-                // Caller tape -> the TAPE argument that claimed it: the
-                // aliasing rule an in-unit callee's arguments are held to
-                // (docs/tmt/language.md (reuse)), blamed on the second
-                // argument as there. State arguments stay exempt — two
-                // continuations may share one target state.
-                let mut tape_seen: HashMap<&str, &str> = HashMap::new();
-                for a in &named_args {
-                    if !seen.insert(a.name.as_str()) {
-                        return Err(CompileError {
-                            span: a.name_span,
-                            kind: CompileErrorKind::DuplicateArg(a.name.clone()),
-                        });
-                    }
-                    if !sig.tapes.iter().any(|t| t.name == a.name)
-                        && !sig.state_params.iter().any(|p| p == &a.name)
-                    {
-                        return Err(CompileError {
-                            span: a.name_span,
-                            kind: CompileErrorKind::UnknownArg(a.name.clone()),
-                        });
-                    }
-                    // A target that is no tape of the host at all is that
-                    // error (`host_tape_of`, below), not an alias — the
-                    // local check's own precedence.
-                    if sig.tapes.iter().any(|t| t.name == a.name)
-                        && let BindingValue::Named { target, .. } = &a.value
-                        && host.tapes.iter().any(|t| t.name == *target)
-                        && let Some(first) = tape_seen.insert(target.as_str(), a.name.as_str())
-                    {
-                        return Err(CompileError {
-                            span: a.span,
-                            kind: CompileErrorKind::DuplicateTapeTarget {
-                                first: first.to_string(),
-                                second: a.name.clone(),
-                                target: target.clone(),
-                            },
-                        });
-                    }
-                }
+                // The compiler's shared argument check has already run on
+                // this list against the same declarations (repeated and
+                // unknown names, kinds, aliased tapes, unbound
+                // parameters); this only orders the entries.
                 order_by_callee_tapes(sig.tapes.iter().map(|t| t.name.as_str()), &named_args, site)?
             }
             // No declarations for this callee: keep the site's own source

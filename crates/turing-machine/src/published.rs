@@ -325,6 +325,10 @@ mod tests {
     const L1: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' });\n}\n";
     const L2: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state done);\n}\n";
     const C8: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r(t = t) then stop; }\n}\n";
+    /// The same caller with an argument-less (transparent) call: the object
+    /// reading names its state parameter differently from the text ones, so
+    /// no argument list is valid against every reading of `lib::r`.
+    const C8_TRANSPARENT: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r() then stop; }\n}\n";
     const OWN: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state done) {\n    entry state s { [*] -> goto done; }\n  }\n}\nmachine {\n  tape t: lib::ab;\n  entry state s { [*] -> call lib::r(t = t, done = stop) then stop; }\n}\n";
     const OWN_FIN: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state fin) {\n    entry state s { [*] -> goto fin; }\n  }\n}\nmachine {\n  tape t: lib::ab;\n  entry state s { [*] -> call lib::r(t = t, fin = stop) then stop; }\n}\n";
     const C_OWN: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r(t = t, done = stop) then stop; }\n}\n";
@@ -487,7 +491,10 @@ mod tests {
                     );
                 }
             }
-            assert!(analyze_with(C8, &decls).is_ok(), "object at {position}");
+            assert!(
+                analyze_with(C8_TRANSPARENT, &decls).is_ok(),
+                "object at {position}"
+            );
         }
     }
 

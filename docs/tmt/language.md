@@ -943,9 +943,12 @@ compile was given the callee's declarations:
 - **With declarations** (a sibling source, a `--extern` file, a library,
   or the embedded standard library), the argument list is checked here,
   exactly as a local signature's is: a missing, duplicate, or
-  unrecognized argument name is a compile error naming the parameter, two
-  tape arguments naming one caller tape are `duplicate-tape-target`, and
-  the emitted entries follow the callee's own tape order.
+  unrecognized argument name is a compile error naming the parameter, a
+  terminator handed to a tape parameter is `wrong-arg-kind`, two tape
+  arguments naming one caller tape are `duplicate-tape-target`, a `bind`
+  is checked where it is declared, and the emitted entries follow the
+  callee's own tape order. An argument-less call or bind is the
+  transparent form and is not checked by name.
 - **Without them**, the call still compiles: every entry is written by
   name, in source order, and the same checks run at LINK time instead,
   against the callee's real object — where a parameter the callee does

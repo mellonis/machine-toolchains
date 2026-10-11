@@ -1560,3 +1560,163 @@ machine {
         .trim();
     assert_eq!(call_line, "call    mylib::combine [a: 0, b: 1]", "{tma}");
 }
+
+// -- one argument check for a call or bind into a declared routine -------
+
+const C1_TMH: &str = "\
+namespace lib {
+  export alphabet dec { '_', '0', '1' }
+  export routine r(tape a: dec writes {}, state done);
+  export routine q(tape a: dec writes {}, tape b: dec writes {});
+}
+";
+
+const C1: &str = "\
+use lib::dec;
+use lib::q;
+
+machine {
+  tape t: dec;
+  tape u: dec;
+  entry state s { [*, *] -> call q(a = stop, b = u) then stop; }
+}
+";
+
+const C2: &str = "\
+use lib::dec;
+use lib::q;
+
+machine {
+  tape t: dec;
+  tape u: dec;
+  bind q(a = t) as qq;
+  entry state s { [*, *] -> call qq() then stop; }
+}
+";
+
+const C3: &str = "\
+use lib::dec;
+use lib::q;
+
+machine {
+  tape t: dec;
+  tape u: dec;
+  entry state s { [*, *] -> call q(a = stop, b = halt) then stop; }
+}
+";
+
+const C_OK: &str = "\
+use lib::dec;
+use lib::q;
+
+machine {
+  tape t: dec;
+  tape u: dec;
+  entry state s { [*, *] -> call q(a = t, b = u) then stop; }
+}
+";
+
+const C_TRANSPARENT: &str = "\
+alphabet bin { '_', '^', '$', '0', '1' }
+machine {
+  tape t: bin;
+  entry state go { [*] -> call std::binaryNumbers::plusOne() then stop; }
+}
+";
+
+/// Mutation: skip the shared check in `check_call_like`'s out-of-unit arm,
+/// leaving `ir::resolve_binding` as the only external check — the error is
+/// `missing-arg` at the rule again.
+#[test]
+fn a_terminator_for_a_declared_tape_parameter_is_wrong_arg_kind() {
+    let dir = scratch("xunit_terminator_tape");
+    let header = write(&dir, "c1.tmh", C1_TMH);
+    let input = write(&dir, "c1.tmc", C1);
+    let err = compile(
+        &dir,
+        &input,
+        "c1.tmo",
+        &["--nostdlib", "--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(
+            "c1.tmc:7:36: error: binding argument `a` must be a tape target [wrong-arg-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// An argument list made only of terminators used to skip every check.
+/// Mutation: skip the shared check when no argument is `Named` (an
+/// all-terminator list then compiles).
+#[test]
+fn an_all_terminator_call_into_a_declared_routine_is_checked() {
+    let dir = scratch("xunit_all_terminators");
+    let header = write(&dir, "c3.tmh", C1_TMH);
+    let input = write(&dir, "c3.tmc", C3);
+    let err = compile(
+        &dir,
+        &input,
+        "c3.tmo",
+        &["--nostdlib", "--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(
+            "c3.tmc:7:36: error: binding argument `a` must be a tape target [wrong-arg-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// A missing argument on an external `bind` is blamed on the bind's own
+/// first argument, not on the later call of its name. Mutation: check
+/// external binds only at their call site (drop the bind-loop check in
+/// `check_reuse_targets`).
+#[test]
+fn a_missing_argument_on_a_bind_points_at_the_bind() {
+    let dir = scratch("xunit_bind_missing");
+    let header = write(&dir, "c2.tmh", C1_TMH);
+    let input = write(&dir, "c2.tmc", C2);
+    let err = compile(
+        &dir,
+        &input,
+        "c2.tmo",
+        &["--nostdlib", "--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(
+            "c2.tmc:7:10: error: missing binding argument for parameter `b` [missing-arg]"
+        ),
+        "{err}"
+    );
+}
+
+/// An argument-less call is the transparent form and is not checked by
+/// name. Mutation: run the shared check on an empty list (`missing-arg`
+/// for the callee's tape parameter).
+#[test]
+fn a_transparent_call_into_a_declared_routine_compiles() {
+    let dir = scratch("xunit_transparent");
+    let input = write(&dir, "ut.tmc", C_TRANSPARENT);
+    let out = compile(&dir, &input, "ut.tmo", &[]);
+    assert!(out.is_ok(), "{:?}", out.err());
+}
+
+/// Control for the three above: every argument correct. No mutation reddens
+/// it; it guards the shared check against refusing a valid list.
+#[test]
+fn a_correct_call_into_a_declared_routine_compiles() {
+    let dir = scratch("xunit_correct");
+    let header = write(&dir, "c1.tmh", C1_TMH);
+    let input = write(&dir, "ok.tmc", C_OK);
+    let out = compile(
+        &dir,
+        &input,
+        "ok.tmo",
+        &["--nostdlib", "--extern", header.to_str().unwrap()],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+}
