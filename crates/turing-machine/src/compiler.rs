@@ -196,6 +196,14 @@ pub enum CompileErrorKind {
     /// Two imports bind one bare name in one scope (post-alias). The same
     /// binding in different scopes is legal (inner shadows outer).
     DuplicateBinding(String),
+    /// One rule's pattern binds a name twice (docs/tmt/language.md (pattern
+    /// cells)). Cells are counted from 1, in pattern order.
+    DuplicatePatternBinding {
+        name: String,
+        first: usize,
+        second: usize,
+        state: String,
+    },
     /// A world declares more than 16 tapes (a `machine` block's tape decls
     /// or a signature's tape params).
     TooManyTapes(usize),
@@ -625,6 +633,7 @@ impl CompileErrorKind {
         CompileErrorKind::DuplicateName { .. } => "duplicate-name",
         CompileErrorKind::ConflictingDeclaration { .. } => "conflicting-declaration",
         CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
+        CompileErrorKind::DuplicatePatternBinding { .. } => "duplicate-pattern-binding",
         CompileErrorKind::TooManyTapes(_) => "too-many-tapes",
         CompileErrorKind::UnresolvedAlphabet(_) => "unresolved-alphabet",
         CompileErrorKind::DuplicateTape(_) => "duplicate-tape",
@@ -880,6 +889,17 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "`{n}` is bound twice — qualify the reference (`ns::{n}`) or disambiguate with `as`"
+                )
+            }
+            CompileErrorKind::DuplicatePatternBinding {
+                name,
+                first,
+                second,
+                state,
+            } => {
+                write!(
+                    f,
+                    "`{name}` is bound by cell {first} and again by cell {second} of one rule in state `{state}` — each binding in a pattern needs its own name"
                 )
             }
             CompileErrorKind::TooManyTapes(n) => {
@@ -4923,6 +4943,24 @@ impl WorldCtx<'_> {
         let ns = self.world_ns(world);
         for s in &world.states {
             for rule in &s.rules {
+                let mut bound: HashMap<&str, usize> = HashMap::new();
+                for (i, cell) in rule.pattern.cells.iter().enumerate() {
+                    let Some(binding) = &cell.binding else {
+                        continue;
+                    };
+                    if let Some(&first) = bound.get(binding.name.as_str()) {
+                        return Err(CompileError {
+                            span: binding.span,
+                            kind: CompileErrorKind::DuplicatePatternBinding {
+                                name: binding.name.clone(),
+                                first,
+                                second: i + 1,
+                                state: s.name.clone(),
+                            },
+                        });
+                    }
+                    bound.insert(binding.name.as_str(), i + 1);
+                }
                 match &rule.transition {
                     Transition::Goto { name, span, .. } => {
                         self.check_state_target(name, *span, &states, &binds, &ns)?;
@@ -5342,6 +5380,12 @@ mod tests {
                 second: "b".into(),
             },
             CompileErrorKind::DuplicateBinding("x".into()),
+            CompileErrorKind::DuplicatePatternBinding {
+                name: "x".into(),
+                first: 1,
+                second: 2,
+                state: "s".into(),
+            },
             CompileErrorKind::TooManyTapes(17),
             CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NoSuchAlphabet("x".into())),
             CompileErrorKind::DuplicateTape("x".into()),

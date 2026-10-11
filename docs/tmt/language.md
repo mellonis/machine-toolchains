@@ -735,6 +735,10 @@ substitution"). A binding on a wildcard is rejected:
 [* as v] -> …    // error: bind an explicit range so the expansion cost is visible
 ```
 
+A name is bound once per pattern: `[0..7 as x, 0..7 as x]` is
+`duplicate-pattern-binding`, naming both cells. The same name in two
+different rules is two unrelated bindings.
+
 A rule whose every cell is `*` is the state's **catch-all**.
 
 ### Write and move vectors

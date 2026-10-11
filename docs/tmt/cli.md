@@ -304,6 +304,7 @@ subsection.
 | `duplicate-name` | Two entities (alphabet, map, routine, graph, or namespace) share one name in one scope — including a top-level `main`, which is reserved for the entry world in every unit, library or program (`docs/tmt/language.md (program structure)`). |
 | `conflicting-declaration` | Two declarations of one qualified name disagree: two declaration sources publish it differently, or this unit defines a name its declarations publish differently (the message names both origins). Identical declarations — a unit's source and its up-to-date header, one library reached twice — are one declaration. |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
+| `duplicate-pattern-binding` | One rule's pattern binds a name twice (`[0..7 as x, 0..7 as x]`) — the message names both cells and the state; give each binding its own name. |
 | `too-many-tapes` | A world declares more than 16 tapes. |
 | `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). A name that resolves to one of this unit's own declarations of another kind (a glyph set, a map, a routine or a graph) is this code too; the message names the kind found. |
 | `duplicate-tape` | Two tapes share one name in one world. |
