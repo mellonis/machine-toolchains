@@ -578,6 +578,28 @@ does: neither clause is ever inferred. A clause is published with the
 routine's signature — in a compiled object's `.param` line and in a
 header — in the alphabet's band order, duplicates collapsed ("Headers").
 
+`enters` and `leaves` constrain the **glyph** under the head, not the
+head's position: a routine that returns one cell short of where it
+entered satisfies them, provided the glyph there is one the clause names.
+To state "returns to the cell it started on", mark the home cell with a
+glyph nothing else on the tape carries and promise to leave on it:
+
+```
+alphabet sym { '_', 'a', 'b', 'H' }
+
+? Enters on the home marker and walks right; comes back and leaves on it.
+routine sweep(tape t: sym enters { 'H' } leaves { 'H' }) {
+  entry state out {
+    ['_'] -> move [<] goto back;
+    [*]   -> move [>] goto out;
+  }
+  state back {
+    ['H'] -> return;
+    [*]   -> move [<] goto back;
+  }
+}
+```
+
 A head-position clause is checked in two halves: statically, where the
 body pins the answer down, and at run time in a debug build, everywhere
 else.
