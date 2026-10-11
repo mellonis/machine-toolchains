@@ -6,10 +6,14 @@ use std::path::{Path, PathBuf};
 
 use mtc_turing_machine::cli::{CliOutput, execute};
 
+/// `R1` and `R2` declare `lib::r` identically (the same explicit `writes`
+/// contract) and differ only in their bodies, so the compile-time
+/// one-declaration rule (docs/tmt/language.md (declarations)) lets both
+/// through and it is the LINK that refuses the second definition.
 const R1: &str = "\
 namespace lib {
   export alphabet ab { '_', 'a' }
-  export routine r(tape t: ab) {
+  export routine r(tape t: ab writes { '_', 'a' }) {
     entry state s { [*] -> write ['a'] return; }
   }
 }
@@ -18,7 +22,7 @@ namespace lib {
 const R2: &str = "\
 namespace lib {
   export alphabet ab { '_', 'a' }
-  export routine r(tape t: ab) {
+  export routine r(tape t: ab writes { '_', 'a' }) {
     entry state s { [*] -> write ['_'] return; }
   }
 }

@@ -60,12 +60,11 @@ FLAGS:
 /// — so one `--extern` file may itself depend on another, in either
 /// command-line order. The FINAL table is still assembled in
 /// command-line order, then the embedded standard library last unless
-/// `nostdlib` — the exact push order [`crate::footprint::
-/// find_external`]'s first-match lookup relies on, so a user's own
-/// `--extern std.tmh` shadows the built-in `std` when both are given;
-/// the fixpoint's OWN read context now pushes stdlib last too, for the
-/// identical reason (`crate::header::resolve_declarations`'s own doc
-/// comment). Every file that never reads clean is reported together,
+/// `nostdlib`. The order decides nothing: two files declaring one name
+/// must declare it identically, or the compile fails
+/// `conflicting-declaration` (docs/tmt/language.md (declarations)); the
+/// fixpoint's OWN read context pushes stdlib last too, so a conflict
+/// names the same origins either way. Every file that never reads clean is reported together,
 /// through [`render_unresolved`], never just the first in command-line
 /// order. Shared with `tmt interface`'s own `--extern`/`--nostdlib`
 /// (`cli/interface.rs`), which takes exactly this same meaning —

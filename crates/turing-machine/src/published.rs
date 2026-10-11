@@ -11,16 +11,17 @@
 //! glyph list, never its alphabet's name — a reading taken from a compiled
 //! object synthesizes alphabet names, and a call binds by index anyway.
 
-// The conflict checks that compare two readings of one name consume these
-// forms; until they land only the tests below do.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::BTreeMap;
 
+use mtc_core::diagnostics::Span;
+
 use crate::compiler::{
-    ParamKind, Resolved, ResolvedAlphabet, ResolvedMapDecl, ResolvedSet, ResolvedWorld, WorldKind,
-    clause_glyphs, declared_effective, symset_glyphs,
+    CompileError, CompileErrorKind, ParamKind, Provenance, ReadMode, Resolved, ResolvedAlphabet,
+    ResolvedMapDecl, ResolvedSet, ResolvedWorld, WorldKind, clause_glyphs, declared_effective,
+    full_name, symset_glyphs,
 };
+use crate::declarations::Declarations;
+use crate::parser::Program;
 
 /// A declaration as another unit sees it (docs/tmt/language.md
 /// (declarations)): what two readings of one name must agree on.
@@ -190,10 +191,248 @@ pub(crate) fn graph_form(w: &ResolvedWorld) -> PublishedForm {
     PublishedForm::Graph { digest: w.digest }
 }
 
+/// The unit's own definitions — every alphabet, set, map, routine and
+/// graph `program` declares, exported or not — each with its name span
+/// and published form, settled exactly as a declarations reading of it
+/// would be (`header::settle_declarations`). With [`Provenance::Object`]
+/// every state parameter's name is `None`.
+pub(crate) fn own_forms(
+    program: &Program,
+    resolved: &Resolved,
+    externals: &Declarations,
+    mode: ReadMode,
+    provenance: Provenance,
+) -> BTreeMap<String, (Span, PublishedForm)> {
+    let mut settled = resolved.clone();
+    settled.from_object = provenance == Provenance::Object;
+    crate::header::settle_declarations(program, &mut settled, externals, mode);
+    let mut forms = BTreeMap::new();
+    for a in &program.alphabets {
+        let name = full_name(&a.ns, &a.name);
+        if let Some(r) = settled.alphabets.get(&name) {
+            forms.insert(name, (a.name_span, alphabet_form(r)));
+        }
+    }
+    for s in &program.sets {
+        let name = full_name(&s.ns, &s.name);
+        if let Some(r) = settled.sets.get(&name) {
+            forms.insert(name, (s.name_span, set_form(r)));
+        }
+    }
+    for m in &program.maps {
+        let name = full_name(&m.ns, &m.name);
+        if let Some(r) = settled.maps.get(&name) {
+            forms.insert(name, (m.name_span, map_form(r, &settled)));
+        }
+    }
+    for (name, span, graph) in program
+        .routines
+        .iter()
+        .map(|r| (full_name(&r.ns, &r.name), r.name_span, false))
+        .chain(
+            program
+                .graphs
+                .iter()
+                .map(|g| (full_name(&g.ns, &g.name), g.name_span, true)),
+        )
+    {
+        let Some(world) = settled.worlds.iter().find(|w| w.name == name) else {
+            continue;
+        };
+        let form = if graph {
+            graph_form(world)
+        } else {
+            routine_form(world, &settled)
+        };
+        forms.insert(name, (span, form));
+    }
+    forms
+}
+
+/// Whether `module` declares `name` under any kind — a cheap superset of
+/// "publishes it", used to skip the settle cost when nothing could clash.
+fn declares(module: &Resolved, name: &str) -> bool {
+    module.alphabets.contains_key(name)
+        || module.sets.contains_key(name)
+        || module.maps.contains_key(name)
+        || module.worlds.iter().any(|w| w.name == name)
+}
+
+/// The unit's own definitions against what the table publishes under the
+/// same names (docs/tmt/language.md (declarations)): a name the table's
+/// FIRST publishing module declares differently is refused at the unit's
+/// definition. A later module disagreeing with that first one is
+/// [`Declarations::check_conflicts`]' business. Private own definitions
+/// are compared too; a module's non-exported items are not published and
+/// so are not compared against.
+pub(crate) fn check_own_against_table(
+    program: &Program,
+    resolved: &Resolved,
+    externals: &Declarations,
+    mode: ReadMode,
+    provenance: Provenance,
+) -> Result<(), CompileError> {
+    let own_names: Vec<String> = program
+        .alphabets
+        .iter()
+        .map(|a| full_name(&a.ns, &a.name))
+        .chain(program.sets.iter().map(|s| full_name(&s.ns, &s.name)))
+        .chain(program.maps.iter().map(|m| full_name(&m.ns, &m.name)))
+        .chain(program.routines.iter().map(|r| full_name(&r.ns, &r.name)))
+        .chain(program.graphs.iter().map(|g| full_name(&g.ns, &g.name)))
+        .collect();
+    // The cheap gate: the editor's keystroke path analyzes a unit whose
+    // names the table almost never declares, and must not pay the settle.
+    let candidates: Vec<_> = externals
+        .entries()
+        .filter(|(_, m)| own_names.iter().any(|n| declares(m, n)))
+        .map(|(origin, m)| (origin, module_forms(m)))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    for (name, (span, own)) in own_forms(program, resolved, externals, mode, provenance) {
+        let first = candidates
+            .iter()
+            .find_map(|(origin, forms)| forms.get(&name).map(|form| (origin, form)));
+        if let Some((origin, form)) = first
+            && !own.agrees(form)
+        {
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::ConflictingDeclaration {
+                    name,
+                    first: "this unit".to_string(),
+                    second: origin.describe(),
+                },
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::declarations::{Declarations, Origin};
+
+    use crate::compiler::{CompileErrorKind as Kind, analyze_with};
+    use std::path::{Path, PathBuf};
+
+    const L1: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' });\n}\n";
+    const L2: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state done);\n}\n";
+    const C8: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r(t = t) then stop; }\n}\n";
+    const OWN: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state done) {\n    entry state s { [*] -> goto done; }\n  }\n}\nmachine {\n  tape t: lib::ab;\n  entry state s { [*] -> call lib::r(t = t, done = stop) then stop; }\n}\n";
+    const OWN_FIN: &str = "namespace lib {\n  export alphabet ab { '_', 'a' }\n  export routine r(tape t: ab writes { 'a' }, state fin) {\n    entry state s { [*] -> goto fin; }\n  }\n}\nmachine {\n  tape t: lib::ab;\n  entry state s { [*] -> call lib::r(t = t, fin = stop) then stop; }\n}\n";
+    const C_OWN: &str = "use lib::ab;\nuse lib::r;\nmachine {\n  tape t: ab;\n  entry state s { [*] -> call r(t = t, done = stop) then stop; }\n}\n";
+
+    fn table(modules: &[(&str, &str)]) -> Declarations {
+        let mut decls = Declarations::none();
+        for (path, text) in modules {
+            let resolved = crate::header::read_extern(Path::new(path), text, &Declarations::none())
+                .expect("reads");
+            decls.push(Origin::Extern(PathBuf::from(path)), resolved);
+        }
+        decls
+    }
+
+    /// Mutation: drop `Declarations::check_conflicts` from `resolve_program`.
+    #[test]
+    fn two_table_modules_publishing_one_name_differently_conflict() {
+        let err = analyze_with(C8, &table(&[("l1.tmh", L1), ("l2.tmh", L2)])).unwrap_err();
+        assert_eq!(err.span, Span::point(0, 0));
+        assert_eq!(
+            err.kind,
+            Kind::ConflictingDeclaration {
+                name: "lib::r".into(),
+                first: "`l1.tmh`".into(),
+                second: "`l2.tmh`".into(),
+            }
+        );
+    }
+
+    /// Mutation: compare modules by origin instead of by form.
+    #[test]
+    fn two_table_modules_publishing_one_name_identically_merge() {
+        assert!(analyze_with(C8, &table(&[("l1.tmh", L1), ("l1b.tmh", L1)])).is_ok());
+    }
+
+    /// A name of another kind is another declaration. Mutation: compare
+    /// only forms of the same kind.
+    #[test]
+    fn an_own_name_of_another_kind_conflicts() {
+        let src = "namespace lib {\n  alphabet r { '_', 'a' }\n}\nmachine {\n  tape t: lib::r;\n  entry state s { [*] -> stop; }\n}\n";
+        let err = analyze_with(src, &table(&[("l1.tmh", L1)])).unwrap_err();
+        assert!(
+            matches!(&err.kind, Kind::ConflictingDeclaration { name, first, .. }
+                if name == "lib::r" && first == "this unit"),
+            "{err:?}"
+        );
+        assert_eq!(err.span.start.line, 2);
+    }
+
+    fn own_object() -> mtc_core::formats::object::ObjectFile {
+        crate::compiler::compile(
+            OWN,
+            crate::compiler::CompileOptions {
+                externals: Declarations::none(),
+                ..Default::default()
+            },
+        )
+        .expect("OWN compiles alone")
+        .object
+    }
+
+    /// The object reading names its exit `exit0`, the source reading
+    /// `done`; they are one unit and must merge. The TEXT reading goes
+    /// first so the consumer's `done = …` binds against a named parameter.
+    /// Mutation: compare forms by derived `==` — they conflict on the
+    /// state name.
+    #[test]
+    fn an_object_reading_and_a_source_reading_of_one_unit_merge() {
+        let mut decls = table(&[("own.tmc", OWN)]);
+        let from_object =
+            crate::header::declarations_from_object(&own_object(), &Declarations::none())
+                .expect("the object reads");
+        decls.push(Origin::Library("own".into()), from_object);
+        assert!(analyze_with(C_OWN, &decls).is_ok());
+    }
+
+    /// The object read's OWN-definition check, against a table that
+    /// already holds the source reading. Mutation: `own_forms` ignoring
+    /// `Provenance`.
+    #[test]
+    fn an_object_read_beside_its_source_reading_is_not_a_conflict() {
+        let context = table(&[("own.tmc", OWN)]);
+        assert!(crate::header::declarations_from_object(&own_object(), &context).is_ok());
+    }
+
+    /// Two TEXT readings disagree on a state name: a real difference (a
+    /// caller binds by name). Mutation: treat every state name as optional
+    /// (count only).
+    #[test]
+    fn two_text_readings_differing_in_a_state_name_conflict() {
+        let err =
+            analyze_with(C8, &table(&[("own.tmc", OWN), ("own_fin.tmc", OWN_FIN)])).unwrap_err();
+        assert_eq!(
+            err.kind,
+            Kind::ConflictingDeclaration {
+                name: "lib::r".into(),
+                first: "`own.tmc`".into(),
+                second: "`own_fin.tmc`".into(),
+            }
+        );
+    }
+
+    /// Mutation: doc lines inside the published form.
+    #[test]
+    fn a_doc_line_is_not_part_of_a_declaration() {
+        let documented = L1.replace(
+            "  export routine r",
+            "  ? Documented here.\n  export routine r",
+        );
+        assert!(analyze_with(C8, &table(&[("l1.tmh", L1), ("l1doc.tmh", &documented)])).is_ok());
+    }
 
     fn analyzed(source: &str) -> Resolved {
         crate::compiler::analyze(source)
@@ -333,6 +572,7 @@ mod tests {
         }
         sources.sort();
         let (mut units, mut forms) = (0usize, 0usize);
+        let mut skipped: Vec<String> = Vec::new();
         for path in &sources {
             let text = std::fs::read_to_string(path).unwrap();
             // The embedded stdlib's own source reads against nothing; every
@@ -343,6 +583,7 @@ mod tests {
                 Declarations::stdlib()
             };
             let Ok(header) = crate::header::from_source(&text, &context) else {
+                skipped.push(path.file_name().unwrap().to_string_lossy().into_owned());
                 continue;
             };
             let from_source =
@@ -388,7 +629,15 @@ mod tests {
             units += 1;
             forms += a.len();
         }
-        eprintln!("published-form corpus: {units} units, {forms} forms");
+        eprintln!("published-form corpus: {units} units, {forms} forms, skipped {skipped:?}");
+        // A unit whose header fails to print is named, never silently
+        // dropped: the list must be exactly the units that legitimately
+        // have no header to compare.
+        let expected_skipped: Vec<String> = Vec::new();
+        assert_eq!(
+            skipped, expected_skipped,
+            "units skipped for want of a header"
+        );
         assert!(units >= 14, "only {units} shipped units were read");
         // The corpus exports 48 declarations today (std 42,
         // named_map_foreign_alphabets 4, a5 1, a6 1); the floor leaves room

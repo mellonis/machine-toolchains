@@ -315,39 +315,271 @@ namespace std {
 }
 ";
 
-/// Mutation: reversing extern order, or pushing the embedded stdlib
-/// FIRST instead of last. Reversing swaps which of `order_a`/`order_b`
-/// wins in BOTH orderings below, flipping both assertions. Pushing the
-/// stdlib first makes the embedded library's own `writes {}` win over
-/// EITHER extern (the empty set is a subset of any declared contract),
-/// turning the second, expected-failing compile into a success too —
-/// this is the mutation the orchestrator verified by hand (see the task
-/// report).
+/// Two `--extern` headers declaring one standard-library name with
+/// different contracts conflict, in either command-line order; the first
+/// named is the other origin of the second. Mutation: skip the
+/// own-definition-versus-table call in `resolve_program` — both compiles
+/// return to first-wins.
 #[test]
-fn extern_order_is_command_line_order_then_stdlib() {
+fn two_extern_headers_declaring_one_name_differently_conflict_in_either_order() {
     let dir = scratch("extern_order");
     let a = write(&dir, "order_a.tmh", ORDER_A);
     let b = write(&dir, "order_b.tmh", ORDER_B);
     let caller = write(&dir, "caller.tmc", STD_SHADOW_CALLER);
-    let a_str = a.to_str().unwrap().to_string();
-    let b_str = b.to_str().unwrap().to_string();
+    for (first, second) in [(&a, &b), (&b, &a)] {
+        let err = compile(
+            &dir,
+            &caller,
+            &[
+                "--nostdlib",
+                "--extern",
+                first.to_str().unwrap(),
+                "--extern",
+                second.to_str().unwrap(),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("[conflicting-declaration]"), "{err}");
+        assert!(
+            err.contains("std::binaryNumbers::goToNumbersStart"),
+            "{err}"
+        );
+        assert!(err.contains(&format!("`{}`", first.display())), "{err}");
+    }
+}
 
-    // order_a first: its `writes { '^' }` matches the caller's contract.
-    let a_first = compile(
-        &dir,
-        &caller,
-        &["--extern", a_str.as_str(), "--extern", b_str.as_str()],
-    );
-    assert!(a_first.is_ok(), "{:?}", a_first.err());
+const L1_TMH: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a' }
+  export routine r(tape t: ab writes { 'a' });
+}
+";
 
-    // order_b first: its `writes { '$' }` does not.
-    let b_first = compile(
+const L2_TMH: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a' }
+  export routine r(tape t: ab writes { 'a' }, state done);
+}
+";
+
+const C8: &str = "\
+use lib::ab;
+use lib::r;
+machine {
+  tape t: ab;
+  entry state s { [*] -> call r(t = t) then stop; }
+}
+";
+
+const OWN: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a' }
+  export routine r(tape t: ab writes { 'a' }, state done) {
+    entry state s { [*] -> goto done; }
+  }
+}
+machine {
+  tape t: lib::ab;
+  entry state s { [*] -> call lib::r(t = t, done = stop) then stop; }
+}
+";
+
+const OWNSTD: &str = "\
+namespace std {
+  namespace binaryNumbers {
+    export routine goToNumber(tape num: std::binaryNumbers::symbols, state done) {
+      entry state s { [*] -> goto done; }
+    }
+  }
+}
+machine {
+  tape num: std::binaryNumbers::symbols;
+  entry state s { [*] -> call std::binaryNumbers::goToNumber(num = num, done = stop) then stop; }
+}
+";
+
+const OWNSAME: &str = "\
+namespace std {
+  namespace binaryNumbers {
+    export routine goToNumber(tape num: std::binaryNumbers::symbols writes {} leaves { '$' }) {
+      entry state walk {
+        ['$'] -> return;
+        [*]   -> move [>] goto walk;
+      }
+    }
+  }
+}
+
+machine {
+  tape num: std::binaryNumbers::symbols;
+  entry state s { [*] -> call std::binaryNumbers::goToNumber(num = num) then stop; }
+}
+";
+
+/// Two headers declaring `lib::r` with different signatures: the one read
+/// second is refused against the first, in either order. Mutation: skip
+/// the `check_own_against_table` call — the compile returns to first-wins
+/// (Ok one way, `missing-arg` the other).
+#[test]
+fn two_headers_declaring_one_routine_differently_conflict() {
+    let dir = scratch("conflict_l1_l2");
+    let l1 = write(&dir, "l1.tmh", L1_TMH);
+    let l2 = write(&dir, "l2.tmh", L2_TMH);
+    let c8 = write(&dir, "c8.tmc", C8);
+    for (first, second) in [(&l1, &l2), (&l2, &l1)] {
+        let err = compile(
+            &dir,
+            &c8,
+            &[
+                "--nostdlib",
+                "--extern",
+                first.to_str().unwrap(),
+                "--extern",
+                second.to_str().unwrap(),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(&format!("{}:3:18: error:", second.display())),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!(
+                "`lib::r` is declared differently by this unit and by `{}`",
+                first.display()
+            )),
+            "{err}"
+        );
+        assert!(err.contains("[conflicting-declaration]"), "{err}");
+    }
+}
+
+/// One unit declared twice — the same file given twice, or a byte copy —
+/// is one declaration. Mutation: compare by origin instead of by form.
+#[test]
+fn one_unit_declared_twice_merges() {
+    let dir = scratch("conflict_merge");
+    let l1 = write(&dir, "l1.tmh", L1_TMH);
+    let copy = write(&dir, "l1copy.tmh", L1_TMH);
+    let c8 = write(&dir, "c8.tmc", C8);
+    for other in [&l1, &copy] {
+        let out = compile(
+            &dir,
+            &c8,
+            &[
+                "--nostdlib",
+                "--extern",
+                l1.to_str().unwrap(),
+                "--extern",
+                other.to_str().unwrap(),
+            ],
+        );
+        assert!(out.is_ok(), "{:?}", out.err());
+    }
+}
+
+/// Mutation: skip the `check_own_against_table` call.
+#[test]
+fn a_unit_defining_a_name_its_table_declares_differently_is_refused() {
+    let dir = scratch("conflict_own");
+    let l1 = write(&dir, "l1.tmh", L1_TMH);
+    let own = write(&dir, "own.tmc", OWN);
+    let err = compile(
         &dir,
-        &caller,
-        &["--extern", b_str.as_str(), "--extern", a_str.as_str()],
+        &own,
+        &["--nostdlib", "--extern", l1.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("own.tmc:3:18: error:"), "{err}");
+    assert!(
+        err.contains(&format!("by this unit and by `{}`", l1.display())),
+        "{err}"
     );
-    let err = b_first.unwrap_err();
-    assert!(err.contains("writes-outside-contract"), "{err}");
+    assert!(err.contains("[conflicting-declaration]"), "{err}");
+}
+
+/// A unit compiled beside its own up-to-date header is fine; beside a
+/// stale one it is refused. Mutation: own forms computed without
+/// `settle_declarations` — the first half fails on `r`'s `noreturn`.
+#[test]
+fn a_unit_beside_its_own_header_compiles() {
+    let dir = scratch("conflict_own_header");
+    let own = write(&dir, "own.tmc", OWN);
+    let printed = execute(&[
+        "interface".into(),
+        own.to_str().unwrap().into(),
+        "--nostdlib".into(),
+    ])
+    .expect("interface");
+    let fresh = write(&dir, "own.tmh", &printed.stdout);
+    let ok = compile(
+        &dir,
+        &own,
+        &["--nostdlib", "--extern", fresh.to_str().unwrap()],
+    );
+    assert!(ok.is_ok(), "{:?}", ok.err());
+    let stale = write(&dir, "own_stale.tmh", L1_TMH);
+    let err = compile(
+        &dir,
+        &own,
+        &["--nostdlib", "--extern", stale.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[conflicting-declaration]"), "{err}");
+}
+
+/// Mutation: leave the embedded stdlib out of the table the own-definition
+/// check reads.
+#[test]
+fn a_unit_redefining_a_std_routine_differently_is_refused() {
+    let dir = scratch("conflict_ownstd");
+    let src = write(&dir, "ownstd.tmc", OWNSTD);
+    let err = compile(&dir, &src, &[]).unwrap_err();
+    assert!(err.contains("ownstd.tmc:3:20: error:"), "{err}");
+    assert!(
+        err.contains("`std::binaryNumbers::goToNumber` is declared differently by this unit and by the standard library"),
+        "{err}"
+    );
+}
+
+/// The identical redefinition compiles (the link refuses it). Mutation:
+/// refuse every own name the table declares without comparing forms.
+#[test]
+fn a_unit_redefining_a_std_routine_identically_compiles() {
+    let dir = scratch("conflict_ownsame");
+    let src = write(&dir, "ownsame.tmc", OWNSAME);
+    let out = compile(&dir, &src, &[]);
+    assert!(out.is_ok(), "{:?}", out.err());
+}
+
+/// A unit's source and its header given to one compile are one
+/// declaration seen twice. Mutation: skip the writes step of
+/// `header::settle_declarations` — the source reading then publishes the
+/// whole alphabet and conflicts with the header.
+#[test]
+fn a_units_source_and_its_header_together_merge() {
+    let dir = scratch("conflict_src_and_header");
+    let u = write(&dir, "u.tmc", U);
+    let header = execute(&[
+        "interface".into(),
+        u.to_str().unwrap().into(),
+        "--nostdlib".into(),
+    ])
+    .expect("interface");
+    let u_tmh = write(&dir, "u.tmh", &header.stdout);
+    let uc = write(&dir, "uc.tmc", UC);
+    let out = compile(
+        &dir,
+        &uc,
+        &[
+            "--nostdlib",
+            "--extern",
+            u.to_str().unwrap(),
+            "--extern",
+            u_tmh.to_str().unwrap(),
+        ],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
 }
 
 const CHAIN_OTHER: &str = "\

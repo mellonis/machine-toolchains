@@ -6,9 +6,13 @@
 //! source, so the stdlib's [`Resolved`] is cloned in here rather than
 //! borrowed, keeping ONE type for both cases.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::compiler::{Resolved, ResolvedWorld};
+use mtc_core::diagnostics::Span;
+
+use crate::compiler::{CompileError, CompileErrorKind, Resolved, ResolvedWorld};
+use crate::published::{PublishedForm, module_forms};
 
 /// Where one declaration module came from. Read by the diagnostics that
 /// must tell "no such name" from "its declarations were not given"
@@ -24,6 +28,18 @@ pub enum Origin {
     Sibling(PathBuf),
     /// The interface section of a library object on the `-L` path.
     Library(String),
+}
+
+impl Origin {
+    /// How a diagnostic names this origin: the standard library, a quoted
+    /// path, or a quoted library name.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Origin::Stdlib => "the standard library".to_string(),
+            Origin::Extern(p) | Origin::Sibling(p) => format!("`{}`", p.display()),
+            Origin::Library(n) => format!("library `{n}`"),
+        }
+    }
 }
 
 /// Everything the compiler knows about units other than its own
@@ -109,10 +125,52 @@ impl Declarations {
             .map(|(origin, _)| origin)
     }
 
-    /// The declared world named `name` (a routine, first-match over
-    /// `modules()` in table order — `--extern` files in command-line
-    /// order, then the embedded stdlib last), or `None` when no module
-    /// this compile was given declares it. The one lookup an external
+    /// Every module with the origin it came from, in table order.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&Origin, &Resolved)> {
+        self.modules
+            .iter()
+            .map(|(origin, resolved)| (origin, resolved))
+    }
+
+    /// Two modules publishing one name differently (docs/tmt/language.md
+    /// (declarations)): the first later module whose form of a name does
+    /// not agree with the first module's, reported at `0:0` like every
+    /// compile-wide error. Identical forms merge, whatever their origins;
+    /// fewer than two modules cannot conflict (the editor's per-keystroke
+    /// path has one).
+    pub(crate) fn check_conflicts(&self) -> Result<(), CompileError> {
+        if self.modules.len() < 2 {
+            return Ok(());
+        }
+        let mut first: BTreeMap<String, (&Origin, PublishedForm)> = BTreeMap::new();
+        for (origin, resolved) in self.entries() {
+            for (name, form) in module_forms(resolved) {
+                match first.get(&name) {
+                    None => {
+                        first.insert(name, (origin, form));
+                    }
+                    Some((first_origin, first_form)) if !first_form.agrees(&form) => {
+                        return Err(CompileError {
+                            span: Span::point(0, 0),
+                            kind: CompileErrorKind::ConflictingDeclaration {
+                                name,
+                                first: first_origin.describe(),
+                                second: origin.describe(),
+                            },
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The declared world named `name` (a routine), or `None` when no
+    /// module this compile was given declares it. Modules that publish
+    /// one name agree on its form ([`check_conflicts`](Self::check_conflicts)),
+    /// so the first match in table order is as good as any — the table's
+    /// order decides nothing. The one lookup an external
     /// call/bind site's own arg-list checks and ordering read
     /// (`ir::resolve_binding`, `compiler::expand_named_maps_in_args`):
     /// when a callee's declarations are in hand, its tape order and

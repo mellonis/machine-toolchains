@@ -1178,28 +1178,19 @@ fn a_mutual_pair_missing_each_others_alphabets_notes_the_cycle() {
     );
 }
 
-// ── a peer shadowing a stdlib name is believed over the built-in ────────
+// ── a library header redeclaring a stdlib name differently is refused ───
 
-/// `libs/mystd.tmh` declares `std::binaryNumbers::minusOne` itself, under
-/// a NARROWER contract (`writes { '0' }`) than the real embedded one
-/// (`writes { '_', '^', '0', '1' }`); `consumer.tmc` declares its own
-/// `cons::wrap` under that same narrow contract and calls
-/// `std::binaryNumbers::minusOne` transparently. This compiles only when
-/// the fixpoint's OWN read of `consumer.tmc` sees `mystd`'s override
-/// BEFORE it would otherwise fall through to the real embedded stdlib —
-/// the identical precedence the FINAL declarations table already uses
-/// (`unit_declarations`: siblings, then libraries, then stdlib LAST).
+/// `libs/mystd.tmh` declares `std::binaryNumbers::minusOne` under a
+/// NARROWER contract (`writes { '0' }`) than the real embedded one
+/// (`writes { '_', '^', '0', '1' }`). Two declarations of one name must
+/// agree (docs/tmt/language.md (declarations)), so the build is refused,
+/// naming the header and the standard library.
 ///
-/// Mutation (applied by hand and verified, then reverted): pushing
-/// `stdlib` BEFORE the peer loop inside
-/// `crate::header::resolve_declarations` (the shape this task's own fix
-/// replaces) — `consumer.tmc`'s read then sees the REAL, wider
-/// `minusOne` win the first-match lookup instead of `mystd`'s override,
-/// and `cons::wrap`'s own narrow contract is violated by the wider
-/// footprint: this build, which must succeed, fails instead with
-/// `writes-outside-contract` naming `consumer.tmc`.
+/// Mutation: skip the own-definition-versus-table check in
+/// `compiler::resolve_program` — the header is believed over the built-in
+/// again and the build succeeds.
 #[test]
-fn a_peer_shadowing_a_stdlib_name_is_believed_over_the_builtin() {
+fn a_library_header_redeclaring_a_stdlib_routine_differently_is_refused() {
     let dir = scratch("peer_shadows_stdlib");
     std::fs::create_dir_all(dir.join("libs")).unwrap();
     write(
@@ -1252,11 +1243,16 @@ machine {
     );
 
     let out = build_in(&dir, &[]);
-    assert!(
-        out.status.success(),
-        "the library's override must be believed inside the fixpoint too: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(!out.status.success(), "the redeclaration must be refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for needle in [
+        "[conflicting-declaration]",
+        "std::binaryNumbers::minusOne",
+        "mystd.tmh",
+        "the standard library",
+    ] {
+        assert!(stderr.contains(needle), "missing `{needle}`: {stderr}");
+    }
 }
 
 /// The other direction of the same precedence: with no peer declaring

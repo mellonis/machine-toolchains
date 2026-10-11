@@ -148,11 +148,11 @@ another sibling, or a library depend on a sibling, of any dependency
 depth and regardless of declared order — a library authored with `tmt
 interface --extern` (below) commonly ships a header that itself still
 `use`s another unit's declarations, and this is what lets `tmt build`
-read it back. Only the FINAL table's precedence is fixed: every OTHER
-source of the same target, in its declared order, then each declared
-library, in `-l`/manifest order, then the embedded standard library
-unless opted out — the same objects-then-libraries-then-stdlib order the
-linker itself resolves names in.
+read it back. The FINAL table lists every OTHER source of the same
+target, in its declared order, then each declared library, in
+`-l`/manifest order, then the embedded standard library unless opted
+out; since two of them may declare one name only identically
+(`docs/tmt/language.md (declarations)`), the order decides nothing.
 
 A `.tmc` sibling is read LENIENTLY: a routine's declared shape is its
 signature, and its body contributes what its generated header would

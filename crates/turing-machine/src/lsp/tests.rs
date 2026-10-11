@@ -3185,12 +3185,16 @@ fn a_shadowing_sibling_wins_over_the_stdlib_at_every_leg() {
     // like the embedded roster's own entries — `std::binaryNumbers::
     // goToNumber` here is the SAME string the roster carries for the
     // real routine of that name.
+    // The sibling declares the stdlib's exact signature: a different one is
+    // `conflicting-declaration` (docs/tmt/language.md (declarations)), and
+    // the editor would drop the sibling rather than shadow the stdlib.
     let helper_src = "\
-alphabet b { '_', '0' }
 namespace std {
   namespace binaryNumbers {
 ? Shadows the embedded stdlib routine of the same qualified name.
-    export routine goToNumber(tape num: b) { entry state s { [*] -> return; } }
+    export routine goToNumber(tape num: std::binaryNumbers::symbols writes {} leaves { '$' }) {
+      entry state walk { ['$'] -> return; [*] -> move [>] goto walk; }
+    }
   }
 }
 ";

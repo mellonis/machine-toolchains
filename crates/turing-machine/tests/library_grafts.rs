@@ -314,6 +314,44 @@ namespace lib {
 }
 ";
 
+/// `LIB_TMC`'s `walker` over a PRIVATE `lib::marks`: the header prints the
+/// alphabet but does not publish it, so a consumer's own `lib::marks` is no
+/// second declaration of a published name.
+const ALPHA_COLLISION_LIB_TMC: &str = "\
+namespace lib {
+  alphabet marks { '_', 'x', 'y' }
+  export map flip: marks -> marks { 'x' -> 'y', 'y' -> 'x' }
+
+  export graph walker(tape t: marks, state done) {
+    entry state w {
+      ['x'] -> write ['y'] goto done;
+      [*]   -> goto done;
+    }
+  }
+}
+";
+
+/// `LIB_TMC`'s `relay` nesting a PRIVATE `walker`: printed by the header,
+/// not published, so a consumer's own `lib::walker` is no second
+/// declaration of a published name.
+const MEMO_LIB_TMC: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  export map flip: marks -> marks { 'x' -> 'y', 'y' -> 'x' }
+
+  graph walker(tape t: marks, state done) {
+    entry state w {
+      ['x'] -> write ['y'] goto done;
+      [*]   -> goto done;
+    }
+  }
+
+  export graph relay(tape a: marks, state done) {
+    entry graft walker(t = a with map flip, done = done) as inner;
+  }
+}
+";
+
 /// The consumer grafting `walker` straight from `lib`'s header.
 const CONSUMER_WALKER: &str = "\
 use lib::marks;
@@ -1093,7 +1131,7 @@ fn a_mismatched_with_map_is_refused_on_a_header_grafted_target() {
 #[test]
 fn a_colliding_local_alphabet_is_diagnosed_not_silently_captured() {
     let dir = scratch("lib_graft_name_capture");
-    let lib_src = write_file(&dir, "lib.tmc", LIB_TMC);
+    let lib_src = write_file(&dir, "lib.tmc", ALPHA_COLLISION_LIB_TMC);
     let header = interface(&dir, &lib_src, "lib.tmh");
 
     let err = compile_extern_err(
@@ -1118,7 +1156,7 @@ fn a_colliding_local_alphabet_is_diagnosed_not_silently_captured() {
 #[test]
 fn an_unrelated_colliding_local_alphabet_does_not_refuse_a_valid_graft() {
     let dir = scratch("lib_graft_name_capture_wider");
-    let lib_src = write_file(&dir, "lib.tmc", LIB_TMC);
+    let lib_src = write_file(&dir, "lib.tmc", ALPHA_COLLISION_LIB_TMC);
     let header = interface(&dir, &lib_src, "lib.tmh");
 
     let _ = compile_extern(
@@ -1225,7 +1263,7 @@ machine {
 #[test]
 fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
     let dir = scratch("lib_graft_memo_local_first");
-    let lib_src = write_file(&dir, "lib.tmc", LIB_TMC);
+    let lib_src = write_file(&dir, "lib.tmc", MEMO_LIB_TMC);
     let header = interface(&dir, &lib_src, "lib.tmh");
 
     let text = compile_extern_text(
@@ -1253,7 +1291,7 @@ fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
         CONSUMER_MEMO_COLLISION_LOCAL_FIRST,
         &header,
     );
-    let lib = compile_alone(LIB_TMC);
+    let lib = compile_alone(MEMO_LIB_TMC);
     assert_eq!(
         consumer.grafts.len(),
         1,
@@ -1271,11 +1309,14 @@ fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
     link(&[consumer.clone(), lib], &[], LinkOptions::default())
         .unwrap_or_else(|e| panic!("the matching library must link: {e}"));
 
-    let drifted_lib_tmc = LIB_TMC.replace(
+    let drifted_lib_tmc = MEMO_LIB_TMC.replace(
         "['x'] -> write ['y'] goto done;\n      [*]   -> goto done;",
         "[*] -> goto done;",
     );
-    assert_ne!(drifted_lib_tmc, LIB_TMC, "the replacement did not fire");
+    assert_ne!(
+        drifted_lib_tmc, MEMO_LIB_TMC,
+        "the replacement did not fire"
+    );
     let drifted_lib = compile_alone(&drifted_lib_tmc);
     let err = link(&[consumer, drifted_lib], &[], LinkOptions::default())
         .expect_err("a drifted library must still be refused");
@@ -1292,7 +1333,7 @@ fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
 #[test]
 fn a_librarys_nested_graft_does_not_leak_into_a_consumers_own_graph() {
     let dir = scratch("lib_graft_memo_library_first");
-    let lib_src = write_file(&dir, "lib.tmc", LIB_TMC);
+    let lib_src = write_file(&dir, "lib.tmc", MEMO_LIB_TMC);
     let header = interface(&dir, &lib_src, "lib.tmh");
 
     let text = compile_extern_text(
@@ -1575,17 +1616,14 @@ fn a_library_grafts_declared_write_set_is_believed() {
 }
 
 /// A module declaring a ROUTINE under the mangled name a LATER module
-/// declares its GRAPH under. The splice's own lookup matches a graph and
-/// skips the routine; the write footprint must read the clause from that
-/// SAME module, or it believes a contract belonging to a body nothing
-/// splices. Both `--extern` orders must therefore agree, and both must
-/// refuse: the grafted graph writes outside the host's `writes {}`.
+/// declares its GRAPH under. A name of another kind is another declaration
+/// (docs/tmt/language.md (declarations)), so the two modules cannot share
+/// a table: the second one read is refused as `conflicting-declaration`,
+/// in either `--extern` order, before any graft could meet the ambiguity.
 ///
-/// Mutation: give a graft edge the kind-agnostic external lookup a
-/// call uses (`footprint::find_external` in place of
-/// `compiler::find_external_graph`) — the routine-first order then reads
-/// `lib::seek`'s ROUTINE clause, `writes {}`, and the host wrongly
-/// compiles while the graph-first order still refuses.
+/// Mutation: let forms of different kinds agree in
+/// `PublishedForm::agrees` — the table is then accepted and the host is
+/// refused for `writes-outside-contract` instead.
 #[test]
 fn a_graft_reads_its_clause_from_the_module_the_body_comes_from() {
     const ROUTINE_MODULE: &str = "\
@@ -1635,10 +1673,15 @@ export routine facade(tape t: bits writes {}, state out) {
             out.to_str().unwrap(),
         ]))
         .expect_err(&format!("{label}: the host must be refused"));
-        assert!(err.contains("[writes-outside-contract]"), "{label}: {err}");
-        // The set named is the GRAPH's declared one — the routine module's
-        // `writes {}` would name nothing at all.
-        assert!(err.contains("may write '0', '1'"), "{label}: {err}");
+        assert!(err.contains("[conflicting-declaration]"), "{label}: {err}");
+        assert!(
+            err.contains("`lib::seek` is declared differently"),
+            "{label}: {err}"
+        );
+        assert!(
+            err.contains(&format!("`{}`", first.display())),
+            "{label}: {err}"
+        );
     }
 }
 
@@ -2207,7 +2250,10 @@ namespace std {
 /// its source and by its header, each alongside a shadowing standard
 /// library whose graph takes `params`; return each route's exit code and
 /// combined output.
-fn shadowed_nested_graft(tag: &str, params: &str) -> Vec<(Option<i32>, String)> {
+///
+/// With `nostdlib` the fake is the only `std::binaryNumbers` in the compile;
+/// without it the fake sits beside the embedded one, and the two disagree.
+fn shadowed_nested_graft(tag: &str, params: &str, nostdlib: bool) -> Vec<(Option<i32>, String)> {
     let dir = scratch(tag);
     let nlib = write_file(&dir, "nlib.tmc", SHADOW_NLIB_TMC);
     let header = interface(&dir, &nlib, "nlib.tmh");
@@ -2221,10 +2267,13 @@ fn shadowed_nested_graft(tag: &str, params: &str) -> Vec<(Option<i32>, String)> 
     [&nlib, &header]
         .into_iter()
         .map(|lib| {
-            let run = std::process::Command::new(env!("CARGO_BIN_EXE_tmt"))
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tmt"));
+            command.args(["compile", cons.to_str().unwrap()]);
+            if nostdlib {
+                command.arg("--nostdlib");
+            }
+            let run = command
                 .args([
-                    "compile",
-                    cons.to_str().unwrap(),
                     "--extern",
                     lib.to_str().unwrap(),
                     "--extern",
@@ -2250,15 +2299,15 @@ fn shadowed_nested_graft(tag: &str, params: &str) -> Vec<(Option<i32>, String)> 
 /// splice actually uses. Here that graph (a user `--extern` shadowing the
 /// standard library's) takes a tape parameter `extra` BEFORE `num` that the
 /// nested graft never binds: a coded `missing-arg`, through the source and
-/// the header route alike — never a panic. Mutation: drop the argument
-/// check at the splice (`expand::build_composite`'s call to
-/// `compiler::check_graft_args`) — both routes abort in the splice, exit
-/// 101, "panicked" in the output.
+/// the header route alike — never a panic. Mutation: drop the graft-argument
+/// check of a declarations read (`WorldCtx::check_reuse_targets`' graft
+/// arm) — `nlib` is then read clean and the splice meets the mismatch.
 #[test]
 fn a_nested_library_graft_is_checked_against_the_graph_it_splices() {
     for (code, text) in shadowed_nested_graft(
         "lib_graft_shadowed_nested",
         "tape extra: symbols, tape num: symbols, state done",
+        true,
     ) {
         assert!(!text.contains("panicked"), "{text}");
         assert_ne!(code, Some(101), "{text}");
@@ -2275,13 +2324,15 @@ fn a_nested_library_graft_is_checked_against_the_graph_it_splices() {
 /// `num`. Without the splice-time check the splice paired the arguments
 /// with the wrong graph's tapes and reported `identity-glyph-mismatch`,
 /// about glyphs; it is the same unbound parameter as above and now reads
-/// as one. Mutation: drop the splice-time check — both routes report
+/// as one. Mutation: drop the graft-argument check of a declarations read
+/// (`WorldCtx::check_reuse_targets`' graft arm) — both routes report
 /// `identity-glyph-mismatch` instead.
 #[test]
 fn a_nested_library_graft_missing_a_later_parameter_is_missing_arg() {
     for (code, text) in shadowed_nested_graft(
         "lib_graft_shadowed_nested_after",
         "tape num: symbols, tape extra: symbols, state done",
+        true,
     ) {
         assert_eq!(code, Some(1), "{text}");
         assert!(
@@ -2289,5 +2340,29 @@ fn a_nested_library_graft_missing_a_later_parameter_is_missing_arg() {
             "{text}"
         );
         assert!(text.contains("[missing-arg]"), "{text}");
+    }
+}
+
+/// A user source re-declaring a standard-library graph differently, beside
+/// the embedded standard library, is a conflict rather than a shadow. The
+/// GRAPH is the name reported: the fake's `symbols` (`'_','0','1','$','^'`)
+/// also differs from the stdlib's (`'_','^','$','0','1'`), and own names
+/// are checked in sorted order, `…goToNumberGraph` before `…symbols`.
+/// Mutation: leave the embedded standard library out of the table the
+/// own-definition check reads.
+#[test]
+fn a_user_std_graph_beside_the_embedded_one_conflicts() {
+    for (code, text) in shadowed_nested_graft(
+        "lib_graft_user_std_graph",
+        "tape extra: symbols, tape num: symbols, state done",
+        false,
+    ) {
+        assert_eq!(code, Some(1), "{text}");
+        assert!(text.contains("fakestd.tmc:4:18:"), "{text}");
+        assert!(
+            text.contains("`std::binaryNumbers::goToNumberGraph` is declared differently by this unit and by the standard library"),
+            "{text}"
+        );
+        assert!(text.contains("[conflicting-declaration]"), "{text}");
     }
 }

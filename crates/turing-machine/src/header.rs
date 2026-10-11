@@ -159,8 +159,8 @@ use mtc_core::formats::object::{
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
-    self, CompileError, CompileErrorKind, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld,
-    WorldKind, clause_glyphs, full_name, published_writes, symset_glyphs,
+    self, CompileError, CompileErrorKind, Provenance, ReadMode, Resolved, ResolvedCallTarget,
+    ResolvedWorld, WorldKind, clause_glyphs, full_name, published_writes, symset_glyphs,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -345,7 +345,7 @@ pub(crate) fn read_extern(
     source: &str,
     externals: &Declarations,
 ) -> Result<Resolved, CompileError> {
-    read_declarations_with_mode(source, header_mode_for(path), externals)
+    read_declarations_with_mode(source, header_mode_for(path), externals, Provenance::Text)
 }
 
 /// `.tmh` (case-insensitive) selects STRICT [`ReadMode::DeclarationsOnly`]
@@ -371,8 +371,9 @@ fn read_declarations_with_mode(
     source: &str,
     mode: ReadMode,
     externals: &Declarations,
+    provenance: Provenance,
 ) -> Result<Resolved, CompileError> {
-    let analysis = compiler::analyze_with_mode(source, externals, mode)?;
+    let analysis = compiler::analyze_with_provenance(source, externals, mode, provenance)?;
     let mut resolved = analysis.resolved;
     settle_declarations(&analysis.program, &mut resolved, externals, mode);
     Ok(resolved)
@@ -382,8 +383,11 @@ fn read_declarations_with_mode(
 /// (docs/tmt/language.md (declarations)): stamp every graph's digest,
 /// settle every routine's `noreturn` from its body, and — for a
 /// [`ReadMode::Program`] read only — publish each routine/graph tape's
-/// write set as the header prints it. The ONE place the lenient read
-/// settles these facts.
+/// write set as the header prints it. The ONE place these facts are
+/// settled: a declarations reading publishes them through it, and the
+/// own-definition check (`published::own_forms`) runs it on a copy of the
+/// unit being compiled, so a unit is compared with its table as the
+/// unit's own reading would be published.
 pub(crate) fn settle_declarations(
     program: &Program,
     resolved: &mut Resolved,
@@ -481,21 +485,26 @@ pub(crate) fn declarations_from_object(
         message,
         code: OBJECT_INTERFACE_UNREADABLE,
     })?;
-    read_declarations_with_mode(&text, ReadMode::DeclarationsOnly, externals)
-        .map(|mut resolved| {
-            resolved.from_object = true;
-            resolved
-        })
-        .map_err(|e| UnresolvedSource {
-            message: format!(
-                "{}:{}: error: {} [{}]",
-                e.span.start.line,
-                e.span.start.col,
-                e.kind,
-                e.kind.code()
-            ),
-            code: e.kind.code(),
-        })
+    read_declarations_with_mode(
+        &text,
+        ReadMode::DeclarationsOnly,
+        externals,
+        Provenance::Object,
+    )
+    .map(|mut resolved| {
+        resolved.from_object = true;
+        resolved
+    })
+    .map_err(|e| UnresolvedSource {
+        message: format!(
+            "{}:{}: error: {} [{}]",
+            e.span.start.line,
+            e.span.start.col,
+            e.kind,
+            e.kind.code()
+        ),
+        code: e.kind.code(),
+    })
 }
 
 /// A sentinel [`UnresolvedSource::code`] for the one `declarations_from_
@@ -586,20 +595,18 @@ impl DeclarationSource {
 /// the embedded standard library is pushed, unless `stdlib` is false (a
 /// switch that therefore reaches EVERY read here, siblings, libraries
 /// and `--extern` files alike). Pushing stdlib last, after every peer,
-/// is deliberate and matches the FINAL table's own precedence below —
-/// `Declarations`' own lookup is first-match, so a read run against
-/// stdlib pushed FIRST would let the built-in library win a name a
-/// peer's own declarations are about to shadow, even though the real
-/// compile (reading the same peer's declarations from the final table)
-/// believes the peer. This is what lets a library header depend on
-/// another library, a sibling on another sibling, or an `--extern` file
-/// on another `--extern` file, of any dependency depth and regardless
-/// of the order they were given in — only the FINAL table's precedence
-/// order (siblings, then libraries in `-l` order, then stdlib; or
-/// `--extern` files in command-line order, then stdlib) is fixed, and
-/// that assembly happens separately, in the caller, from these same
-/// results; this function's own read context now matches it exactly,
-/// peer-then-stdlib either way.
+/// matches the FINAL table's own order below, so a conflict between a
+/// peer and the stdlib names the same two origins in either place. The
+/// order decides nothing else: a peer declaring a name the stdlib (or
+/// another peer) publishes differently fails its read as
+/// `conflicting-declaration` (docs/tmt/language.md (declarations)), and
+/// one publishing it identically merges. This is what lets a library
+/// header depend on another library, a sibling on another sibling, or an
+/// `--extern` file on another `--extern` file, of any dependency depth
+/// and regardless of the order they were given in; the FINAL table's
+/// assembly (siblings, then libraries in `-l` order, then stdlib; or
+/// `--extern` files in command-line order, then stdlib) happens
+/// separately, in the caller, from these same results.
 ///
 /// Returns one outcome per input source, same order, same length: `Ok`
 /// from the pass that first read it clean, `Err` (its own error, from

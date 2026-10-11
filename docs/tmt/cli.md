@@ -205,11 +205,11 @@ error); anything else — a `.tmc` — is read LENIENTLY as a full program,
 where any `machine` block is unused and a routine's body contributes its
 `noreturn` and its uncontracted tapes' write sets, inferred exactly as
 `tmt interface` infers them. The flag is
-repeatable, and order is meaningful: modules are consulted in command-line
-order, with the embedded standard library consulted last — so a `--extern
-std.tmh` of the user's own shadows the built-in `std` when both are
-present. This mirrors the linker's own first-wins rule for a name declared
-in more than one object.
+repeatable. Two files declaring one name must declare it identically — a
+unit's source and its header, one library given twice — or the compile
+fails `conflicting-declaration`; the same holds against the embedded
+standard library, which is read last, and against the unit's own
+definitions (`docs/tmt/language.md (declarations)`).
 
 `--nostdlib` drops the embedded standard library from that lookup —
 `std::…` names then behave like any other external, contributing the
@@ -297,6 +297,7 @@ subsection.
 | `range-outside-alphabet` | A range in a pattern cell or a contract clause has no walk over the alphabet it is written against, which it walks in declared order: a cell range's endpoint is not a symbol of the alphabet, or the second endpoint comes first in it. |
 | `empty-set-in-pattern` | A pattern cell names a glyph set with no members, so the rule can never match. |
 | `duplicate-name` | Two entities (alphabet, map, routine, graph, or namespace) share one name in one scope — including a top-level `main`, which is reserved for the entry world in every unit, library or program (`docs/tmt/language.md (program structure)`). |
+| `conflicting-declaration` | Two declarations of one qualified name disagree: two declaration sources publish it differently, or this unit defines a name its declarations publish differently (the message names both origins). Identical declarations — a unit's source and its up-to-date header, one library reached twice — are one declaration. |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
 | `too-many-tapes` | A world declares more than 16 tapes. |
 | `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). A name that resolves to one of this unit's own declarations of another kind (a glyph set, a map, a routine or a graph) is this code too; the message names the kind found. |

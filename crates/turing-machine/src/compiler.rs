@@ -185,6 +185,14 @@ pub enum CompileErrorKind {
     /// Two entities (alphabet / routine / graph / namespace) share one name
     /// in one scope. `what` names the EXISTING entity's kind.
     DuplicateName { name: String, what: &'static str },
+    /// Two declarations of one qualified name disagree (docs/tmt/language.md
+    /// (declarations)). `first`/`second` describe the two origins — "this
+    /// unit", a quoted path, ``library `NAME` ``, or "the standard library".
+    ConflictingDeclaration {
+        name: String,
+        first: String,
+        second: String,
+    },
     /// Two imports bind one bare name in one scope (post-alias). The same
     /// binding in different scopes is legal (inner shadows outer).
     DuplicateBinding(String),
@@ -615,6 +623,7 @@ impl CompileErrorKind {
         CompileErrorKind::RangeOutsideAlphabet { .. } => "range-outside-alphabet",
         CompileErrorKind::EmptySetInPattern(_) => "empty-set-in-pattern",
         CompileErrorKind::DuplicateName { .. } => "duplicate-name",
+        CompileErrorKind::ConflictingDeclaration { .. } => "conflicting-declaration",
         CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
         CompileErrorKind::TooManyTapes(_) => "too-many-tapes",
         CompileErrorKind::UnresolvedAlphabet(_) => "unresolved-alphabet",
@@ -855,6 +864,16 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "duplicate name `{name}` — already used by {what} in this scope"
+                )
+            }
+            CompileErrorKind::ConflictingDeclaration {
+                name,
+                first,
+                second,
+            } => {
+                write!(
+                    f,
+                    "`{name}` is declared differently by {first} and by {second}"
                 )
             }
             CompileErrorKind::DuplicateBinding(n) => {
@@ -1923,10 +1942,32 @@ pub(crate) fn analyze_with_mode(
     externals: &Declarations,
     mode: ReadMode,
 ) -> Result<Analysis, CompileError> {
+    analyze_with_provenance(source, externals, mode, Provenance::Text)
+}
+
+/// Where the text a reading parses came from: written, or printed from a
+/// source (`Text`), or rendered from a compiled object's interface
+/// (`Object`), whose state-parameter names are minted, not declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Provenance {
+    Text,
+    Object,
+}
+
+/// [`analyze_with_mode`] with the reading's [`Provenance`] — what
+/// `header::read_declarations_with_mode` threads through; the object arm
+/// (`header::declarations_from_object`) is the one caller that passes
+/// [`Provenance::Object`].
+pub(crate) fn analyze_with_provenance(
+    source: &str,
+    externals: &Declarations,
+    mode: ReadMode,
+    provenance: Provenance,
+) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(Rc::clone(&green)), source);
-    let (resolved, diagnostics) = resolve_program(&program, externals, mode)?;
+    let (resolved, diagnostics) = resolve_program(&program, externals, mode, provenance)?;
     Ok(Analysis {
         resolved,
         diagnostics,
@@ -1950,7 +1991,9 @@ fn resolve_program(
     program: &Program,
     externals: &Declarations,
     mode: ReadMode,
+    provenance: Provenance,
 ) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
+    externals.check_conflicts()?;
     check_declarations_shape(program, mode)?;
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
@@ -1984,6 +2027,7 @@ fn resolve_program(
     expand_named_maps(&mut resolved, &scopes, externals)?;
     check_contracts(&resolved, externals)?;
     check_head_contracts(&resolved)?;
+    crate::published::check_own_against_table(program, &resolved, externals, mode, provenance)?;
     let WorldCtx {
         imports_used,
         mut diagnostics,
@@ -2805,7 +2849,7 @@ pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> Tmc
     };
     let green_retained = Some(Rc::clone(&green));
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
-    match resolve_program(&program, externals, ReadMode::Program) {
+    match resolve_program(&program, externals, ReadMode::Program, Provenance::Text) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
@@ -5285,6 +5329,11 @@ mod tests {
             CompileErrorKind::DuplicateName {
                 name: "x".into(),
                 what: "an alphabet",
+            },
+            CompileErrorKind::ConflictingDeclaration {
+                name: "x".into(),
+                first: "a".into(),
+                second: "b".into(),
             },
             CompileErrorKind::DuplicateBinding("x".into()),
             CompileErrorKind::TooManyTapes(17),

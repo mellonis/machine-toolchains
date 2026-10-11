@@ -1692,6 +1692,20 @@ no body to walk); a `.tmc` read leniently infers it from the body exactly
 as `tmt interface` does, and a routine whose body cannot be expanded
 falls back to its declared clause.
 
+**One declaration per name.** A qualified name has one declaration in a
+compile. Two declaration sources that publish it identically — the same
+signature and contract clauses and `noreturn` for a routine, the same
+digest for a graph, the same glyphs for an alphabet, the same pairs for a
+map, the same members for a set — are one declaration seen twice;
+anything else is `conflicting-declaration`, naming both. The unit's own
+definition counts: a unit defining a name its declarations publish
+differently is refused at that definition, which is how a stale header is
+caught at the first compile. Doc lines and comments are not part of a
+declaration. A header also PRINTS the non-exported declarations an
+exported body needs; those are not published, and a unit's own definition
+of the same name is not a second declaration of anything the header
+offers.
+
 What a compile is given to read is a matter for the tools rather than the
 language: `tmt compile --extern FILE`, the sibling sources and libraries
 `tmt build` derives from a manifest, and the embedded standard library
