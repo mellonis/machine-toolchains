@@ -407,6 +407,47 @@ arity of every pattern/write/move vector in the world at once, not a safe
 single-span textual edit. The finding is worth surfacing regardless: an
 untouched tape still costs a cell in every emitted row.
 
+### unused-tape-parameter
+
+A `routine` or `graph` tape parameter its body never reads, writes or
+moves, and never passes on to a `call`, `graft` or `bind` — the definition
+`unused-tape` uses for a machine tape. A body that reuses another unit with
+no argument list (a transparent call) binds tapes by position and counts as
+touching every one. It fires regardless of `export`: nobody else can use a
+parameter.
+
+```
+b.tmc:2:28: lint: tape parameter `u` of `r` is never read, written, moved, or passed on
+```
+
+`fix: None` — removing a parameter changes the signature every caller
+binds.
+
+### unused-fold-variable
+
+A pattern binding (`as NAME`) its rule's write vector never reads — a read
+inside an arithmetic substitution (`{x + 1}`) counts.
+
+```
+b.tmc:4:28: lint: pattern binding `x` is never read by this rule's write vector
+```
+
+`fix: None` — a binding may be kept for readability.
+
+### inert-never-writes
+
+With both `writes` and `never writes` written, a glyph `never writes` names
+but `writes` does not changes nothing: the effective set is `writes` minus
+`never writes`. Reported per element of `never writes`, naming the inert
+glyphs. Source only — a header publishes each tape's effective set as one
+`writes` clause and never prints `never writes`.
+
+```
+b.tmc:2:60: lint: '2' in `never writes` is not in `writes`, so excluding it changes nothing
+```
+
+`fix: None`.
+
 ### unused-exit
 
 A `graph` `state` exit parameter its own body never targets — no `goto`,

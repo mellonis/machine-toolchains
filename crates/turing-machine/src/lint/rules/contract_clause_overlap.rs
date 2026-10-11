@@ -63,7 +63,7 @@ use crate::patterns::{declared_range, glyph_label};
 
 /// One alphabet-body element's own source span — a clause body uses the same
 /// element grammar as an alphabet body.
-fn elem_span(elem: &AlphabetElem) -> Span {
+pub(super) fn elem_span(elem: &AlphabetElem) -> Span {
     match elem {
         AlphabetElem::Single(s) => s.span(),
         AlphabetElem::Range { span, .. } => *span,
@@ -79,7 +79,7 @@ fn elem_span(elem: &AlphabetElem) -> Span {
 /// range or set, a glyph absent from the alphabet) — unreachable past a
 /// clean analysis, but the rule stays silent here rather than panicking on
 /// it.
-fn elem_indices(
+pub(super) fn elem_indices(
     elem: &AlphabetElem,
     glyphs: &[String],
     sets: &SetScope,
@@ -98,7 +98,7 @@ fn elem_indices(
 
 /// `indices`' glyphs, ascending by index — the compiler's own
 /// offending-glyph rendering order (`WritesOutsideContract`).
-fn ascending_glyphs(glyphs: &[String], indices: &[u32]) -> Vec<String> {
+pub(super) fn ascending_glyphs(glyphs: &[String], indices: &[u32]) -> Vec<String> {
     let mut sorted = indices.to_vec();
     sorted.sort_unstable();
     sorted
@@ -109,7 +109,7 @@ fn ascending_glyphs(glyphs: &[String], indices: &[u32]) -> Vec<String> {
 
 /// A glyph list rendered the way `WritesOutsideContract` renders its
 /// offending set: each glyph single-quoted, comma-space joined.
-fn quoted_list(glyphs: &[String]) -> String {
+pub(super) fn quoted_list(glyphs: &[String]) -> String {
     glyphs
         .iter()
         .map(|g| format!("'{g}'"))
@@ -124,7 +124,10 @@ fn quoted_list(glyphs: &[String]) -> String {
 /// source. `None` for a machine world: a machine tape declaration carries no
 /// contract grammar at all, so its tapes' `writes`/`never writes` are always
 /// `None` and never reach this lookup.
-fn world_sig<'a>(program: &'a Program, world_name: &str) -> Option<(&'a [SigParam], &'a [String])> {
+pub(super) fn world_sig<'a>(
+    program: &'a Program,
+    world_name: &str,
+) -> Option<(&'a [SigParam], &'a [String])> {
     if let Some(r) = program
         .routines
         .iter()
@@ -145,6 +148,19 @@ fn writes_clause_for<'a>(params: &'a [SigParam], tape_name: &str) -> Option<&'a 
     let p = params.iter().find(|p| p.name == tape_name)?;
     match &p.kind {
         SigParamKind::Tape { writes, .. } => writes.as_deref(),
+        SigParamKind::State => None,
+    }
+}
+
+/// The `never writes` clause AST node of the tape parameter named
+/// `tape_name`, if it declared one.
+pub(super) fn never_writes_clause_for<'a>(
+    params: &'a [SigParam],
+    tape_name: &str,
+) -> Option<&'a ContractClause> {
+    let p = params.iter().find(|p| p.name == tape_name)?;
+    match &p.kind {
+        SigParamKind::Tape { never_writes, .. } => never_writes.as_deref(),
         SigParamKind::State => None,
     }
 }
