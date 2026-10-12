@@ -1731,16 +1731,31 @@ signature and contract clauses and `noreturn` for a routine, the same
 digest for a graph, the same glyphs for an alphabet, the same pairs for a
 map, the same members for a set — are one declaration seen twice;
 anything else is `conflicting-declaration`, naming both. The unit's own
-definition counts: a unit defining a name its declarations publish
-differently is refused at that definition, which is how a stale header is
-caught at the first compile. Doc lines and comments are not part of a
-declaration. A header also PRINTS the non-exported declarations an
-exported body needs; those are not published, and a unit's own definition
-of the same name is not a second declaration of anything the header
-offers. A declaration read from a compiled object compares its state
+definition counts, exported or not: a unit defining a name its
+declarations publish differently is refused at that definition, which is
+how a stale header is caught at the first compile. Doc lines and comments
+are not part of a declaration.
+
+A declaration a source carries WITHOUT exporting it takes part too. A
+header also prints the non-exported graphs an exported body needs, and a
+`.tmc` read for its declarations carries every private declaration it
+has; whoever is given that source can see them, so beside a declaration
+of the same name that ANOTHER source publishes, a private one must have
+the same form, or the compile is refused in whichever order the two are
+given — refusing is the conservative choice, since otherwise the order
+would pick one. So a private definition sharing a name with a published
+one is legal when the forms are the same, and the private one is then
+what its own unit uses; with another form it is refused. A graph's form
+is its digest, which covers its `export` keyword, so a private graph
+beside an exported graph of the same name is always refused. Two units'
+PRIVATE declarations of one name, with no source publishing it, are not
+compared with each other: each is its own unit's business.
+
+A declaration read from a compiled object compares its state
 parameters by position, since an object keeps no names for them; two
 readings that both carry names must agree on them. A name conflicts when
-ANY two of its readings disagree, whatever the order they are given in.
+ANY two of its readings disagree in this way, whatever the order they are
+given in.
 When a routine is declared both by a header or source and by an object,
 callers use the names the text declaration gives, whatever the order the
 declarations are given in; an object alone offers only the names its

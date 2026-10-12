@@ -151,8 +151,9 @@ interface --extern` (below) commonly ships a header that itself still
 read it back. The FINAL table lists every OTHER source of the same
 target, in its declared order, then each declared library, in
 `-l`/manifest order, then the embedded standard library unless opted
-out; since two of them may declare one name only identically
-(`docs/tmt/language.md (declarations)`), the order decides nothing.
+out; since a name any of them publishes may be declared by the others
+only identically, privately or not (`docs/tmt/language.md
+(declarations)`), the order decides nothing about a published name.
 
 A `.tmc` sibling is read LENIENTLY: a routine's declared shape is its
 signature, and its body contributes what its generated header would

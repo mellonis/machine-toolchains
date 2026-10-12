@@ -821,13 +821,18 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
 /// path: the module (for its alphabets) and the world.
 ///
 /// First match over `externals`, in the order `Declarations::modules()`
-/// returns it. The order decides nothing: two modules publishing one name
-/// must publish it identically, or the compile is refused
-/// `conflicting-declaration` before any lookup runs (docs/tmt/language.md
-/// (declarations)), exactly as the linker refuses a name two inputs define.
-/// That also rules out two modules carrying one name as a routine here and
-/// as a graph for `compiler::find_external_graph`: this lookup matches any
-/// kind, that one only graphs, and the two can no longer disagree.
+/// returns it, of any kind and whatever its export status — a private
+/// declaration a module carries is returned like a published one. For a
+/// name ANY module publishes the order decides nothing: every other
+/// module's declaration of it, exported or not, must have the same form,
+/// or the compile is refused `conflicting-declaration` before any lookup
+/// runs (docs/tmt/language.md (declarations)). That also rules out one
+/// module carrying such a name as a routine here and another as a graph
+/// for `compiler::find_external_graph`: this lookup matches any kind,
+/// that one only graphs, and they cannot disagree on a published name.
+/// What the order still decides is a name NO module publishes but two
+/// carry privately: the first one is returned, and those two are never
+/// compared.
 pub(crate) fn find_external<'a>(
     externals: &[&'a Resolved],
     path: &str,

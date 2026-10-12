@@ -4150,18 +4150,21 @@ fn find_external_map<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a R
 /// modules, in table order — [`find_external_alphabet`]'s graft-target twin,
 /// over `Resolved::worlds` (kind [`WorldKind::Graph`] only, no `exported`
 /// filter — the same no-filter precedent [`Declarations::routine`] sets: a
-/// `.tmh` never carries a non-exported graph at all, since only an exported
-/// graph's body is ever printed, so the filter would be redundant for that
-/// reader and would wrongly refuse a private graph read leniently from a
-/// `--extern .tmc`). `pub(crate)`: both `resolve_world_reuse` (does the
+/// header prints a non-exported graph only where an exported body nests
+/// it, and a filter would wrongly refuse a private graph read leniently
+/// from a `--extern .tmc`). `pub(crate)`: both `resolve_world_reuse` (does the
 /// declarations table carry this target at all) and `expand.rs` (the
 /// splice itself, and its recursive nested grafts) call it.
 ///
-/// Two modules can no longer carry one name as a routine in one and as a
-/// graph in another (a module defining the name in any kind is compared
-/// against what the table publishes, docs/tmt/language.md (declarations)),
-/// so this graph-only lookup and `footprint::find_external` always agree on
-/// the module a name comes from.
+/// For a name ANY module publishes, every other module's declaration of
+/// it — exported or not, of any kind — must have the same form, or the
+/// compile was refused before this lookup ran (docs/tmt/language.md
+/// (declarations)); so a private graph is never returned in place of
+/// another module's published graph or routine, and this graph-only
+/// lookup and `footprint::find_external` agree on what a published name
+/// is. What the table's order still decides is a graph NO module
+/// publishes but two carry privately: the first is returned (and a
+/// compile that would splice both bodies is refused at the splice).
 ///
 /// Returns the OWNING module alongside the world, mirroring
 /// `footprint::find_external`'s own shape — `expand.rs` needs it: a spliced
@@ -4183,9 +4186,10 @@ pub(crate) fn find_external_graph<'a>(
 
 /// The routine world `name` names in the declarations table, first module
 /// first, text readings before an object reading
-/// ([`crate::declarations::first_reading`]) — kind-filtered, unlike
-/// `Declarations::routine`. Returns the owning module alongside the world,
-/// mirroring [`find_external_graph`].
+/// ([`crate::declarations::first_reading`]) — the same reading
+/// `Declarations::routine` returns, whatever its export status. Returns
+/// the owning module alongside the world, mirroring
+/// [`find_external_graph`].
 pub(crate) fn find_external_routine<'a>(
     externals: &[&'a Resolved],
     name: &str,

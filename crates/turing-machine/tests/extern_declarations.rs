@@ -890,3 +890,281 @@ fn a_source_read_still_refuses_what_the_header_refuses() {
         );
     }
 }
+
+/// A header printing a PRIVATE `graph lib::walker` — the body its exported
+/// `outerA` nests — which writes `'y'`.
+const PRIV_LA: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  graph walker(tape t: marks writes { 'y' }, state done) {
+    entry state w {
+      ['x'] -> write ['y'] goto done;
+      [*]   -> goto done;
+    }
+  }
+  export graph outerA(tape a: marks writes { 'y' }, state done) {
+    entry graft walker(t = a, done = done) as inner;
+  }
+}
+";
+
+/// A header exporting a ROUTINE under the name `PRIV_LA` holds privately.
+const PRIV_LR: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  export routine walker(tape t: marks writes {});
+}
+";
+
+/// A header exporting a GRAPH of another body under that name.
+const PRIV_LB: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  export graph walker(tape t: marks writes { 'x' }, state done) {
+    entry state w {
+      ['y'] -> write ['x'] goto done;
+      [*]   -> goto done;
+    }
+  }
+}
+";
+
+/// A SOURCE whose private `routine lib::r` writes `'y'`; its generated
+/// header does not print it.
+const PRIV_X: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  routine r(tape t: marks) {
+    entry state s { [*] -> write ['y'] return; }
+  }
+  export routine other(tape t: marks) {
+    entry state s { [*] -> call r(t = t) then d; }
+    state d { [*] -> return; }
+  }
+}
+";
+
+/// Headers publishing `lib::r`: with another write set than `PRIV_X`'s
+/// private routine has, and with the same one.
+const PRIV_H_QUIET: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  export routine r(tape t: marks writes {});
+}
+";
+const PRIV_H_SAME: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  export routine r(tape t: marks writes { 'y' });
+}
+";
+
+/// Another library whose PRIVATE `lib::walker` has another body, with
+/// nothing published under that name.
+const PRIV_LZ: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  graph walker(tape t: marks writes { 'x' }, state done) {
+    entry state w {
+      ['y'] -> write ['x'] goto done;
+      [*]   -> goto done;
+    }
+  }
+  export graph outerZ(tape a: marks writes { 'x' }, state done) {
+    entry graft walker(t = a, done = done) as inner;
+  }
+}
+";
+
+const PRIV_CALLS_WALKER: &str = "\
+use lib::marks;
+routine quiet(tape t: marks writes {}) {
+  entry state s { [*] -> call lib::walker(t = t) then d; }
+  state d { [*] -> return; }
+}
+machine {
+  tape t: marks;
+  entry state go { [*] -> call quiet(t = t) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+const PRIV_GRAFTS_WALKER: &str = "\
+use lib::marks;
+machine {
+  tape t: marks;
+  entry graft lib::walker(t = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+const PRIV_GRAFTS_OUTER_A: &str = "\
+use lib::marks;
+use lib::outerA;
+machine {
+  tape t: marks;
+  entry graft outerA(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+const PRIV_CALLS_R_QUIET: &str = "\
+use lib::marks;
+routine quiet(tape t: marks writes {}) {
+  entry state s { [*] -> call lib::r(t = t) then d; }
+  state d { [*] -> return; }
+}
+machine {
+  tape t: marks;
+  entry state go { [*] -> call quiet(t = t) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+const PRIV_CALLS_R_LOUD: &str = "\
+use lib::marks;
+routine loud(tape t: marks writes { 'y' }) {
+  entry state s { [*] -> call lib::r(t = t) then d; }
+  state d { [*] -> return; }
+}
+machine {
+  tape t: marks;
+  entry state go { [*] -> call loud(t = t) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+/// `tmt compile caller --nostdlib --extern FIRST --extern SECOND`, in both
+/// orders of the two declaration files.
+fn compile_in_both_orders(
+    tag: &str,
+    caller: &str,
+    a: (&str, &str),
+    b: (&str, &str),
+) -> [Result<CliOutput, String>; 2] {
+    let dir = scratch(tag);
+    let caller = write(&dir, "caller.tmc", caller);
+    let a = write(&dir, a.0, a.1);
+    let b = write(&dir, b.0, b.1);
+    [(&a, &b), (&b, &a)].map(|(first, second)| {
+        compile(
+            &dir,
+            &caller,
+            &[
+                "--nostdlib",
+                "--extern",
+                first.to_str().unwrap(),
+                "--extern",
+                second.to_str().unwrap(),
+            ],
+        )
+    })
+}
+
+/// A declaration one `--extern` file carries WITHOUT exporting it, beside
+/// another file's published declaration of the same name in another form,
+/// is refused whichever file comes first, and both files are named — a
+/// consumer's lookup would otherwise take whichever came first. Four
+/// shapes: a caller of a name that is a private graph here and a
+/// published routine there; a graft of a name that is a private graph
+/// here and an exported graph of another body there; a consumer of one
+/// library's export while the two libraries hold that pair; and a caller
+/// of a name that is a private routine no header prints in a source and a
+/// published routine in a header. Mutation: compare exported forms only
+/// (`published::readings_conflict` requiring BOTH readings to be
+/// published) — the orders then diverge: one compiles or reports a false
+/// `writes-outside-contract`, the other conflicts.
+#[test]
+fn a_private_name_beside_a_published_one_of_another_form_is_refused_in_both_extern_orders() {
+    let shapes: [(&str, &str, (&str, &str), (&str, &str), &str); 4] = [
+        (
+            "priv_call",
+            PRIV_CALLS_WALKER,
+            ("la.tmh", PRIV_LA),
+            ("lr.tmh", PRIV_LR),
+            "lib::walker",
+        ),
+        (
+            "priv_graft",
+            PRIV_GRAFTS_WALKER,
+            ("la.tmh", PRIV_LA),
+            ("lb.tmh", PRIV_LB),
+            "lib::walker",
+        ),
+        (
+            "priv_nested",
+            PRIV_GRAFTS_OUTER_A,
+            ("la.tmh", PRIV_LA),
+            ("lb.tmh", PRIV_LB),
+            "lib::walker",
+        ),
+        (
+            "priv_unprinted",
+            PRIV_CALLS_R_QUIET,
+            ("x.tmc", PRIV_X),
+            ("h.tmh", PRIV_H_QUIET),
+            "lib::r",
+        ),
+    ];
+    for (tag, caller, a, b, name) in shapes {
+        for (order, out) in compile_in_both_orders(tag, caller, a, b)
+            .into_iter()
+            .enumerate()
+        {
+            let err = out.expect_err("a private name beside a published one of another form");
+            assert!(
+                err.contains("[conflicting-declaration]"),
+                "{tag}, order {order}: {err}"
+            );
+            assert!(
+                err.contains(&format!("`{name}` is declared differently")),
+                "{tag}, order {order}: {err}"
+            );
+            for file in [a.0, b.0] {
+                assert!(err.contains(file), "{tag}, order {order}: {file}: {err}");
+            }
+            assert!(
+                !err.contains("[writes-outside-contract]"),
+                "{tag}, order {order}: {err}"
+            );
+        }
+    }
+}
+
+/// The near miss: the private routine beside a header publishing the SAME
+/// form (the set the routine really writes) merges in both orders, and
+/// the caller is held to that one form. Mutation: refuse a private
+/// declaration that shares a name with a published one whatever its form.
+#[test]
+fn a_private_name_beside_a_published_one_of_the_same_form_compiles_in_both_extern_orders() {
+    for (order, out) in compile_in_both_orders(
+        "priv_same",
+        PRIV_CALLS_R_LOUD,
+        ("x.tmc", PRIV_X),
+        ("h.tmh", PRIV_H_SAME),
+    )
+    .into_iter()
+    .enumerate()
+    {
+        assert!(out.is_ok(), "order {order}: {:?}", out.err());
+    }
+}
+
+/// Two libraries' PRIVATE graphs of one name, with nothing published
+/// under it, are not compared with each other: a consumer of one
+/// library's export compiles in both orders. Mutation: compare every pair
+/// of readings whatever their export status.
+#[test]
+fn two_private_graphs_of_one_name_compile_for_a_consumer_of_one_export_in_both_extern_orders() {
+    for (order, out) in compile_in_both_orders(
+        "priv_priv",
+        PRIV_GRAFTS_OUTER_A,
+        ("la.tmh", PRIV_LA),
+        ("lz.tmh", PRIV_LZ),
+    )
+    .into_iter()
+    .enumerate()
+    {
+        assert!(out.is_ok(), "order {order}: {:?}", out.err());
+    }
+}

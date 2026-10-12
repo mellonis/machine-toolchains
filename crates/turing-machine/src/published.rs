@@ -97,32 +97,87 @@ impl ParamForm {
     }
 }
 
-/// Every EXPORTED alphabet, set, map, routine and graph `module` declares,
-/// keyed by qualified name. A module with `from_object` set yields
+/// One declaration a module carries, as the lookups a consumer uses see
+/// it: its qualified name, whether the module PUBLISHES it (exports it),
+/// and its form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VisibleForm {
+    pub name: String,
+    pub published: bool,
+    pub form: PublishedForm,
+}
+
+/// Every alphabet, set, map, routine and graph `module` carries, exported
+/// or not, sorted by name — exactly what the cross-unit lookups
+/// (`compiler::external_decls` and the per-kind lookups over it,
+/// `footprint::find_external`, `Declarations::routine`) can return from
+/// the module: none of them reads the `exported` flag, so a header's
+/// printed private graph, a leniently read source's private routine and
+/// an alphabet a module merely copied in from another unit are all
+/// visible to a consumer when their module comes first in the table. A
+/// machine is never a declaration. A module with `from_object` set yields
 /// `State { name: None }` for every state parameter.
-pub(crate) fn module_forms(module: &Resolved) -> BTreeMap<String, PublishedForm> {
-    let mut forms = BTreeMap::new();
-    for a in module.alphabets.values().filter(|a| a.exported) {
-        forms.insert(a.name.clone(), alphabet_form(a));
+pub(crate) fn visible_forms(module: &Resolved) -> Vec<VisibleForm> {
+    let mut forms = Vec::new();
+    let mut push = |name: &str, published: bool, form: PublishedForm| {
+        forms.push(VisibleForm {
+            name: name.to_string(),
+            published,
+            form,
+        });
+    };
+    for a in module.alphabets.values() {
+        push(&a.name, a.exported, alphabet_form(a));
     }
-    for s in module.sets.values().filter(|s| s.exported) {
-        forms.insert(s.name.clone(), set_form(s));
+    for s in module.sets.values() {
+        push(&s.name, s.exported, set_form(s));
     }
-    for m in module.maps.values().filter(|m| m.exported) {
-        forms.insert(m.name.clone(), map_form(m, module));
+    for m in module.maps.values() {
+        push(&m.name, m.exported, map_form(m, module));
     }
     for w in module
         .worlds
         .iter()
-        .filter(|w| w.exported && w.kind != WorldKind::Machine)
+        .filter(|w| w.kind != WorldKind::Machine)
     {
         let form = match w.kind {
             WorldKind::Graph => graph_form(w),
             _ => routine_form(w, module),
         };
-        forms.insert(w.name.clone(), form);
+        push(&w.name, w.exported, form);
     }
+    forms.sort_by(|a, b| a.name.cmp(&b.name));
     forms
+}
+
+/// Every EXPORTED alphabet, set, map, routine and graph `module` declares,
+/// keyed by qualified name — the published subset of [`visible_forms`],
+/// which is what the shipped-corpus guard below compares between a unit's
+/// source and its generated header.
+#[cfg(test)]
+pub(crate) fn module_forms(module: &Resolved) -> BTreeMap<String, PublishedForm> {
+    visible_forms(module)
+        .into_iter()
+        .filter(|v| v.published)
+        .map(|v| (v.name, v.form))
+        .collect()
+}
+
+/// THE rule for two readings of one name taken from two different units
+/// (docs/tmt/language.md (declarations)): they conflict when at least one
+/// of them is published and their forms disagree. A private declaration
+/// takes part because the lookups a consumer uses see a declaration
+/// whatever its export status, so a private name beside a published one
+/// of another form would be picked by table order; two private
+/// declarations of one name are each their own unit's business and are
+/// never compared.
+pub(crate) fn readings_conflict(
+    a_published: bool,
+    a: &PublishedForm,
+    b_published: bool,
+    b: &PublishedForm,
+) -> bool {
+    (a_published || b_published) && !a.agrees(b)
 }
 
 pub(crate) fn alphabet_form(a: &ResolvedAlphabet) -> PublishedForm {
@@ -192,8 +247,9 @@ pub(crate) fn graph_form(w: &ResolvedWorld) -> PublishedForm {
 }
 
 /// The unit's own definitions — every alphabet, set, map, routine and
-/// graph `program` declares, exported or not — each with its name span
-/// and published form, settled exactly as a declarations reading of it
+/// graph `program` declares, exported or not — each with its name span,
+/// whether the unit exports it, and its form, settled exactly as a
+/// declarations reading of it
 /// would be (`header::settle_declarations`). With [`Provenance::Object`]
 /// every state parameter's name is `None`.
 pub(crate) fn own_forms(
@@ -202,7 +258,7 @@ pub(crate) fn own_forms(
     externals: &Declarations,
     mode: ReadMode,
     provenance: Provenance,
-) -> BTreeMap<String, (Span, PublishedForm)> {
+) -> BTreeMap<String, (Span, bool, PublishedForm)> {
     let mut settled = resolved.clone();
     settled.from_object = provenance == Provenance::Object;
     crate::header::settle_declarations(program, &mut settled, externals, mode);
@@ -210,30 +266,30 @@ pub(crate) fn own_forms(
     for a in &program.alphabets {
         let name = full_name(&a.ns, &a.name);
         if let Some(r) = settled.alphabets.get(&name) {
-            forms.insert(name, (a.name_span, alphabet_form(r)));
+            forms.insert(name, (a.name_span, a.exported, alphabet_form(r)));
         }
     }
     for s in &program.sets {
         let name = full_name(&s.ns, &s.name);
         if let Some(r) = settled.sets.get(&name) {
-            forms.insert(name, (s.name_span, set_form(r)));
+            forms.insert(name, (s.name_span, s.exported, set_form(r)));
         }
     }
     for m in &program.maps {
         let name = full_name(&m.ns, &m.name);
         if let Some(r) = settled.maps.get(&name) {
-            forms.insert(name, (m.name_span, map_form(r, &settled)));
+            forms.insert(name, (m.name_span, m.exported, map_form(r, &settled)));
         }
     }
-    for (name, span, graph) in program
+    for (name, span, exported, graph) in program
         .routines
         .iter()
-        .map(|r| (full_name(&r.ns, &r.name), r.name_span, false))
+        .map(|r| (full_name(&r.ns, &r.name), r.name_span, r.exported, false))
         .chain(
             program
                 .graphs
                 .iter()
-                .map(|g| (full_name(&g.ns, &g.name), g.name_span, true)),
+                .map(|g| (full_name(&g.ns, &g.name), g.name_span, g.exported, true)),
         )
     {
         let Some(world) = settled.worlds.iter().find(|w| w.name == name) else {
@@ -244,13 +300,14 @@ pub(crate) fn own_forms(
         } else {
             routine_form(world, &settled)
         };
-        forms.insert(name, (span, form));
+        forms.insert(name, (span, exported, form));
     }
     forms
 }
 
 /// Whether `module` declares `name` under any kind — a cheap superset of
-/// "publishes it", used to skip the settle cost when nothing could clash.
+/// "carries a form of it", used to skip the settle cost when nothing could
+/// clash.
 fn declares(module: &Resolved, name: &str) -> bool {
     module.alphabets.contains_key(name)
         || module.sets.contains_key(name)
@@ -258,15 +315,17 @@ fn declares(module: &Resolved, name: &str) -> bool {
         || module.worlds.iter().any(|w| w.name == name)
 }
 
-/// The unit's own definitions against what the table publishes under the
-/// same names (docs/tmt/language.md (declarations)): a name the table's
-/// ANY publishing module declares differently is refused at the unit's
-/// definition (`agrees` is not transitive, so every reading is tested; the
-/// origin named is the first disagreeing one in table order). Two table
-/// modules disagreeing with each other is
-/// [`Declarations::check_conflicts`]' business. Private own definitions
-/// are compared too; a module's non-exported items are not published and
-/// so are not compared against.
+/// The unit's own definitions against what the table carries under the
+/// same names (docs/tmt/language.md (declarations)), by the one rule for
+/// two readings of a name ([`readings_conflict`]): a name ANY table module
+/// declares differently is refused at the unit's definition when either
+/// side publishes it — the unit's private definition against a published
+/// declaration, and the unit's published definition against a declaration
+/// a module carries privately, since a consumer of both would be handed
+/// whichever came first. Two private ones are not compared. `agrees` is
+/// not transitive, so every reading is tested; the origin named is the
+/// first disagreeing one in table order. Two table modules disagreeing
+/// with each other is [`Declarations::check_conflicts`]' business.
 pub(crate) fn check_own_against_table(
     program: &Program,
     resolved: &Resolved,
@@ -288,17 +347,18 @@ pub(crate) fn check_own_against_table(
     let candidates: Vec<_> = externals
         .entries()
         .filter(|(_, m)| own_names.iter().any(|n| declares(m, n)))
-        .map(|(origin, m)| (origin, module_forms(m)))
+        .map(|(origin, m)| (origin, visible_forms(m)))
         .collect();
     if candidates.is_empty() {
         return Ok(());
     }
-    for (name, (span, own)) in own_forms(program, resolved, externals, mode, provenance) {
+    for (name, (span, published, own)) in own_forms(program, resolved, externals, mode, provenance)
+    {
         let clash = candidates.iter().find_map(|(origin, forms)| {
             forms
-                .get(&name)
-                .filter(|form| !own.agrees(form))
-                .map(|_| origin)
+                .iter()
+                .any(|v| v.name == name && readings_conflict(published, &own, v.published, &v.form))
+                .then_some(origin)
         });
         if let Some(origin) = clash {
             return Err(CompileError {
@@ -622,6 +682,178 @@ mod tests {
                     if name == "lib::r" && first == "this unit"),
                 "{body}: {err:?}"
             );
+        }
+    }
+
+    /// A header printing a PRIVATE `graph lib::walker` (the body its
+    /// exported `outerA` nests) that writes `'y'`.
+    const LA: &str = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  graph walker(tape t: marks writes { 'y' }, state done) {\n    entry state w {\n      ['x'] -> write ['y'] goto done;\n      [*]   -> goto done;\n    }\n  }\n  export graph outerA(tape a: marks writes { 'y' }, state done) {\n    entry graft walker(t = a, done = done) as inner;\n  }\n}\n";
+    /// A header exporting a ROUTINE under the same name.
+    const LR: &str = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  export routine walker(tape t: marks writes {});\n}\n";
+    /// A header exporting a GRAPH of another body under the same name.
+    const LB: &str = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  export graph walker(tape t: marks writes { 'x' }, state done) {\n    entry state w {\n      ['y'] -> write ['x'] goto done;\n      [*]   -> goto done;\n    }\n  }\n}\n";
+    /// Another library whose PRIVATE `lib::walker` has another body, and
+    /// which publishes nothing under that name.
+    const LZ: &str = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  graph walker(tape t: marks writes { 'x' }, state done) {\n    entry state w {\n      ['y'] -> write ['x'] goto done;\n      [*]   -> goto done;\n    }\n  }\n  export graph outerZ(tape a: marks writes { 'x' }, state done) {\n    entry graft walker(t = a, done = done) as inner;\n  }\n}\n";
+    /// A source whose PRIVATE `routine lib::r` no header prints; it
+    /// writes `'y'`.
+    const X_PRIVATE_R: &str = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  routine r(tape t: marks) {\n    entry state s { [*] -> write ['y'] return; }\n  }\n  export routine other(tape t: marks) {\n    entry state s { [*] -> call r(t = t) then d; }\n    state d { [*] -> return; }\n  }\n}\n";
+    /// A unit whose private `r` writes `'x'` instead (and whose export has
+    /// another name, so only `lib::r` is contested).
+    const X2_PRIVATE_R: &str = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  routine r(tape t: marks) {\n    entry state s { [*] -> write ['x'] return; }\n  }\n  export routine another(tape t: marks) {\n    entry state s { [*] -> call r(t = t) then d; }\n    state d { [*] -> return; }\n  }\n}\n";
+    /// Headers publishing `lib::r` — with another write set than
+    /// [`X_PRIVATE_R`]'s, and with the same one.
+    const H_R_QUIET: &str = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  export routine r(tape t: marks writes {});\n}\n";
+    const H_R_SAME: &str = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  export routine r(tape t: marks writes { 'y' });\n}\n";
+    const CALLS_WALKER: &str = "use lib::marks;\nroutine quiet(tape t: marks writes {}) {\n  entry state s { [*] -> call lib::walker(t = t) then d; }\n  state d { [*] -> return; }\n}\nmachine {\n  tape t: marks;\n  entry state go { [*] -> call quiet(t = t) then fin; }\n  state fin { [*] -> stop; }\n}\n";
+    const GRAFTS_WALKER: &str = "use lib::marks;\nmachine {\n  tape t: marks;\n  entry graft lib::walker(t = t, done = fin) as r;\n  state fin { [*] -> stop; }\n}\n";
+    const CALLS_R: &str = "use lib::marks;\nroutine loud(tape t: marks) {\n  entry state s { [*] -> call lib::r(t = t) then d; }\n  state d { [*] -> return; }\n}\nmachine {\n  tape t: marks;\n  entry state go { [*] -> call loud(t = t) then fin; }\n  state fin { [*] -> stop; }\n}\n";
+    const GRAFTS_OUTER_A: &str = "use lib::marks;\nuse lib::outerA;\nmachine {\n  tape t: marks;\n  entry graft outerA(a = t, done = fin) as r;\n  state fin { [*] -> stop; }\n}\n";
+
+    /// `caller` against the two modules in BOTH table orders: refused as
+    /// a conflict over `name` each time, naming the two origins in table
+    /// order.
+    fn assert_conflict_in_both_orders(caller: &str, a: (&str, &str), b: (&str, &str), name: &str) {
+        for (first, second) in [(a, b), (b, a)] {
+            let err = analyze_with(caller, &table(&[first, second])).unwrap_err();
+            assert_eq!(
+                err.kind,
+                Kind::ConflictingDeclaration {
+                    name: name.into(),
+                    first: format!("`{}`", first.0),
+                    second: format!("`{}`", second.0),
+                },
+                "[{}, {}]",
+                first.0,
+                second.0
+            );
+        }
+    }
+
+    /// A declaration one module carries without exporting it is what a
+    /// consumer's lookup would return when that module comes first, so it
+    /// is compared with what the other modules publish: a private graph
+    /// beside a published routine, beside a published graph of another
+    /// body, and a private routine no header prints beside a published
+    /// routine of another form — each refused in both table orders.
+    /// Mutation: compare exported forms only (`readings_conflict`
+    /// requiring BOTH readings to be published) — every
+    /// pair here then compiles or misreports by order.
+    #[test]
+    fn a_private_declaration_beside_a_published_one_of_another_form_conflicts_in_both_orders() {
+        assert_conflict_in_both_orders(CALLS_WALKER, ("la.tmh", LA), ("lr.tmh", LR), "lib::walker");
+        assert_conflict_in_both_orders(
+            GRAFTS_WALKER,
+            ("la.tmh", LA),
+            ("lb.tmh", LB),
+            "lib::walker",
+        );
+        assert_conflict_in_both_orders(
+            CALLS_R,
+            ("x.tmc", X_PRIVATE_R),
+            ("h.tmh", H_R_QUIET),
+            "lib::r",
+        );
+    }
+
+    /// The near miss: a private declaration beside a published one of the
+    /// SAME form merges, in both orders — a private routine beside a
+    /// header publishing the set it really writes. (No such pair exists
+    /// for a graph: its digest covers its `export` keyword, so a private
+    /// graph and an exported one never have one form.) Mutation: refuse
+    /// any private declaration that shares a name with a published one,
+    /// whatever its form.
+    #[test]
+    fn a_private_declaration_beside_a_published_one_of_the_same_form_merges() {
+        let (a, b) = (("x.tmc", X_PRIVATE_R), ("h.tmh", H_R_SAME));
+        for order in [[a, b], [b, a]] {
+            if let Err(e) = analyze_with(CALLS_R, &table(&order)) {
+                panic!("[{}, {}]: {e:?}", order[0].0, order[1].0);
+            }
+        }
+    }
+
+    /// Two modules' PRIVATE declarations of one name, with nothing
+    /// published under it, are not compared with each other: a consumer
+    /// of one module's export compiles in both orders. Mutation: compare
+    /// every pair of readings whatever their export status.
+    #[test]
+    fn two_private_declarations_of_one_name_with_nothing_published_do_not_conflict() {
+        for order in [
+            [("la.tmh", LA), ("lz.tmh", LZ)],
+            [("lz.tmh", LZ), ("la.tmh", LA)],
+        ] {
+            let out = crate::compiler::compile(
+                GRAFTS_OUTER_A,
+                crate::compiler::CompileOptions {
+                    externals: table(&order),
+                    ..Default::default()
+                },
+            );
+            if let Err(e) = out {
+                panic!("[{}, {}]: {e:?}", order[0].0, order[1].0);
+            }
+        }
+    }
+
+    /// A published reading EQUAL to an earlier private one is still a
+    /// published reading: a third module's private declaration of another
+    /// form conflicts with it. Mutation: retain a reading only when no
+    /// equal FORM was seen, whatever its export status
+    /// (`Declarations::check_conflicts`) — the published reading is then
+    /// dropped as a duplicate of the private one and the third module is
+    /// compared private against private.
+    #[test]
+    fn a_published_reading_equal_to_an_earlier_private_one_is_still_compared() {
+        let decls = table(&[
+            ("x.tmc", X_PRIVATE_R),
+            ("h.tmh", H_R_SAME),
+            ("x2.tmc", X2_PRIVATE_R),
+        ]);
+        let err = analyze_with(CALLS_R, &decls).unwrap_err();
+        assert_eq!(
+            err.kind,
+            Kind::ConflictingDeclaration {
+                name: "lib::r".into(),
+                first: "`h.tmh`".into(),
+                second: "`x2.tmc`".into(),
+            }
+        );
+    }
+
+    /// The own-definition check is symmetric with the table's: a unit's
+    /// PUBLISHED definition is compared with a declaration a table module
+    /// carries privately, as its private definition is with a published
+    /// one. With one module in the table the table's own pair check does
+    /// not run, so this is the own-definition check alone. Mutation:
+    /// compare the unit's definitions with the table's EXPORTED forms
+    /// only (`check_own_against_table`).
+    #[test]
+    fn an_own_published_definition_conflicts_with_a_private_declaration_of_the_table() {
+        let own = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  export routine walker(tape t: marks writes {}) {\n    entry state s { [*] -> return; }\n  }\n}\n";
+        let err = analyze_with(own, &table(&[("la.tmh", LA)]))
+            .map(|_| ())
+            .expect_err("the unit publishes `lib::walker` as another form");
+        assert_eq!(
+            err.kind,
+            Kind::ConflictingDeclaration {
+                name: "lib::walker".into(),
+                first: "this unit".into(),
+                second: "`la.tmh`".into(),
+            }
+        );
+        assert_eq!(err.span.start.line, 3);
+    }
+
+    /// The near miss: the unit's PRIVATE graph beside a table module's
+    /// private graph of another body is not a conflict. Mutation: compare
+    /// the unit's definitions with every declaration a module carries,
+    /// whatever either side's export status.
+    #[test]
+    fn an_own_private_definition_beside_a_private_declaration_of_the_table_is_legal() {
+        let own = "namespace lib {\n  export alphabet marks { '_', 'x', 'y' }\n  graph walker(tape t: marks, state done) {\n    entry state w {\n      ['y'] -> write ['x'] goto done;\n      [*]   -> goto done;\n    }\n  }\n  export graph outerZ(tape a: marks, state done) {\n    entry graft walker(t = a, done = done) as inner;\n  }\n}\n";
+        if let Err(e) = analyze_with(own, &table(&[("la.tmh", LA)])) {
+            panic!("{e:?}");
         }
     }
 

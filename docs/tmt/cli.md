@@ -209,7 +209,12 @@ repeatable. Two files declaring one name must declare it identically — a
 unit's source and its header, one library given twice — or the compile
 fails `conflicting-declaration`; the same holds against the embedded
 standard library, which is read last, and against the unit's own
-definitions (`docs/tmt/language.md (declarations)`). To fix the error, keep
+definitions, exported or not. A name one file carries without exporting
+it — a private graph a header prints, a private routine of a `.tmc` — is
+held to the same rule beside another file's published declaration of
+that name, in either order of the two flags; two files' private
+declarations of one name are not compared
+(`docs/tmt/language.md (declarations)`). To fix the error, keep
 one declaration per name: after changing a unit, regenerate its header
 with `tmt interface` (a stale header beside its unit is the usual cause),
 or drop the file that declares the name differently. A declaration read
@@ -302,7 +307,7 @@ subsection.
 | `range-outside-alphabet` | A range in a pattern cell or a contract clause has no walk over the alphabet it is written against, which it walks in declared order: a cell range's endpoint is not a symbol of the alphabet, or the second endpoint comes first in it. |
 | `empty-set-in-pattern` | A pattern cell names a glyph set with no members, so the rule can never match. |
 | `duplicate-name` | Two entities (alphabet, map, routine, graph, or namespace) share one name in one scope — including a top-level `main`, which is reserved for the entry world in every unit, library or program (`docs/tmt/language.md (program structure)`). |
-| `conflicting-declaration` | Two declarations of one qualified name disagree: two declaration sources publish it differently, or this unit defines a name its declarations publish differently, or this unit would splice two different graphs under one name (the message names both origins). Identical declarations — a unit's source and its up-to-date header, one library reached twice — are one declaration. |
+| `conflicting-declaration` | Two declarations of one qualified name disagree: two declaration sources publish it differently, or one publishes it and another carries it privately in another form, or this unit defines a name its declarations declare differently (either side publishing it), or this unit would splice two different graphs under one name (the message names both origins). Identical declarations — a unit's source and its up-to-date header, one library reached twice — are one declaration. |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
 | `duplicate-pattern-binding` | One rule's pattern binds a name twice (`[0..7 as x, 0..7 as x]`) — the message names both cells and the state; give each binding its own name. |
 | `too-many-tapes` | A world declares more than 16 tapes. |
