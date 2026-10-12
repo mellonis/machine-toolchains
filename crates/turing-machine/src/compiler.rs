@@ -2067,6 +2067,29 @@ pub(crate) enum Provenance {
     Object,
 }
 
+/// Whether an analysis runs the checks whose verdict depends on what the
+/// OTHER declaration sources currently publish: the table's own
+/// one-declaration check, the write-contract check (a callee's published
+/// write set bounds the caller's footprint) and the own-definition check.
+/// None of the three changes the [`Resolved`] an analysis produces, so a
+/// reading taken with them [`Deferred`](PeerChecks::Deferred) is the same
+/// reading an enforced one yields whenever the enforced one succeeds.
+/// Deferring is for the one caller that reads sources against a set of
+/// peers still being settled (`header::resolve_declarations`,
+/// docs/tmt/project.md (Declaration derivation)): there such a refusal is
+/// provisional, and only the settled set decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerChecks {
+    Enforced,
+    Deferred,
+}
+
+/// The diagnostic codes the peer-dependent checks report — the refusals a
+/// read against a not-yet-settled set of peers must treat as provisional
+/// ([`PeerChecks`]).
+pub(crate) const PEER_CHECK_CODES: [&str; 2] =
+    ["conflicting-declaration", "writes-outside-contract"];
+
 /// [`analyze_with_mode`] with the reading's [`Provenance`] — what
 /// `header::read_declarations_with_mode` threads through; the object arm
 /// (`header::declarations_from_object`) is the one caller that passes
@@ -2077,10 +2100,22 @@ pub(crate) fn analyze_with_provenance(
     mode: ReadMode,
     provenance: Provenance,
 ) -> Result<Analysis, CompileError> {
+    analyze_reading(source, externals, mode, provenance, PeerChecks::Enforced)
+}
+
+/// [`analyze_with_provenance`] with an explicit [`PeerChecks`] — the
+/// declarations reader's entry point.
+pub(crate) fn analyze_reading(
+    source: &str,
+    externals: &Declarations,
+    mode: ReadMode,
+    provenance: Provenance,
+    checks: PeerChecks,
+) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(Rc::clone(&green)), source);
-    let (resolved, diagnostics) = resolve_program(&program, externals, mode, provenance)?;
+    let (resolved, diagnostics) = resolve_program(&program, externals, mode, provenance, checks)?;
     Ok(Analysis {
         resolved,
         diagnostics,
@@ -2105,8 +2140,12 @@ fn resolve_program(
     externals: &Declarations,
     mode: ReadMode,
     provenance: Provenance,
+    checks: PeerChecks,
 ) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
-    externals.check_conflicts()?;
+    let enforced = checks == PeerChecks::Enforced;
+    if enforced {
+        externals.check_conflicts()?;
+    }
     check_declarations_shape(program, mode)?;
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
@@ -2138,9 +2177,13 @@ fn resolve_program(
     // (`crate::footprint` walks `BindingValue::Named::map::pairs`), so this
     // must run first.
     expand_named_maps(&mut resolved, &scopes, externals)?;
-    check_contracts(&resolved, externals)?;
+    if enforced {
+        check_contracts(&resolved, externals)?;
+    }
     check_head_contracts(&resolved)?;
-    crate::published::check_own_against_table(program, &resolved, externals, mode, provenance)?;
+    if enforced {
+        crate::published::check_own_against_table(program, &resolved, externals, mode, provenance)?;
+    }
     let WorldCtx {
         imports_used,
         mut diagnostics,
@@ -2972,7 +3015,13 @@ pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> Tmc
     };
     let green_retained = Some(Rc::clone(&green));
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
-    match resolve_program(&program, externals, ReadMode::Program, Provenance::Text) {
+    match resolve_program(
+        &program,
+        externals,
+        ReadMode::Program,
+        Provenance::Text,
+        PeerChecks::Enforced,
+    ) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,

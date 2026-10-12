@@ -159,8 +159,9 @@ use mtc_core::formats::object::{
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
-    self, CompileError, CompileErrorKind, Provenance, ReadMode, Resolved, ResolvedCallTarget,
-    ResolvedWorld, WorldKind, clause_glyphs, full_name, published_writes, symset_glyphs,
+    self, CompileError, CompileErrorKind, PeerChecks, Provenance, ReadMode, Resolved,
+    ResolvedCallTarget, ResolvedWorld, WorldKind, clause_glyphs, full_name, published_writes,
+    symset_glyphs,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -340,12 +341,30 @@ fn canonical(text: &str) -> Result<String, String> {
 /// another declared unit needs that unit's declarations in hand just to
 /// extract its OWN shape. [`resolve_declarations`] is what builds this
 /// context, growing it as more sources resolve.
+#[cfg(test)]
 pub(crate) fn read_extern(
     path: &Path,
     source: &str,
     externals: &Declarations,
 ) -> Result<Resolved, CompileError> {
-    read_declarations_with_mode(source, header_mode_for(path), externals, Provenance::Text)
+    read_extern_with(path, source, externals, PeerChecks::Enforced)
+}
+
+/// [`read_extern`] with an explicit [`PeerChecks`] — what
+/// [`resolve_declarations`] reads a text source through.
+fn read_extern_with(
+    path: &Path,
+    source: &str,
+    externals: &Declarations,
+    checks: PeerChecks,
+) -> Result<Resolved, CompileError> {
+    read_declarations_with_mode(
+        source,
+        header_mode_for(path),
+        externals,
+        Provenance::Text,
+        checks,
+    )
 }
 
 /// `.tmh` (case-insensitive) selects STRICT [`ReadMode::DeclarationsOnly`]
@@ -372,8 +391,9 @@ fn read_declarations_with_mode(
     mode: ReadMode,
     externals: &Declarations,
     provenance: Provenance,
+    checks: PeerChecks,
 ) -> Result<Resolved, CompileError> {
-    let analysis = compiler::analyze_with_provenance(source, externals, mode, provenance)?;
+    let analysis = compiler::analyze_reading(source, externals, mode, provenance, checks)?;
     let mut resolved = analysis.resolved;
     settle_declarations(&analysis.program, &mut resolved, externals, mode);
     Ok(resolved)
@@ -474,9 +494,20 @@ pub(crate) fn settle_declarations(
 /// object with nothing to show is worth naming; here, feeding an object
 /// with nothing to declare to another unit is not a mistake at all — it
 /// declares nothing because it exports nothing.
+#[cfg(test)]
 pub(crate) fn declarations_from_object(
     obj: &ObjectFile,
     externals: &Declarations,
+) -> Result<Resolved, UnresolvedSource> {
+    declarations_from_object_with(obj, externals, PeerChecks::Enforced)
+}
+
+/// [`declarations_from_object`] with an explicit [`PeerChecks`] — what
+/// [`resolve_declarations`] reads an object source through.
+fn declarations_from_object_with(
+    obj: &ObjectFile,
+    externals: &Declarations,
+    checks: PeerChecks,
 ) -> Result<Resolved, UnresolvedSource> {
     if obj.interface.is_none() {
         return Ok(empty_resolved());
@@ -490,6 +521,7 @@ pub(crate) fn declarations_from_object(
         ReadMode::DeclarationsOnly,
         externals,
         Provenance::Object,
+        checks,
     )
     .map(|mut resolved| {
         resolved.from_object = true;
@@ -564,10 +596,21 @@ pub(crate) struct DeclarationSource {
 }
 
 impl DeclarationSource {
-    fn read(&self, externals: &Declarations) -> Result<Resolved, UnresolvedSource> {
+    /// The file this source was read from, for a diagnostic.
+    fn path(&self) -> &Path {
+        match &self.text {
+            DeclarationText::Source { path, .. } | DeclarationText::Object { path, .. } => path,
+        }
+    }
+
+    fn read(
+        &self,
+        externals: &Declarations,
+        checks: PeerChecks,
+    ) -> Result<Resolved, UnresolvedSource> {
         match &self.text {
             DeclarationText::Source { path, text } => {
-                read_extern(path, text, externals).map_err(|e| UnresolvedSource {
+                read_extern_with(path, text, externals, checks).map_err(|e| UnresolvedSource {
                     message: format!(
                         "{}:{}:{}: error: {} [{}]",
                         path.display(),
@@ -579,72 +622,210 @@ impl DeclarationSource {
                     code: e.kind.code(),
                 })
             }
-            DeclarationText::Object { path, object } => declarations_from_object(object, externals)
-                .map_err(|inner| UnresolvedSource {
-                    message: format!("{}: {}", path.display(), inner.message),
-                    code: inner.code,
-                }),
+            DeclarationText::Object { path, object } => {
+                declarations_from_object_with(object, externals, checks).map_err(|inner| {
+                    UnresolvedSource {
+                        message: format!("{}: {}", path.display(), inner.message),
+                        code: inner.code,
+                    }
+                })
+            }
+        }
+    }
+
+    /// One read of this source against `externals`, as the settling loop
+    /// of [`resolve_declarations`] takes it: the reading (when one can be
+    /// had) and the verdict of the full, checked read (`None` when it read
+    /// clean). The checked read comes first, so a source that reads clean
+    /// is read exactly once. A refusal by one of the peer-dependent checks
+    /// (`compiler::PEER_CHECK_CODES`) does not cost the source its
+    /// reading: those checks change nothing a reading publishes, so the
+    /// source is read again with them deferred and its peers still see
+    /// what it declares; whether the refusal stands is decided by the
+    /// read made against the settled set.
+    fn read_settling(
+        &self,
+        externals: &Declarations,
+    ) -> (Option<Resolved>, Option<UnresolvedSource>) {
+        match self.read(externals, PeerChecks::Enforced) {
+            Ok(reading) => (Some(reading), None),
+            Err(refusal) if compiler::PEER_CHECK_CODES.contains(&refusal.code) => (
+                self.read(externals, PeerChecks::Deferred).ok(),
+                Some(refusal),
+            ),
+            Err(refusal) => (None, Some(refusal)),
         }
     }
 }
 
-/// Read every source in `sources` against a shared, GROWING context
-/// (docs/tmt/project.md (Declaration derivation)): it starts empty and
-/// gains each source's own declarations the moment it reads clean, one
-/// pass at a time, until a WHOLE pass makes no further progress — THEN
-/// the embedded standard library is pushed, unless `stdlib` is false (a
-/// switch that therefore reaches EVERY read here, siblings, libraries
-/// and `--extern` files alike). Pushing stdlib last, after every peer,
-/// matches the FINAL table's own order below, so a conflict between a
-/// peer and the stdlib names the same two origins in either place. The
-/// order decides nothing else: a peer declaring a name the stdlib (or
-/// another peer) publishes differently fails its read as
-/// `conflicting-declaration` (docs/tmt/language.md (declarations)), and
-/// one publishing it identically merges. This is what lets a library
-/// header depend on another library, a sibling on another sibling, or an
-/// `--extern` file on another `--extern` file, of any dependency depth
-/// and regardless of the order they were given in; the FINAL table's
-/// assembly (siblings, then libraries in `-l` order, then stdlib; or
-/// `--extern` files in command-line order, then stdlib) happens
-/// separately, in the caller, from these same results.
+/// What [`resolve_declarations`] did, for the tests that pin its cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SettleStats {
+    /// Sweeps over the sources.
+    pub passes: usize,
+    /// Checked reads made (a deferred re-read after a provisional refusal
+    /// is not counted separately).
+    pub reads: usize,
+    /// The largest sweep guard computed — `passes` stays at or below it
+    /// unless the readings failed to settle.
+    pub guard: usize,
+    /// Readings that REPLACED an earlier reading of their source without
+    /// narrowing it ([`narrowing_left`] did not drop). The sweep guard
+    /// assumes there are none; a test holds this at zero over every
+    /// fixture, so a field that starts to change on its own shows up.
+    pub non_narrowing_changes: usize,
+}
+
+/// A sentinel [`UnresolvedSource::code`] for a set of sources whose
+/// declarations did not settle within the pass limit of
+/// [`resolve_declarations`] — never one of the compiler's own codes.
+const DECLARATIONS_UNSETTLED: &str = "declarations-unsettled";
+
+/// Read every source in `sources` against the declarations of all the
+/// OTHERS, until what they publish stops changing
+/// (docs/tmt/project.md (Declaration derivation)). The result does not
+/// depend on the order the sources are given in.
+///
+/// What a source publishes depends on its peers: a `.tmc` read publishes
+/// each uncontracted tape's INFERRED write set and each routine's inferred
+/// `noreturn` ([`settle_declarations`]), and both inferences read the
+/// callees' declarations — a callee nobody has declared yet is assumed to
+/// write the whole alphabet and to return. So a source is read again
+/// whenever a peer's reading has changed since its last read, each read
+/// against the latest reading of EVERY other source that has one (then
+/// the embedded standard library, pushed last unless `stdlib` is false —
+/// the final table's own order, so a conflict names the same origins in
+/// either place), and its new reading REPLACES the old one: one source
+/// contributes exactly one reading. The inferences only narrow as
+/// declarations arrive (a write set shrinks, `noreturn` goes from unknown
+/// to known), so the readings settle, to the same result whatever the
+/// order: with no cycle of calls between the sources each sweep settles
+/// at least one more, so `sources.len() + 1` sweeps suffice; a cycle of
+/// calls through maps that shift glyphs can lose one glyph per trip and
+/// take longer. The loop simply runs until nothing is due a read. Its
+/// only guard is a safety net for the monotonicity it relies on, never a
+/// limit a program can meet: every sweep but the last changes a reading,
+/// and a change is a first reading or a narrowing, so the sweeps cannot
+/// exceed the number of sources plus what the readings in hand can still
+/// lose ([`settle_height`]). Past that, every source still due a read
+/// fails with an internal-consistency error rather than looping or being
+/// accepted unsettled.
+///
+/// A read made before the set has settled can be refused for a reason the
+/// settled set removes — a caller's `writes` contract violated only
+/// because its callee had not yet been read against ITS callee, or two
+/// readings of one unit that disagree only until the later one narrows.
+/// Such a refusal (`compiler::PEER_CHECK_CODES`) is PROVISIONAL: the
+/// source keeps a reading taken with those checks deferred
+/// ([`DeclarationSource::read_settling`]), and its verdict is the one its
+/// last read gave — which, once nothing is due a read, was made against
+/// the settled set. A refusal that persists there is reported as before;
+/// every other error (syntax, an unresolved name) costs the source its
+/// new reading at once, and an earlier reading of it, if any, stays for
+/// its peers.
+///
+/// This is what lets a library header depend on another library, a
+/// sibling on another sibling, or an `--extern` file on another `--extern`
+/// file, of any dependency depth and regardless of the order they were
+/// given in; the FINAL table's assembly (siblings, then libraries in `-l`
+/// order, then stdlib; or `--extern` files in command-line order, then
+/// stdlib) happens separately, in the caller, from these same results.
 ///
 /// Returns one outcome per input source, same order, same length: `Ok`
-/// from the pass that first read it clean, `Err` (its own error, from
-/// its own LAST read attempt — the richest context it ever saw — naming
-/// its own path) once the fixpoint stops making progress with it still
-/// unread. Two sources that genuinely need EACH OTHER's declarations
-/// never converge; both come back `Err` (docs/tmt/project.md
-/// (Declaration derivation) — mutual dependency is not supported; give
-/// one of them a hand-written header instead). The caller — never this
-/// function — decides how to render several such `Err`s together
-/// (`cli/build.rs::render_unresolved`): reporting every one of them,
-/// not choosing a single "most likely" cause, is what lets a mutual
-/// pair's two names both reach the user regardless of which was listed
-/// first.
+/// with its settled reading, or `Err` with the error of its own LAST read
+/// — naming its own path. Two sources that each need the OTHER's
+/// declarations merely to be read (each naming an alphabet the other
+/// declares, say) never get a reading; both come back `Err`
+/// (docs/tmt/project.md (Declaration derivation) — give one of them a
+/// hand-written header instead). The caller — never this function —
+/// decides how to render several such `Err`s together
+/// (`cli/build.rs::render_unresolved`).
 ///
-/// Cost: in the ordinary case (no source needs more than one or two
-/// peers) parse work stays close to one read per source. The worst case
-/// — a source that resolves only on the LAST pass — re-reads it once per
-/// pass, `O(sources)` passes of `O(sources)` reads; accepted as the price
-/// of never depending on declared order for correctness, not a cost this
-/// function tries to hide.
+/// Cost: a source that reads clean and whose peers then stay as they are
+/// is read once — a lone source is read exactly once. Otherwise each
+/// change of a peer costs one more read.
 pub(crate) fn resolve_declarations(
     sources: &[DeclarationSource],
     stdlib: bool,
 ) -> Vec<Result<Resolved, UnresolvedSource>> {
+    resolve_declarations_counted(sources, stdlib).0
+}
+
+/// How many times one reading can still narrow: one step per routine or
+/// graph (its `noreturn`) and one per glyph of each of its tapes (its
+/// published write set).
+fn settle_height(reading: &Resolved) -> usize {
+    reading
+        .worlds
+        .iter()
+        .filter(|w| w.kind != WorldKind::Machine)
+        .map(|w| 1 + w.tapes.iter().map(|t| t.cardinality).sum::<usize>())
+        .sum()
+}
+
+/// What a reading can still lose by narrowing: per routine or graph, one
+/// for a `noreturn` not yet known plus the size of each tape's published
+/// write set (the whole alphabet where none is stated). Every change of a
+/// reading the settling loop expects lowers this.
+fn narrowing_left(reading: &Resolved) -> usize {
+    reading
+        .worlds
+        .iter()
+        .filter(|w| w.kind != WorldKind::Machine)
+        .map(|w| {
+            usize::from(w.declared_noreturn.is_none())
+                + w.tapes
+                    .iter()
+                    .map(|t| t.writes.map_or(t.cardinality, |set| set.len() as usize))
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+/// [`resolve_declarations`], also reporting what it cost.
+pub(crate) fn resolve_declarations_counted(
+    sources: &[DeclarationSource],
+    stdlib: bool,
+) -> (Vec<Result<Resolved, UnresolvedSource>>, SettleStats) {
     let n = sources.len();
-    let mut resolved: Vec<Option<Resolved>> = vec![None; n];
-    let mut last_err: Vec<Option<UnresolvedSource>> = vec![None; n];
-    loop {
-        let mut progress = false;
+    let mut readings: Vec<Option<Resolved>> = vec![None; n];
+    // The verdict of each source's LAST read: `None` once it read clean.
+    let mut verdicts: Vec<Option<UnresolvedSource>> = vec![None; n];
+    // Due a read: never read, or a peer's reading changed since.
+    let mut due = vec![true; n];
+    let mut stats = SettleStats::default();
+    while due.contains(&true) {
+        // Every sweep but the last changes a reading, and a change is a
+        // first reading (at most one per source) or a narrowing: a glyph
+        // leaves a published write set, or a routine becomes `noreturn`.
+        // So the readings in hand bound the sweeps still possible.
+        let narrowings: usize = readings.iter().flatten().map(settle_height).sum();
+        stats.guard = stats.guard.max(n + narrowings);
+        if stats.passes > n + narrowings {
+            for i in (0..n).filter(|&i| due[i]) {
+                verdicts[i] = Some(UnresolvedSource {
+                    message: format!(
+                        "{}: internal error: the declarations of this build's sources did \
+                         not settle after {} passes over them; this is a defect in tmt, \
+                         not in the source [{DECLARATIONS_UNSETTLED}]",
+                        sources[i].path().display(),
+                        stats.passes
+                    ),
+                    code: DECLARATIONS_UNSETTLED,
+                });
+            }
+            break;
+        }
+        stats.passes += 1;
         for i in 0..n {
-            if resolved[i].is_some() {
+            if !due[i] {
                 continue;
             }
+            due[i] = false;
             let mut context = Declarations::none();
-            for (j, entry) in resolved.iter().enumerate() {
+            for (j, reading) in readings.iter().enumerate() {
                 if i != j
-                    && let Some(r) = entry
+                    && let Some(r) = reading
                 {
                     context.push(sources[j].origin.clone(), r.clone());
                 }
@@ -654,25 +835,37 @@ pub(crate) fn resolve_declarations(
             if stdlib {
                 context.push_stdlib();
             }
-            match sources[i].read(&context) {
-                Ok(r) => {
-                    resolved[i] = Some(r);
-                    progress = true;
+            stats.reads += 1;
+            let (reading, verdict) = sources[i].read_settling(&context);
+            verdicts[i] = verdict;
+            if let Some(reading) = reading
+                && readings[i].as_ref() != Some(&reading)
+            {
+                if let Some(old) = &readings[i]
+                    && narrowing_left(&reading) >= narrowing_left(old)
+                {
+                    stats.non_narrowing_changes += 1;
                 }
-                Err(e) => last_err[i] = Some(e),
+                // REPLACED, never added beside the old one: the slot is
+                // the source's one reading.
+                readings[i] = Some(reading);
+                for (j, flag) in due.iter_mut().enumerate() {
+                    if j != i {
+                        *flag = true;
+                    }
+                }
             }
         }
-        if !progress {
-            break;
-        }
     }
-    resolved
+    let results = readings
         .into_iter()
-        .zip(last_err)
-        .map(|(r, e)| {
-            r.ok_or_else(|| e.expect("every still-unresolved source was attempted at least once"))
+        .zip(verdicts)
+        .map(|(reading, verdict)| match verdict {
+            Some(refusal) => Err(refusal),
+            None => Ok(reading.expect("a source with no refusal read clean")),
         })
-        .collect()
+        .collect();
+    (results, stats)
 }
 
 /// A [`Resolved`] declaring nothing — [`declarations_from_object`]'s
@@ -2323,4 +2516,254 @@ fn indented(lines: Vec<String>) -> Vec<String> {
 /// directly.
 fn synthesized_alphabet_name(routine_full_name: &str, param_name: &str) -> String {
     format!("{}__{param_name}", routine_full_name.replace("::", "_"))
+}
+
+#[cfg(test)]
+mod settle_tests {
+    //! The settling loop of [`resolve_declarations`]: one outcome in every
+    //! order of the sources, what it costs, and the assumption its sweep
+    //! guard rests on (docs/tmt/project.md (Declaration derivation)).
+
+    use super::*;
+
+    const A_MID: &str = "namespace a {\n  export alphabet ab { '_', 'x', 'y' }\n  export routine mid(tape t: ab) {\n    entry state s { [*] -> call b::leaf(t = t) then d; }\n    state d { [*] -> return; }\n  }\n}\n";
+    const B_LEAF: &str = "namespace b {\n  export alphabet ab { '_', 'x', 'y' }\n  export routine leaf(tape t: ab) {\n    entry state s { [*] -> write ['x'] return; }\n  }\n}\n";
+    const B_RELAY: &str = "namespace b {\n  export alphabet ab { '_', 'x', 'y' }\n  export routine leaf(tape t: ab) {\n    entry state s { [*] -> call d::leaf(t = t) then e; }\n    state e { [*] -> return; }\n  }\n}\n";
+    const D_LEAF: &str = "namespace d {\n  export alphabet ab { '_', 'x', 'y' }\n  export routine leaf(tape t: ab) {\n    entry state s { [*] -> write ['x'] return; }\n  }\n}\n";
+    const C_TOP: &str = "use a::ab;\nroutine top(tape t: ab writes { 'x' }) {\n  entry state s { [*] -> call a::mid(t = t) then d; }\n  state d { [*] -> return; }\n}\nmachine {\n  tape t: ab;\n  entry state go { [*] -> call top(t = t) then fin; }\n  state fin { [*] -> stop; }\n}\n";
+
+    /// `a::f` and `b::g` over one five-glyph alphabet call each other, `f`
+    /// through a map that shifts the glyphs: each trip round the cycle
+    /// drops one glyph from the write sets the two publish.
+    const CYC_A: &str = "namespace a {\n  export alphabet ab { '_', 'a', 'b', 'c', 'd' }\n  export routine f(tape t: ab) {\n    entry state s { [*] -> call b::g(t = t with map { 'a' -> 'b', 'b' -> 'c', 'c' -> 'd', 'd' => '_' }) then e; }\n    state e { [*] -> return; }\n  }\n}\n";
+    const CYC_B: &str = "namespace b {\n  export alphabet ab { '_', 'a', 'b', 'c', 'd' }\n  export routine g(tape t: ab) {\n    entry state s { [*] -> call a::f(t = t) then e; }\n    state e { [*] -> return; }\n  }\n}\n";
+    const CYC_C: &str = "use a::ab;\nmachine {\n  tape t: ab;\n  entry state go { [*] -> call a::f(t = t) then fin; }\n  state fin { [*] -> stop; }\n}\n";
+
+    /// The same cycle over alphabets of five and four glyphs, each call
+    /// through a shifting map; `c`'s `top` promises to write nothing, which
+    /// the settled cycle still breaks by the blank alone.
+    const CYC2_A: &str = "namespace a {\n  export alphabet big { '_', 'a', 'b', 'c', 'd' }\n  export routine f(tape t: big) {\n    entry state s {\n      ['_'] -> return;\n      [*]   -> call b::g(t = t with map { 'a' -> 'x', 'b' -> 'y', 'c' -> 'z' }) then e;\n    }\n    state e { [*] -> return; }\n  }\n}\n";
+    const CYC2_B: &str = "namespace b {\n  export alphabet small { '_', 'x', 'y', 'z' }\n  export routine g(tape t: small) {\n    entry state s {\n      ['_'] -> return;\n      [*]   -> call a::f(t = t with map { 'x' -> 'b', 'y' -> 'c', 'z' -> 'd' }) then e;\n    }\n    state e { [*] -> return; }\n  }\n}\n";
+    const CYC2_C: &str = "use a::big;\nroutine top(tape t: big writes {}) {\n  entry state s { [*] -> call a::f(t = t) then d; }\n  state d { [*] -> return; }\n}\nmachine {\n  tape t: big;\n  entry state go { [*] -> call top(t = t) then fin; }\n  state fin { [*] -> stop; }\n}\n";
+
+    /// Two sources whose routines call each other, each under `writes
+    /// { '0' }`, and the same pair with `bb::rb` really writing `'1'`
+    /// under a contract that allows it — which breaks `aa::ra`'s.
+    const PAIR_A: &str = "namespace aa {\n  export alphabet t { '_', '0', '1' }\n  export routine ra(tape x: t writes { '0' }) {\n    entry state s {\n      ['1'] -> write ['0'] move [>] call bb::rb(x = x) then done;\n      [*]   -> return;\n    }\n    state done { [*] -> return; }\n  }\n}\n";
+    const PAIR_B: &str = "namespace bb {\n  export alphabet t { '_', '0', '1' }\n  export routine rb(tape x: t writes { '0' }) {\n    entry state s {\n      ['1'] -> write ['0'] move [>] call aa::ra(x = x) then done;\n      [*]   -> return;\n    }\n    state done { [*] -> return; }\n  }\n}\n";
+    const PAIR_B_LOUD: &str = "namespace bb {\n  export alphabet t { '_', '0', '1' }\n  export routine rb(tape x: t writes { '0', '1' }) {\n    entry state s {\n      ['0'] -> write ['1'] move [>] call aa::ra(x = x) then done;\n      [*]   -> return;\n    }\n    state done { [*] -> return; }\n  }\n}\n";
+
+    type Outcome = Vec<(String, Result<Resolved, String>)>;
+
+    fn settle(order: &[(&str, &str)]) -> (Outcome, SettleStats) {
+        let sources: Vec<DeclarationSource> = order
+            .iter()
+            .map(|(name, text)| DeclarationSource {
+                origin: Origin::Sibling(PathBuf::from(name)),
+                text: DeclarationText::Source {
+                    path: PathBuf::from(name),
+                    text: text.to_string(),
+                },
+            })
+            .collect();
+        let (results, stats) = resolve_declarations_counted(&sources, false);
+        assert_eq!(results.len(), order.len(), "one outcome per source");
+        let mut outcome: Outcome = order
+            .iter()
+            .zip(results)
+            .map(|((name, _), r)| (name.to_string(), r.map_err(|e| e.message)))
+            .collect();
+        outcome.sort_by(|a, b| a.0.cmp(&b.0));
+        (outcome, stats)
+    }
+
+    fn orderings<'a>(items: &[(&'a str, &'a str)]) -> Vec<Vec<(&'a str, &'a str)>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut all = Vec::new();
+        for i in 0..items.len() {
+            let mut rest = items.to_vec();
+            let head = rest.remove(i);
+            for mut tail in orderings(&rest) {
+                tail.insert(0, head);
+                all.push(tail);
+            }
+        }
+        all
+    }
+
+    /// Settle `sources` in every order: the outcome of each source —
+    /// its whole reading, or its error text — is the same in all of them,
+    /// the sweeps stay within the guard, and no reading was replaced by one
+    /// that did not narrow. Returns that one outcome and the most sweeps
+    /// any order took.
+    fn one_outcome_in_every_order(sources: &[(&str, &str)]) -> (Outcome, usize) {
+        let mut first: Option<Outcome> = None;
+        let mut most = 0;
+        for order in orderings(sources) {
+            let names: Vec<&str> = order.iter().map(|s| s.0).collect();
+            let (outcome, stats) = settle(&order);
+            assert!(stats.passes <= stats.guard, "{names:?}: {stats:?}");
+            assert_eq!(stats.non_narrowing_changes, 0, "{names:?}: {stats:?}");
+            most = most.max(stats.passes);
+            match &first {
+                None => first = Some(outcome),
+                Some(expected) => assert!(expected == &outcome, "{names:?} settled differently"),
+            }
+        }
+        (first.expect("at least one order"), most)
+    }
+
+    fn published_writes_of(outcome: &Outcome, source: &str, routine: &str) -> Vec<String> {
+        let reading = outcome
+            .iter()
+            .find(|(name, _)| name == source)
+            .and_then(|(_, r)| r.as_ref().ok())
+            .unwrap_or_else(|| panic!("{source} has a reading"));
+        let world = reading
+            .worlds
+            .iter()
+            .find(|w| w.name == routine)
+            .expect("the routine is declared");
+        let tape = &world.tapes[0];
+        let glyphs = &reading.alphabets[&tape.alphabet].glyphs;
+        symset_glyphs(
+            tape.writes.expect("a source reading publishes a set"),
+            glyphs,
+        )
+    }
+
+    /// A lone source is read exactly once, in one sweep: the checked read
+    /// comes first and nothing can make it due again. Mutation: mark a
+    /// source itself due when its own reading changes (drop the `j != i`
+    /// test) — it is then read twice.
+    #[test]
+    fn a_lone_source_is_read_exactly_once() {
+        let (outcome, stats) = settle(&[("b.tmc", B_LEAF)]);
+        assert!(outcome[0].1.is_ok());
+        assert_eq!((stats.passes, stats.reads), (1, 1), "{stats:?}");
+    }
+
+    /// The three-source and four-source chains settle to one outcome in
+    /// every order: every source reads clean and `a::mid` publishes only
+    /// the glyph the leaf really writes. Without a cycle of calls each
+    /// sweep settles one more source, so `sources + 1` sweeps suffice.
+    /// Mutation: read each source once (mark a peer due only while it has
+    /// no reading) — in the orders reading `a` before `b`, `a::mid`
+    /// publishes the whole alphabet and `c` is refused.
+    #[test]
+    fn a_chain_of_sources_settles_to_one_outcome_in_every_order() {
+        for sources in [
+            vec![("c.tmc", C_TOP), ("a.tmc", A_MID), ("b.tmc", B_LEAF)],
+            vec![
+                ("c.tmc", C_TOP),
+                ("a.tmc", A_MID),
+                ("b.tmc", B_RELAY),
+                ("d.tmc", D_LEAF),
+            ],
+        ] {
+            let (outcome, most) = one_outcome_in_every_order(&sources);
+            for (name, result) in &outcome {
+                assert!(result.is_ok(), "{name}: {:?}", result.as_ref().err());
+            }
+            assert_eq!(published_writes_of(&outcome, "a.tmc", "a::mid"), ["x"]);
+            assert!(most <= sources.len() + 1, "{most} sweeps");
+        }
+    }
+
+    /// A cycle of calls through a glyph-shifting map loses one glyph per
+    /// trip, so it takes MORE sweeps than `sources + 1` — and still settles
+    /// to one outcome in every order, within the guard: the write sets
+    /// `f` and `g` publish shrink from the whole alphabet to the one or
+    /// two glyphs the maps cannot shift away. Mutation: guard the sweeps by the number
+    /// of sources plus one (drop `narrowings` from the guard) — these
+    /// sources are then refused with the internal-consistency error, in
+    /// some orders and not others.
+    #[test]
+    fn a_cycle_of_calls_through_shifting_maps_settles_to_one_outcome_in_every_order() {
+        let pair = [("a.tmc", CYC_A), ("b.tmc", CYC_B)];
+        let (outcome, most) = one_outcome_in_every_order(&pair);
+        assert!(most > pair.len() + 1, "the cycle settled in {most} sweeps");
+        assert_eq!(published_writes_of(&outcome, "a.tmc", "a::f"), ["_", "a"]);
+        assert_eq!(published_writes_of(&outcome, "b.tmc", "b::g"), ["_", "a"]);
+
+        let (outcome, _) =
+            one_outcome_in_every_order(&[("c.tmc", CYC_C), ("a.tmc", CYC_A), ("b.tmc", CYC_B)]);
+        assert!(outcome.iter().all(|(_, r)| r.is_ok()), "{outcome:?}");
+
+        let three = [("c.tmc", CYC2_C), ("a.tmc", CYC2_A), ("b.tmc", CYC2_B)];
+        let (outcome, most) = one_outcome_in_every_order(&three);
+        assert!(most > three.len() + 1, "the cycle settled in {most} sweeps");
+        assert_eq!(published_writes_of(&outcome, "a.tmc", "a::f"), ["_"]);
+        assert_eq!(published_writes_of(&outcome, "b.tmc", "b::g"), ["_"]);
+        let refusal = outcome[2]
+            .1
+            .as_ref()
+            .expect_err("`top` promises to write nothing");
+        assert_eq!(
+            refusal,
+            "c.tmc:2:13: error: `top` may write '_' on tape `t`, which its contract forbids \
+             [writes-outside-contract]"
+        );
+    }
+
+    /// Two sources whose routines call each other under `writes`
+    /// contracts both read clean, in either order: a contract refusal met
+    /// before the peer had a reading is provisional, and against the
+    /// settled set each body holds its contract given the other's.
+    /// Mutation: treat provisional refusals as final (give a source
+    /// refused by a peer check no reading and keep its refusal) — both
+    /// sources then fail `writes-outside-contract`.
+    #[test]
+    fn two_sources_calling_each_other_under_contracts_both_read_clean() {
+        let (outcome, _) = one_outcome_in_every_order(&[("a.tmc", PAIR_A), ("b.tmc", PAIR_B)]);
+        for (name, result) in &outcome {
+            assert!(result.is_ok(), "{name}: {:?}", result.as_ref().err());
+        }
+    }
+
+    /// The near miss: the same pair with `bb::rb` really writing `'1'`.
+    /// `aa::ra`'s contract is then broken through the call, and that is
+    /// refused in either order with the one diagnostic of the settled set;
+    /// `bb`, whose own contract holds, reads clean. Mutation: accept a
+    /// source once it has a reading, whatever its last checked read said
+    /// (drop the verdict of a read that still yielded a reading) — `aa` is
+    /// then accepted.
+    #[test]
+    fn a_contract_really_broken_through_a_mutual_call_is_refused_in_either_order() {
+        let (outcome, _) = one_outcome_in_every_order(&[("a.tmc", PAIR_A), ("b.tmc", PAIR_B_LOUD)]);
+        assert_eq!(
+            outcome[0]
+                .1
+                .as_ref()
+                .expect_err("`aa::ra` breaks its contract"),
+            "a.tmc:3:21: error: `aa::ra` may write '1' on tape `x`, which its contract forbids \
+             [writes-outside-contract]"
+        );
+        assert!(outcome[1].1.is_ok(), "{:?}", outcome[1].1.as_ref().err());
+    }
+
+    /// One source contributes exactly one reading: the table assembled
+    /// from the settled results holds each name once, so the
+    /// one-declaration check — which compares every pair of readings —
+    /// finds nothing, though `a::mid` had a wider reading on the way.
+    /// Mutation: read each source once (mark a peer due only while it has
+    /// no reading) — `c` is then left refused against `a::mid`'s first,
+    /// wider reading and there is no settled table to assemble.
+    #[test]
+    fn a_settled_source_contributes_one_reading() {
+        let order = [("c.tmc", C_TOP), ("a.tmc", A_MID), ("b.tmc", B_LEAF)];
+        let (outcome, stats) = settle(&order);
+        assert!(stats.passes > 1, "the fixture must re-read a source");
+        let mut table = Declarations::none();
+        for (name, result) in outcome {
+            table.push(
+                Origin::Sibling(PathBuf::from(&name)),
+                result.unwrap_or_else(|e| panic!("{name}: {e}")),
+            );
+        }
+        assert_eq!(table.len(), order.len());
+        assert!(table.check_conflicts().is_ok());
+    }
 }

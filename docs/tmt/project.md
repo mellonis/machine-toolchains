@@ -136,24 +136,31 @@ parser rejects it as an unknown flag, the same refusal any unrecognized
 dashed token gets).
 
 **Every declaration source in a target — its effective sources and its
-effective libraries — is read together, through one shared fixpoint.**
-Each one is read against a context that starts as just the embedded
-standard library (unless `stdlib: false`, which reaches every read here
-just as it reaches the link stage — a library header depending on
-`std::` resolves exactly as a sibling would) and grows to include every
-OTHER source's declarations the moment IT reads clean, iterated pass
-after pass until a whole pass makes no further progress. This is what
-lets a library header depend on another library, a sibling depend on
-another sibling, or a library depend on a sibling, of any dependency
-depth and regardless of declared order — a library authored with `tmt
-interface --extern` (below) commonly ships a header that itself still
-`use`s another unit's declarations, and this is what lets `tmt build`
-read it back. The FINAL table lists every OTHER source of the same
-target, in its declared order, then each declared library, in
-`-l`/manifest order, then the embedded standard library unless opted
-out; since a name any of them publishes may be declared by the others
-only identically, privately or not (`docs/tmt/language.md
-(declarations)`), the order decides nothing about a published name.
+effective libraries — is read together, to a fixed point.** Each one is
+read against the declarations of all the OTHERS read so far, then the
+embedded standard library (unless `stdlib: false`, which reaches every
+read here just as it reaches the link stage — a library header depending
+on `std::` resolves exactly as a sibling would), and is read again
+whenever one of the others changes what it publishes, until nothing
+changes. What a `.tmc` publishes can depend on the others — an
+uncontracted tape's write set and a routine's `noreturn` are inferred
+through its calls, and a callee nobody has declared yet is taken to write
+its whole alphabet — and those inferences only narrow as declarations
+arrive, so the readings settle to one result whatever order the sources
+are declared in. This is what lets a library header depend on another
+library, a sibling depend on another sibling, or a library depend on a
+sibling, of any dependency depth and regardless of declared order — a
+library authored with `tmt interface --extern` (below) commonly ships a
+header that itself still `use`s another unit's declarations, and this is
+what lets `tmt build` read it back. A refusal that depends on the others
+— a `writes` contract broken through a call into another source, a
+`conflicting-declaration` — is decided against the settled readings
+only. The FINAL table lists every OTHER source of the same target, in its
+declared order, then each declared library, in `-l`/manifest order, then
+the embedded standard library unless opted out. The order decides
+nothing about what the sources publish, and nothing about a published
+name: the others may declare it only identically, privately or not
+(`docs/tmt/language.md (declarations)`).
 
 A `.tmc` sibling is read LENIENTLY: a routine's declared shape is its
 signature, and its body contributes what its generated header would
@@ -191,20 +198,19 @@ declared order, so the actual root cause is never displaced by one of
 its own downstream symptoms regardless of which file happens to be
 listed first.
 
-**Mutually dependent units are not supported**: if two sources need EACH
-OTHER's declarations to read clean (most commonly two mutually recursive
-routines split across files, each under a narrow write contract that can
-only be validated once the other's declared contract is known), neither
-source's own read ever sees the other — each treats its absent peer as
-an unconstrained, opaque callee, infers a wider write footprint than its
-OWN declared contract allows, and fails with a contract violation that
-is really a missing-peer symptom wearing a different diagnostic. Both
-sources are named in the build's own error, in either declared order,
-together with a trailing note describing the pattern and its escape:
-break the cycle by hand — write a header for one of the two units, edit
-it to state the fact the other side needs without the routine bodies
-that create the cycle, and give it to the build as a library instead of
-a sibling.
+**Units may depend on each other.** Two sources whose routines call each
+other — mutually recursive routines split across files, each under its
+own `writes` contract — build: each contract is checked against what the
+other publishes once the readings have settled, and a contract the
+settled pair really breaks is refused, naming the routine and the glyphs,
+in either declared order. What is still refused is a pair in which each
+source needs the OTHER's declarations merely to be READ — each naming an
+alphabet that only the other declares, for example: neither can be read
+first, so there is nothing for the fixed point to start from. Both
+sources are then named in the build's own error, in either declared
+order, with a trailing note describing the pattern and its escape: break
+the cycle by hand — write a header for one of the two units and give it
+to the build as a library instead of a sibling.
 
 For each declared library, **whatever exists of `<name>.tmo` (its
 interface section) and `<name>.tmh` (graphs, named maps, doc lines) on

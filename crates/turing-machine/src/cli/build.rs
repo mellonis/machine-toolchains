@@ -54,23 +54,24 @@ FLAGS:
 /// `--extern` files, read through the SAME shared fixpoint `tmt build`
 /// uses for its own siblings and libraries
 /// (`crate::header::resolve_declarations`, docs/tmt/project.md
-/// (Declaration derivation)): each file is read against every OTHER
-/// `--extern` file already read clean, then the embedded standard
-/// library (unless `nostdlib`), iterated until no more progress is made
-/// — so one `--extern` file may itself depend on another, in either
-/// command-line order. The FINAL table is still assembled in
-/// command-line order, then the embedded standard library last unless
-/// `nostdlib`. The order decides nothing: two files declaring one name
-/// must declare it identically, or the compile fails
-/// `conflicting-declaration` (docs/tmt/language.md (declarations)); the
-/// fixpoint's OWN read context pushes stdlib last too, so a conflict
-/// names the same origins either way. Every file that never reads clean is reported together,
-/// through [`render_unresolved`], never just the first in command-line
-/// order. Shared with `tmt interface`'s own `--extern`/`--nostdlib`
-/// (`cli/interface.rs`), which takes exactly this same meaning —
-/// `tmt build` derives its own siblings' and libraries' declarations
-/// independently (`cli/driver.rs`) and does NOT call this function,
-/// though it does share [`render_unresolved`] with it.
+/// (Declaration derivation)): each file is read against the declarations
+/// of every OTHER `--extern` file read so far, then the embedded standard
+/// library (unless `nostdlib`), and again whenever one of the others
+/// changes what it publishes, until nothing changes — so one `--extern`
+/// file may itself depend on another, and what the files publish does not
+/// depend on their command-line order. The FINAL table is still assembled
+/// in command-line order, then the embedded standard library last unless
+/// `nostdlib`. That order decides nothing about a published name: every
+/// other file's declaration of it must have the same form, or the compile
+/// fails `conflicting-declaration` (docs/tmt/language.md (declarations));
+/// the fixpoint's OWN read context pushes stdlib last too, so a conflict
+/// names the same origins either way. Every file whose last read failed
+/// is reported together, through [`render_unresolved`], never just the
+/// first in command-line order. Shared with `tmt interface`'s own
+/// `--extern`/`--nostdlib` (`cli/interface.rs`), which takes exactly this
+/// same meaning — `tmt build` derives its own siblings' and libraries'
+/// declarations independently (`cli/driver.rs`) and does NOT call this
+/// function, though it does share [`render_unresolved`] with it.
 pub(super) fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declarations, String> {
     let mut sources = Vec::with_capacity(paths.len());
     for raw in paths {
@@ -146,23 +147,17 @@ const DECLARATIONS_MISSING_CODES: [&str; 4] = [
 /// Classification is by CODE only, never by scanning `message` text, so
 /// a future reword of the rendered prose can never silently defeat it.
 ///
-/// When every remaining failure's code is one of those four, or is
-/// `writes-outside-contract`, a trailing note is appended. `writes-
-/// outside-contract` earns the same treatment for one specific reason:
-/// it is the shape two units that each need the OTHER's declarations
-/// fail with when neither's own read ever sees the other — each treats
-/// its absent peer as an unconstrained (opaque) callee, infers a wider
-/// write footprint than its OWN declared contract allows, and reports a
-/// contract violation that is really a missing-peer symptom wearing a
-/// different code. Two independent sources that each carry their own
-/// unrelated writes-outside-contract bug also trigger this note; that
-/// is accepted imprecision, not a claim that every such pair is a real
-/// cycle — the note only ever supplements the individual diagnostics
-/// already printed above it, never replaces them.
+/// When every failure's code is one of those four, a trailing note is
+/// appended: two units that each need the OTHER's declarations merely to
+/// be read (each naming an alphabet the other declares, say) never get a
+/// reading, and each reports the other's names as not given. That is the
+/// one dependency cycle still refused. A `writes-outside-contract` is
+/// never such a symptom: a contract refusal met before the peers have
+/// settled is provisional (`crate::header::resolve_declarations`), so one
+/// that reaches this function was decided against the settled set and is
+/// a real violation.
 pub(super) fn render_unresolved(failures: &[crate::header::UnresolvedSource]) -> String {
     let is_declarations_missing = |code: &str| DECLARATIONS_MISSING_CODES.contains(&code);
-    let may_be_a_missing_peer_symptom =
-        |code: &str| is_declarations_missing(code) || code == "writes-outside-contract";
 
     let mut ordered: Vec<&crate::header::UnresolvedSource> = failures
         .iter()
@@ -178,17 +173,13 @@ pub(super) fn render_unresolved(failures: &[crate::header::UnresolvedSource]) ->
         out.push_str(&f.message);
     }
 
-    if failures.len() >= 2
-        && failures
-            .iter()
-            .all(|f| may_be_a_missing_peer_symptom(f.code))
-    {
+    if failures.len() >= 2 && failures.iter().all(|f| is_declarations_missing(f.code)) {
         out.push_str(
             "\nnote: every source named above may be failing only because it needs one of \
              the others' declarations, and none of them ever supplied them to each other — \
-             two units that depend on each other's declarations are not supported; break the \
-             cycle by hand-writing a header for one of them and supplying that header in its \
-             place",
+             two units that each depend on the other's declarations merely to be read are not \
+             supported; break the cycle by hand-writing a header for one of them and \
+             supplying that header in its place",
         );
     }
 

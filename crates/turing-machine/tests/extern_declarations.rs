@@ -1168,3 +1168,139 @@ fn two_private_graphs_of_one_name_compile_for_a_consumer_of_one_export_in_both_e
         assert!(out.is_ok(), "order {order}: {:?}", out.err());
     }
 }
+
+// ── the order of `--extern` sources decides nothing ───────────────────────
+
+/// `a::mid` declares no `writes` clause and calls `b::leaf`: the set it
+/// publishes is inferred, and is what `b::leaf` writes only once `b`'s
+/// declarations are known.
+const EXT_ORDER_A: &str = "\
+namespace a {
+  export alphabet ab { '_', 'x', 'y' }
+  export routine mid(tape t: ab) {
+    entry state s { [*] -> call b::leaf(t = t) then d; }
+    state d { [*] -> return; }
+  }
+}
+";
+
+const EXT_ORDER_B: &str = "\
+namespace b {
+  export alphabet ab { '_', 'x', 'y' }
+  export routine leaf(tape t: ab) {
+    entry state s { [*] -> write ['x'] return; }
+  }
+}
+";
+
+/// `b::leaf` one level deeper: it calls `d::leaf`, which does the write.
+const EXT_ORDER_B_RELAY: &str = "\
+namespace b {
+  export alphabet ab { '_', 'x', 'y' }
+  export routine leaf(tape t: ab) {
+    entry state s { [*] -> call d::leaf(t = t) then e; }
+    state e { [*] -> return; }
+  }
+}
+";
+
+const EXT_ORDER_D: &str = "\
+namespace d {
+  export alphabet ab { '_', 'x', 'y' }
+  export routine leaf(tape t: ab) {
+    entry state s { [*] -> write ['x'] return; }
+  }
+}
+";
+
+const EXT_ORDER_C: &str = "\
+use a::ab;
+routine top(tape t: ab writes { 'x' }) {
+  entry state s { [*] -> call a::mid(t = t) then d; }
+  state d { [*] -> return; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call top(t = t) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+/// Every ordering of `items`.
+fn orderings<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    if items.len() <= 1 {
+        return vec![items.to_vec()];
+    }
+    let mut all = Vec::new();
+    for i in 0..items.len() {
+        let mut rest = items.to_vec();
+        let head = rest.remove(i);
+        for mut tail in orderings(&rest) {
+            tail.insert(0, head.clone());
+            all.push(tail);
+        }
+    }
+    all
+}
+
+/// `tmt compile c.tmc --nostdlib --extern …` with the externs in the
+/// given order.
+fn compile_against(dir: &Path, unit: &Path, externs: &[PathBuf]) -> Result<CliOutput, String> {
+    let mut flags: Vec<&str> = vec!["--nostdlib"];
+    for e in externs {
+        flags.push("--extern");
+        flags.push(e.to_str().unwrap());
+    }
+    compile(dir, unit, &flags)
+}
+
+/// Whether a unit compiles does not depend on the order of its `--extern`
+/// sources: with both known, `a::mid` writes only what `b::leaf` writes,
+/// so the caller's `writes { 'x' }` holds whichever is given first — and
+/// in every order of the chain one level deeper. Mutation: read each
+/// source once (in `header::resolve_declarations`, mark a peer due a read
+/// only while it has no reading) — `--extern a.tmc --extern b.tmc` then
+/// fails `writes-outside-contract`.
+#[test]
+fn a_compile_does_not_depend_on_the_order_of_its_extern_sources() {
+    let dir = scratch("extern_source_order");
+    let c = write(&dir, "c.tmc", EXT_ORDER_C);
+    let a = write(&dir, "a.tmc", EXT_ORDER_A);
+    let b = write(&dir, "b.tmc", EXT_ORDER_B);
+    for order in orderings(&[a.clone(), b]) {
+        let out = compile_against(&dir, &c, &order);
+        assert!(out.is_ok(), "{order:?}: {:?}", out.err());
+    }
+    let b = write(&dir, "b.tmc", EXT_ORDER_B_RELAY);
+    let d = write(&dir, "d.tmc", EXT_ORDER_D);
+    for order in orderings(&[a, b, d]) {
+        let out = compile_against(&dir, &c, &order);
+        assert!(out.is_ok(), "{order:?}: {:?}", out.err());
+    }
+}
+
+/// The near miss: a caller promising to write only `'y'` is refused in
+/// every order, for the glyph the chain really writes. Mutation: let the
+/// compile of the unit itself defer the peer-dependent checks
+/// (`compiler::analyze_with_provenance` passing `PeerChecks::Deferred`) —
+/// deferring is for a declarations read against peers still settling, and
+/// here every order would compile.
+#[test]
+fn a_compile_breaking_a_contract_is_refused_in_every_order_of_its_extern_sources() {
+    let dir = scratch("extern_source_order_violation");
+    let c = write(
+        &dir,
+        "c.tmc",
+        &EXT_ORDER_C.replace("writes { 'x' }", "writes { 'y' }"),
+    );
+    let a = write(&dir, "a.tmc", EXT_ORDER_A);
+    let b = write(&dir, "b.tmc", EXT_ORDER_B);
+    for order in orderings(&[a, b]) {
+        let err = compile_against(&dir, &c, &order).expect_err("the contract is broken");
+        assert!(
+            err.contains("`top` may write 'x' on tape `t`")
+                && err.contains("[writes-outside-contract]"),
+            "{order:?}: {err}"
+        );
+    }
+}

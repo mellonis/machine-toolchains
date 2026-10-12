@@ -205,7 +205,12 @@ error); anything else — a `.tmc` — is read LENIENTLY as a full program,
 where any `machine` block is unused and a routine's body contributes its
 `noreturn` and its uncontracted tapes' write sets, inferred exactly as
 `tmt interface` infers them. The flag is
-repeatable. Two files declaring one name must declare it identically — a
+repeatable, and the files are read together to a fixed point — each
+against the declarations of the others, again whenever one of them
+changes what it publishes — so one `--extern` file may depend on another
+and the order of the flags decides nothing about what they publish
+(`docs/tmt/project.md (Declaration derivation)`). Two files declaring one
+name must declare it identically — a
 unit's source and its header, one library given twice — or the compile
 fails `conflicting-declaration`; the same holds against the embedded
 standard library, which is read last, and against the unit's own
@@ -233,16 +238,11 @@ does not, by itself, resolve a call target or an alphabet reached through
 `use` — an unresolved `use`-imported name fails exactly as it does without
 `--extern`.
 
-A declarations reading believes the DECLARED write set only, so which
-of the two forms of a unit you point `--extern` at changes what
-compiles: a routine declaring no `writes` clause is read as able to
-write its whole alphabet. `tmt interface` is where inference becomes a
-declared fact — it writes the inferred write set down — so a unit given
-as its own generated `.tmh` supports strictly more than the same unit
-given as a `.tmc` (`docs/tmt/project.md (Declaration derivation)`).
-Declare the clauses in the source, or point `--extern` at the generated
-header. `noreturn` is the same either way: a `.tmc` read leniently has
-its bodies, and infers it exactly as `tmt interface` does.
+A unit given to `--extern` as its `.tmc` and as the header `tmt
+interface` generates from it against the same `--extern` files publish
+the same thing, in every order of the flags: each tape's declared write
+set where it declares one, the write set inferred from the body
+otherwise, and the same `noreturn`.
 
 `--extern` takes declaration **source** text. A compiled container given
 to it — an object, an executable, a tape block — is refused on its magic,

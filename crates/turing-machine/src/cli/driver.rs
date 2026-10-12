@@ -1055,14 +1055,14 @@ fn source_declaration_text(path: &Path) -> Result<crate::header::DeclarationText
 /// its own path, before the fixpoint runs at all. Once every source has
 /// TEXT, `stdlib` reaches every one of their reads alike, siblings and
 /// libraries both (a library header depending on `std::` resolves
-/// exactly as a sibling would). Every source that never reads clean
-/// once the fixpoint stops making progress is reported here, together,
+/// exactly as a sibling would). Every source whose read against the
+/// settled set failed is reported here, together,
 /// before any unit is compiled, never swallowed and never narrowed down
 /// to a single "most likely" one and left for a dependent's own compile
 /// to misreport (docs/tmt/project.md (Declaration derivation) —
-/// including the case where two sources genuinely need EACH OTHER and
-/// neither ever resolves: [`super::build::render_unresolved`] names
-/// both, in either declared order).
+/// including the case where two sources need EACH OTHER's declarations
+/// merely to be read, so neither ever is: [`super::build::render_unresolved`]
+/// names both, in either declared order).
 #[allow(clippy::type_complexity)]
 fn resolve_target_declarations(
     source_paths: &[PathBuf],

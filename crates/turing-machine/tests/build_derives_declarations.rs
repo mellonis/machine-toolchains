@@ -1012,25 +1012,24 @@ fn a_root_cause_whose_own_code_is_declarations_missing_is_still_shown_lib_first(
     );
 }
 
-// ── a genuinely mutual pair of siblings ───────────────────────────────────
+// ── two siblings that call each other ─────────────────────────────────────
 
-/// `aa::ra` and `bb::rb` each transparently call the OTHER, each under a
-/// narrow `writes { '0' }` contract that can only be validated once the
-/// other side's declared contract is known — the shape
-/// `docs/tmt/project.md (Declaration derivation)`'s "mutually dependent
-/// units are not supported" paragraph describes. Neither source's own
-/// declarations-only read ever sees the other (the fixpoint's first pass
-/// tries both against stdlib alone and both fail there, so no further
-/// pass ever makes progress): each treats its absent peer as an
-/// unconstrained, opaque callee, infers a wider write footprint than its
-/// OWN declared contract allows, and fails with `writes-outside-contract`
-/// — a real diagnostic, just not the actual shape of the problem.
+/// `aa::ra` and `bb::rb` each call the OTHER, each under `writes { '0' }`:
+/// two mutually recursive routines split across files. Each one's
+/// contract can only be checked once the other's declarations are known;
+/// the declarations are derived to a fixed point
+/// (docs/tmt/project.md (Declaration derivation)), so the refusal each
+/// meets while its peer is still unread is provisional and the settled
+/// pair holds. Together they turn a run of `1`s into `0`s.
 const AA_CALLS_BB: &str = "\
 namespace aa {
-  alphabet t { '_', '0', '1' }
+  export alphabet t { '_', '0', '1' }
 
   export routine ra(tape x: t writes { '0' }) {
-    entry state s { [*] -> call bb::rb() then done; }
+    entry state s {
+      ['1'] -> write ['0'] move [>] call bb::rb(x = x) then done;
+      [*]   -> return;
+    }
     state done { [*] -> return; }
   }
 }
@@ -1038,88 +1037,154 @@ namespace aa {
 
 const BB_CALLS_AA: &str = "\
 namespace bb {
-  alphabet t { '_', '0', '1' }
+  export alphabet t { '_', '0', '1' }
 
   export routine rb(tape x: t writes { '0' }) {
-    entry state s { [*] -> call aa::ra() then done; }
+    entry state s {
+      ['1'] -> write ['0'] move [>] call aa::ra(x = x) then done;
+      [*]   -> return;
+    }
     state done { [*] -> return; }
   }
 }
 ";
 
-/// Both files must be named, and the trailing note must appear, in this
-/// declared order.
-#[test]
-fn a_mutual_pair_of_siblings_names_both_and_notes_the_cycle_a_first() {
-    let dir = scratch("mutual_pair_a_first");
-    write(&dir, "a.tmc", AA_CALLS_BB);
-    write(&dir, "b.tmc", BB_CALLS_AA);
-    write(
-        &dir,
-        "tmt.json",
-        r#"{ "project": { "targets": { "ab": {
-            "sources": ["a.tmc", "b.tmc"]
-        } } } }"#,
-    );
+/// `bb::rb` really writing `'1'`, under a contract of its own that allows
+/// it: `aa::ra`'s `writes { '0' }` is then broken through the call.
+const BB_CALLS_AA_AND_WRITES_ONE: &str = "\
+namespace bb {
+  export alphabet t { '_', '0', '1' }
 
-    let out = build_in(&dir, &[]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("a.tmc") && stderr.contains("aa::ra"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("b.tmc") && stderr.contains("bb::rb"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("writes-outside-contract"),
-        "both sides fail this way, not a declarations-missing code: {stderr}"
-    );
-    assert!(
-        stderr.contains("note:") && stderr.contains("depend on each other"),
-        "the mutual-dependency note must be appended: {stderr}"
+  export routine rb(tape x: t writes { '0', '1' }) {
+    entry state s {
+      ['0'] -> write ['1'] move [>] call aa::ra(x = x) then done;
+      [*]   -> return;
+    }
+    state done { [*] -> return; }
+  }
+}
+";
+
+const APP_CALLS_AA: &str = "\
+alphabet t { '_', '0', '1' }
+
+machine {
+  tape d: t;
+  entry state go { [*] -> call aa::ra(x = d) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+fn write_mutual_pair(dir: &Path, b: &str, sources: &str) {
+    write(dir, "a.tmc", AA_CALLS_BB);
+    write(dir, "b.tmc", b);
+    write(dir, "app.tmc", APP_CALLS_AA);
+    write(
+        dir,
+        "tmt.json",
+        &format!(r#"{{ "project": {{ "targets": {{ "app": {{ "sources": {sources} }} }} }} }}"#),
     );
 }
 
-/// The other declared order, for the identical pair — both names and the
-/// note must appear regardless of which file was listed first.
+/// Two siblings that call each other under `writes` contracts build, in
+/// either declared order and under every call mechanism, and the program
+/// they make runs the same way under each: `1111` becomes `0000`.
+/// Mutation: treat provisional refusals as final (in
+/// `header::DeclarationSource::read_settling`, give a source refused by a
+/// peer check no reading) — neither sibling ever reads clean and the
+/// build fails `writes-outside-contract` in both orders.
 #[test]
-fn a_mutual_pair_of_siblings_names_both_and_notes_the_cycle_b_first() {
-    let dir = scratch("mutual_pair_b_first");
-    write(&dir, "a.tmc", AA_CALLS_BB);
-    write(&dir, "b.tmc", BB_CALLS_AA);
-    write(
-        &dir,
-        "tmt.json",
-        r#"{ "project": { "targets": { "ba": {
-            "sources": ["b.tmc", "a.tmc"]
-        } } } }"#,
-    );
-
-    let out = build_in(&dir, &[]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("a.tmc") && stderr.contains("aa::ra"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("b.tmc") && stderr.contains("bb::rb"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains("note:") && stderr.contains("depend on each other"),
-        "{stderr}"
-    );
+fn two_siblings_calling_each_other_under_contracts_build_and_run_in_either_order() {
+    for (tag, sources) in [
+        ("mutual_pair_a_first", r#"["app.tmc", "a.tmc", "b.tmc"]"#),
+        ("mutual_pair_b_first", r#"["b.tmc", "a.tmc", "app.tmc"]"#),
+    ] {
+        let dir = scratch(tag);
+        write_mutual_pair(&dir, BB_CALLS_AA, sources);
+        let tape = tmt()
+            .args([
+                "tape-block",
+                "new",
+                "--from",
+                "app.tmc",
+                "--cells",
+                "d='1','1','1','1'",
+                "-o",
+                "in.tmt",
+            ])
+            .current_dir(&*dir)
+            .output()
+            .unwrap();
+        assert!(
+            tape.status.success(),
+            "{}",
+            String::from_utf8_lossy(&tape.stderr)
+        );
+        for mech in ["mono", "frames", "hybrid"] {
+            let out = build_in(&dir, &["--call-mech", mech]);
+            assert!(
+                out.status.success(),
+                "{tag}, {mech}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let run = tmt()
+                .args(["run", "app.tmx", "--tape-block", "in.tmt"])
+                .current_dir(&*dir)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&run.stdout);
+            assert!(
+                run.status.success() && stdout.contains("outcome: Stopped"),
+                "{tag}, {mech}: {stdout}{}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            assert!(stdout.contains("|0000_|"), "{tag}, {mech}: {stdout}");
+        }
+    }
 }
 
-/// The same cycle through the note's OTHER arm: each file's routine names
-/// the OTHER file's alphabet in its own signature, so each declarations-
-/// only read fails with `unresolved-alphabet` — one of the four
-/// declarations-missing codes, not `writes-outside-contract` — and the
-/// pair above never reaches that code.
+/// The refusal that still exists: a contract REALLY broken through the
+/// mutual call. `bb::rb` writes `'1'`, which `aa::ra` promised not to; the
+/// build is refused in either declared order with one and the same
+/// diagnostic — the glyph really written, at `aa::ra`'s parameter — and no
+/// note about a dependency cycle, which is not the cause. Mutation: read
+/// each source once (in `header::resolve_declarations`, mark a peer due a
+/// read only while it has no reading) — the diagnostic then depends on the
+/// order (the whole alphabet where `a` was read before `b`).
+#[test]
+fn a_contract_really_broken_through_a_mutual_call_is_refused_in_either_order() {
+    let mut seen: Option<String> = None;
+    // One directory for both orders, so the two diagnostics can be
+    // compared whole, paths included.
+    let dir = scratch("mutual_broken");
+    for (tag, sources) in [
+        ("a first", r#"["app.tmc", "a.tmc", "b.tmc"]"#),
+        ("b first", r#"["b.tmc", "a.tmc", "app.tmc"]"#),
+    ] {
+        write_mutual_pair(&dir, BB_CALLS_AA_AND_WRITES_ONE, sources);
+        let out = build_in(&dir, &[]);
+        assert!(!out.status.success(), "{tag} built");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            stderr.contains(
+                "a.tmc:4:21: error: `aa::ra` may write '1' on tape `x`, which its contract \
+                 forbids [writes-outside-contract]"
+            ),
+            "{tag}: {stderr}"
+        );
+        assert!(!stderr.contains("note:"), "{tag}: {stderr}");
+        match &seen {
+            None => seen = Some(stderr),
+            Some(first) => assert_eq!(first, &stderr, "{tag}"),
+        }
+    }
+}
+
+/// The cycle that is still refused: each file's routine names the OTHER
+/// file's alphabet in its own signature, so neither can be read at all
+/// without the other — each read fails with `unresolved-alphabet`, one of
+/// the four declarations-missing codes — and no reading ever exists for
+/// the fixed point to start from.
 const AA_NAMES_BB_ALPHABET: &str = "\
 namespace aa {
   export alphabet t { '_', '0' }
@@ -1140,10 +1205,8 @@ namespace bb {
 }
 ";
 
-/// Mutation: narrowing the note's condition to `writes-outside-contract`
-/// alone (dropping `is_declarations_missing` from `render_unresolved`'s
-/// `may_be_a_missing_peer_symptom`) — both files are still named, but the
-/// note disappears.
+/// Mutation: drop the note from `render_unresolved` — both files are
+/// still named, but nothing says that they need each other.
 #[test]
 fn a_mutual_pair_missing_each_others_alphabets_notes_the_cycle() {
     let dir = scratch("mutual_pair_alphabets");
@@ -1173,7 +1236,7 @@ fn a_mutual_pair_missing_each_others_alphabets_notes_the_cycle() {
         "both sides fail on the declarations-missing arm: {stderr}"
     );
     assert!(
-        stderr.contains("note:") && stderr.contains("depend on each other"),
+        stderr.contains("note:") && stderr.contains("depend on the other's declarations"),
         "the mutual-dependency note must be appended: {stderr}"
     );
 }
@@ -1617,4 +1680,177 @@ fn a_sibling_callee_that_returns_still_requires_then() {
     ])
     .expect_err("a callee that can return is not `noreturn`");
     assert!(err.contains("[then-required]"), "{err}");
+}
+
+// ── the order of a build's sources decides nothing ────────────────────────
+
+/// `a::mid` declares no `writes` clause and calls `b::leaf`, so the set it
+/// publishes is inferred — and is exactly what `b::leaf` writes only once
+/// `b`'s declarations are known.
+const ORDER_A_MID: &str = "\
+namespace a {
+  export alphabet ab { '_', 'x', 'y' }
+  export routine mid(tape t: ab) {
+    entry state s { [*] -> call b::leaf(t = t) then d; }
+    state d { [*] -> return; }
+  }
+}
+";
+
+/// The leaf of the three-source program: it writes `'x'`.
+const ORDER_B_LEAF: &str = "\
+namespace b {
+  export alphabet ab { '_', 'x', 'y' }
+  export routine leaf(tape t: ab) {
+    entry state s { [*] -> write ['x'] return; }
+  }
+}
+";
+
+/// `b::leaf` one level deeper: it writes nothing itself and calls
+/// `d::leaf`.
+const ORDER_B_RELAY: &str = "\
+namespace b {
+  export alphabet ab { '_', 'x', 'y' }
+  export routine leaf(tape t: ab) {
+    entry state s { [*] -> call d::leaf(t = t) then e; }
+    state e { [*] -> return; }
+  }
+}
+";
+
+const ORDER_D_LEAF: &str = "\
+namespace d {
+  export alphabet ab { '_', 'x', 'y' }
+  export routine leaf(tape t: ab) {
+    entry state s { [*] -> write ['x'] return; }
+  }
+}
+";
+
+/// The program: `top` promises to write only `'x'` and calls `a::mid`.
+const ORDER_C_TOP: &str = "\
+use a::ab;
+routine top(tape t: ab writes { 'x' }) {
+  entry state s { [*] -> call a::mid(t = t) then d; }
+  state d { [*] -> return; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call top(t = t) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+/// The near miss: `top` promises to write only `'y'`, which the chain
+/// below it really breaks.
+const ORDER_C_TOP_VIOLATING: &str = "\
+use a::ab;
+routine top(tape t: ab writes { 'y' }) {
+  entry state s { [*] -> call a::mid(t = t) then d; }
+  state d { [*] -> return; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call top(t = t) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+/// Every ordering of `names`.
+fn orderings<'a>(names: &[&'a str]) -> Vec<Vec<&'a str>> {
+    if names.len() <= 1 {
+        return vec![names.to_vec()];
+    }
+    let mut all = Vec::new();
+    for i in 0..names.len() {
+        let mut rest = names.to_vec();
+        let head = rest.remove(i);
+        for mut tail in orderings(&rest) {
+            tail.insert(0, head);
+            all.push(tail);
+        }
+    }
+    all
+}
+
+/// `tmt build <order> --nostdlib -o out.tmx` in `dir`, argv mode.
+fn build_order(dir: &Path, order: &[&str]) -> std::process::Output {
+    let mut argv: Vec<&str> = order.to_vec();
+    argv.extend(["--nostdlib", "-o", "out.tmx"]);
+    build_in(dir, &argv)
+}
+
+/// Whether a program builds does not depend on the order of its sources:
+/// with every source known, `a::mid` writes only what `b::leaf` writes,
+/// so `top`'s contract holds — in all six orders, including the ones that
+/// read `a` before `b` (where `a::mid` is first inferred to write the
+/// whole alphabet) and the ones that read `c` first. Mutation: read each
+/// source once (in `header::resolve_declarations`, mark a peer due a read
+/// only while it has no reading) — the orders reading `a` before `b` then
+/// fail `writes-outside-contract`.
+#[test]
+fn a_build_does_not_depend_on_the_order_of_its_sources() {
+    let dir = scratch("source_order_three");
+    write(&dir, "a.tmc", ORDER_A_MID);
+    write(&dir, "b.tmc", ORDER_B_LEAF);
+    write(&dir, "c.tmc", ORDER_C_TOP);
+    for order in orderings(&["c.tmc", "a.tmc", "b.tmc"]) {
+        let out = build_order(&dir, &order);
+        assert!(
+            out.status.success(),
+            "{order:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// The near miss: a contract the settled program really breaks is refused
+/// in every order, with one and the same diagnostic — the glyph the chain
+/// really writes, never the whole alphabet of a half-settled read.
+/// Mutation: read each source once (in `header::resolve_declarations`,
+/// mark a peer due a read only while it has no reading) — the orders
+/// reading `a` before `b` then report `'_', 'x'`.
+#[test]
+fn a_build_breaking_a_contract_is_refused_in_every_order_of_its_sources() {
+    let dir = scratch("source_order_violation");
+    write(&dir, "a.tmc", ORDER_A_MID);
+    write(&dir, "b.tmc", ORDER_B_LEAF);
+    write(&dir, "c.tmc", ORDER_C_TOP_VIOLATING);
+    let mut seen: Option<String> = None;
+    for order in orderings(&["c.tmc", "a.tmc", "b.tmc"]) {
+        let out = build_order(&dir, &order);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "{order:?} built");
+        assert!(
+            stderr.contains("c.tmc:2:13: error: `top` may write 'x' on tape `t`")
+                && stderr.contains("[writes-outside-contract]"),
+            "{order:?}: {stderr}"
+        );
+        match &seen {
+            None => seen = Some(stderr),
+            Some(first) => assert_eq!(first, &stderr, "{order:?}"),
+        }
+    }
+}
+
+/// One level deeper — `c` → `a` → `b` → `d` — in all twenty-four orders:
+/// the narrowing travels the whole chain whichever end is read first.
+/// Mutation: stop after one re-read of each source (a pass limit of two
+/// in `header::resolve_declarations`) — the worst orders then fail.
+#[test]
+fn a_four_source_chain_builds_in_every_order() {
+    let dir = scratch("source_order_four");
+    write(&dir, "a.tmc", ORDER_A_MID);
+    write(&dir, "b.tmc", ORDER_B_RELAY);
+    write(&dir, "d.tmc", ORDER_D_LEAF);
+    write(&dir, "c.tmc", ORDER_C_TOP);
+    for order in orderings(&["c.tmc", "a.tmc", "b.tmc", "d.tmc"]) {
+        let out = build_order(&dir, &order);
+        assert!(
+            out.status.success(),
+            "{order:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
