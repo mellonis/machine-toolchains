@@ -374,11 +374,15 @@ fn settle_exports<'a, R: PartialEq>(
 /// records go through [`settle_exports`]: identical exports count as one,
 /// differing ones are a conflict when some input grafts the graph or when
 /// both exporters are user objects, so each consumer is compared against
-/// the one export that remains. A graph no input exports is checked
-/// against the PRIVATE records inputs hold of it — the graft must match at
-/// least one of them, whichever input provided it — and a graph no input
-/// records at all is NOT checked: that is a header-only library, the one
-/// place a header is trusted.
+/// the one export that remains. A graft that differs from that export but
+/// matches some input's PRIVATE record of the name is refused too — a
+/// private graph beside another input's different export of its name is
+/// the same pair the compiler refuses — with the error that names the
+/// private provider and the exporter rather than a drift. A graph no
+/// input exports is checked against the PRIVATE records inputs hold of it
+/// — the graft must match at least one of them, whichever input provided
+/// it — and a graph no input records at all is NOT checked: that is a
+/// header-only library, the one place a header is trusted.
 ///
 /// Object-level, not per-blob: `Interface::graphs` and
 /// `ObjectFile::grafts` describe a whole unit, so this runs over the
@@ -417,10 +421,26 @@ pub(super) fn check_graft_drift(
         for graft in &obj.grafts {
             if let Some(&(lib, digest)) = exporter.get(graft.graph.as_str()) {
                 if digest != graft.digest {
-                    return Err(LinkError::GraftDrift {
-                        graph: graft.graph.clone(),
-                        consumer: name_of(i),
-                        library: name_of(lib),
+                    // Still refused, but told truthfully: when some input
+                    // holds the graph PRIVATELY with the digest this unit
+                    // recorded, the splice matches its provider, and what
+                    // stops the link is that provider's private graph
+                    // beside another input's different export of the name.
+                    let provider = private
+                        .get(graft.graph.as_str())
+                        .and_then(|records| records.iter().find(|r| r.1 == graft.digest));
+                    return Err(match provider {
+                        Some(&(provider, _)) => LinkError::PrivateGraftBesideExport {
+                            graph: graft.graph.clone(),
+                            consumer: name_of(i),
+                            provider: name_of(provider),
+                            exporter: name_of(lib),
+                        },
+                        None => LinkError::GraftDrift {
+                            graph: graft.graph.clone(),
+                            consumer: name_of(i),
+                            library: name_of(lib),
+                        },
                     });
                 }
             } else if let Some(records) = private.get(graft.graph.as_str())

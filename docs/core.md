@@ -976,7 +976,12 @@ A graph record may be marked private: a unit prints the graph in its header
 without exporting it. A private record never conflicts with another input's
 record of the same name, between any pair of inputs. It only lets the link
 check a consumer that spliced the graph, which must match at least one
-input's private record when no input exports the name.
+input's private record when no input exports the name. When one input
+holds a graph privately and another EXPORTS a graph of the same name with
+a different digest, a consumer that spliced the private one is refused as
+well — the same pair is refused when it is compiled against — and the
+error says so, naming the input that provides the graph privately and the
+one that exports it differently, rather than reporting a drift.
 
 A graph no input records at all is not checked. That is a header-only
 library, and it is the one place a header is trusted; the trust is

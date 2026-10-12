@@ -725,7 +725,10 @@ A `.graph` line may be marked `private`: the unit prints that graph in its
 header without exporting it. A private record never conflicts with another
 input's record of the same name; it only lets the link check a consumer
 that spliced the graph, which must match at least one input's private
-record when no input exports the name. That check has a known limit: a
+record when no input exports the name. A consumer whose record matches a
+private one while another input exports the name with a different digest
+is refused, with an error naming both inputs
+(`docs/core.md (graft drift)`). The private check has a known limit: a
 consumer's record of a graph no input exports is satisfied by ANY input's
 matching private record, so when two libraries carry identical private
 graphs of one name and one of them later changes, the other's record

@@ -947,6 +947,83 @@ fn a_graft_of_a_private_graph_no_provider_matches_is_drift() {
     );
 }
 
+/// One input holds `lib::step` PRIVATELY with the digest the consumer
+/// recorded, another EXPORTS a graph of that name with a different
+/// digest. The link still refuses the pair, but it says what is true: the
+/// consumer's graph is the first input's private one, and the second
+/// exports the name differently — not that the consumer's header drifted
+/// from the exporter, which it never read. Both input orders, each input
+/// named by its label. Mutation it catches: always report plain drift —
+/// the error is then `GraftDrift` naming the exporter alone.
+#[test]
+fn a_graft_matching_a_private_record_beside_a_different_export_names_both() {
+    let exported = private_exporter("b", 2).replace(", private", "");
+    let private = private_exporter("a", 1);
+    for (libraries, labels) in [
+        ([asm(&private), asm(&exported)], ["a.lib", "b.lib"]),
+        ([asm(&exported), asm(&private)], ["b.lib", "a.lib"]),
+    ] {
+        let err = link(
+            &fake_syntax(),
+            &[asm(&step_consumer(1))],
+            &libraries,
+            LinkOptions {
+                labels: vec![
+                    Some("app.o".into()),
+                    Some(labels[0].into()),
+                    Some(labels[1].into()),
+                ],
+                ..opts(CallMech::Frames)
+            },
+        )
+        .expect_err("a private graph beside a different export of its name");
+        assert_eq!(
+            err,
+            LinkError::PrivateGraftBesideExport {
+                graph: "lib::step".into(),
+                consumer: "app.o".into(),
+                provider: "a.lib".into(),
+                exporter: "b.lib".into(),
+            },
+            "{labels:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "`lib::step`, grafted into app.o, is provided privately by a.lib and \
+             exported differently by b.lib"
+        );
+    }
+}
+
+/// The control: the consumer's digest matches NO record — neither the
+/// private one nor the exported one — so it is a genuine drift and keeps
+/// the drift message, naming the exporter. Mutation it catches: report
+/// the private-beside-export error whenever a private record of the name
+/// exists, whatever its digest.
+#[test]
+fn a_graft_matching_no_record_beside_a_private_one_and_an_export_is_plain_drift() {
+    let exported = private_exporter("b", 2).replace(", private", "");
+    let err = link(
+        &fake_syntax(),
+        &[asm(&step_consumer(3))],
+        &[asm(&private_exporter("a", 1)), asm(&exported)],
+        opts(CallMech::Frames),
+    )
+    .expect_err("no record matches");
+    assert_eq!(
+        err,
+        LinkError::GraftDrift {
+            graph: "lib::step".into(),
+            consumer: "input #0".into(),
+            library: "input #2".into(),
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "`lib::step` was grafted into input #0 from a header that does not match input #2"
+    );
+}
+
 /// Mutation it catches: compare only the alphabet NAMES and a drifted
 /// glyph list links silently — the exact hazard item 4 demonstrated.
 #[test]

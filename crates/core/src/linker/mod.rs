@@ -104,6 +104,20 @@ pub enum LinkError {
         consumer: String,
         library: String,
     },
+    /// A unit spliced a graph that one input records PRIVATELY, with the
+    /// digest the unit recorded, while another input EXPORTS a graph of
+    /// the same name with a different digest (docs/core.md (graft
+    /// drift)). The splice itself has not drifted — the consumer matches
+    /// its provider — but a private graph beside another input's
+    /// different export of its name is refused, as it is at compile time,
+    /// and the error names both inputs instead of blaming a header the
+    /// consumer never read.
+    PrivateGraftBesideExport {
+        graph: String,
+        consumer: String,
+        provider: String,
+        exporter: String,
+    },
     /// Two inputs export one graph or one alphabet with different records
     /// — digests or glyph lists — while some input consumes the name, or
     /// while both are user objects (docs/core.md (graft drift)). `what` is
@@ -308,6 +322,16 @@ impl std::fmt::Display for LinkError {
                 f,
                 "`{graph}` was grafted into {consumer} from a header that does not \
                  match {library}"
+            ),
+            Self::PrivateGraftBesideExport {
+                graph,
+                consumer,
+                provider,
+                exporter,
+            } => write!(
+                f,
+                "`{graph}`, grafted into {consumer}, is provided privately by {provider} \
+                 and exported differently by {exporter}"
             ),
             Self::ConflictingExport {
                 what,
