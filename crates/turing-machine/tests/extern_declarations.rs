@@ -1076,7 +1076,7 @@ fn compile_in_both_orders(
 /// `writes-outside-contract`, the other conflicts.
 #[test]
 fn a_private_name_beside_a_published_one_of_another_form_is_refused_in_both_extern_orders() {
-    let shapes: [(&str, &str, (&str, &str), (&str, &str), &str); 4] = [
+    let shapes = [
         (
             "priv_call",
             PRIV_CALLS_WALKER,
