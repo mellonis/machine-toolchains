@@ -1159,8 +1159,10 @@ fn a_graph_exported_byte_other_than_zero_or_one_is_rejected() {
 }
 
 /// A buffer that ends where the exported byte should be is a typed error,
-/// never a panic. Mutation it catches: read the byte with a defaulting
-/// accessor (e.g. `unwrap_or(1)`) instead of the checked `u8()`.
+/// never a panic. No single mutation of the reader reddens it: a reader
+/// that defaulted the missing byte would fail on the next read past the
+/// end instead, so what this pins is the outcome — an `Err`, whichever
+/// read reports it — and that truncation at this offset cannot panic.
 #[test]
 fn a_graph_record_truncated_before_its_exported_byte_is_rejected() {
     let mut bytes = v4_sample().to_bytes();

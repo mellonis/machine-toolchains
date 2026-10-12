@@ -1932,7 +1932,11 @@ fn refused(code: &str, line: u32, col: u32) -> (String, u32, u32) {
     (code.to_string(), line, col)
 }
 
-/// Mutation: skip the graft argument lists in `check_reuse_targets`.
+/// Two checks refuse this list, each backstopping the other: the world
+/// checks (`check_reuse_targets`' graft arm) and the splice
+/// (`check_graft_args`). Mutation: skip the graft argument lists at BOTH
+/// sites — skipping either one alone leaves the other to refuse it at the
+/// same position.
 #[test]
 fn return_in_a_machine_graft_is_refused() {
     assert_eq!(
@@ -1952,7 +1956,9 @@ fn return_in_a_graph_body_graft_is_refused() {
 
 /// The graft's second exit used to leave the machine's own state dead and
 /// warn; the cause is now the refusal, at the first `return`. Mutation:
-/// skip the graft argument lists (the warning path returns).
+/// skip the graft argument lists at BOTH sites that refuse them
+/// (`check_reuse_targets`' graft arm and `check_graft_args` at the
+/// splice) — the warning path returns; either site alone still refuses.
 #[test]
 fn the_unreachable_state_symptom_is_now_its_cause() {
     assert_eq!(

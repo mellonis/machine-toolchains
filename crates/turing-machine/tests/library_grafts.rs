@@ -2318,7 +2318,9 @@ fn shadowed_nested_graft(tag: &str, params: &str, nostdlib: bool) -> Vec<(Option
 /// nested graft never binds: a coded `missing-arg`, through the source and
 /// the header route alike — never a panic. Mutation: drop the graft-argument
 /// check of a declarations read (`WorldCtx::check_reuse_targets`' graft
-/// arm) — `nlib` is then read clean and the splice meets the mismatch.
+/// arm) — the read of `nlib` then goes on to its contract check and fails
+/// there instead, with a misleading `writes-outside-contract` on `nlib::w`;
+/// the splice-time check (`check_graft_args`) is never reached.
 #[test]
 fn a_nested_library_graft_is_checked_against_the_graph_it_splices() {
     for (code, text) in shadowed_nested_graft(
@@ -2342,8 +2344,9 @@ fn a_nested_library_graft_is_checked_against_the_graph_it_splices() {
 /// with the wrong graph's tapes and reported `identity-glyph-mismatch`,
 /// about glyphs; it is the same unbound parameter as above and now reads
 /// as one. Mutation: drop the graft-argument check of a declarations read
-/// (`WorldCtx::check_reuse_targets`' graft arm) — both routes report
-/// `identity-glyph-mismatch` instead.
+/// (`WorldCtx::check_reuse_targets`' graft arm) — the read of `nlib` then
+/// fails at its contract check instead, with a misleading
+/// `writes-outside-contract` on `nlib::w`.
 #[test]
 fn a_nested_library_graft_missing_a_later_parameter_is_missing_arg() {
     for (code, text) in shadowed_nested_graft(
