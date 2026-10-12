@@ -398,8 +398,10 @@ pub(super) struct OverlaySym {
 
 /// One open document's cross-file symbol table: every name its siblings
 /// and libraries export, first-wins (sources before libraries, each in
-/// `ProjectView`'s own order, mirroring the linker's own
-/// user-objects-beat-libraries / first-dir-wins precedent), plus a
+/// `ProjectView`'s own order — the order the linker reads its inputs in.
+/// The linker itself picks no winner: a name two inputs define is a link
+/// error once the program reaches it, docs/core.md (linking), so
+/// first-wins here only decides what the editor shows for it), plus a
 /// `members` index for namespace-qualified lookups (a bare name under
 /// its namespace path; top-level exports live under the empty path;
 /// EVERY intermediate namespace level along a name's path is registered

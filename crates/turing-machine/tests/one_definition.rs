@@ -1,6 +1,8 @@
-//! The one-definition rule's first step: a link error that concerns two
-//! inputs names both, by the label the driver gave each (docs/core.md
-//! (linking)). Every assertion goes through the public CLI entry.
+//! The one-definition rule at link (docs/core.md (linking)): a name two
+//! inputs define is refused once the program reaches it — user objects,
+//! libraries and the embedded standard library alike — and a link error
+//! that concerns two inputs names both, by the label the driver gave
+//! each. Every assertion goes through the public CLI entry.
 
 use std::path::{Path, PathBuf};
 

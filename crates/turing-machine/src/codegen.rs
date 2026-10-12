@@ -1048,8 +1048,8 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                 // a callee KNOWN to be `noreturn`. Control is never meant to
                 // come back here, but a LYING declaration (a header that
                 // claims `noreturn` while the linked definition returns
-                // anyway, or a first-wins shadowed definition) would let a
-                // stray `ret` fall through into whatever the linker placed
+                // anyway) would let a stray `ret` fall through into
+                // whatever the linker placed
                 // next and run silently on. `trap #2` closes that hole: on
                 // an honest program it never fires (nothing reaches it), and
                 // on a lying one it turns silent fall-through into a

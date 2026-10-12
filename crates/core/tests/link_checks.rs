@@ -1507,6 +1507,61 @@ fn a_return_through_an_undeclared_exit_is_refused_under_every_mechanism() {
     }
 }
 
+/// A routine `stray` that declares two exits and returns through exit 2,
+/// with nothing calling it.
+fn stray_overrunning_its_exits() -> String {
+    "\
+.routine stray, tapes=1, alpha=(3), exits=3
+.param p, ('_', '0', '1')
+.section code
+.func stray
+        rd
+        retx    #2
+"
+    .to_string()
+}
+
+/// The undeclared-exit check runs over the routines the program REACHES:
+/// a routine nothing calls is dropped from the link, so its body
+/// returning past its declared exits does not fail an unrelated program —
+/// whether it sits in the entry's own object or in a library, under every
+/// mechanism. (The same routine, once called, is refused: the test above.)
+///
+/// Mutation it catches: scan every input routine, not the reached order
+/// (in `link`, compare each interface routine of every object and library
+/// with its blob's exit returns) — both links then fail `UndeclaredExit`
+/// naming `stray`.
+#[test]
+fn an_unreached_routine_returning_through_an_undeclared_exit_does_not_fail_the_link() {
+    let entry_with_stray = format!(
+        "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+{}.func main
+        stp
+",
+        stray_overrunning_its_exits()
+    );
+    for mech in MECHS {
+        // The stray routine beside the entry, in the entry's object.
+        link(
+            &fake_syntax(),
+            &[declaring_exits(&entry_with_stray, "stray", 2)],
+            &[],
+            opts(mech),
+        )
+        .unwrap_or_else(|e| panic!("stray in the entry object, under {mech}: {e}"));
+        // The stray routine in a library the program never calls into.
+        link(
+            &fake_syntax(),
+            &[asm(&plain_main())],
+            &[declaring_exits(&stray_overrunning_its_exits(), "stray", 2)],
+            opts(mech),
+        )
+        .unwrap_or_else(|e| panic!("stray in a library, under {mech}: {e}"));
+    }
+}
+
 /// A body returning through exit 2 of a routine that declares two is
 /// refused by the assembler itself, at the offending instruction.
 ///

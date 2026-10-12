@@ -576,10 +576,12 @@ k:      wr      [1]
         retx    #0
 ";
 
-/// A callee whose BODY disagrees with its own declared exit count: it
-/// declares `exits=1` and returns through `retx #1`. Ruling 19 pins the
-/// site's vector to the declaration, so the splice is the only place this
-/// can surface — nothing validates a routine's body against its interface.
+/// A callee whose BODY disagrees with its own declared exit count. The
+/// text declares `exits=2` so that `retx #1` assembles at all; the test
+/// then lowers the interface to ONE exit (`declaring_exits`), which is
+/// what the call site's one-label vector binds. A site's vector is pinned
+/// to the declaration, and the linker validates every reached body
+/// against its interface before any site is lowered.
 const BODY_OVERRUNS_ITS_EXITS: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')

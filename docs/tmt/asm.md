@@ -113,7 +113,10 @@ set)`. What belongs here is how they are *spelled*:
   byte, `0`..=`255`, written with a leading `#` (`trap #0`, `retx #1`).
   It is distinct from a symbol or a label — it carries a raw number.
   In a routine whose `.routine` line declares `exits=N`, `retx #k` needs
-  `k < N`; otherwise the file does not assemble (`undeclared-exit`).
+  `k < N`; otherwise the file does not assemble (`undeclared-exit`). A
+  routine with `.param` lines and NO `exits=` declares zero exits, so
+  every `retx` in it is refused; a `.routine` line with no `.param` lines
+  declares no interface and is not checked.
 - **`call.m <target>, <frame>`** pairs a call target with a `.frame`
   label from the tables section. The operand's two halves are a rel
   displacement and, after link, a call-site index

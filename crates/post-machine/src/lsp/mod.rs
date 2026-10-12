@@ -235,11 +235,14 @@ fn std_enabled(state: &DocState) -> bool {
 /// have in hand, since both live in the SAME `Overlay.symbols` key
 /// space. Resolution order is local file, then declared sources, then
 /// declared libraries (first-wins), then the embedded stdlib LAST
-/// (docs/pmt/project.md (libraries)) — the same order the linker itself
-/// follows, which is why a user's own `namespace std { export … }`
-/// shadows the embedded routine of the same mangled name even though the
-/// name starts with `std::`. Checking ownership first, rather than
-/// `Option`-chaining straight into a lookup, matters because the overlay
+/// (docs/pmt/project.md (libraries)) — the order the linker reads its
+/// inputs in. The overlay is first-wins, so a user's own `namespace std
+/// { export … }` is what the EDITOR shows in place of the embedded
+/// routine of the same mangled name even though the name starts with
+/// `std::`; the linker shadows nothing — it refuses the pair once the
+/// program reaches the name (docs/core.md (linking)). Checking ownership
+/// first, rather than `Option`-chaining straight into a lookup, matters
+/// because the overlay
 /// can OWN a name yet still answer no location or doc (a `.pma`/`.pmo`-
 /// backed sibling) — that must still short-circuit here instead of
 /// falling through to the unrelated embedded stdlib entry behind the

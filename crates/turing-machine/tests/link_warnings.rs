@@ -665,6 +665,10 @@ fn no_shipped_program_returns_through_an_undeclared_exit() {
             Err(_) => continue,
         }
     }
+    // Findings first: a refusal then names the routine, where the floor
+    // or the control assertion below would only say that something did
+    // not link.
+    assert!(findings.is_empty(), "{findings:#?}");
     assert!(
         linked >= 16,
         "the corpus sweep linked only {linked} programs"
@@ -673,5 +677,4 @@ fn no_shipped_program_returns_through_an_undeclared_exit() {
         control_linked,
         "the compiled two-exit control did not link, so the sweep reached no `retx`"
     );
-    assert!(findings.is_empty(), "{findings:#?}");
 }

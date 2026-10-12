@@ -654,7 +654,11 @@ regardless of `export` — the grammar does not accept `export` on a
 `machine` block at all, and the linker reaches its `main` unconditionally.
 A project that defines a `std::` name of its own sees its own definition
 in the editor; the linker refuses the pair once the program reaches the
-name.
+name. For `.tmc` that holds only when the project's definition has the
+standard library's own signature: with another signature it is
+`conflicting-declaration` at compile time
+(`docs/tmt/language.md (declarations)`), not something the editor shows
+in the library's place.
 
 A project may declare `"stdlib": false`; doing so removes the `std::`
 surface entirely — no completion candidates, no hover, and no
@@ -903,8 +907,10 @@ never holds a stdlib entry to begin with.
 Both surfaces, and completion in a `use` path or a `call`/`bind` target,
 consult the project overlay FIRST (**Cross-file resolution**, above): a
 project that defines its own `namespace std { export routine … }` is what
-the editor shows for that name; the linker refuses the pair once the
-program reaches it.
+the editor shows for that name — when its signature equals the standard
+library's; a definition with another signature is
+`conflicting-declaration` (`docs/tmt/language.md (declarations)`). The
+linker refuses the pair once the program reaches it.
 
 ## The `.tma` service
 

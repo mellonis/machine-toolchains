@@ -456,6 +456,14 @@ follows per hybrid exit-bearing fold decision — the callee, its site count,
 body and descriptor bytes, and whether the group was shared under frames or
 spliced as mono seeds — so a link with no such site prints none.
 
+A routine the program reaches that returns through an exit its `.routine`
+line does not declare is a link error under every mechanism, whether or
+not the entry carries a signature (the assembler refuses the same body in
+a `.tma`, so only an object built another way can carry one).
+`undeclared-exit` is an error, not a link-warning code: `--allow
+undeclared-exit` and a `lint.allow` entry naming it are unknown-code
+errors (`docs/core.md (linking)`).
+
 ### `--call-mech`
 
 Selects how declarative binding calls are lowered. The three values are
@@ -513,13 +521,6 @@ populate. This is narrower than `tmt build`'s own `-l`/`-L`
 compile-time declarations from a library and accepts a header-only one
 (`NAME.tmh` with no matching `.tmo`) that `tmt link` cannot use at all —
 a header-only library is a `tmt build` concept only.
-
-A routine returning through an exit its `.routine` line does not declare
-is a link error under every mechanism, whether or not the entry carries a
-signature (the assembler refuses the same body in a `.tma`, so only an
-object built another way can carry one). It is no longer a link-warning
-code: `--allow undeclared-exit` and a `lint.allow` entry naming it are
-unknown-code errors (`docs/core.md (linking)`).
 
 ### Link warnings
 

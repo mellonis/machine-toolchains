@@ -3164,11 +3164,13 @@ machine {
 
 #[test]
 fn a_shadowing_sibling_wins_over_the_stdlib_at_every_leg() {
-    // The plan's governing rule, stated in the brief: resolution order is
-    // local file, then declared sources, then declared libraries
-    // (first-wins), then the embedded stdlib LAST — mirroring the
-    // linker's own user-object-beats-library precedence. A sibling that
-    // mangles to the IDENTICAL qualified name an embedded roster entry
+    // The overlay's resolution order is local file, then declared
+    // sources, then declared libraries (first-wins), then the embedded
+    // stdlib LAST — the order the linker reads its inputs in. It decides
+    // only what the editor shows: the linker picks no winner and refuses
+    // such a pair once the program reaches the name
+    // (docs/core.md (linking)). A sibling that mangles to the
+    // IDENTICAL qualified name an embedded roster entry
     // carries is the exact shadowed case the sibling crate shipped
     // BACKWARDS (stdlib-first) and needed a dedicated follow-up fix for.
     // The faithfulness fixtures elsewhere in this file only cover the
