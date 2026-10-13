@@ -18,7 +18,7 @@ fn args(list: &[&str]) -> Vec<String> {
 
 /// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
 /// uniquely by process id + an atomic counter — copied verbatim from
-/// `tests/mode_equivalence.rs::scratch` (docs/superpowers plan's "temp
+/// `tests/mode_equivalence.rs::scratch` (docs/internal plan's "temp
 /// paths in tests" rule): a literal, non-unique directory name is shared
 /// by every concurrently running `cargo test` invocation that targets the
 /// same `CARGO_TARGET_TMPDIR`, so two such invocations racing on the
