@@ -158,9 +158,12 @@ what lets `tmt build` read it back. A refusal that depends on the others
 only. The FINAL table lists every OTHER source of the same target, in its
 declared order, then each declared library, in `-l`/manifest order, then
 the embedded standard library unless opted out. The order decides
-nothing about what the sources publish, and nothing about a published
-name: the others may declare it only identically, privately or not
-(`docs/tmt/language.md (declarations)`).
+nothing about what the sources publish through a PUBLISHED name, and
+nothing about a published name itself: the others may declare it only
+identically, privately or not (`docs/tmt/language.md (declarations)`).
+A name two sources carry only privately, in different forms, is taken
+from the first of them in table order, so a source that grafts or calls
+that name can publish differently by order.
 
 A `.tmc` sibling is read LENIENTLY: a routine's declared shape is its
 signature, and its body contributes what its generated header would
@@ -211,6 +214,17 @@ sources are then named in the build's own error, in either declared
 order, with a trailing note describing the pattern and its escape: break
 the cycle by hand — write a header for one of the two units and give it
 to the build as a library instead of a sibling.
+
+Two limits of such a pair. First, passing the declarations stage is not
+linking: when the routines call each other with state parameters (an
+exit-bearing call), the pair links only under `--call-mech=frames`; the
+default mechanism and `mono` refuse the link with the copy-path message
+that names that cure, the same limit a single recursive unit meets
+(`docs/tmt/language.md (state parameters)`). Second, a cycle none of
+whose members states a `writes` clause settles at the whole alphabet, so
+a caller under a narrower contract is refused with
+`writes-outside-contract` even when nothing in the cycle writes more;
+one `writes` clause on one member of the cycle cures it.
 
 For each declared library, **whatever exists of `<name>.tmo` (its
 interface section) and `<name>.tmh` (graphs, named maps, doc lines) on

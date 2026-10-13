@@ -209,7 +209,9 @@ repeatable, and the files are read together to a fixed point — each
 against the declarations of the others, again whenever one of them
 changes what it publishes — so one `--extern` file may depend on another
 and the order of the flags decides nothing about what they publish
-(`docs/tmt/project.md (Declaration derivation)`). Two files declaring one
+through a published name (`docs/tmt/project.md (Declaration derivation)`);
+a name two files carry only privately, in different forms, is taken from
+the first of them in flag order. Two files declaring one
 name must declare it identically — a
 unit's source and its header, one library given twice — or the compile
 fails `conflicting-declaration`; the same holds against the embedded
@@ -242,7 +244,12 @@ A unit given to `--extern` as its `.tmc` and as the header `tmt
 interface` generates from it against the same `--extern` files publish
 the same thing, in every order of the flags: each tape's declared write
 set where it declares one, the write set inferred from the body
-otherwise, and the same `noreturn`.
+otherwise, and the same `noreturn` — unless the units call each other in
+a cycle through `with map` bindings that shift glyphs. `tmt interface`
+reads its unit once against its peers and cannot reach the settled set
+there, so the header can be wider than the `.tmc`. State the `writes`
+clause on the routine, covering what it can write, and both forms
+publish it.
 
 `--extern` takes declaration **source** text. A compiled container given
 to it — an object, an executable, a tape block — is refused on its magic,

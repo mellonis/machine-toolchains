@@ -702,9 +702,13 @@ const DECLARATIONS_UNSETTLED: &str = "declarations-unsettled";
 /// order: with no cycle of calls between the sources each sweep settles
 /// at least one more, so `sources.len() + 1` sweeps suffice; a cycle of
 /// calls through maps that shift glyphs can lose one glyph per trip and
-/// take longer. The loop simply runs until nothing is due a read. Its
-/// only guard is a safety net for the monotonicity it relies on, never a
-/// limit a program can meet: every sweep but the last changes a reading,
+/// take longer. The loop simply runs until nothing is due a read. The
+/// narrowing has one corner this function cannot rule out: a unit whose
+/// expansion fails only against a richer table makes [`inferred_returns`]
+/// fall back to the routine's declared `noreturn` clause, which can widen
+/// a reading instead of narrowing it. No input that reaches that corner
+/// is known. Its only guard is a safety net for the monotonicity it
+/// relies on, and no input known to reach it: every sweep but the last changes a reading,
 /// and a change is a first reading or a narrowing, so the sweeps cannot
 /// exceed the number of sources plus what the readings in hand can still
 /// lose ([`settle_height`]). Past that, every source still due a read
