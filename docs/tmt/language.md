@@ -1479,7 +1479,7 @@ direction (`map-conflict`), and — on equal-cardinality alphabets — the
 map is injective (`map-not-injective`), exactly the graft-time checks
 above. On UNEQUAL cardinalities the declaration additionally requires
 every non-blank source symbol to be named explicitly (`map-not-closed`):
-unlike a graft's own inline map (one splice, one visible use, so an
+unlike a graft's own CLOSED inline map (one splice, one visible use, so an
 unnamed source quietly becomes a hole), a named declaration is meant to
 be reused at every site that names it, so a gap left implicit there would
 be a silent runtime trap wherever it is next used. `wideToBits` above

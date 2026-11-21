@@ -1218,8 +1218,8 @@ fn build_tapemap(
 /// own map, [`build_tapemap`], through [`build_symbol_maps`] and
 /// [`check_injective_completion`]), and — the one check unique to a named
 /// declaration — CLOSED on unequal cardinalities: every non-blank SOURCE
-/// symbol must be explicitly named. A graft's own inline map silently
-/// holes an unnamed source across unequal cardinalities
+/// symbol must be explicitly named. A graft's own CLOSED inline map
+/// silently holes an unnamed source across unequal cardinalities
 /// (`build_tapemap`'s `close_unlisted`) because a graft is one splice, one
 /// visible use; a NAME is checked once and reused at every site that
 /// names it, so an unnamed source there would be a silent runtime trap
