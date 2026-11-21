@@ -177,13 +177,22 @@ where { (x in S && y in S && x < y) || x == y }
 
 Consequences, pinned as written:
 
+- **One-sided narrowing is never enough** (ruled by the author: for a
+  cross-alphabet pair with `in` on only one operand, *"the other one
+  needs it added"*): an order comparison needs one common context for
+  the PAIR — both narrowed in their cones to one set, or both unnarrowed
+  on one alphabet. `where { x in S && x < y }` is an error in both
+  worlds — cross-alphabet (no common sequence) and same-alphabet (x's
+  context is `S`, y's is the alphabet). The refusal names both contexts
+  and its hint is the remedy: add the missing `in` to the other operand.
+- When the restriction is wanted but the set's ORDER is not, restrict in
+  the pattern cell instead — `[qq as x, 'a'..'z' as y] where { x < y }`
+  compares in the alphabet's order and needs no `in` at all. Plain
+  restriction belongs to the cell; `in S` is for licensing a sequence.
 - `where { (x in S && A) || x < y }` is **legal** when x and y share one
   alphabet (the outside comparison is over the alphabet's default
-  order); it is an error only when the pair has no common sequence
-  without a license (cross-alphabet).
-- `where { x in S && x < y }` (y unnarrowed) is an error even on one
-  alphabet: an order comparison needs the license of **both** operands —
-  both narrowed to one set, or both unnarrowed on one alphabet.
+  order); it is an error when the pair has no common sequence without a
+  license (cross-alphabet).
 - Two different set-narrowings of one binding **inside one cone**
   (`x in S && x in T && …`) are an error only where x's **position** is
   needed; `x in S && x in T && x == y` is legal — identity needs no
