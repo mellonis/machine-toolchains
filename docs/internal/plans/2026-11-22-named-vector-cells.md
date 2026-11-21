@@ -252,7 +252,7 @@ generated headers print the canonical positional form from both arms.
 |---|---|---|
 | a name that does not resolve | `unresolved-tape-target` pins (Task 3) | red — span at the name |
 | resolve names to the WRONG index | Task 4's swap-mutation pin | red — rows differ from the twin |
-| fill defaults as identity instead of `*`/`-`/`.` | Task 3's positive twin + Task 4 row equality | red — rows carry the wrong cells |
+| fill defaults as identity instead of `*`/`-`/`.` | `the_two_spellings_emit_one_image` (all three fixtures) | red — VERIFIED AGAINST THE ROWS PINS' BLIND SPOT: a move-fill mutant (`.` filled as `<`) passed `machine_rules_fold_to_the_same_rows` green (rows see match lines only; fills ride `wrmv`), so the row pins were strengthened to whole-image equality |
 | drop `name:` on the clean reprint | Task 5 token-preservation fixture | red — fmt loses a token |
 | print headers from source-form rules | Task 6 twin pin | red — source ≠ object |
 | named form exempt from `check_width` differently than filled | Task 3 width tests + `row-width` cases unchanged | red |

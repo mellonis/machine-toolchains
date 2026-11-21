@@ -273,6 +273,19 @@ fn rows_of(src: &str) -> Vec<String> {
         .collect()
 }
 
+/// The linked image's FULL disassembly — the whole `byte for byte` claim.
+/// `rows_of` sees only the match rows; writes and moves live in the code
+/// text (`wrmv`), where the fill defaults of an unnamed cell also land.
+fn image_of(src: &str) -> String {
+    let out = link(
+        std::slice::from_ref(&object(src)),
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("link failed: {e}"));
+    disassemble_executable_with_map(&out.executable, &out.map)
+}
+
 const WIDE_NAMED: &str = "\
 alphabet ab { '_', 'a', 'b' }
 
@@ -392,6 +405,30 @@ machine {
 #[test]
 fn a_grafted_graph_body_folds_to_the_same_rows() {
     assert_eq!(rows_of(GRAFT_NAMED), rows_of(GRAFT_POSITIONAL));
+}
+
+// The rows pins read only the match rows. The fill defaults for a cell no
+// name covered land in the CODE (`.`/`-` rides the `wrmv` operands), so the
+// claim is only whole at image level: every fixture's full disassembly is
+// the twin's, byte for byte. (This pin exists because the row-only pins let
+// a mutated move fill default — `.` filled as `<` — pass green.)
+#[test]
+fn the_two_spellings_emit_one_image() {
+    assert_eq!(
+        image_of(WIDE_NAMED),
+        image_of(WIDE_POSITIONAL),
+        "machine rules"
+    );
+    assert_eq!(
+        image_of(ROUTINE_NAMED),
+        image_of(ROUTINE_POSITIONAL),
+        "a routine body"
+    );
+    assert_eq!(
+        image_of(GRAFT_NAMED),
+        image_of(GRAFT_POSITIONAL),
+        "a grafted graph body"
+    );
 }
 
 // ---------------------------------------------------------------------------
