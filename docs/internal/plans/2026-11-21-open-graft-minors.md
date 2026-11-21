@@ -278,3 +278,24 @@ construction; record the file list in the run's report.
 | Drop `t.open`/`read_class` assertions (Task 2) | same test's remaining holes assertions | red on the revert |
 | Revert to tape-major loop (Task 3) | `a_refusal_names_the_first_state_then_its_first_uncovered_tape` | red — named `two`/`p` |
 | Move the docs row back (Task 4) | — | hold-still (docs layout); read against `code_registry!` |
+
+## Review outcome (recorded at execution)
+
+Fresh whole-branch review: **Ready to merge** — 0 Critical, 0 Important,
+3 Minor. One Minor was re-graded Important by effect and fixed in the
+review fix pass (three texts said a graft's inline map "silently holes an
+unnamed source" without the closed-map scope — the very law this round
+establishes). The deferred set below was discharged the same day on the
+partner's request, so nothing remains outstanding:
+
+- the `docs/tmt/cli.md` selection parenthetical now names the skip (the
+  refusal names the first uncovered tape whose map is open and leaves an
+  opaque symbol — a closed map, or a map naming every symbol, is passed
+  over);
+- the `open_single_pair_src_map` (ex-`open_unequal_src_map`) doc no longer
+  claims its caller's alphabets, and the vacuous `t.holes()` assert carries
+  the note that only `rmap.holes.is_empty()` guards the recorded mutation;
+- the reviewer's optional gap is closed by
+  `open_unequal_map_still_closes_its_write_half` — an open map on unequal
+  alphabets hard-closes its write half; the pin was mutation-verified
+  (copying the read-side `!open &&` guard onto the write close redden it).

@@ -2382,13 +2382,13 @@ mod map_tests {
         );
     }
 
-    /// An open map with one pair over UNEQUAL alphabets — host `_ a b`,
-    /// graph `_ 0`, `'a' -> '0'` — built the way `build_tapemap` builds it.
-    /// The unlisted host symbol `b` is opaque by `read_class`, which reads the
-    /// pairs directly on an open map and never consults `holes`; a read hole
-    /// minted for it would be dead state contradicting that model and riding
-    /// along in the dedup key (docs/tmt/language.md (open grafts)).
-    fn open_unequal_src_map() -> SrcSymMap {
+    /// An open map with one pair `'a' -> '0'` plus the `*` marker, built the
+    /// way `build_tapemap` builds it; the alphabets belong to each CALLER.
+    /// A host symbol the pairs do not name is opaque by `read_class`, which
+    /// reads the pairs directly on an open map and never consults `holes`; a
+    /// read hole minted for it would be dead state contradicting that model
+    /// and riding along in the dedup key (docs/tmt/language.md (open grafts)).
+    fn open_single_pair_src_map() -> SrcSymMap {
         let glyph = |v: &str| SymLit::Glyph {
             value: v.to_string(),
             span: Span::new(1, 1, 1, 2),
@@ -2413,7 +2413,7 @@ mod map_tests {
     #[test]
     fn open_unequal_map_mints_no_read_holes() {
         let t = build_tapemap(
-            Some(&open_unequal_src_map()),
+            Some(&open_single_pair_src_map()),
             0,
             &glyphs(&["_", "a", "b"]),
             &glyphs(&["_", "0"]),
@@ -2421,6 +2421,10 @@ mod map_tests {
         )
         .expect("tapemap");
         assert!(t.open);
+        // The assert that guards the recorded mutation (minting holes again)
+        // is `rmap.holes` here; `t.holes()` below is vacuously true on an open
+        // map, since `holes()` filters `read_class == Hole` and unlisted
+        // sources classify `Opaque` even when `rmap.holes` is non-empty.
         assert!(
             t.rmap.holes.is_empty(),
             "an open map mints no read holes, got {:?}",
@@ -2437,7 +2441,7 @@ mod map_tests {
     #[test]
     fn open_equal_map_never_minted_read_holes() {
         let t = build_tapemap(
-            Some(&open_unequal_src_map()),
+            Some(&open_single_pair_src_map()),
             0,
             &glyphs(&["_", "a", "b"]),
             &glyphs(&["_", "0", "x"]),
@@ -2446,6 +2450,27 @@ mod map_tests {
         .expect("tapemap");
         assert!(t.rmap.holes.is_empty());
         assert_eq!(t.read_class(2), ReadClass::Opaque);
+    }
+
+    /// The write half closes whatever the cardinalities: an open map's
+    /// unnamed graph glyph has no host image (its write becomes `trap #1`)
+    /// and must never land through identity (docs/tmt/language.md (open
+    /// grafts)). Runs the map over UNEQUAL alphabets, where the close rides
+    /// the cardinality disjunct alone — a copy of the read-side `!open &&`
+    /// guard on the write close redden this.
+    #[test]
+    fn open_unequal_map_still_closes_its_write_half() {
+        let t = build_tapemap(
+            Some(&open_single_pair_src_map()),
+            0,
+            &glyphs(&["_", "a", "x", "y"]),
+            &glyphs(&["_", "0", "1"]),
+            Span::new(1, 1, 1, 2),
+        )
+        .expect("tapemap");
+        assert_eq!(t.write_image(0), Some(0)); // blank pinned
+        assert_eq!(t.write_image(1), Some(1)); // the named pair
+        assert_eq!(t.write_image(2), None); // unnamed glyph: no host image
     }
 }
 
