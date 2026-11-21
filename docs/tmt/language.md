@@ -1346,7 +1346,7 @@ it on the `[*]` row.
 else it is a parse error. It is a site's marker, so a top-level `map`
 declaration refuses it (a parse error). A `graft`'s map carries it too —
 there the unlisted host symbols are the opaque class, matched only by the
-graph's `*` rows (open grafts). A pattern cell's `* as v` stays the
+graph's `*` rows (Open grafts, below). A pattern cell's `* as v` stays the
 `wildcard-binding` error, which is what keeps a substitution from ever
 copying the opaque index into a write.
 
@@ -1376,6 +1376,77 @@ may reach the call is reported as "a symbol this open map sends to the
 callee's opaque index" (`docs/tmt/lint.md (enters-unmet)`). The
 optimizer's `inline` never splices a site whose binding is open; the
 link engine composes it (`docs/tmt/optimizer.md (inline)`).
+
+### Open grafts
+
+A `graft`'s tape map may end with `*` exactly as a `call`'s or `bind`'s may,
+and the marker means the same thing there — on the graft's own mechanism. A
+call sends the unlisted caller symbols, at link time, onto the callee's
+opaque index; a graft splices the graph's rows into the host's own tapes and
+has no second alphabet, so the unlisted host symbols become the **opaque
+class**: they name no glyph of the graph's alphabet, are never aliased onto
+one and never holed into a trap row, and are matched only by the graph's
+`*` rows.
+
+```
+alphabet wide { '_', '^', '$', '0', '1' }
+alphabet bits { '_', '0', '1' }
+
+graph skip(tape t: bits, state done) {
+  entry state s {
+    ['_'] -> done;
+    [*]   -> move [>] goto s;
+  }
+}
+
+machine {
+  tape w: wide;
+
+  entry graft skip(t = w with map { '0' -> '0', '1' -> '1', * }, done = fin) as sk;
+
+  state fin { [*] -> stop; }
+}
+```
+
+The markers `'^'` and `'$'` are neither holes nor collapsed onto a graph
+glyph here: `skip` reads each as "anything else" and walks past it on the
+`[*]` row. The named pairs carry the digits — and the whole write half.
+**The graph writes back only what the pairs map, whatever the
+cardinalities**: an unnamed glyph's write has no host image and becomes
+`trap #1`, rather than landing through identity. The blank stays pinned
+either way. (`tmt lint` on the program above reports exactly what a
+read-only body earns: the `unused-graft-name` and two `dead-map-pair`
+demotions suggesting `=>`, since `skip` never writes.)
+
+A map naming no pairs at all (`map { * }`) is therefore legal and useful for
+a body that only ever reads through `*` cells — and it is NOT an omitted
+map: omitting the map is the identity binding, which requires glyph-for-glyph
+equal alphabets, while `{ * }` sends every non-blank symbol to the opaque
+class and closes the write half entirely.
+
+**Refused, not trapped.** A graph state that would let the opaque class
+decide whether one of its rows matches is refused at compile time —
+`open-graft-uncovered`, naming the graph state and the tape parameter —
+because the point of the marker is that the extra symbols keep their meaning
+as *other*. The law is single-row cover: every row is shadowed in the same
+state by a row whose cell on that tape is `*` and whose other cells accept
+everything the row itself accepts. Rows `[0, *]` and `[*, 1]` over two
+open-bound tapes are therefore refused: an opaque symbol on the first tape
+with the second on `'1'` matches neither. A world with no reading state
+passes vacuously; a rule whose cells have no host preimage at all dies with
+the `empty-expansion` warning, exactly as under a closed map.
+
+The class survives a graft inside a graft: an unlisted symbol is "anything
+else" at every depth, matched only by `*` cells all the way down. Openness
+is part of a graft INSTANCE's identity — two sites differing only in `*`
+splice two fragments and are not each other's `duplicate-graft-instance`
+(the same way their semantics differ).
+
+Named map declarations stay closed by construction (see below): `*` is
+grammatical only at a site's map. And a graft site reports no
+`enters-unmet` — the head-position analysis reports no graft edges at all
+(its own module documentation) — so a graft's diagnostics are the coverage
+refusal and the trap-row behaviour above.
 
 ### Named maps
 

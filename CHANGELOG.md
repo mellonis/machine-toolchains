@@ -14,6 +14,25 @@ version — `0.6.0-dev` after 0.5.0 — so a build from it names itself as
 unreleased; the entry for the next release assembles here at the cut and
 takes the version the work earned.
 
+### Open grafts — 2026-11-21
+
+A graft's tape map may now end with `*`, as a call's or bind's map already
+could. The unlisted host symbols become the opaque class — never aliased
+onto a glyph of the graph's alphabet and never holed into a trap row — and
+are matched only by the graph's own `*` rows. The graph writes back only
+what the pairs map, whatever the cardinalities; `* as v` stays refused. A
+graph state whose rows would let the opaque class decide a match is refused
+at compile time — `open-graft-uncovered`, naming the state and the tape —
+rather than trapping at run time. The class survives a graft inside a graft,
+and openness is part of a graft instance's identity, so two sites differing
+only in `*` never share a spliced fragment. The 0.2 refusal named
+`open-graft-unsupported` is gone.
+
+| Version space | This change | Previous |
+|---|---|---|
+| `.tmc` language | **0.3** — a graft's map admits the open marker | 0.2 |
+| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+
 ## [0.5.0] - 2026-09-02
 
 Two release candidates preceded this cut on the same day: the first so

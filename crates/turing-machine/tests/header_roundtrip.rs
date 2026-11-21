@@ -1871,12 +1871,14 @@ export routine pick(tape exit0: bits, state hit) {
 }
 
 /// `TMC_LANG_VERSION` moved `0.1` → `0.2` when the grammar gained the
-/// bodiless-signature alternative a header is written in. Pre-1.0, `N`
-/// bumps on ANY grammar change; there is no patch digit. Mutation:
-/// leaving it at `0.1`.
+/// bodiless-signature alternative a header is written in, and `0.2` →
+/// `0.3` when graft maps admitted the open marker (an acceptance change:
+/// a text that was refused now compiles). Pre-1.0, `N` bumps on ANY
+/// grammar change; there is no patch digit. Mutation:
+/// leaving it at `0.2`.
 #[test]
-fn the_language_version_is_two() {
-    assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.2");
+fn the_language_version_is_three() {
+    assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.3");
 }
 
 /// `tmt interface` answers what a unit DECLARES, not what it compiles

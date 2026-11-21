@@ -42,9 +42,11 @@ use crate::syntax::{self, GreenSink, TmcKind};
 /// first cut (mirrors PM-1's `PMC_LANG_VERSION` discipline); `0.2` adds the
 /// declarations-only signature alternative — a `;` in place of a `{ … }`
 /// body after a routine or graph signature (docs/tmt/language.md
-/// (headers)).
+/// (headers)); `0.3` admits open graft maps — a `*` in a graft's binding
+/// map, the same marker a call's or bind's map already took
+/// (docs/tmt/language.md (open grafts)).
 /// (An unreleased version amends in place; the bump discipline binds from the first release.)
-pub const TMC_LANG_VERSION: &str = "0.2";
+pub const TMC_LANG_VERSION: &str = "0.3";
 
 // ---------------------------------------------------------------------------
 // AST — the flat program the front end (resolution, IR, codegen) consumes.
