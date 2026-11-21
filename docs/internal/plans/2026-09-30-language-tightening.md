@@ -1,5 +1,14 @@
 # Language Tightening (Phase 4, Language Spec A) Implementation Plan
 
+> **Checkbox provenance (2026-11-21).** Tasks 1–14 were ticked from the merged
+> history on `next`, not re-executed: every commit named below is on the branch
+> (Task 13's two landed under reworded subjects — `287726b` and `722a881`), and
+> `cargo test --workspace` at the branch tip is green (4790 passed / 0 failed /
+> 11 ignored). Task 0's steps stay unticked on purpose: its deliverable, the
+> git-ignored `baseline.md` ledger, is not in the repository and cannot be
+> re-read; each later task re-checked those corpus properties through its own
+> committed gate.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove every place where the toolchain silently picks one of two
@@ -714,16 +723,16 @@ fn a_link_error_falls_back_to_sources_then_position() {
    shadowing bullets change in Task 2b.)
 
 **Steps.**
-- [ ] Before editing: `git grep -n 'LinkError::' -- crates/wasm/src crates/post-machine/src crates/turing-machine/src`
+- [x] Before editing: `git grep -n 'LinkError::' -- crates/wasm/src crates/post-machine/src crates/turing-machine/src`
   — any exhaustive `match` on `LinkError` outside core must gain the new shape
   (and, in Tasks 3 and 10b, the new variants); list what you find.
-- [ ] Write tests 1–6; run `cargo nextest run -p mtc-core --test link_checks -E 'test(/duplicate_symbol|falls_back/)'` — compile error on the struct variant is the expected first red; then (after adding the variant only) the assertion red.
-- [ ] Implement 1–4. Update any `duplicate symbol: NAME` example output the
+- [x] Write tests 1–6; run `cargo nextest run -p mtc-core --test link_checks -E 'test(/duplicate_symbol|falls_back/)'` — compile error on the struct variant is the expected first red; then (after adding the variant only) the assertion red.
+- [x] Implement 1–4. Update any `duplicate symbol: NAME` example output the
   Task 0 grep found in `docs/`.
-- [ ] Focused green: core `link_checks`, core lib (`resolve` tests), TM `--test one_definition`, PM `--test one_definition`, TM lib (`link_library_objects…`).
-- [ ] Mutations: empty labels in `tmt link` → test 3 red; `input_name` ignoring sources → test 2 red.
-- [ ] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4` once; PM byte identity (`--test golden_programs --test asm_volatile`) is inside the PM run; then `cargo nextest run -p mtc-wasm -j 4` once (the browser binding links through the same `LinkOptions` and `LinkError`).
-- [ ] Commit: `feat(core): a link error names the inputs it comes from`.
+- [x] Focused green: core `link_checks`, core lib (`resolve` tests), TM `--test one_definition`, PM `--test one_definition`, TM lib (`link_library_objects…`).
+- [x] Mutations: empty labels in `tmt link` → test 3 red; `input_name` ignoring sources → test 2 red.
+- [x] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4` once; PM byte identity (`--test golden_programs --test asm_volatile`) is inside the PM run; then `cargo nextest run -p mtc-wasm -j 4` once (the browser binding links through the same `LinkOptions` and `LinkError`).
+- [x] Commit: `feat(core): a link error names the inputs it comes from`.
 
 ---
 
@@ -1021,19 +1030,19 @@ inputs define is listed once)". `object_columns`' doc: drop "exactly as
 
 
 **Steps.**
-- [ ] Write rows 1–8 and the rewritten unit tests; run
+- [x] Write rows 1–8 and the rewritten unit tests; run
   `cargo nextest run -p mtc-core --lib -E 'test(/resolve::/)'` and
   `--test link_checks`; see 1, 3 (reached half), 4, 5, 6, 7 red; 2 and 8
   green.
-- [ ] Implement the contenders check; update the module and field docs.
-- [ ] Focused green; mutations (drop the check → 1 red; ignore reach → 3's
+- [x] Implement the contenders check; update the module and field docs.
+- [x] Focused green; mutations (drop the check → 1 red; ignore reach → 3's
   middle assertion red; per-column counting → 4 red; per-record counting →
   8 red).
-- [ ] Gate: `cargo nextest run -p mtc-core -j 4` once;
+- [x] Gate: `cargo nextest run -p mtc-core -j 4` once;
   `cargo nextest run -p mtc-post-machine --test golden_programs --test asm_volatile -j 4`;
   then one run of `-p mtc-post-machine` and `-p mtc-turing-machine`
   confirming that the ONLY red tests are the six named under "Scope of 2a".
-- [ ] Commit: `feat(core): a name two inputs define is refused once the program reaches it`.
+- [x] Commit: `feat(core): a name two inputs define is refused once the program reaches it`.
   Ledger `changelog-notes.md`: BREAKING — a library definition can no longer
   be shadowed; "Overriding std" is gone, `--nostdlib` replaces the library
   wholesale.
@@ -1283,16 +1292,16 @@ premise):
 
 
 **Steps.**
-- [ ] Write rows 1–7 and the rewrites; see 1, 2, 4, 5, 7 red (they link or
+- [x] Write rows 1–7 and the rewrites; see 1, 2, 4, 5, 7 red (they link or
   build today); 3 and 6 green; the six tests 2a left red now pass.
-- [ ] Comments and doc comments (driver, cli, wasm).
-- [ ] Docs as above. Re-run Task 0's shipped-build sweep (every file that
+- [x] Comments and doc comments (driver, cli, wasm).
+- [x] Docs as above. Re-run Task 0's shipped-build sweep (every file that
   built must still build); record in the ledger.
-- [ ] Mutations: `tmt link` without `-l` labels → 1 red; `tmt build` without
+- [x] Mutations: `tmt link` without `-l` labels → 1 red; `tmt build` without
   the stdlib label → 4 red; PM driver without the stdlib label → 5 red.
-- [ ] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4`
+- [x] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4`
   once (PM byte identity inside); `cargo nextest run -p mtc-wasm -j 4` once.
-- [ ] Commits: `test(cli): both toolchains refuse a reached name two inputs define`
+- [x] Commits: `test(cli): both toolchains refuse a reached name two inputs define`
   (the rewrites and the new CLI tests) and
   `docs(core): one definition per name at link, no shadowing of a library`
   (docs, comments, `CLAUDE.md`).
@@ -1547,21 +1556,21 @@ spliced the graph, which must match at least one input's private record when
 no input exports the name."
 
 **Steps.**
-- [ ] Tests 1–18 red where the table says the result changes (14–18 fail
+- [x] Tests 1–18 red where the table says the result changes (14–18 fail
   to assemble until the spelling exists).
-- [ ] Implement the flag (format, assembler, disassembler, constructions),
+- [x] Implement the flag (format, assembler, disassembler, constructions),
   then `settle_exports`, the private drift arm, and the two callers.
-- [ ] Focused green; mutations (first-wins → 1, 6, 8 red; consumption ignored
+- [x] Focused green; mutations (first-wins → 1, 6, 8 red; consumption ignored
   → 4, 11 red; user arm dropped → 5, 12 red; drift first → 2 red; private
   records in the conflict pass → 15 red; first-private-only → 17 red;
   private records unchecked → 18 red; `, private` not printed → 14 red).
-- [ ] Core format guards: the object round-trip and noise property tests in
+- [x] Core format guards: the object round-trip and noise property tests in
   `formats/object/tests.rs` green with the new byte; the dis→asm
   byte-identity tests green (`graph_and_grafted_lines_reassemble_byte_identically`
   in the TM crate among them).
-- [ ] Docs.
-- [ ] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4` once.
-- [ ] Commit: `feat(core): two inputs exporting one graph or alphabet differently are refused`.
+- [x] Docs.
+- [x] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4` once.
+- [x] Commit: `feat(core): two inputs exporting one graph or alphabet differently are refused`.
 
 ---
 
@@ -1953,19 +1962,19 @@ the ledger.
      its uncontracted tapes' inferred write sets…".
 
 **Steps.**
-- [ ] Tests 1–7 (1, 3 in `extern_declarations.rs`; 4–7 in `published.rs`).
+- [x] Tests 1–7 (1, 3 in `extern_declarations.rs`; 4–7 in `published.rs`).
   Run: test 1 red (the TODAY error), 4 red on a5, 5–7 red (functions missing).
-- [ ] Implement 1–3; tests green.
-- [ ] Mutations (skip (e) → 1 and 4 red; empty set for uncontracted → 3 red;
+- [x] Implement 1–3; tests green.
+- [x] Mutations (skip (e) → 1 and 4 red; empty set for uncontracted → 3 red;
   `agrees` replaced by `==` → 7 red).
-- [ ] Docs (4).
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once. Expected
+- [x] Docs (4).
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once. Expected
   flips: none known. Any red test gets a one-line disposition in the report
   (a test that relied on a sibling `.tmc` being believed to write its whole
   alphabet is the only plausible kind). Compiled-stdlib byte identity at
   `-O0` and `-O1` (`tests/interface_emission.rs` stdlib object tests) must
   hold — this task changes no codegen path.
-- [ ] Commit: `fix(turing-machine): a source read publishes the write sets its header prints`.
+- [x] Commit: `fix(turing-machine): a source read publishes the write sets its header prints`.
 
 ---
 
@@ -2578,24 +2587,24 @@ namespace lib {
   (`docs/tmt/language.md (declarations)`), the order decides nothing."
 
 **Steps.**
-- [ ] Write tests 1–17 and the rewrites; run the focused binaries; the new
+- [x] Write tests 1–17 and the rewrites; run the focused binaries; the new
   tests red for the stated reasons (16 is a guard: green at the start of this task, red only under Task 4's
   mutation; 13, 14, 17 are green today and must stay green).
-- [ ] Implement 1–4; focused green.
-- [ ] Mutations (own-vs-table call removed → 1, 4, 6, 7, 9 red; `check_conflicts`
+- [x] Implement 1–4; focused green.
+- [x] Mutations (own-vs-table call removed → 1, 4, 6, 7, 9 red; `check_conflicts`
   removed → 10 red; settle skipped in `own_forms` → 5 red, because `own.tmh`
   prints `r` as `noreturn` and the unsettled own form does not; forms not
   compared → 3, 5, 8 red; derived `==` → 13 red; `Provenance` ignored → 14
   red; counts only → 15 red; writes step skipped → 16 red).
-- [ ] Re-run Task 0's shipped-build sweep and
+- [x] Re-run Task 0's shipped-build sweep and
   `cargo nextest run -p mtc-turing-machine --test stdlib_header --test header_roundtrip --test header_fmt_clean --test interface_emission`
   first (these compile `std.tmc` against the default table: a red here means
   the Task 4 guard missed a difference — stop and report).
-- [ ] Docs; `error_code_docs.rs::the_published_compile_catalog_lists_exactly_the_registry_codes` green.
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once;
+- [x] Docs; `error_code_docs.rs::the_published_compile_catalog_lists_exactly_the_registry_codes` green.
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once;
   `cargo nextest run -p mtc-wasm -j 4` once (the browser binding compiles
   sources against the embedded stdlib).
-- [ ] Commit: `feat(turing-machine): a name declared differently twice is a compile error`.
+- [x] Commit: `feat(turing-machine): a name declared differently twice is a compile error`.
   Ledger: BREAKING — `--extern` order no longer shadows; a unit redefining a
   `std::` routine differently is refused at compile.
 
@@ -2748,15 +2757,15 @@ matched with `as NAME`…": "A name is bound once per pattern:
 The same name in two different rules is two unrelated bindings."
 
 **Steps.**
-- [ ] Tests red (1, 4); 2, 3 green.
-- [ ] Implement; green; mutation (drop the check) → 1, 4 red.
-- [ ] Docs; `error_code_docs.rs` and the witness test green.
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once. The corpus
+- [x] Tests red (1, 4); 2, 3 green.
+- [x] Implement; green; mutation (drop the check) → 1, 4 red.
+- [x] Docs; `error_code_docs.rs` and the witness test green.
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once. The corpus
   has 139 bindings, none repeated within one rule (Task 0 scan) — no flip
   expected; `tmc_property.rs` generates patterns: if it now produces
   duplicate names and reds, its generator must mint distinct names per rule
   (report as a disposition).
-- [ ] Commit: `feat(turing-machine): a binding name repeated in one pattern is an error`.
+- [x] Commit: `feat(turing-machine): a binding name repeated in one pattern is an error`.
   Ledger: BREAKING — a pattern binding a name twice no longer compiles.
 
 ---
@@ -2971,13 +2980,13 @@ machine whether or not anything calls it, is `return-outside-routine`";
 `docs/tmt/cli.md` row as in Files.
 
 **Steps.**
-- [ ] Tests 1–7; red: 1, 2, 3, 4, 5.
-- [ ] Implement; green; mutations per table.
-- [ ] Docs.
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once. The corpus
+- [x] Tests 1–7; red: 1, 2, 3, 4, 5.
+- [x] Implement; green; mutations per table.
+- [x] Docs.
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once. The corpus
   uses `= return` only inside routines (`std.tmc`, `facade_proof.rs`,
   `library_grafts.rs` routine fixtures) — no flip expected.
-- [ ] Commit: `fix(turing-machine): return is refused as an argument outside a routine`.
+- [x] Commit: `fix(turing-machine): return is refused as an argument outside a routine`.
   Ledger: BREAKING (minor) — a graft or bind in a machine or graph body that
   hands `return` to an exit no longer compiles.
 
@@ -3168,11 +3177,11 @@ If one moves, the order of checks differs between the two copies — report it
 rather than re-pinning.
 
 **Steps.**
-- [ ] Tests 1–5; red: 1, 2, 3.
-- [ ] Implement; green; mutations per table.
-- [ ] Docs.
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once.
-- [ ] Commit: `fix(turing-machine): a call into a declared routine takes the shared argument check`.
+- [x] Tests 1–5; red: 1, 2, 3.
+- [x] Implement; green; mutations per table.
+- [x] Docs.
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once.
+- [x] Commit: `fix(turing-machine): a call into a declared routine takes the shared argument check`.
   Ledger: BREAKING (minor) — stricter argument kinds across units.
 
 ---
@@ -3486,13 +3495,13 @@ graph cases in the three-way split, and in "### Calls across units": "A
 `wrong-target-kind` — a graph is grafted, never called."
 
 **Steps.**
-- [ ] Tests 1–9; red: 1, 2, 3, 6, 7, 8, 9 (texts), 5 (functions missing).
-- [ ] Implement (visibility first, then `external_decls`, the miss sites, the
+- [x] Tests 1–9; red: 1, 2, 3, 6, 7, 8, 9 (texts), 5 (functions missing).
+- [x] Implement (visibility first, then `external_decls`, the miss sites, the
   `found` field, the fourth site, `Declarations::routine`'s filter); green;
   mutations per table.
-- [ ] Docs; `error_code_docs.rs` and the witness test green.
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once.
-- [ ] Commit: `fix(turing-machine): a cross-unit name of the wrong kind says what it is`.
+- [x] Docs; `error_code_docs.rs` and the witness test green.
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once.
+- [x] Commit: `fix(turing-machine): a cross-unit name of the wrong kind says what it is`.
 
 ---
 
@@ -3662,18 +3671,18 @@ fn a_return_through_an_undeclared_exit_does_not_assemble() {
   returns a frame descriptor governs."
 
 **Steps.**
-- [ ] Before editing: `git grep -n 'AsmErrorKind::' -- crates/wasm crates/*/src`
+- [x] Before editing: `git grep -n 'AsmErrorKind::' -- crates/wasm crates/*/src`
   — any exhaustive match there gains the arm.
-- [ ] Tests 1–4; see 1 and 4 red. Rebuild the four fixtures; their tests
+- [x] Tests 1–4; see 1 and 4 red. Rebuild the four fixtures; their tests
   stay green today (the patch is a no-op on behaviour).
-- [ ] Implement; green; mutations per table.
-- [ ] Drift guards: core `error_code_docs.rs::the_published_catalog_lists_exactly_the_registry_codes`
+- [x] Implement; green; mutations per table.
+- [x] Drift guards: core `error_code_docs.rs::the_published_catalog_lists_exactly_the_registry_codes`
   and `every_capability_cell_names_a_real_assembler_capability`.
-- [ ] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4` once
+- [x] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4` once
   (PM byte identity inside; PM has no `.routine` interface, so nothing there
   can change); `cargo nextest run -p mtc-wasm -j 4` once (the browser
   binding surfaces assembler errors through `build` on `tma`).
-- [ ] Commit: `feat(core): a return through an undeclared exit does not assemble`.
+- [x] Commit: `feat(core): a return through an undeclared exit does not assemble`.
   Ledger: BREAKING — a hand-written `.tma` returning through an undeclared
   exit no longer assembles.
 
@@ -3868,17 +3877,17 @@ match link(&syntax, std::slice::from_ref(&obj), std::slice::from_ref(&stdlib), L
   its signature does not declare".
 
 **Steps.**
-- [ ] Before editing: `git grep -n 'LinkError::\|undeclared-exit\|DIAGNOSTIC_CODES' -- crates/wasm crates/*/src`
+- [x] Before editing: `git grep -n 'LinkError::\|undeclared-exit\|DIAGNOSTIC_CODES' -- crates/wasm crates/*/src`
   — any exhaustive match or pinned code list there changes with this task.
-- [ ] Tests 1–9 as in the table; see 1, 4, 5, 6, 7, 8 red.
-- [ ] Implement.
-- [ ] Focused green; mutations per table.
-- [ ] Drift guards: core `error_code_docs.rs::the_published_link_warning_catalog_lists_exactly_the_registry_codes`,
+- [x] Tests 1–9 as in the table; see 1, 4, 5, 6, 7, 8 red.
+- [x] Implement.
+- [x] Focused green; mutations per table.
+- [x] Drift guards: core `error_code_docs.rs::the_published_link_warning_catalog_lists_exactly_the_registry_codes`,
   TM `error_code_docs.rs::the_published_link_warning_catalog_lists_exactly_the_registry_codes`,
   TM `lint/mod.rs::validate_allow_also_accepts_link_warning_codes`.
-- [ ] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4` once;
+- [x] Gate: `cargo nextest run -p mtc-core -p mtc-post-machine -p mtc-turing-machine -j 4` once;
   `cargo nextest run -p mtc-wasm -j 4` once.
-- [ ] Commit: `feat(core): a return through an undeclared exit is refused at link`.
+- [x] Commit: `feat(core): a return through an undeclared exit is refused at link`.
   Ledger: BREAKING — `undeclared-exit` is a link error under every
   mechanism; `--allow undeclared-exit` and a `lint.allow` entry naming it
   are now unknown-code errors.
@@ -4176,20 +4185,20 @@ only.
   touches every tape."
 
 **Steps.**
-- [ ] Rule-file tests and the sweep file; see 1, 3, 5, 6, 8 red; 2, 4, 7, 9
+- [x] Rule-file tests and the sweep file; see 1, 3, 5, 6, 8 red; 2, 4, 7, 9
   green.
-- [ ] Implement the transparent rule first; see 1 go green; commit it alone:
+- [x] Implement the transparent rule first; see 1 go green; commit it alone:
   `fix(turing-machine): a transparent call into another unit touches every tape`.
-- [ ] Implement the three rules and their registry rows; docs headings
+- [x] Implement the three rules and their registry rows; docs headings
   (`lint::docs_drift::the_tmc_rule_headings_match_the_registry_both_directions`
   must pass).
-- [ ] Mutations per table; the sweep with transparent handling dropped
+- [x] Mutations per table; the sweep with transparent handling dropped
   reports exactly rpn's four adapters (record them).
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once. Tests that
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once. Tests that
   assert an EMPTY diagnostics list from `lint` over a fixture with an unread
   binding, an untouched parameter or a both-clauses tape would flip — fix the
   FIXTURE (read the binding, touch the tape) and list each in the report.
-- [ ] Commit: `feat(turing-machine): unused tape parameters, unread bindings and inert never-writes entries are lints`.
+- [x] Commit: `feat(turing-machine): unused tape parameters, unread bindings and inert never-writes entries are lints`.
 
 ---
 
@@ -4263,13 +4272,13 @@ machine {
   `unused-set` skip exported declarations.**"
 
 **Steps.**
-- [ ] Tests; the exported halves red.
-- [ ] Implement the three skips; module docs.
-- [ ] Mutations; docs.
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once (the
+- [x] Tests; the exported halves red.
+- [x] Implement the three skips; module docs.
+- [x] Mutations; docs.
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once (the
   `lint_fix_comment_guard.rs` / `lint_quickfix_comments.rs` fixtures are
   non-exported — no flip expected).
-- [ ] Commit: `feat(turing-machine): an exported alphabet, map or set is never reported unused`.
+- [x] Commit: `feat(turing-machine): an exported alphabet, map or set is never reported unused`.
 
 ---
 
@@ -4621,17 +4630,17 @@ records every graph its header prints, so each is checked by name."
 `docs/formats.md`: the `.graph`/`.grafted` sentences as in Files.
 
 **Steps.**
-- [ ] Tests 1–6, 9 red; 7, 8, 10 green today (10 must stay green); the
+- [x] Tests 1–6, 9 red; 7, 8, 10 green today (10 must stay green); the
   three flipping tests red for the stated reason.
-- [ ] Implement 1, then 2, then 3; after each, run
+- [x] Implement 1, then 2, then 3; after each, run
   `cargo nextest run -p mtc-turing-machine --test library_grafts`.
-- [ ] Rewrite the three flipping tests; all green.
-- [ ] Mutations per table.
-- [ ] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once; the
+- [x] Rewrite the three flipping tests; all green.
+- [x] Mutations per table.
+- [x] Gate: `cargo nextest run -p mtc-turing-machine -j 4` once; the
   compiled-stdlib byte identity at `-O0`/`-O1`
   (`tests/interface_emission.rs` stdlib tests) must hold — say so in the
   report with the test names; `cargo nextest run -p mtc-wasm -j 4` once.
-- [ ] Commits: `feat(turing-machine): a graph's digest covers the sets and maps its body names`
+- [x] Commits: `feat(turing-machine): a graph's digest covers the sets and maps its body names`
   (implementation 1, tests 1–3) and
   `feat(turing-machine): every graph a splice pulls in is recorded and checked`
   (implementation 2–3, tests 4–6 and the three rewrites).
@@ -4684,16 +4693,16 @@ Re-run it with the branch's final binary before committing; if a static check
 objects, adjust the example — never the claim.
 
 **The whole-branch gate** (run in this order, one at a time):
-- [ ] `cargo fmt --check`
-- [ ] `CARGO_TARGET_DIR=… cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `CARGO_TARGET_DIR=… cargo build -p mtc-core --no-default-features`
-- [ ] `CARGO_TARGET_DIR=… cargo build --workspace --lib --target wasm32-unknown-unknown`
-- [ ] `scripts/build-wasm-bundle.sh` (WITHOUT the target-dir prefix) then
+- [x] `cargo fmt --check`
+- [x] `CARGO_TARGET_DIR=… cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `CARGO_TARGET_DIR=… cargo build -p mtc-core --no-default-features`
+- [x] `CARGO_TARGET_DIR=… cargo build --workspace --lib --target wasm32-unknown-unknown`
+- [x] `scripts/build-wasm-bundle.sh` (WITHOUT the target-dir prefix) then
   `node scripts/wasm-smoke.mjs target/wasm-bundle/dist`
-- [ ] `CARGO_TARGET_DIR=… cargo nextest run --workspace -j 4` — the one
+- [x] `CARGO_TARGET_DIR=… cargo nextest run --workspace -j 4` — the one
   workspace run of the plan. Compare the count with the Task 0 baseline:
   every difference is a test this plan added, deleted or renamed (list them).
-- [ ] Standing gates named explicitly (they are inside the workspace run;
+- [x] Standing gates named explicitly (they are inside the workspace run;
   cite their names in the report): PM-1 byte identity
   (`golden_programs`, `asm_volatile`); core neutrality (no TM/PM knowledge
   in the `crates/core` diff — `git diff origin/next -- crates/core` read by
@@ -4702,14 +4711,14 @@ objects, adjust the example — never the claim.
   `link_matrix`; compiled-stdlib byte identity at both opt levels
   (`interface_emission.rs` stdlib tests); every drift guard named in Global
   Constraints.
-- [ ] Re-run Task 0's shipped-build and lint sweeps with the final binaries;
+- [x] Re-run Task 0's shipped-build and lint sweeps with the final binaries;
   every file that built still builds; the lint findings equal the baseline
   (no new code fires on shipped files).
-- [ ] Docs audit: `git grep -n 'first-wins\|shadow' -- docs README.md CLAUDE.md`
+- [x] Docs audit: `git grep -n 'first-wins\|shadow' -- docs README.md CLAUDE.md`
   — every remaining hit is about rows, imports or locals, not symbols or
   declarations; `git grep -nE '#[0-9]{2,3}\b|Task [0-9]|spec §' -- docs crates ':!docs/internal'`
   shows nothing this branch added.
-- [ ] Commit (docs): `docs(turing-machine): head contracts constrain the glyph under the head, not its position`.
+- [x] Commit (docs): `docs(turing-machine): head contracts constrain the glyph under the head, not its position`.
 
 ---
 ## Tests that flip (copy into the ledger in Task 0)
