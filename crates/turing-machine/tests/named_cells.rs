@@ -505,3 +505,184 @@ fn a_named_spelling_formats_idempotently_and_keeps_its_names() {
     assert!(once.contains("x: '_'"), "the name survives: {once}");
     assert_eq!(format(&once).expect("formats"), once, "idempotent");
 }
+
+// ---------------------------------------------------------------------------
+// Generated headers speak the canonical positional form, from both arms
+// (docs/tmt/language.md (named vector cells)): a named source's `tmt
+// interface` output is byte-identical to its positional twin's, and a named
+// library graph travels through that header into a host's graft unchanged.
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use mtc_turing_machine::cli::execute;
+
+fn args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// A fresh per-call fixture directory — pid + atomic counter (the temp-path
+/// rule), cleaned on drop.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn new(name: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+    fn write(&self, name: &str, content: &str) -> std::path::PathBuf {
+        let p = self.0.join(name);
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `tmt interface SRC` over a scratch copy, as the CLI prints it.
+fn header_of(src: &str) -> String {
+    let dir = ScratchDir::new("named_header");
+    let path = dir.write("unit.tmc", src);
+    let out = execute(&args(&["interface", path.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    out.stdout
+}
+
+const HEADER_NAMED: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+export graph g(tape n: ab, tape m: ab, state done) {
+  entry state scan {
+    [m: 'a'] -> write [m: 'b'] goto scan;
+    [n: '_'] -> done;
+  }
+}
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry graft g(n = t, m = u, done = fin) as inst;
+  state fin { [*, *] -> stop; }
+}
+";
+
+const HEADER_POSITIONAL: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+export graph g(tape n: ab, tape m: ab, state done) {
+  entry state scan {
+    [*, 'a'] -> write [-, 'b'] goto scan;
+    ['_', *] -> done;
+  }
+}
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry graft g(n = t, m = u, done = fin) as inst;
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn a_named_source_prints_its_positional_twin_s_header() {
+    // The named body is sparse over two tapes: the header must print the
+    // full-width positional form either way (a name as spelling never
+    // reaches a generated artifact).
+    let named = header_of(HEADER_NAMED);
+    let positional = header_of(HEADER_POSITIONAL);
+    assert_eq!(
+        named, positional,
+        "the generated header is the positional form from both spellings"
+    );
+    // Anti-vacuity: the body really is in there, in full-width positional
+    // shape (an exported-unit-less header would print empty and satisfy
+    // any equality).
+    assert!(
+        named.contains("[*, 'a']"),
+        "the body prints positional and full width: {named}"
+    );
+}
+
+const LIB_GRAPH_NAMED: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a', 'b' }
+
+  export graph g(tape n: ab, tape m: ab, state done) {
+    entry state scan {
+      [m: 'a'] -> write [m: 'b'] goto scan;
+      [n: '_'] -> done;
+    }
+  }
+}
+";
+
+const LIB_GRAPH_POSITIONAL: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a', 'b' }
+
+  export graph g(tape n: ab, tape m: ab, state done) {
+    entry state scan {
+      [*, 'a'] -> write [-, 'b'] goto scan;
+      ['_', *] -> done;
+    }
+  }
+}
+";
+
+const HOST: &str = "\
+use lib::ab;
+use lib::g;
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry graft g(n = t, m = u, done = fin) as inst;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// The declarations path: the library unit's header is generated from its
+/// SOURCE (where the graph body may be written named), the host compiles
+/// against it with `--extern` and grafts the graph, and the generated
+/// assembly must equal the positional twin pipeline's byte for byte —
+/// spliced rows and graft digest included.
+fn extern_assembly(lib_src: &str) -> String {
+    let dir = ScratchDir::new("named_extern");
+    let lib = dir.write("lib.tmc", lib_src);
+    let host = dir.write("host.tmc", HOST);
+    let hdr_out = execute(&args(&["interface", lib.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface lib: {e}"));
+    assert_eq!(hdr_out.code, 0, "{}", hdr_out.stderr);
+    let header = dir.write("lib.tmh", &hdr_out.stdout);
+    let out = execute(&args(&[
+        "compile",
+        "-S",
+        "--nostdlib",
+        host.to_str().unwrap(),
+        "--extern",
+        header.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile host: {e}"));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    out.stdout
+}
+
+#[test]
+fn a_named_library_body_travels_through_its_header_unchanged() {
+    assert_eq!(
+        extern_assembly(LIB_GRAPH_NAMED),
+        extern_assembly(LIB_GRAPH_POSITIONAL),
+        "a host grafting a named library graph emits the twin's assembly"
+    );
+}

@@ -160,8 +160,8 @@ use mtc_core::formats::object::{
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
     self, CompileError, CompileErrorKind, PeerChecks, Provenance, ReadMode, Resolved,
-    ResolvedCallTarget, ResolvedWorld, WorldKind, clause_glyphs, full_name, published_writes,
-    symset_glyphs,
+    ResolvedCallTarget, ResolvedWorld, WorldKind, clause_glyphs, full_name,
+    position_named_cells, published_writes, symset_glyphs,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -1864,7 +1864,20 @@ fn graph_body_lines(
         "graph"
     };
     let mut lines = vec![format!("{keyword} {}({}) {{", graph.name, sig)];
-    for state in &graph.states {
+    // The body prints the POSITIONAL form whatever the source spelled: a
+    // name is a spelling, and a generated artifact speaks the semantics
+    // (docs/tmt/language.md (named vector cells)). The fold is the same one
+    // resolution runs over `world.states`; over this source-form copy it is
+    // infallible (the unit resolved before printing) or a no-op (the object
+    // arm builds positional rules from rows) — running it is what keeps both
+    // arms, and `graph_digest` over these lines, on one text.
+    let mut states = graph.states.clone();
+    position_named_cells(
+        &mut states,
+        &world.tapes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+    )
+    .expect("a body prints only for a unit that resolved");
+    for state in &states {
         lines.extend(indented(state_lines(state)));
     }
     for graft in &graph.grafts {
