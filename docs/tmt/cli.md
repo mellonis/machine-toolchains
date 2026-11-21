@@ -349,6 +349,7 @@ subsection.
 | `map-conflict` | A symbol map maps one symbol to two different images in one direction. |
 | `map-not-injective` | A symbol map on equal-size alphabets is not injective — identity completion collides. |
 | `identity-glyph-mismatch` | An omitted symbol map on tapes whose alphabets are not glyph-for-glyph equal — an omitted map means identity. |
+| `open-graft-uncovered` | A graft site's open map, on a graph state whose rows would let the opaque class decide whether one of them matches. Refused instead of trapping later: give the state a row whose bound-tape cell is `*`, or name the symbols in the map. The state and the tape parameter are named — the first state in source order that leaves an open tape uncovered, and that state's first uncovered tape, in parameter order. |
 | `map-not-closed` | A named map declaration's two alphabets differ in size and it leaves a non-blank source symbol unmapped — unlike a graft's inline map (which silently holes an unnamed source), a declaration reused at many sites must name every one explicitly. |
 | `named-map-source-mismatch` | A `with map NAME` site's caller tape alphabet is not the named map's own declared source alphabet. |
 | `named-map-target-mismatch` | A `with map NAME` site's callee parameter alphabet is not the named map's own declared target alphabet. |
@@ -361,7 +362,6 @@ subsection.
 | `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
 | `too-many-state-params` | A signature declares more than 255 `state` parameters — the published exit count is one byte wide. |
 | `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (declare it locally, or supply its declarations to this compile). |
-| `open-graft-uncovered` | A graft site's open map, on a graph state whose rows would let the opaque class decide whether one of them matches. Refused instead of trapping later: give the state a row whose bound-tape cell is `*`, or name the symbols in the map. The state and the tape parameter are named. |
 | `noreturn-violated` | A routine's signature declares `noreturn`, but its body has a way to return — a `return` transition, a `then return`, or `return` handed to a callee as a `state` argument, counted conservatively over the whole body. |
 | `then-required` | A `call`/bind site omits `then`, but its callee is not known (declared to this unit) to be `noreturn` — `then` stays mandatory against an unknown callee or one that can return, since the linker never checks it either way. |
 | `internal-error` | The compiler broke its own invariant — generated assembly failed to assemble, or a compiler-built IR world failed validation. A compiler bug, not a source error; please report it. |
