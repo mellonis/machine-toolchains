@@ -455,7 +455,11 @@ fn lint_findings_are_the_twin_s_exact() {
         .filter(|(code, _)| code == "unused-tape")
         .map(|(_, m)| m.as_str())
         .collect();
-    assert_eq!(unused.len(), 2, "a3 and a4 are untouched, named: {unused:?}");
+    assert_eq!(
+        unused.len(),
+        2,
+        "a3 and a4 are untouched, named: {unused:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

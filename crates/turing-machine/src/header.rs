@@ -160,8 +160,8 @@ use mtc_core::formats::object::{
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
     self, CompileError, CompileErrorKind, PeerChecks, Provenance, ReadMode, Resolved,
-    ResolvedCallTarget, ResolvedWorld, WorldKind, clause_glyphs, full_name,
-    position_named_cells, published_writes, symset_glyphs,
+    ResolvedCallTarget, ResolvedWorld, WorldKind, clause_glyphs, full_name, position_named_cells,
+    published_writes, symset_glyphs,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -1874,7 +1874,11 @@ fn graph_body_lines(
     let mut states = graph.states.clone();
     position_named_cells(
         &mut states,
-        &world.tapes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        &world
+            .tapes
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
     )
     .expect("a body prints only for a unit that resolved");
     for state in &states {

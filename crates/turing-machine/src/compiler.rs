@@ -3965,7 +3965,10 @@ fn resolve_world(
 /// positional assumptions; `Program` keeps the written spelling, which is
 /// what lets fmt print the form the author wrote and the header print its
 /// own canonical one.
-pub(crate) fn position_named_cells(states: &mut [State], tape_names: &[&str]) -> Result<(), CompileError> {
+pub(crate) fn position_named_cells(
+    states: &mut [State],
+    tape_names: &[&str],
+) -> Result<(), CompileError> {
     for st in states.iter_mut() {
         for rule in &mut st.rules {
             position_pattern_cells(&mut rule.pattern, tape_names)?;
@@ -5954,9 +5957,7 @@ mod tests {
                 expected: 2,
                 got: 3,
             },
-            CompileErrorKind::DuplicateNamedCell {
-                name: "x".into(),
-            },
+            CompileErrorKind::DuplicateNamedCell { name: "x".into() },
             CompileErrorKind::MixedCellForms,
             CompileErrorKind::TooManyStateParams(256),
             CompileErrorKind::StateArgsNeedDeclarations("x".into()),

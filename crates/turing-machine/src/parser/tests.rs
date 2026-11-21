@@ -1329,10 +1329,16 @@ fn a_rule_vector_cell_may_name_its_tape() {
         .expect("a pattern cell names its tape");
     assert_eq!(pn.name, "t");
     let wv = r.write.as_ref().expect("write");
-    let wn = wv.cells[0].name.as_ref().expect("a write cell names its tape");
+    let wn = wv.cells[0]
+        .name
+        .as_ref()
+        .expect("a write cell names its tape");
     assert_eq!(wn.name, "u");
     let mv = r.mov.as_ref().expect("move");
-    let mn = mv.cells[0].name.as_ref().expect("a move cell names its tape");
+    let mn = mv.cells[0]
+        .name
+        .as_ref()
+        .expect("a move cell names its tape");
     assert_eq!(mn.name, "t");
     // The cell span covers the name THROUGH the content, and the name's own
     // span is just the name — what a diagnostic about the name points at.
@@ -1354,16 +1360,18 @@ fn a_positional_cell_keeps_no_name() {
     let p = parse_src(A1).expect("parses");
     let r = &machine(&p).states[0].rules[0];
     assert!(r.pattern.cells.iter().all(|c| c.name.is_none()));
-    assert!(r
-        .write
-        .as_ref()
-        .map(|w| w.cells.iter().all(|c| c.name.is_none()))
-        .unwrap_or(true));
-    assert!(r
-        .mov
-        .as_ref()
-        .map(|m| m.cells.iter().all(|c| c.name.is_none()))
-        .unwrap_or(true));
+    assert!(
+        r.write
+            .as_ref()
+            .map(|w| w.cells.iter().all(|c| c.name.is_none()))
+            .unwrap_or(true)
+    );
+    assert!(
+        r.mov
+            .as_ref()
+            .map(|m| m.cells.iter().all(|c| c.name.is_none()))
+            .unwrap_or(true)
+    );
 }
 
 const NAMED_SET: &str = "\
@@ -1431,5 +1439,8 @@ fn a_name_leaves_char_arithmetic_pointing_at_the_variable() {
     let e = parse_src(NAMED_CHAR).unwrap_err();
     assert_eq!(e.kind.code(), "char-arithmetic");
     // The span is the offending reference's own, name prefix or not.
-    assert_eq!(e.span, Span::point(at(NAMED_CHAR, "v + 1").line, at(NAMED_CHAR, "v + 1").col));
+    assert_eq!(
+        e.span,
+        Span::point(at(NAMED_CHAR, "v + 1").line, at(NAMED_CHAR, "v + 1").col)
+    );
 }
