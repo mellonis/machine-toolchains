@@ -1773,17 +1773,19 @@ fn expand_grafts_into<'a>(
         // no row may decide a match on it. The law is the routine-side
         // single-row cover (docs/tmt/language.md (open grafts)), reused over
         // the graph's own expanded rows — the first state that would let the
-        // opaque index decide is refused by name.
-        for (k, tm) in comp.tapes.iter().enumerate() {
-            if !tm.open {
-                continue;
-            }
-            // Nothing to protect where the map names every symbol: the opaque
-            // class is empty, so no row can ever decide on a member of it.
-            if !(0..tm.host_card as u16).any(|p| tm.read_class(p) == ReadClass::Opaque) {
-                continue;
-            }
-            for st in &gx.states {
+        // opaque index decide is refused by name: the first state in source
+        // order that has an uncovered open tape, and within it the first
+        // such tape.
+        for st in &gx.states {
+            for (k, tm) in comp.tapes.iter().enumerate() {
+                if !tm.open {
+                    continue;
+                }
+                // Nothing to protect where the map names every symbol: the opaque
+                // class is empty, so no row can ever decide on a member of it.
+                if !(0..tm.host_card as u16).any(|p| tm.read_class(p) == ReadClass::Opaque) {
+                    continue;
+                }
                 // A row whose read cells have no host preimage is dropped at
                 // the splice (`map_rule`) and cannot decide anything — only
                 // rows that will actually exist enter the cover question.
@@ -3663,6 +3665,82 @@ machine {
                 &err.kind,
                 CompileErrorKind::OpenGraftUncovered { state, tape }
                     if state == "mix" && tape == "p"
+            ),
+            "{:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_first_state_then_its_first_uncovered_tape() {
+        // Two reading states, crossed failures: `one` leaves only `q`
+        // uncovered, `two` only `p`. State-major selection names `one`/`q`
+        // (the first state in source order that has an uncovered open tape,
+        // and within it the first such tape); a tape-major scan would name
+        // `two`/`p`, so this discriminates the two orders.
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph crossed(tape p: three, tape q: three, state done) {
+  entry state one {
+    [*, '1'] -> done;
+  }
+  state two {
+    ['0', *] -> done;
+  }
+}
+
+machine {
+  tape x: five;
+  tape y: five;
+  entry graft crossed(p = x with map { 'a' -> '0', * }, q = y with map { 'a' -> '0', 'b' -> '1', * }, done = s2) as inst;
+  state s2 { [*, *] -> stop; }
+}
+";
+        let err = expand_err(src);
+        assert!(
+            matches!(
+                &err.kind,
+                CompileErrorKind::OpenGraftUncovered { state, tape }
+                    if state == "one" && tape == "q"
+            ),
+            "{:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn a_wholly_covered_state_is_passed_over() {
+        // The first state shadows on both tapes; the refusal falls through to
+        // the second, naming its uncovered tape. Both selection orders agree
+        // here — the regression half.
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph mixed(tape p: three, tape q: three, state done) {
+  entry state one {
+    [*, *] -> done;
+  }
+  state two {
+    ['0', *] -> done;
+  }
+}
+
+machine {
+  tape x: five;
+  tape y: five;
+  entry graft mixed(p = x with map { 'a' -> '0', * }, q = y with map { 'a' -> '0', 'b' -> '1', * }, done = s2) as inst;
+  state s2 { [*, *] -> stop; }
+}
+";
+        let err = expand_err(src);
+        assert!(
+            matches!(
+                &err.kind,
+                CompileErrorKind::OpenGraftUncovered { state, tape }
+                    if state == "two" && tape == "p"
             ),
             "{:?}",
             err.kind

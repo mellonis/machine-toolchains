@@ -1434,7 +1434,10 @@ everything the row itself accepts. Rows `[0, *]` and `[*, 1]` over two
 open-bound tapes are therefore refused: an opaque symbol on the first tape
 with the second on `'0'` matches neither. A world with no reading state
 passes vacuously; a rule whose cells have no host preimage at all dies with
-the `empty-expansion` warning, exactly as under a closed map.
+the `empty-expansion` warning, exactly as under a closed map. Where several
+states would let the class decide, the refusal names the first state in
+source order that leaves an open tape uncovered, and that state's first
+uncovered tape, in parameter order.
 
 The class survives a graft inside a graft: an unlisted symbol is "anything
 else" at every depth, matched only by `*` cells all the way down. Openness
