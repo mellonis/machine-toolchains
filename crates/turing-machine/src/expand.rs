@@ -1165,16 +1165,20 @@ fn build_tapemap(
     let open = m.open.is_some();
     let (mut rmap, mut wmap, bidir) = build_symbol_maps(&m.pairs, host_glyphs, graph_glyphs)?;
     // Closed-on-unequal (docs/formats.md (bound calls)): identity completion
-    // exists only for equal-size alphabets. Across differently-sized tapes
-    // every non-blank source the map does not name is a hole — computed from
-    // the explicit srcs still in `pairs`, before the identity-pair retain
-    // below, so an explicit `k->k` survives as identity while a truly absent
-    // symbol traps. A NAMED map's own declaration checks the opposite way
+    // exists only for equal-size alphabets. On a CLOSED map, every non-blank
+    // source the map does not name is a hole — computed from the explicit
+    // srcs still in `pairs`, before the identity-pair retain below, so an
+    // explicit `k->k` survives as identity while a truly absent symbol traps.
+    // An OPEN map mints none of these on the read side: its unlisted source is
+    // the opaque class by `read_class`, which reads `pairs` directly and never
+    // consults `holes`, so a hole entry would be dead state contradicting
+    // that model and riding along in the dedup key.
+    // A NAMED map's own declaration checks the opposite way
     // (`check_named_map_decl` REQUIRES every non-blank source to be named
     // on unequal cardinalities) — a graft is one splice,
     // one visible use, so a silent hole here is not the same hazard a
     // reused declaration's silent gap would be.
-    if host_card != graph_card {
+    if !open && host_card != graph_card {
         close_unlisted(&mut rmap, host_card);
     }
     // ...and an OPEN map closes its WRITE half whatever the cardinalities:
@@ -2374,6 +2378,72 @@ mod map_tests {
             }
             .key()
         );
+    }
+
+    /// An open map with one pair over UNEQUAL alphabets — host `_ a b`,
+    /// graph `_ 0`, `'a' -> '0'` — built the way `build_tapemap` builds it.
+    /// The unlisted host symbol `b` is opaque by `read_class`, which reads the
+    /// pairs directly on an open map and never consults `holes`; a read hole
+    /// minted for it would be dead state contradicting that model and riding
+    /// along in the dedup key (docs/tmt/language.md (open grafts)).
+    fn open_unequal_src_map() -> SrcSymMap {
+        let glyph = |v: &str| SymLit::Glyph {
+            value: v.to_string(),
+            span: Span::new(1, 1, 1, 2),
+        };
+        SrcSymMap {
+            pairs: vec![crate::parser::MapPair {
+                src: glyph("a"),
+                dst: glyph("0"),
+                arrow: MapArrow::Bidirectional,
+                span: Span::new(1, 1, 1, 2),
+            }],
+            span: Span::new(1, 1, 1, 2),
+            named: None,
+            open: Some(Span::new(1, 1, 1, 2)),
+        }
+    }
+
+    fn glyphs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|g| g.to_string()).collect()
+    }
+
+    #[test]
+    fn open_unequal_map_mints_no_read_holes() {
+        let t = build_tapemap(
+            Some(&open_unequal_src_map()),
+            0,
+            &glyphs(&["_", "a", "b"]),
+            &glyphs(&["_", "0"]),
+            Span::new(1, 1, 1, 2),
+        )
+        .expect("tapemap");
+        assert!(t.open);
+        assert!(
+            t.rmap.holes.is_empty(),
+            "an open map mints no read holes, got {:?}",
+            t.rmap.holes
+        );
+        assert_eq!(t.holes(), Vec::<u16>::new());
+        // The named pair is not a hole either way; unlisted `b` stays opaque.
+        assert_eq!(t.read_class(1), ReadClass::Image(1));
+        assert_eq!(t.read_class(2), ReadClass::Opaque);
+    }
+
+    /// Equal cardinalities: the read-side close never ran there, open or not —
+    /// the regression half, holding that direction still.
+    #[test]
+    fn open_equal_map_never_minted_read_holes() {
+        let t = build_tapemap(
+            Some(&open_unequal_src_map()),
+            0,
+            &glyphs(&["_", "a", "b"]),
+            &glyphs(&["_", "0", "x"]),
+            Span::new(1, 1, 1, 2),
+        )
+        .expect("tapemap");
+        assert!(t.rmap.holes.is_empty());
+        assert_eq!(t.read_class(2), ReadClass::Opaque);
     }
 }
 
