@@ -235,3 +235,225 @@ fn a_named_spelling_and_its_positional_twin_are_one_program() {
     assert_eq!(named.0, Outcome::Stopped);
     assert_eq!(named.1, vec![snap(0, &[2], 0), snap(0, &[2], 0)]);
 }
+
+// ---------------------------------------------------------------------------
+// named ≡ positional, byte for byte: the two spellings of one program yield
+// IDENTICAL match rows in the image and identical runs. Fixtures cover one
+// world per surface: a machine's own rules, a routine body, and a grafted
+// graph body. The pin is discriminating against a WRONG name mapping (two
+// names swapped is legal and yields different rows) — recorded as the round's
+// swap mutation.
+// ---------------------------------------------------------------------------
+
+use mtc_core::formats::object::ObjectFile;
+use mtc_turing_machine::asm::disassemble_executable_with_map;
+
+fn object(src: &str) -> ObjectFile {
+    compile(src, CompileOptions::default())
+        .unwrap_or_else(|e| panic!("the fixture must compile: {e}"))
+        .object
+}
+
+fn rows_of(src: &str) -> Vec<String> {
+    let out = link(
+        std::slice::from_ref(&object(src)),
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("link failed: {e}"));
+    let dis = disassemble_executable_with_map(&out.executable, &out.map);
+    dis.lines()
+        .filter_map(|l| {
+            l.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_once(".row ")
+                .map(|(_, op)| op.to_string())
+        })
+        .collect()
+}
+
+const WIDE_NAMED: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape x: ab;
+  tape y: ab;
+  tape z: ab;
+  entry state s {
+    [y: 'a', z: 'b'] -> write [y: 'b', z: 'a'] move [y: >, z: <] goto s;
+    [x: 'a' as v] -> write [x: {v}] goto s;
+    [*, *, '_'] -> stop;
+  }
+}
+";
+
+const WIDE_POSITIONAL: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape x: ab;
+  tape y: ab;
+  tape z: ab;
+  entry state s {
+    [*, 'a', 'b'] -> write [-, 'b', 'a'] move [., >, <] goto s;
+    ['a' as v, *, *] -> write [{v}, -, -] goto s;
+    [*, *, '_'] -> stop;
+  }
+}
+";
+
+#[test]
+fn machine_rules_fold_to_the_same_rows() {
+    assert_eq!(rows_of(WIDE_NAMED), rows_of(WIDE_POSITIONAL));
+}
+
+const ROUTINE_NAMED: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+routine step(tape n: ab) {
+  entry state s {
+    [n: 'a'] -> write [n: 'b'] move [n: >] goto s;
+    [n: '_'] -> return;
+  }
+}
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state go {
+    [t: 'a'] -> call step(n = t) then fin;
+    [u: 'b'] -> call step(n = u) then fin;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+const ROUTINE_POSITIONAL: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+routine step(tape n: ab) {
+  entry state s {
+    ['a'] -> write ['b'] move [>] goto s;
+    ['_'] -> return;
+  }
+}
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state go {
+    ['a', *] -> call step(n = t) then fin;
+    [*, 'b'] -> call step(n = u) then fin;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn a_routine_body_folds_to_the_same_rows() {
+    assert_eq!(rows_of(ROUTINE_NAMED), rows_of(ROUTINE_POSITIONAL));
+}
+
+const GRAFT_NAMED: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+graph g(tape n: ab, state done) {
+  entry state scan {
+    [n: 'a'] -> write [n: 'b'] move [n: >] goto scan;
+    [n: '_'] -> done;
+  }
+}
+
+machine {
+  tape t: ab;
+  entry graft g(n = t, done = fin) as inst;
+  state fin { [*] -> stop; }
+}
+";
+
+const GRAFT_POSITIONAL: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+graph g(tape n: ab, state done) {
+  entry state scan {
+    ['a'] -> write ['b'] move [>] goto scan;
+    ['_'] -> done;
+  }
+}
+
+machine {
+  tape t: ab;
+  entry graft g(n = t, done = fin) as inst;
+  state fin { [*] -> stop; }
+}
+";
+
+#[test]
+fn a_grafted_graph_body_folds_to_the_same_rows() {
+    assert_eq!(rows_of(GRAFT_NAMED), rows_of(GRAFT_POSITIONAL));
+}
+
+// ---------------------------------------------------------------------------
+// Lint fidelity: the findings over a named sparse spelling are exactly the
+// findings over its positional twin — the fill's defaults neither fabricate
+// activity nor hide it (the `unused-*` family sees untouched tapes
+// identically).
+// ---------------------------------------------------------------------------
+
+use mtc_turing_machine::lint::{LintOptions, lint};
+
+const FOUR_TAPE_NAMED: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape a1: ab;
+  tape a2: ab;
+  tape a3: ab;
+  tape a4: ab;
+  entry state s {
+    [a2: 'a'] -> write [a2: 'b'] goto s;
+    [a1: '_'] -> stop;
+  }
+}
+";
+
+const FOUR_TAPE_POSITIONAL: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape a1: ab;
+  tape a2: ab;
+  tape a3: ab;
+  tape a4: ab;
+  entry state s {
+    [*, 'a', *, *] -> write [-, 'b', -, -] goto s;
+    ['_', *, *, *] -> stop;
+  }
+}
+";
+
+#[test]
+fn lint_findings_are_the_twin_s_exact() {
+    let findings = |src: &str| -> Vec<(String, String)> {
+        lint(src, LintOptions::default())
+            .expect("lints")
+            .diagnostics
+            .into_iter()
+            .map(|d| (d.code.to_string(), d.message))
+            .collect()
+    };
+    let named = findings(FOUR_TAPE_NAMED);
+    assert_eq!(
+        named,
+        findings(FOUR_TAPE_POSITIONAL),
+        "the named spelling must earn exactly its twin's findings"
+    );
+    // The fill must not hide the untouched tapes: a3 and a4 stay reported.
+    let unused: Vec<&str> = named
+        .iter()
+        .filter(|(code, _)| code == "unused-tape")
+        .map(|(_, m)| m.as_str())
+        .collect();
+    assert_eq!(unused.len(), 2, "a3 and a4 are untouched, named: {unused:?}");
+}
