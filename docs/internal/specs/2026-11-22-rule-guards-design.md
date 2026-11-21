@@ -151,13 +151,49 @@ where { x in S && (A || B) }   // A and B see x ∈ S: survival forces the
                                // conjunct true
 where { (x in S && A) || B }   // B does not: survival via B tells us
                                // nothing about `x in S`
-where { (x in S && A) || x < y }   // ERROR outside the cone: `x < y`
-                                   // compares on default contexts
 ```
 
 Sound and compositional: a row survives the guard only when every
 conjunct holds, so within one conjunct-committed cone the narrowing is
 always real.
+
+**Typing is cone-local too** (ruled by the author: a branch *"should
+know nothing about the narrowing; if it needs one, it needs its own"*).
+Every occurrence is typed against the narrowings in effect in its own
+cone — never against a sibling branch's. The author shares a narrowing
+by hoisting it into the conjunction and parenthesizing the `||`, which
+is the shape above; each branch carries its own license otherwise:
+
+```
+// shared: hoisted, `||` under the conjunction
+where { x in S && y in S && (x < y || x == y) }
+
+// per-branch: each side names its own sequence
+where { (x in S && y in S && x < y) || (x in T && y in T && x < y) }
+
+// a branch with no narrowing works on its tape alphabets' default order
+where { (x in S && y in S && x < y) || x == y }
+```
+
+Consequences, pinned as written:
+
+- `where { (x in S && A) || x < y }` is **legal** when x and y share one
+  alphabet (the outside comparison is over the alphabet's default
+  order); it is an error only when the pair has no common sequence
+  without a license (cross-alphabet).
+- `where { x in S && x < y }` (y unnarrowed) is an error even on one
+  alphabet: an order comparison needs the license of **both** operands —
+  both narrowed to one set, or both unnarrowed on one alphabet.
+- Two different set-narrowings of one binding **inside one cone**
+  (`x in S && x in T && …`) are an error only where x's **position** is
+  needed; `x in S && x in T && x == y` is legal — identity needs no
+  sequence, the restrictions simply intersect. In sibling cones each
+  branch's own narrowing stands.
+- A narrowed binding's value outside its narrowing conjuncts (an
+  occurrence in a cone where no `in S` holds for it) is not restricted
+  by them; when its position is typed over `S`'s sequence, a value off
+  that sequence matches nothing — the same off-line rule as `y - 1` for
+  the first member.
 
 ## Decided semantics
 
@@ -199,8 +235,8 @@ term   := binding | glyph-literal | number-literal
 | Form | Domain | License |
 |---|---|---|
 | `x == y`, `x != y`, `x == 'a'` | glyph identity | none needed (any tapes) |
-| `x < y`, `x ≤ y`, `x > y`, `x ≥ y` | positions | one common context (same alphabet, or both narrowed to one set) |
-| `x == y - 1`, `x + 1 == y`, `x == 'c'` with offsets | positions | one common context |
+| `x < y`, `x ≤ y`, `x > y`, `x ≥ y` | positions | one common context **within the occurrence's cone** (same alphabet unnarrowed, or both narrowed there to one set) |
+| `x == y - 1`, `x + 1 == y`, `x == 'c'` with offsets | positions | one common context within the occurrence's cone |
 | `x < 'a'`, `'a' - 1 == y` | positions | `a` must lie in the other side's context sequence |
 | `x in S` | restriction | `S ⊆ x`'s tape alphabet; narrows x's context to `S` in the cone |
 
@@ -218,10 +254,22 @@ survival. A guard that keeps no rows warns with the existing
   `->`, and the never-move rule's audit grows slots for it (`]`-`where`,
   `where`-`{`, `}`-`->` boundaries, operator/binding slots inside).
 - **Headers** (`tmt interface`, `.tmh` bodies) print guards in `rule_text`
-  — a spliced graph body carries its guard into the host, whose expander
-  then filters in its own world. `graph_digest` covers it (CRC over the
-  printed lines), so twin spellings digest identically and `GraftDrift`
-  stays quiet.
+  — a guard is semantics like a range. **At a graft splice the guard has
+  already done its work in the graph's own expansion**: the expander
+  memoizes a graph expanded against its own tape contexts and the rows
+  travel through the per-graft `map_rule`, so the filter runs in
+  GRAPH-SPACE, typed and evaluated where the graph is written. A graph's
+  meaning is host-independent — the host receives mapped, already-filtered
+  rows. (Host-world filtering was rejected: it would need bindings to
+  survive mapping, per-instance re-evaluation, and re-typing at splice,
+  and the same graph would keep different rows under an
+  order-non-preserving `with map` — two truths again.)
+  `graph_digest` covers the printed guard (CRC over the printed lines),
+  so twin spellings digest identically and `GraftDrift` stays quiet. The
+  digest's named-content appendix — which today scans pattern-cell
+  `SetRef`s and bound maps — must also collect the guard's `in S` set
+  names, or `GraftDrift` goes quiet on set-member drift, which is exactly
+  what it must not do.
 - **Disassembly** never sees a guard — rows only.
 
 ### What this does NOT disturb
@@ -240,9 +288,13 @@ optimizer involvement); `check_rules` numbering (post-fold indices).
   path.
 - fmt pins: guard survival verbatim, idempotence, comment-audit slots
   green in both flavours, an adversarial `.tmc`/`.fmt` pair.
-- Refusal pins with spans: order-context error naming both contexts;
+- Refusal pins with spans: order-context error naming both contexts
+  (cross-alphabet with no license; one-sided narrowing `x in S && x < y`;
+  two different narrowing sets in one cone where a position is needed);
   `in S` with `S` off-alphabet; unknown binding name; a non-varying
-  comparison; narrowing misuse inside `||` as above.
+  comparison. And a POSITIVE pin for the cone-local ruling: a bare
+  `x < y` in a `||` branch beside a narrowed sibling branch is legal on
+  one alphabet and means the alphabet's default order.
 - Header twin: guarded named source and its positional twin print one
   header; a guarded library graph grafts identically with its digest.
 - Docs: `docs/tmt/language.md` gains "Rule guards" (with the two-domain
