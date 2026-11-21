@@ -390,7 +390,7 @@ stream. A block comment stays inline wherever it was written —
 `routine r(tape t: ab) /* c */ {` are all fixed points. A comment is
 never glued to a neighbouring token, so a `:` or `;` that normally
 abuts its predecessor takes a space when a comment intervenes. A named
-vector cell owns its `name`-to-`:` slot the same way — `[t /* c */: 'a']
+vector cell owns its `name`-to-`:` slot the same way — `[t /* c */ : 'a']
 -> stop;` and `[t: /* c */ 'a'] -> stop;` are fixed points like any other
 (docs/tmt/language.md (named vector cells)).
 

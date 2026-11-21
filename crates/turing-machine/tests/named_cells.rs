@@ -403,6 +403,16 @@ fn a_grafted_graph_body_folds_to_the_same_rows() {
 
 use mtc_turing_machine::lint::{LintOptions, lint};
 
+/// The lint channel, reduced to the facts the twins must agree on.
+fn lint_findings(src: &str) -> Vec<(String, String)> {
+    lint(src, LintOptions::default())
+        .expect("lints")
+        .diagnostics
+        .into_iter()
+        .map(|d| (d.code.to_string(), d.message))
+        .collect()
+}
+
 const FOUR_TAPE_NAMED: &str = "\
 alphabet ab { '_', 'a', 'b' }
 
@@ -435,18 +445,10 @@ machine {
 
 #[test]
 fn lint_findings_are_the_twin_s_exact() {
-    let findings = |src: &str| -> Vec<(String, String)> {
-        lint(src, LintOptions::default())
-            .expect("lints")
-            .diagnostics
-            .into_iter()
-            .map(|d| (d.code.to_string(), d.message))
-            .collect()
-    };
-    let named = findings(FOUR_TAPE_NAMED);
+    let named = lint_findings(FOUR_TAPE_NAMED);
     assert_eq!(
         named,
-        findings(FOUR_TAPE_POSITIONAL),
+        lint_findings(FOUR_TAPE_POSITIONAL),
         "the named spelling must earn exactly its twin's findings"
     );
     // The fill must not hide the untouched tapes: a3 and a4 stay reported.
@@ -459,6 +461,56 @@ fn lint_findings_are_the_twin_s_exact() {
         unused.len(),
         2,
         "a3 and a4 are untouched, named: {unused:?}"
+    );
+}
+
+// The binding-product route is folded-cell dependent (`binding-product-
+// threshold` skips a pattern narrower than the world), so it must be pinned
+// on a sparse named rule, against a 256 threshold a two-range rule crosses.
+
+const PRODUCT_NAMED: &str = "\
+alphabet big { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 }
+
+machine {
+  tape a: big;
+  tape b: big;
+  tape c: big;
+  entry state s {
+    [a: 0..20 as p, b: 0..20 as q] -> write [a: {p}, b: {q}] stop;
+    [*, *, *] -> stop;
+  }
+}
+";
+
+const PRODUCT_POSITIONAL: &str = "\
+alphabet big { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 }
+
+machine {
+  tape a: big;
+  tape b: big;
+  tape c: big;
+  entry state s {
+    [0..20 as p, 0..20 as q, *] -> write [{p}, {q}, -] stop;
+    [*, *, *] -> stop;
+  }
+}
+";
+
+#[test]
+fn the_binding_product_route_agrees_with_the_twin() {
+    let named = lint_findings(PRODUCT_NAMED);
+    assert_eq!(
+        named,
+        lint_findings(PRODUCT_POSITIONAL),
+        "the product route reads the folded cells, named or not"
+    );
+    let products = named
+        .iter()
+        .filter(|(code, _)| code == "binding-product-threshold")
+        .count();
+    assert_eq!(
+        products, 1,
+        "the wide rule really crosses the threshold: {named:?}"
     );
 }
 
@@ -658,9 +710,11 @@ machine {
 
 /// The declarations path: the library unit's header is generated from its
 /// SOURCE (where the graph body may be written named), the host compiles
-/// against it with `--extern` and grafts the graph, and the generated
-/// assembly must equal the positional twin pipeline's byte for byte —
-/// spliced rows and graft digest included.
+/// against it with `--extern` and grafts the graph. Returns the EMITTED
+/// `.tma` text, read back from the `-o` file `compile -S` writes — the
+/// spliced rows and the graft digest are the only witness of the mapping,
+/// and comparing anything else (the CLI's stdout is empty here) would pin
+/// nothing.
 fn extern_assembly(lib_src: &str) -> String {
     let dir = ScratchDir::new("named_extern");
     let lib = dir.write("lib.tmc", lib_src);
@@ -669,17 +723,27 @@ fn extern_assembly(lib_src: &str) -> String {
         .unwrap_or_else(|e| panic!("interface lib: {e}"));
     assert_eq!(hdr_out.code, 0, "{}", hdr_out.stderr);
     let header = dir.write("lib.tmh", &hdr_out.stdout);
+    let asm = dir.0.join("host.tma");
     let out = execute(&args(&[
         "compile",
         "-S",
         "--nostdlib",
+        "-o",
+        asm.to_str().unwrap(),
         host.to_str().unwrap(),
         "--extern",
         header.to_str().unwrap(),
     ]))
     .unwrap_or_else(|e| panic!("compile host: {e}"));
     assert_eq!(out.code, 0, "{}", out.stderr);
-    out.stdout
+    let text = std::fs::read_to_string(&asm).expect("compile -S writes the assembly to -o");
+    // Anti-vacuity: the image names its graft, carrying the digest — a
+    // header travel claim needs a graft record to speak of.
+    assert!(
+        text.contains(".grafted lib::g"),
+        "the host grafts the named graph: {text}"
+    );
+    text
 }
 
 #[test]

@@ -4008,13 +4008,34 @@ fn named_cell_position(
     Ok(pos)
 }
 
-/// Each of the three folds shares the shape — form check, name resolution,
-/// positional fill — but not the cell type, so each spells its own default.
+/// Each of the three folds shares the shape — form check and name resolution
+/// first, then the positional fill — but not the cell type, so each spells
+/// its own default.
 fn position_pattern_cells(p: &mut Pattern, tape_names: &[&str]) -> Result<(), CompileError> {
     if p.cells.iter().all(|c| c.name.is_none()) {
         return Ok(());
     }
     let named_form = p.cells[0].name.is_some();
+    // Form and names are checked BEFORE anything is destructured, so a
+    // refusal leaves the vector exactly as written.
+    let mut seen = HashSet::new();
+    let mut spots = Vec::with_capacity(p.cells.len());
+    for c in &p.cells {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if let Some(n) = &c.name {
+            spots.push(named_cell_position(n, tape_names, &mut seen)?);
+        }
+    }
+    if !named_form {
+        // Unreachable past the early return and the form agreement, kept so
+        // the destructuring fill below is total for whatever it moves.
+        return Ok(());
+    }
     let mut out = vec![
         PatternCell {
             name: None,
@@ -4024,22 +4045,9 @@ fn position_pattern_cells(p: &mut Pattern, tape_names: &[&str]) -> Result<(), Co
         };
         tape_names.len()
     ];
-    let mut seen = HashSet::new();
-    for mut c in std::mem::take(&mut p.cells) {
-        if c.name.is_some() != named_form {
-            return Err(CompileError {
-                span: c.span,
-                kind: CompileErrorKind::MixedCellForms,
-            });
-        }
-        if !named_form {
-            // A positional form with any name in the vector: the named cell
-            // was refused at its own loop turn, before this one runs. A cell
-            // matching the positional form just waits out the inevitable.
-            continue;
-        }
-        let n = c.name.take().expect("the form was checked");
-        out[named_cell_position(&n, tape_names, &mut seen)?] = c;
+    for (mut c, n) in std::mem::take(&mut p.cells).into_iter().zip(spots) {
+        c.name = None;
+        out[n] = c;
     }
     p.cells = out;
     Ok(())
@@ -4050,6 +4058,26 @@ fn position_write_cells(w: &mut WriteVec, tape_names: &[&str]) -> Result<(), Com
         return Ok(());
     }
     let named_form = w.cells[0].name.is_some();
+    // Form and names are checked BEFORE anything is destructured, so a
+    // refusal leaves the vector exactly as written.
+    let mut seen = HashSet::new();
+    let mut spots = Vec::with_capacity(w.cells.len());
+    for c in &w.cells {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if let Some(n) = &c.name {
+            spots.push(named_cell_position(n, tape_names, &mut seen)?);
+        }
+    }
+    if !named_form {
+        // Unreachable past the early return and the form agreement, kept so
+        // the destructuring fill below is total for whatever it moves.
+        return Ok(());
+    }
     let mut out = vec![
         WriteCell {
             name: None,
@@ -4058,19 +4086,9 @@ fn position_write_cells(w: &mut WriteVec, tape_names: &[&str]) -> Result<(), Com
         };
         tape_names.len()
     ];
-    let mut seen = HashSet::new();
-    for mut c in std::mem::take(&mut w.cells) {
-        if c.name.is_some() != named_form {
-            return Err(CompileError {
-                span: c.span,
-                kind: CompileErrorKind::MixedCellForms,
-            });
-        }
-        if !named_form {
-            continue;
-        }
-        let n = c.name.take().expect("the form was checked");
-        out[named_cell_position(&n, tape_names, &mut seen)?] = c;
+    for (mut c, n) in std::mem::take(&mut w.cells).into_iter().zip(spots) {
+        c.name = None;
+        out[n] = c;
     }
     w.cells = out;
     Ok(())
@@ -4081,6 +4099,26 @@ fn position_move_cells(m: &mut MoveVec, tape_names: &[&str]) -> Result<(), Compi
         return Ok(());
     }
     let named_form = m.cells[0].name.is_some();
+    // Form and names are checked BEFORE anything is destructured, so a
+    // refusal leaves the vector exactly as written.
+    let mut seen = HashSet::new();
+    let mut spots = Vec::with_capacity(m.cells.len());
+    for c in &m.cells {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if let Some(n) = &c.name {
+            spots.push(named_cell_position(n, tape_names, &mut seen)?);
+        }
+    }
+    if !named_form {
+        // Unreachable past the early return and the form agreement, kept so
+        // the destructuring fill below is total for whatever it moves.
+        return Ok(());
+    }
     let mut out = vec![
         MoveCell {
             name: None,
@@ -4089,19 +4127,9 @@ fn position_move_cells(m: &mut MoveVec, tape_names: &[&str]) -> Result<(), Compi
         };
         tape_names.len()
     ];
-    let mut seen = HashSet::new();
-    for mut c in std::mem::take(&mut m.cells) {
-        if c.name.is_some() != named_form {
-            return Err(CompileError {
-                span: c.span,
-                kind: CompileErrorKind::MixedCellForms,
-            });
-        }
-        if !named_form {
-            continue;
-        }
-        let n = c.name.take().expect("the form was checked");
-        out[named_cell_position(&n, tape_names, &mut seen)?] = c;
+    for (mut c, n) in std::mem::take(&mut m.cells).into_iter().zip(spots) {
+        c.name = None;
+        out[n] = c;
     }
     m.cells = out;
     Ok(())
