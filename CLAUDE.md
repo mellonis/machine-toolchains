@@ -228,7 +228,10 @@ The repo carries several independently versioned contracts — the
 toolchain crates, the `.pmc` language (`PMC_LANG_VERSION`, an acceptance
 contract: pre-1.0 it is `0.N` and N bumps on ANY grammar change;
 major/minor axes activate at a declared 1.0; no patch digit — errata and
-implementation-conformance fixes never move it), the per-arch `.pma`
+implementation-conformance fixes never move it; and the bump is
+per-release — ONCE per `next` cycle relative to `master`, the minimal
+bump, further acceptance changes in the same cycle folding into it
+without moving the version), the per-arch `.pma`
 dialects (same kind of contract; PM-1's is `PM1_PMA_DIALECT_VERSION`,
 born at 0.2 when labels tightened to dot-free), `IR_VERSION` (JSON
 encoding), the container formats (MO/MX/MT), and each toolchain's
