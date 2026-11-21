@@ -1344,10 +1344,9 @@ it on the `[*]` row.
 
 `*` is the map's LAST entry, with or without a trailing comma; anywhere
 else it is a parse error. It is a site's marker, so a top-level `map`
-declaration refuses it (a parse error), and so does a `graft`'s map
-(`open-graft-unsupported`) — a graft splices the graph's rules onto the
-host's own tapes, so there is no callee alphabet with an opaque index for
-an unlisted symbol to read as. A pattern cell's `* as v` stays the
+declaration refuses it (a parse error). A `graft`'s map carries it too —
+there the unlisted host symbols are the opaque class, matched only by the
+graph's `*` rows (open grafts). A pattern cell's `* as v` stays the
 `wildcard-binding` error, which is what keeps a substitution from ever
 copying the opaque index into a write.
 

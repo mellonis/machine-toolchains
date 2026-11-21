@@ -282,19 +282,21 @@ machine {
     assert_eq!(code(src), "wildcard-binding");
 }
 
-/// A graft splices its body into the host's own tape frame: there is no
-/// callee cardinality, so there is no opaque index for unlisted symbols
-/// to land on. Mutation it catches: accept the marker at a graft site and
-/// the composite silently drops it, holing exactly the symbols the author
-/// asked to keep.
+/// A graft splices its body into the host's own tape frame, and the `*`
+/// marker makes the unlisted host symbols the OPAQUE class: matched only by
+/// the graph's `*` rows, never holed and never aliased
+/// (docs/tmt/language.md (open grafts)). Load-bearing: the seed walks the
+/// unlisted `'c'` through the graph's `[*]` row and stops — a closed map
+/// would plant `trap #0` there. Mutation it catches: ignore the marker
+/// (treat the map as closed) and the run traps instead of stopping.
 #[test]
-fn an_open_map_at_a_graft_site_is_refused() {
+fn an_open_map_at_a_graft_site_is_accepted() {
     let src = "\
 alphabet five { '_', 'a', 'b', 'c', 'd' }
 alphabet three { '_', 'a', 'b' }
 
 graph g(tape n: three, state done) {
-  entry state s { [*] -> goto done; }
+  entry state s { ['a'] -> done; [*] -> goto done; }
 }
 
 machine {
@@ -303,7 +305,87 @@ machine {
   state s2 { [*] -> stop; }
 }
 ";
-    assert_eq!(code(src), "open-graft-unsupported");
+    let out = build(src);
+    for mech in MECHS {
+        let exe = link_image(&out, mech).unwrap_or_else(|e| panic!("links under {mech}: {e}"));
+        let (outcome, snap) = run_one_tape(&exe, &[3]); // 'c' — unlisted
+        assert_eq!(outcome, Outcome::Stopped, "under {mech}");
+        assert_eq!(snap.cells, vec![3], "under {mech}");
+        assert_eq!(snap.head, 0, "under {mech}");
+    }
+}
+
+/// Graph `bits` grafted onto `wide` with pairs for the digits and `*` for the
+/// delimited markers: `'0'` is rewritten through the pair's write half,
+/// `'^'`/`'$'` stay "anything else" and are seen only by `[*]`.
+/// Mutation it catches: hole the unlisted symbols (close the map) and the
+/// first `'^'` plants `trap #0` instead of walking.
+#[test]
+fn an_open_graft_lets_unlisted_symbols_match_only_wildcards() {
+    let src = "\
+alphabet wide { '_', '^', '$', '0', '1' }
+alphabet bits { '_', '0', '1' }
+
+graph sweep(tape t: bits, state done) {
+  entry state s {
+    ['0'] -> write ['1'] move [>] goto s;
+    ['1'] -> move [>] goto s;
+    ['_'] -> done;
+    [*]   -> move [>] goto s;
+  }
+}
+
+machine {
+  tape w: wide;
+  entry graft sweep(t = w with map { '0' -> '0', '1' -> '1', * }, done = fin) as sw;
+  state fin { [*] -> stop; }
+}
+";
+    let out = build(src);
+    for mech in MECHS {
+        let exe = link_image(&out, mech).unwrap_or_else(|e| panic!("links under {mech}: {e}"));
+        // '0' '^' '$' '1' '_' — digits carry, markers walk, blank ends.
+        let (outcome, snap) = run_one_tape(&exe, &[3, 1, 2, 4, 0]);
+        assert_eq!(outcome, Outcome::Stopped, "under {mech}");
+        assert_eq!(snap.cells, vec![4, 1, 2, 4, 0], "under {mech}"); // '0' flipped to '1'
+        assert_eq!(snap.head, 4, "under {mech}");
+    }
+}
+
+/// Equal-sized alphabets, a map naming nothing but `*`: the unlisted
+/// `'0'`/`'1'` must NOT identity-alias onto the graph's `'a'`/`'b'` cell
+/// numbers — they reach the body only through `[*]`, and nothing is written.
+/// Mutation it catches: keep equal-card identity completion under openness
+/// and the `['a']` row fires at a head the untouched seed keeps as `'0'`
+/// (corrupting the tape or trapping on the closed write half).
+#[test]
+fn an_open_map_on_an_equal_card_tape_does_not_alias() {
+    let src = "\
+alphabet pad { '_', '0', '1' }
+alphabet abc { '_', 'a', 'b' }
+
+graph mark(tape t: abc, state done) {
+  entry state s {
+    ['a'] -> write ['b'] move [>] goto s;
+    ['_'] -> done;
+    [*]   -> move [>] goto s;
+  }
+}
+
+machine {
+  tape p: pad;
+  entry graft mark(t = p with map { * }, done = fin) as mk;
+  state fin { [*] -> stop; }
+}
+";
+    let out = build(src);
+    for mech in MECHS {
+        let exe = link_image(&out, mech).unwrap_or_else(|e| panic!("links under {mech}: {e}"));
+        let (outcome, snap) = run_one_tape(&exe, &[1, 0]); // '0', then blank
+        assert_eq!(outcome, Outcome::Stopped, "under {mech}");
+        assert_eq!(snap.cells, vec![1, 0], "under {mech}"); // byte-exact: nothing written
+        assert_eq!(snap.head, 1, "under {mech}");
+    }
 }
 
 // ── the inference ──────────────────────────────────────────────────────────

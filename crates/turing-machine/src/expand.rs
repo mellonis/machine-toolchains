@@ -1176,6 +1176,11 @@ fn build_tapemap(
     // reused declaration's silent gap would be.
     if host_card != graph_card {
         close_unlisted(&mut rmap, host_card);
+    }
+    // ...and an OPEN map closes its WRITE half whatever the cardinalities:
+    // the graph writes back only what the pairs map, so an unnamed glyph
+    // never lands through identity (docs/tmt/language.md (open grafts)).
+    if open || host_card != graph_card {
         close_unlisted(&mut wmap, graph_card);
     }
     // Canonical: drop identity pairs (stable dedup keys) — except on an open
@@ -2976,6 +2981,65 @@ machine {
         let kick = state(m, "kick");
         assert_eq!(kick.rules[0].transition, Transition2::Goto("a".into()));
         assert_eq!(m.entry.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn an_open_graft_synthesizes_no_trap_read_rows() {
+        // The `a_holey_graft_synthesizes_trap_read_rows` fixture with the map
+        // left open: the unlisted `q` is opaque, not a hole, so NO trap-read
+        // row is synthesized anywhere (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet bits { '_', '0', '1' }
+alphabet quad { '_', '0', '1', 'q' }
+graph flip(tape t: bits, state done) {
+  entry state go { ['0'] -> write ['1'] done; ['1'] -> write ['0'] done; [*] -> done; }
+}
+machine {
+  tape data: quad;
+  entry graft flip(t = data with map { '0'->'0', '1'->'1', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let f = state(m, "f");
+        assert!(
+            !f.rules.iter().any(|r| r.transition == Transition2::TrapRead),
+            "{:?}",
+            f.rules
+        );
+    }
+
+    #[test]
+    fn an_open_graft_holes_a_map_out_of_range_write() {
+        // Openness does not soften the WRITE half — it hardens it: the graph
+        // writes back only what the pairs map, whatever the cardinalities.
+        // The row reads a NAMED glyph (so it survives) and writes the unlisted
+        // one — no host image, so the row becomes `trap #1` (TrapWrite). On a
+        // closed map these equal-sized alphabets would identity-complete the
+        // write; an open map must not (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet alp { '_', '0', '1' }
+alphabet cot { '_', 'a', 'b' }
+graph burn(tape t: alp, state done) {
+  entry state go { ['0'] -> write ['1'] done; [*] -> done; }
+}
+machine {
+  tape data: cot;
+  entry graft burn(t = data with map { 'a'->'0', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let f = state(m, "f");
+        assert!(
+            f.rules
+                .iter()
+                .any(|r| r.transition == Transition2::TrapWrite),
+            "{:?}",
+            f.rules
+        );
     }
 
     #[test]
