@@ -1432,7 +1432,7 @@ as *other*. The law is single-row cover: every row is shadowed in the same
 state by a row whose cell on that tape is `*` and whose other cells accept
 everything the row itself accepts. Rows `[0, *]` and `[*, 1]` over two
 open-bound tapes are therefore refused: an opaque symbol on the first tape
-with the second on `'1'` matches neither. A world with no reading state
+with the second on `'0'` matches neither. A world with no reading state
 passes vacuously; a rule whose cells have no host preimage at all dies with
 the `empty-expansion` warning, exactly as under a closed map.
 

@@ -3567,7 +3567,7 @@ machine {
     fn two_open_tapes_need_joint_row_cover() {
         // Rows `[0, *]` and `[*, 1]` over two open-bound tapes: per-position
         // reading would call both tapes covered, but one opaque symbol at `p`
-        // matches NEITHER row when `q` sits on `'1'` — single-row cover is the
+        // matches NEITHER row when `q` sits on `'0'` — single-row cover is the
         // law (the `ir.rs` doc example), so the graft is refused at `p`.
         let src = "\
 alphabet five { '_', 'a', 'b', 'c', 'd' }
