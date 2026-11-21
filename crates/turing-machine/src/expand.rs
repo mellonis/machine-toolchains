@@ -240,26 +240,64 @@ impl SymMap {
 
 /// One bound graph tape's absolute placement onto a host tape, plus its
 /// read map (host → graph) and write map (graph → host) and the two
-/// cardinalities the hole checks need.
+/// cardinalities the hole checks need. `open` marks a site map that ended
+/// with the `*` marker: its unlisted host symbols are the OPAQUE class
+/// (docs/tmt/language.md (open grafts)) — never a hole and never an alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TapeMap {
     /// Host tape index this graph tape projects onto.
     phys: usize,
     host_card: usize,
     graph_card: usize,
+    /// The site map left open with `*` (read direction only).
+    open: bool,
     /// host symbol → graph symbol (the binding's read direction).
     rmap: SymMap,
     /// graph symbol → host symbol (bidirectional pairs' inverses).
     wmap: SymMap,
 }
 
+/// How one host symbol reads under a [`TapeMap`]. `Image` is a graph glyph;
+/// `Hole` is a closed map's unmapped symbol (the read-trap machinery's
+/// input); `Opaque` is an open map's unlisted symbol — "anything else", which
+/// only the graph's `*` rows match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadClass {
+    Image(u16),
+    Opaque,
+    Hole,
+}
+
 impl TapeMap {
-    /// The graph symbol host symbol `p` reads as, or `None` (a read hole) when
-    /// its image falls outside the graph tape's alphabet.
-    fn read_image(&self, p: u16) -> Option<u16> {
+    /// The one classification both [`Self::read_image`] and [`Self::holes`]
+    /// draw from. On a closed map this is exactly today's `read_image`
+    /// classification; on an open map the blank stays pinned, a listed source
+    /// reads as its (bounds-checked) destination, and anything unlisted is
+    /// `Opaque`.
+    fn read_class(&self, p: u16) -> ReadClass {
+        if self.open {
+            if p == 0 {
+                return ReadClass::Image(0);
+            }
+            return match self.rmap.pairs.get(&p).copied() {
+                Some(v) if usize::from(v) < self.graph_card => ReadClass::Image(v),
+                Some(_) => ReadClass::Hole,
+                None => ReadClass::Opaque,
+            };
+        }
         match self.rmap.apply(p) {
-            Some(v) if usize::from(v) < self.graph_card => Some(v),
-            _ => None,
+            Some(v) if usize::from(v) < self.graph_card => ReadClass::Image(v),
+            _ => ReadClass::Hole,
+        }
+    }
+
+    /// The graph symbol host symbol `p` reads as, or `None` when its image
+    /// is no graph glyph — a read hole on a closed map, the opaque class on
+    /// an open one.
+    fn read_image(&self, p: u16) -> Option<u16> {
+        match self.read_class(p) {
+            ReadClass::Image(v) => Some(v),
+            ReadClass::Opaque | ReadClass::Hole => None,
         }
     }
 
@@ -279,10 +317,11 @@ impl TapeMap {
             .collect()
     }
 
-    /// The ascending host symbols that read as no graph symbol (read holes).
+    /// The ascending host symbols that read as no graph symbol (read holes) —
+    /// excluding an open map's opaque symbols, which are not holes.
     fn holes(&self) -> Vec<u16> {
         (0..self.host_card as u16)
-            .filter(|&p| self.read_image(p).is_none())
+            .filter(|&p| self.read_class(p) == ReadClass::Hole)
             .collect()
     }
 }
@@ -296,6 +335,8 @@ struct Composite {
 
 impl Composite {
     /// A deterministic dedup key over the projection and both maps per tape.
+    /// Openness rides per tape: two splices differing in openness never share
+    /// a key.
     fn key(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(self.tapes.len() as u32).to_le_bytes());
@@ -303,6 +344,7 @@ impl Composite {
             out.extend_from_slice(&(t.phys as u32).to_le_bytes());
             out.extend_from_slice(&(t.host_card as u32).to_le_bytes());
             out.extend_from_slice(&(t.graph_card as u32).to_le_bytes());
+            out.push(u8::from(t.open));
             t.rmap.write_key(&mut out);
             t.wmap.write_key(&mut out);
         }
@@ -1109,27 +1151,18 @@ fn build_tapemap(
             phys,
             host_card,
             graph_card,
+            open: false,
             rmap: SymMap::identity(),
             wmap: SymMap::identity(),
         });
     };
 
-    // The open marker is a BINDING-RECORD fact: it tells the linker to
-    // send unlisted caller symbols onto the callee's opaque index, an
-    // index the callee's own `*` rows are what survive. A graft has no
-    // binding record and no callee — the graph's body is spliced into
-    // this host before lowering, and its rows are rewritten into the
-    // HOST's index space through the very map being built here, where
-    // "outside the graph's alphabet" names no cell at all. Refused at the
-    // marker rather than silently dropped: accepting it would hole
-    // exactly the symbols the author asked to keep.
-    if let Some(star) = m.open {
-        return Err(CompileError {
-            span: star,
-            kind: CompileErrorKind::OpenGraftUnsupported,
-        });
-    }
-
+    // The open marker makes this map's unlisted host symbols the OPAQUE
+    // class (docs/tmt/language.md (open grafts)): they name no graph glyph,
+    // sit in no preimage and mint no holes, and only the graph's `*` rows
+    // match them. Openness is a READ-side fact — the write half below is
+    // built exactly as a closed map's.
+    let open = m.open.is_some();
     let (mut rmap, mut wmap, bidir) = build_symbol_maps(&m.pairs, host_glyphs, graph_glyphs)?;
     // Closed-on-unequal (docs/formats.md (bound calls)): identity completion
     // exists only for equal-size alphabets. Across differently-sized tapes
@@ -1145,17 +1178,25 @@ fn build_tapemap(
         close_unlisted(&mut rmap, host_card);
         close_unlisted(&mut wmap, graph_card);
     }
-    // Canonical: drop identity pairs (stable dedup keys).
-    rmap.pairs.retain(|s, d| s != d);
+    // Canonical: drop identity pairs (stable dedup keys) — except on an open
+    // READ map, where a named `'0' -> '0'` must keep telling itself apart from
+    // an unlisted (opaque) symbol: the retained pairs are exactly that line.
+    if !open {
+        rmap.pairs.retain(|s, d| s != d);
+    }
     wmap.pairs.retain(|s, d| s != d);
 
-    if host_card == graph_card {
+    // Open maps have no identity completion to protect: unlisted symbols are
+    // opaque, never aliases, and pairs-only injectivity is `map-conflict`'s
+    // job at insert time.
+    if host_card == graph_card && !open {
         check_injective_completion(&bidir, host_card, graph_glyphs, span)?;
     }
     Ok(TapeMap {
         phys,
         host_card,
         graph_card,
+        open: m.open.is_some(),
         rmap,
         wmap,
     })
@@ -2196,6 +2237,7 @@ mod map_tests {
             phys: 0,
             host_card: 5,
             graph_card: 3,
+            open: false,
             rmap,
             wmap: m(&[(1, 3), (2, 4)]),
         };
@@ -2220,12 +2262,64 @@ mod map_tests {
             phys: 0,
             host_card: 4,
             graph_card: 3,
+            open: false,
             rmap,
             wmap: SymMap::identity(),
         };
         assert_eq!(t.read_image(0), Some(0));
         assert_eq!(t.read_image(1), None);
         assert_eq!(t.holes(), vec![1, 2, 3]);
+    }
+
+    /// An OPEN map over host `_ 0 1 x` onto graph `_ 0 1`: `'0' -> '0'` and
+    /// `'1' -> '1'` are named, everything else the map leaves opaque — not a
+    /// hole and not an alias (docs/tmt/language.md (open grafts)).
+    fn open_tm() -> TapeMap {
+        TapeMap {
+            phys: 0,
+            host_card: 4,
+            graph_card: 3,
+            open: true,
+            rmap: m(&[(1, 1), (2, 2)]),
+            wmap: m(&[(1, 1), (2, 2)]),
+        }
+    }
+
+    #[test]
+    fn open_map_makes_unlisted_symbols_opaque_not_holes() {
+        let t = open_tm();
+        assert_eq!(t.read_class(0), ReadClass::Image(0)); // blank pinned
+        assert_eq!(t.read_class(1), ReadClass::Image(1));
+        assert_eq!(t.read_class(2), ReadClass::Image(2));
+        assert_eq!(t.read_class(3), ReadClass::Opaque); // unlisted ≠ hole
+        assert!(t.holes().is_empty());
+        assert_eq!(t.read_image(3), None); // Opaque names no graph glyph
+    }
+
+    #[test]
+    fn open_map_preimage_excludes_opaque() {
+        let t = open_tm();
+        assert_eq!(t.preimage(0), vec![0]);
+        assert_eq!(t.preimage(1), vec![1]);
+        assert_eq!(t.preimage(2), vec![2]);
+        // Host 3 is opaque: it reads as no graph glyph and sits in no preimage.
+        for v in 0..3 {
+            assert!(!t.preimage(v).contains(&3));
+        }
+    }
+
+    #[test]
+    fn openness_is_in_the_dedup_key() {
+        let open = open_tm();
+        let mut closed = open_tm();
+        closed.open = false;
+        assert_ne!(
+            Composite { tapes: vec![open] }.key(),
+            Composite {
+                tapes: vec![closed]
+            }
+            .key()
+        );
     }
 }
 
@@ -2659,6 +2753,7 @@ mod oracle_tests {
             phys,
             host_card,
             graph_card,
+            open: false,
             rmap,
             wmap,
         }
@@ -3100,6 +3195,27 @@ machine {{ tape w: ha; entry graft g(t = w{map}, done = fin) as x; state fin {{ 
             .unwrap_err()
             .kind
             .code()
+    }
+
+    #[test]
+    fn an_open_site_map_stops_being_refused() {
+        // The `*` marker in a GRaFT's map is accepted: unlisted host symbols
+        // are the opaque class, not holes (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', 'a', 'b' }
+
+graph g(tape n: three, state done) {
+  entry state s { [*] -> goto done; }
+}
+
+machine {
+  tape t: five;
+  entry graft g(n = t with map { 'a' -> 'a', * }, done = s2) as inst;
+  state s2 { [*] -> stop; }
+}
+";
+        let _ = expand_ok(src);
     }
 
     #[test]
