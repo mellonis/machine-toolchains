@@ -56,7 +56,8 @@ from what is written.
   constant. `x * 2` and friends are out.
 - No cyclic arithmetic: `y - 1` for the sequence's first member is a
   position off the line, and no row matches it. No wrap-around.
-- No new lint rules and no quickfix in this round. A guard dropping every
+- No new lint rules and no quickfix in this round, with ONE warn-tier
+  exception below (`redundant-guard-narrowing`). A guard dropping every
   row of a rule warns as the existing `empty-expansion`.
 - No optimizer or IR notion of a guard; expansion output is plain rows.
 
@@ -93,10 +94,12 @@ from what is written.
   before guard typing reports anything (the named-cells round's ruling —
   older errors keep their priority).
 - Drift guards to move with the feature: the error-code registry ↔
-  `docs/tmt/cli.md` rows; the reserved-word count (31 → 32) in
-  `docs/tmt/language.md` version history and the CLAUDE.md table; the
-  TextMate grammars' keyword tier (`where` is `keyword.control.tmc`
-  like its 31 siblings); no CLI surface change (no completions work).
+  `docs/tmt/cli.md` rows; the lint inventory table (`docs/tmt/lint.md`)
+  gaining `redundant-guard-narrowing` in the shared allow namespace; the
+  reserved-word count (31 → 32) in `docs/tmt/language.md` version history
+  and the CLAUDE.md table; the TextMate grammars' keyword tier (`where`
+  is `keyword.control.tmc` like its 31 siblings); no CLI surface change
+  (no completions work).
 
 ## Approaches
 
@@ -257,6 +260,26 @@ arithmetic is integer (no wrap). The predicate decides the row's
 survival. A guard that keeps no rows warns with the existing
 `empty-expansion` kind.
 
+### Lint: `redundant-guard-narrowing` (warn-tier audit)
+
+An `in S` conjunct is **not obligatory** — and warns — iff it does
+nothing at all (ruled by the author: *"if x and y are of one alphabet,
+lint that `in` is not required"*), which is exactly both of:
+
+1. the binding's pattern cell cannot produce a glyph outside `S`
+   (the restriction removes no row), and
+2. every order/offset comparison the binding takes part in stays
+   licensed without the narrowing (the pair's alphabet already does the
+   licensing — the same-alphabet case).
+
+The rule stays silent the moment `in S` earns its place: a cell capable
+of values outside `S` (the conjunct cuts rows), or a pair that leans on
+the conjunct as its license (cross-alphabet — including a conjunct that
+is restriction-inert on its own tape but part of the pair's common
+context). Warn-tier, in the shared allow namespace like
+`index-identity-map` — an author writing `in` for documentation can
+allow it off. No quickfix in this round.
+
 ### Printing
 
 - **fmt** prints a guard verbatim — it is written text between `]` and
@@ -304,6 +327,11 @@ optimizer involvement); `check_rules` numbering (post-fold indices).
   comparison. And a POSITIVE pin for the cone-local ruling: a bare
   `x < y` in a `||` branch beside a narrowed sibling branch is legal on
   one alphabet and means the alphabet's default order.
+- `redundant-guard-narrowing` pins both ways: warns on the no-op
+  narrowing whose cell lies inside `S` and whose pair licenses itself on
+  a shared alphabet; silent on a conjunct that cuts rows, on one the
+  pair's license leans on (cross-alphabet), and on a restriction-only
+  conjunct whose cell is not entailed by `S`.
 - Header twin: guarded named source and its positional twin print one
   header; a guarded library graph grafts identically with its digest.
 - Docs: `docs/tmt/language.md` gains "Rule guards" (with the two-domain
