@@ -377,6 +377,12 @@ pub enum CompileErrorKind {
     /// glyph-for-glyph equal — an omitted map means identity, which requires
     /// matching alphabets.
     IdentityGlyphMismatch,
+    /// An open graft map whose graph state would decide whether a row matches
+    /// on a symbol the map leaves opaque — the single-row-cover law, refusing
+    /// rather than letting the opaque index decide at run time (`state` is the
+    /// graph state, `tape` the bound tape parameter;
+    /// docs/tmt/language.md (open grafts)).
+    OpenGraftUncovered { state: String, tape: String },
     /// A named map declaration (`map NAME: SRC -> DST { … }`) leaves a
     /// non-blank SOURCE symbol unmapped, on unequal-cardinality alphabets —
     /// the one declaration check with no inline-form analog (`name` is the
@@ -672,6 +678,7 @@ impl CompileErrorKind {
         CompileErrorKind::MapConflict { .. } => "map-conflict",
         CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
         CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
+        CompileErrorKind::OpenGraftUncovered { .. } => "open-graft-uncovered",
         CompileErrorKind::MapNotClosed(_) => "map-not-closed",
         CompileErrorKind::NamedMapSourceMismatch { .. } => "named-map-source-mismatch",
         CompileErrorKind::NamedMapTargetMismatch { .. } => "named-map-target-mismatch",
@@ -1138,6 +1145,15 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "an omitted graft map means identity, which requires the two tapes to have glyph-for-glyph equal alphabets"
+                )
+            }
+            CompileErrorKind::OpenGraftUncovered { state, tape } => {
+                write!(
+                    f,
+                    "state `{state}` would decide whether a row matches on a \
+                     symbol this graft's open map leaves opaque on tape `{tape}` \
+                     — give the state a row whose `{tape}` cell is `*`, or name \
+                     the symbols in the map"
                 )
             }
             CompileErrorKind::MapNotClosed(g) => {
@@ -5723,6 +5739,10 @@ mod tests {
             CompileErrorKind::MapConflict { symbol: "x".into() },
             CompileErrorKind::MapNotInjective { symbol: "x".into() },
             CompileErrorKind::IdentityGlyphMismatch,
+            CompileErrorKind::OpenGraftUncovered {
+                state: "s".into(),
+                tape: "t".into(),
+            },
             CompileErrorKind::MapNotClosed("x".into()),
             CompileErrorKind::NamedMapSourceMismatch {
                 map: "m".into(),

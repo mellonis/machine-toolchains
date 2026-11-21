@@ -747,20 +747,40 @@ pub(crate) fn known_noreturn(
 /// every head at once, then does one table lookup — so a ROWLESS state
 /// reads nothing (it traps on entry, whatever the tapes hold), and a
 /// world with no reading state is opaque vacuously.
-fn rows_admit_the_opaque_index(states: &[IrState], k: usize) -> bool {
-    states.iter().all(|s| {
-        s.rules.iter().all(|r| {
-            s.rules.iter().any(|w| {
-                matches!(w.pattern.get(k), Some(IrCell::Wildcard))
-                    && w.pattern.len() == r.pattern.len()
-                    && w.pattern
+/// The single-row-cover relation behind [`rows_admit_the_opaque_index`] and
+/// the graft-side coverage check (`expand.rs`), over raw pattern slices so the
+/// two callers cannot drift: `state_rows` holds each state's row patterns in
+/// order. Same law either side: every row `R` must be covered by some row `W`
+/// whose cell at `k` is a wildcard and whose other cells are wildcards-or-equal
+/// to `R`'s — "whenever the other tapes let `R` fire, `W` fires too, opaque
+/// symbol and all".
+pub(crate) fn rows_admit_opaque_index_over_rows<C: PartialEq>(
+    state_rows: &[&[&[C]]],
+    k: usize,
+    is_wild: impl Fn(&C) -> bool,
+) -> bool {
+    state_rows.iter().all(|rules| {
+        rules.iter().all(|r| {
+            rules.iter().any(|w| {
+                matches!(w.get(k), Some(wc) if is_wild(wc))
+                    && w.len() == r.len()
+                    && w
                         .iter()
-                        .zip(&r.pattern)
+                        .zip(r.iter())
                         .enumerate()
-                        .all(|(i, (wc, rc))| i == k || *wc == IrCell::Wildcard || wc == rc)
+                        .all(|(i, (wc, rc))| i == k || is_wild(wc) || wc == rc)
             })
         })
     })
+}
+
+fn rows_admit_the_opaque_index(states: &[IrState], k: usize) -> bool {
+    let groups: Vec<Vec<&[IrCell]>> = states
+        .iter()
+        .map(|s| s.rules.iter().map(|r| r.pattern.as_slice()).collect())
+        .collect();
+    let refs: Vec<&[&[IrCell]]> = groups.iter().map(Vec::as_slice).collect();
+    rows_admit_opaque_index_over_rows(&refs, k, |c| matches!(c, IrCell::Wildcard))
 }
 
 /// Close every routine tape whose opaque symbol a row could hand to a

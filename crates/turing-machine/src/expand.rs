@@ -1765,6 +1765,40 @@ fn expand_grafts_into<'a>(
             });
         }
         let (comp, cont) = build_composite(graft, host, resolved, graph, graph_owner)?;
+        // Coverage: under an open map an unlisted host symbol is opaque, and
+        // no row may decide a match on it. The law is the routine-side
+        // single-row cover (docs/tmt/language.md (open grafts)), reused over
+        // the graph's own expanded rows — the first state that would let the
+        // opaque index decide is refused by name.
+        for (k, tm) in comp.tapes.iter().enumerate() {
+            if !tm.open {
+                continue;
+            }
+            for st in &gx.states {
+                let rows: Vec<&[Cell]> =
+                    st.rules.iter().map(|r| r.pattern.as_slice()).collect();
+                if !crate::ir::rows_admit_opaque_index_over_rows(
+                    &[rows.as_slice()],
+                    k,
+                    |c| *c == Cell::Wild,
+                ) {
+                    let tape = graph.tapes[k].name.clone();
+                    let span = graft
+                        .args
+                        .iter()
+                        .find(|a| a.name == tape)
+                        .map(|a| a.span)
+                        .unwrap_or(graft.target_span);
+                    return Err(CompileError {
+                        span,
+                        kind: CompileErrorKind::OpenGraftUncovered {
+                            state: st.name.clone(),
+                            tape,
+                        },
+                    });
+                }
+            }
+        }
         let key = graft_site_key_bytes(graft.target.as_str(), &comp, &cont);
 
         let instance = match &graft.as_name {
@@ -3259,6 +3293,103 @@ machine {{ tape w: ha; entry graft g(t = w{map}, done = fin) as x; state fin {{ 
             .unwrap_err()
             .kind
             .code()
+    }
+
+    /// Like [`graft_err`] but returning the whole error — for assertions on
+    /// the typed fields.
+    fn expand_err(src: &str) -> CompileError {
+        let a = analyze(src).expect("analyze");
+        expand(&a.resolved, &Declarations::stdlib()).unwrap_err()
+    }
+
+    #[test]
+    fn a_state_without_a_covering_wildcard_is_refused() {
+        // The open map makes unlisted `five` symbols opaque; the graph's state
+        // has no `*` row on the bound tape, so an opaque symbol would decide
+        // whether a row matches — refused, naming the state and the tape
+        // parameter (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph only(tape n: three, state done) {
+  entry state scan { ['0'] -> done; ['_'] -> done; }
+}
+
+machine {
+  tape t: five;
+  entry graft only(n = t with map { 'a' -> '0', * }, done = s2) as inst;
+  state s2 { [*] -> stop; }
+}
+";
+        let err = expand_err(src);
+        assert!(
+            matches!(
+                &err.kind,
+                CompileErrorKind::OpenGraftUncovered { state, tape }
+                    if state == "scan" && tape == "n"
+            ),
+            "{:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn two_open_tapes_need_joint_row_cover() {
+        // Rows `[0, *]` and `[*, 1]` over two open-bound tapes: per-position
+        // reading would call both tapes covered, but one opaque symbol at `p`
+        // matches NEITHER row when `q` sits on `'1'` — single-row cover is the
+        // law (the `ir.rs` doc example), so the graft is refused at `p`.
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph two(tape p: three, tape q: three, state done) {
+  entry state mix {
+    ['0', *] -> done;
+    [*, '1'] -> done;
+  }
+}
+
+machine {
+  tape x: five;
+  tape y: five;
+  entry graft two(p = x with map { 'a' -> '0', * }, q = y with map { 'a' -> '0', 'b' -> '1', * }, done = s2) as inst;
+  state s2 { [*, *] -> stop; }
+}
+";
+        let err = expand_err(src);
+        assert!(
+            matches!(
+                &err.kind,
+                CompileErrorKind::OpenGraftUncovered { state, tape }
+                    if state == "mix" && tape == "p"
+            ),
+            "{:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn a_vacuously_opaque_graph_is_accepted() {
+        // A rowless state reads nothing (it traps on entry, whatever the tape
+        // holds), so a graph whose states have no rules is opaque VACUOUSLY —
+        // the universal quantifier over an empty set holds.
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph quiet(tape n: three, state done) {
+  entry state s { }
+}
+
+machine {
+  tape t: five;
+  entry graft quiet(n = t with map { 'a' -> '0', * }, done = s2) as q;
+  state s2 { [*] -> stop; }
+}
+";
+        let _ = expand_ok(src);
     }
 
     #[test]
