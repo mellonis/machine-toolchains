@@ -435,6 +435,10 @@ pub struct Pattern {
 /// One pattern cell, optionally binding its match with `as v`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternCell {
+    /// `king` in `[king: '♔']` — the tape this cell speaks of, as written.
+    /// Pure spelling: resolution folds it to the tape's vector position
+    /// (docs/tmt/language.md (named vector cells)).
+    pub name: Option<CellName>,
     pub kind: PatternCellKind,
     /// `as v`; forbidden on a wildcard (`* as v`).
     pub binding: Option<Binding>,
@@ -512,6 +516,17 @@ pub struct Binding {
     pub span: Span,
 }
 
+/// A rule-vector cell's tape name — `king` in `[king: '♔']`. The name is
+/// the tape's NAME in the enclosing world, never its position; resolution
+/// folds it to the position and every unnamed tape takes its default
+/// (`*` / `-` / `.`) (docs/tmt/language.md (named vector cells)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellName {
+    pub name: String,
+    /// The name token's own span — what a diagnostic about the name points at.
+    pub span: Span,
+}
+
 /// A bracketed write vector `[cell, …]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteVec {
@@ -521,6 +536,7 @@ pub struct WriteVec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteCell {
+    pub name: Option<CellName>,
     pub kind: WriteCellKind,
     pub span: Span,
 }
@@ -581,6 +597,7 @@ pub struct MoveVec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveCell {
+    pub name: Option<CellName>,
     pub dir: MoveDir,
     pub span: Span,
 }
@@ -2343,6 +2360,7 @@ impl Parser<'_> {
     }
 
     fn pattern_cell(&mut self) -> Result<PatternCell, CompileError> {
+        let name = self.cell_name()?;
         let t = self.peek().clone();
         let (kind, kind_span) = match &t.kind {
             TokenKind::Star => {
@@ -2396,11 +2414,38 @@ impl Parser<'_> {
         if matches!(kind, PatternCellKind::Wildcard) && binding.is_some() {
             return Err(Self::err_at(&t, CompileErrorKind::WildcardBinding));
         }
+        let start = name.as_ref().map(|n| n.span).unwrap_or(kind_span);
         Ok(PatternCell {
+            name,
             kind,
             binding,
-            span: join(kind_span, end),
+            span: join(start, end),
         })
+    }
+
+    /// The optional `NAME:` prefix of a rule-vector cell — decided by
+    /// two-token lookahead before the cell's own dispatch, so bare `roster`
+    /// is a set reference while `king: roster` is a named cell whose content
+    /// happens to be one (docs/tmt/language.md (named vector cells)). The
+    /// name is the enclosing world's NAME for the tape, never a position.
+    fn cell_name(&mut self) -> Result<Option<CellName>, CompileError> {
+        let name = match &self.peek().kind {
+            TokenKind::Ident(n) => n.clone(),
+            _ => return Ok(None),
+        };
+        if !matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(TokenKind::Colon)
+        ) {
+            return Ok(None);
+        }
+        let ntok = self.peek().clone();
+        self.bump(); // the name
+        self.bump(); // `:`
+        Ok(Some(CellName {
+            name,
+            span: ntok.span(),
+        }))
     }
 
     /// A single symbol, or the low end plus a high end after `..`. The two
@@ -2473,37 +2518,37 @@ impl Parser<'_> {
     }
 
     fn write_cell(&mut self) -> Result<WriteCell, CompileError> {
+        let name = self.cell_name()?;
         let t = self.peek().clone();
-        match &t.kind {
+        let (kind, end) = match &t.kind {
             TokenKind::Dash => {
                 self.bump();
-                Ok(WriteCell {
-                    kind: WriteCellKind::Keep,
-                    span: t.span(),
-                })
+                (WriteCellKind::Keep, t.span())
             }
             TokenKind::Glyph(_) | TokenKind::Number(_, _) => {
                 let s = self.sym_lit()?;
-                let span = s.span();
-                Ok(WriteCell {
-                    kind: WriteCellKind::Lit(s),
-                    span,
-                })
+                let end = s.span();
+                (WriteCellKind::Lit(s), end)
             }
             TokenKind::LBrace => {
                 self.bump();
                 let expr = self.fold_expr()?;
                 let rb = self.expect(&TokenKind::RBrace, "`}` to close the substitution")?;
-                Ok(WriteCell {
-                    kind: WriteCellKind::Subst { expr },
-                    span: join(t.span(), rb.span()),
-                })
+                (WriteCellKind::Subst { expr }, rb.span())
             }
-            _ => Err(Self::expected(
-                &t,
-                "a write element (glyph, number, `{binding}`, or `-`)",
-            )),
-        }
+            _ => {
+                return Err(Self::expected(
+                    &t,
+                    "a write element (glyph, number, `{binding}`, or `-`)",
+                ));
+            }
+        };
+        let start = name.as_ref().map(|n| n.span).unwrap_or(t.span());
+        Ok(WriteCell {
+            name,
+            kind,
+            span: join(start, end),
+        })
     }
 
     /// Parse a write-cell fold expression, the assembler's arithmetic grammar
@@ -2620,6 +2665,7 @@ impl Parser<'_> {
     }
 
     fn move_cell(&mut self) -> Result<MoveCell, CompileError> {
+        let name = self.cell_name()?;
         let t = self.peek().clone();
         let dir = match t.kind {
             TokenKind::Lt => MoveDir::Left,
@@ -2630,9 +2676,11 @@ impl Parser<'_> {
             }
         };
         self.bump();
+        let start = name.as_ref().map(|n| n.span).unwrap_or(t.span());
         Ok(MoveCell {
+            name,
             dir,
-            span: t.span(),
+            span: join(start, t.span()),
         })
     }
 

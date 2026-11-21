@@ -1280,3 +1280,156 @@ fn significant_tokens_is_the_comment_free_lex() {
     );
     assert_eq!(significant_tokens(&raw), lex(src).expect("lexes"));
 }
+
+// ---------------------------------------------------------------------------
+// Named, sparse vector cells: a cell may name its tape (`king: 'x'`), the
+// name is pure spelling, and it disturbs nothing that exists (set refs,
+// the `* as` refusal, span precision) (docs/tmt/language.md (named vector
+// cells)).
+// ---------------------------------------------------------------------------
+
+/// The 1-based position of the first occurrence of `needle` in `src`.
+fn at(src: &str, needle: &str) -> mtc_core::diagnostics::Pos {
+    for (i, line) in src.lines().enumerate() {
+        if let Some(col) = line.find(needle) {
+            return mtc_core::diagnostics::Pos {
+                line: i as u32 + 1,
+                col: col as u32 + 1,
+            };
+        }
+    }
+    panic!("`{needle}` not in fixture");
+}
+
+/// The half-open span covering the first occurrence of `needle`.
+fn cover(src: &str, needle: &str) -> Span {
+    let p = at(src, needle);
+    Span::new(p.line, p.col, p.line, p.col + needle.len() as u32)
+}
+
+const NAMED_ALL: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    [t: 'a'] -> write [u: 'b'] move [t: >] stop;
+  }
+}
+";
+
+#[test]
+fn a_rule_vector_cell_may_name_its_tape() {
+    let p = parse_src(NAMED_ALL).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    let pn = r.pattern.cells[0]
+        .name
+        .as_ref()
+        .expect("a pattern cell names its tape");
+    assert_eq!(pn.name, "t");
+    let wv = r.write.as_ref().expect("write");
+    let wn = wv.cells[0].name.as_ref().expect("a write cell names its tape");
+    assert_eq!(wn.name, "u");
+    let mv = r.mov.as_ref().expect("move");
+    let mn = mv.cells[0].name.as_ref().expect("a move cell names its tape");
+    assert_eq!(mn.name, "t");
+    // The cell span covers the name THROUGH the content, and the name's own
+    // span is just the name — what a diagnostic about the name points at.
+    assert_eq!(r.pattern.cells[0].span, cover(NAMED_ALL, "t: 'a'"));
+    assert_eq!(
+        pn.span,
+        Span::point(at(NAMED_ALL, "t: 'a'").line, at(NAMED_ALL, "t: 'a'").col)
+    );
+    assert_eq!(wv.cells[0].span, cover(NAMED_ALL, "u: 'b'"));
+    assert_eq!(mv.cells[0].span, cover(NAMED_ALL, "t: >"));
+    assert_eq!(
+        mv.cells[0].name.as_ref().unwrap().span,
+        Span::point(at(NAMED_ALL, "t: >").line, at(NAMED_ALL, "t: >").col)
+    );
+}
+
+#[test]
+fn a_positional_cell_keeps_no_name() {
+    let p = parse_src(A1).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    assert!(r.pattern.cells.iter().all(|c| c.name.is_none()));
+    assert!(r
+        .write
+        .as_ref()
+        .map(|w| w.cells.iter().all(|c| c.name.is_none()))
+        .unwrap_or(true));
+    assert!(r
+        .mov
+        .as_ref()
+        .map(|m| m.cells.iter().all(|c| c.name.is_none()))
+        .unwrap_or(true));
+}
+
+const NAMED_SET: &str = "\
+alphabet ab { '_', 'a', 'b' }
+set pair { 'a', 'b' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    [t: pair as d] -> stop;
+    [pair as e, *] -> stop;
+  }
+}
+";
+
+#[test]
+fn a_name_does_not_disturb_set_cells() {
+    let p = parse_src(NAMED_SET).expect("parses");
+    let rules = &machine(&p).states[0].rules;
+    let named = &rules[0].pattern.cells[0];
+    assert_eq!(named.name.as_ref().map(|n| n.name.as_str()), Some("t"));
+    assert!(matches!(
+        &named.kind,
+        PatternCellKind::SetRef { name, .. } if name == "pair"
+    ));
+    assert_eq!(named.binding.as_ref().map(|b| b.name.as_str()), Some("d"));
+    let bare = &rules[1].pattern.cells[0];
+    assert!(bare.name.is_none());
+    assert!(matches!(
+        &bare.kind,
+        PatternCellKind::SetRef { name, .. } if name == "pair"
+    ));
+}
+
+const NAMED_WILD: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+  entry state s {
+    [t: * as v] -> stop;
+  }
+}
+";
+
+#[test]
+fn a_named_wildcard_binding_is_still_refused() {
+    assert_eq!(err_code(NAMED_WILD), "wildcard-binding");
+}
+
+const NAMED_CHAR: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+  entry state s {
+    ['a' as v] -> write [t: {v + 1}] stop;
+  }
+}
+";
+
+#[test]
+fn a_name_leaves_char_arithmetic_pointing_at_the_variable() {
+    let e = parse_src(NAMED_CHAR).unwrap_err();
+    assert_eq!(e.kind.code(), "char-arithmetic");
+    // The span is the offending reference's own, name prefix or not.
+    assert_eq!(e.span, Span::point(at(NAMED_CHAR, "v + 1").line, at(NAMED_CHAR, "v + 1").col));
+}

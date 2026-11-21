@@ -702,6 +702,7 @@ mod tests {
 
     fn cell(kind: PatternCellKind) -> PatternCell {
         PatternCell {
+            name: None,
             kind,
             binding: None,
             span: span(),
