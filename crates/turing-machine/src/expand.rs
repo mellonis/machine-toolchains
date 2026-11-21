@@ -3303,6 +3303,135 @@ machine {{ tape w: ha; entry graft g(t = w{map}, done = fin) as x; state fin {{ 
     }
 
     #[test]
+    fn an_opaque_symbol_survives_a_graft_inside_a_graft() {
+        // Nested law: the outer open map makes host 'b'/'c'/'d' opaque, and
+        // that class must still be "anything else" through the inner splice —
+        // matched only by `*` rows at every depth, never holed, never aliased.
+        // The inner map is omitted (identity: both tapes are `three`).
+        let src = "\
+alphabet wide { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph inner(tape n: three, state done) {
+  entry state deep {
+    ['0'] -> done;
+    [*]   -> move [>] goto deep;
+  }
+}
+
+graph outer(tape n: three, state fin) {
+  entry graft inner(n = n, done = fin) as scan;
+}
+
+machine {
+  tape t: wide;
+  entry graft outer(n = t with map { 'a' -> '0', * }, fin = win) as run;
+  state win { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        // No trap row anywhere, at either depth.
+        assert!(
+            !m.states.iter().any(|s| {
+                s.rules
+                    .iter()
+                    .any(|r| matches!(r.transition, Transition2::TrapRead | Transition2::TrapWrite))
+            }),
+            "{:?}",
+            m.states
+        );
+        // The innermost fragment still carries the `*` row that catches the
+        // outer map's opaque symbols.
+        assert!(
+            m.states.iter().any(|s| {
+                s.rules
+                    .iter()
+                    .any(|r| r.pattern == vec![Cell::Wild])
+            }),
+            "{:?}",
+            m.states
+        );
+        // And the named pair still reads: the inner `['0']` row is alive over
+        // host 'a' (index 1).
+        assert!(
+            m.states.iter().any(|s| {
+                s.rules
+                    .iter()
+                    .any(|r| r.pattern == vec![Cell::Sym(1)])
+            }),
+            "{:?}",
+            m.states
+        );
+    }
+
+    #[test]
+    fn openness_is_part_of_the_graft_instance_key() {
+        // Two sites with IDENTICAL pairs and continuations over equal-sized
+        // alphabets, one map open and one closed: open is part of the dedup
+        // key, so the second site keeps its own fragment instead of aliasing
+        // the first. (Semantically the site maps coincide HERE — the named
+        // pairs cover every non-blank symbol — but the key law is stricter on
+        // purpose.) Mutation it catches: drop the openness byte from
+        // `Composite::key` and `second` disappears into `first`.
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+
+graph swap(tape n: alp, state done) {
+  entry state go { ['0'] -> write ['1'] done; [*] -> done; }
+}
+
+machine {
+  tape data: cot;
+  entry graft swap(n = data with map { 'a' -> '1', 'b' -> '0' }, done = fin) as first;
+  graft swap(n = data with map { 'a' -> '1', 'b' -> '0', * }, done = fin) as second;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        assert!(m.states.iter().any(|s| s.name == "first"));
+        assert!(
+            m.states.iter().any(|s| s.name == "second"),
+            "openness must keep the two instances apart: {:?}",
+            m.states
+        );
+    }
+
+    #[test]
+    fn a_one_way_pair_stays_closed_for_writes_under_an_open_map() {
+        // A one-way `=>` pair reads through but never writes back — and the
+        // open map's hard-closed write half holes the pair's destination
+        // anyway, so the graph's `write ['0']` has no host image and the row
+        // becomes `trap #1` (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+
+graph burn(tape n: alp, state done) {
+  entry state go { ['0'] -> write ['0'] done; [*] -> done; }
+}
+
+machine {
+  tape data: cot;
+  entry graft burn(n = data with map { 'a' => '0', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let f = state(m, "f");
+        assert!(
+            f.rules
+                .iter()
+                .any(|r| r.transition == Transition2::TrapWrite),
+            "{:?}",
+            f.rules
+        );
+    }
+
+    #[test]
     fn a_state_without_a_covering_wildcard_is_refused() {
         // The open map makes unlisted `five` symbols opaque; the graph's state
         // has no `*` row on the bound tape, so an opaque symbol would decide

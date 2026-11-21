@@ -210,6 +210,30 @@ machine {
 ";
 
     #[test]
+    fn openness_makes_two_grafts_different_instances() {
+        // The dedup key records openness, so a site whose map carries `*` is
+        // NOT the duplicate of an identical pairs-only site — same pairs, same
+        // continuations, different meaning (docs/tmt/language.md (open grafts)).
+        // Mutation it catches: drop the openness from the key and the second
+        // site becomes a `duplicate-graft-instance` finding.
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+graph swap(tape n: alp, state done) {
+  entry state go { ['0'] -> write ['1'] done; [*] -> done; }
+}
+machine {
+  tape data: cot;
+  graft swap(n = data with map { 'a' -> '1', 'b' -> '0' }, done = fin) as first;
+  graft swap(n = data with map { 'a' -> '1', 'b' -> '0', * }, done = fin) as second;
+  entry state go { [*] -> goto first; }
+  state fin { [*] -> stop; }
+}
+";
+        assert!(findings(src).is_empty(), "{:?}", findings(src));
+    }
+
+    #[test]
     fn two_identical_grafts_fire_exactly_once() {
         // Mutation this guards: if the key ever stopped including the
         // composite/continuation and used the target alone, this still
