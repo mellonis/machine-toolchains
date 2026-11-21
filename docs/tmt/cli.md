@@ -335,7 +335,7 @@ subsection.
 | `duplicate-arg` | Two binding arguments share one parameter name. |
 | `missing-arg` | A signature parameter has no binding argument. |
 | `wrong-arg-kind` | A binding argument is the wrong kind for its parameter. |
-| `unresolved-tape-target` | A tape-parameter argument names a target that is not a tape in the enclosing world. |
+| `unresolved-tape-target` | A tape-parameter argument — or a named rule-vector cell — names a target that is not a tape in the enclosing world. |
 | `duplicate-tape-target` | Two tape-parameter arguments of one `call`, `graft`, or `bind` name the same caller tape — one caller tape cannot back two callee tapes. |
 | `bind-call-args` | A `call` on a world-local bind name carries binding arguments — a bind is already fully bound at its declaration. |
 | `contract-symbol-unknown` | A contract clause — `writes`, `never writes`, `enters` or `leaves` — names a glyph that is not a symbol of the parameter's alphabet, alone, as a range endpoint, or as a member of a named set. |
@@ -360,6 +360,8 @@ subsection.
 | `fold-overflow` | A write-cell fold overflows `i64` during evaluation. |
 | `exact-row-conflict` | Two rules in one state match the same concrete tuple with neither carrying a wildcard. |
 | `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
+| `duplicate-named-cell` | Two named cells of one rule vector name the same tape — write each tape at most once per vector. The second name is the one reported. |
+| `mixed-cell-forms` | One rule vector mixes named and positional cells — spell every cell with `name:`, or none. The first cell sets the vector's form; the first cell that breaks it is the one reported. |
 | `too-many-state-params` | A signature declares more than 255 `state` parameters — the published exit count is one byte wide. |
 | `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (declare it locally, or supply its declarations to this compile). |
 | `noreturn-violated` | A routine's signature declares `noreturn`, but its body has a way to return — a `return` transition, a `then return`, or `return` handed to a callee as a `state` argument, counted conservatively over the whole body. |

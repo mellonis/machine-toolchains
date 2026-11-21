@@ -29,9 +29,9 @@ use crate::lexer::{LexMode, Token, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
-    Graft, Machine, MoveDir, PatternCellKind, Program, QualName, Rule, SetCellMembers, SetDecl,
-    SetMember, SigParamKind, State, SymLit, TermKind, Transition, WriteCell, WriteCellKind,
-    parse_green_from_tokens,
+    Graft, Machine, MoveCell, MoveDir, MoveVec, Pattern, PatternCell, PatternCellKind, Program,
+    QualName, Rule, SetCellMembers, SetDecl, SetMember, SigParamKind, State, SymLit, TermKind,
+    Transition, WriteCell, WriteCellKind, WriteVec, parse_green_from_tokens,
 };
 use crate::patterns::{
     DeclaredRangeMiss, accepted_glyphs, cell_labels, declared_range, label_number,
@@ -429,6 +429,12 @@ pub enum CompileErrorKind {
     /// A rule's pattern / write / move vector width does not equal the world's
     /// tape count (a signed-function width mismatch). `expected` is the arity.
     RowWidth { expected: usize, got: usize },
+    /// Two named cells of one rule vector name the same tape — one tape
+    /// appears at most once per vector. `name` is the tape, repeated.
+    DuplicateNamedCell { name: String },
+    /// One rule vector mixes named and positional cells — the first cell sets
+    /// the form and the span is the first cell that breaks it.
+    MixedCellForms,
 
     // -- IR-lowering scope limits -------------------------------------------
     /// A signature declares more `state` parameters than an exit count can
@@ -689,6 +695,8 @@ impl CompileErrorKind {
         CompileErrorKind::FoldOverflow => "fold-overflow",
         CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
         CompileErrorKind::RowWidth { .. } => "row-width",
+        CompileErrorKind::DuplicateNamedCell { .. } => "duplicate-named-cell",
+        CompileErrorKind::MixedCellForms => "mixed-cell-forms",
         CompileErrorKind::TooManyStateParams(_) => "too-many-state-params",
         CompileErrorKind::StateArgsNeedDeclarations(_) => "state-args-need-declarations",
         CompileErrorKind::NoreturnViolated(_) => "noreturn-violated",
@@ -1232,6 +1240,18 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "a rule vector has {got} elements but the world has {expected} tapes"
+                )
+            }
+            CompileErrorKind::DuplicateNamedCell { name } => {
+                write!(
+                    f,
+                    "`{name}` names one tape twice in one vector — write each tape at most once per vector"
+                )
+            }
+            CompileErrorKind::MixedCellForms => {
+                write!(
+                    f,
+                    "a vector mixes named and positional cells — spell every cell with `name:`, or none"
                 )
             }
             CompileErrorKind::TooManyStateParams(n) => {
@@ -3897,7 +3917,11 @@ fn resolve_world(
             kind: CompileErrorKind::TooManyStateParams(state_params.len()),
         }
     })?;
-    let states = resolve_pattern_sets(states, ns, sets, set_refs)?;
+    let mut states = resolve_pattern_sets(states, ns, sets, set_refs)?;
+    position_named_cells(
+        &mut states,
+        &tapes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+    )?;
     let (grafts, binds, entry) =
         resolve_world_reuse(grafts, binds, &states, ns, scopes, externals)?;
     let calls = resolve_world_calls(&states, &binds, ns, scopes);
@@ -3919,6 +3943,165 @@ fn resolve_world(
         calls,
         digest: None,
     })
+}
+
+/// Fold one world's rule vectors from their written spelling into the
+/// positional form (docs/tmt/language.md (named vector cells)): every named
+/// cell lands on its tape's position in `tape_names`, every position no name
+/// landed on takes its default (`*` / `-` / `.`), and the names go away. A
+/// fully positional vector is left exactly as written — its width is the
+/// `row-width` check's business, later — so a named vector is width-correct
+/// by construction, however few cells it writes.
+///
+/// The named surface carries three refusals, all here: a name that is no
+/// tape of this world (`unresolved-tape-target` — a `state` parameter is
+/// not a tape either), one tape named twice in one vector
+/// (`duplicate-named-cell`, at the second name), and named mixed with
+/// positional cells (`mixed-cell-forms`, at the first cell that breaks the
+/// form its first cell set).
+///
+/// Everything downstream of resolution sees only the filled positional
+/// form, which is what lets `expand`, the lints and the IR keep their
+/// positional assumptions; `Program` keeps the written spelling, which is
+/// what lets fmt print the form the author wrote and the header print its
+/// own canonical one.
+fn position_named_cells(states: &mut [State], tape_names: &[&str]) -> Result<(), CompileError> {
+    for st in states.iter_mut() {
+        for rule in &mut st.rules {
+            position_pattern_cells(&mut rule.pattern, tape_names)?;
+            if let Some(w) = &mut rule.write {
+                position_write_cells(w, tape_names)?;
+            }
+            if let Some(m) = &mut rule.mov {
+                position_move_cells(m, tape_names)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The tape position a cell's name stands for, or the refusal: the name must
+/// name a tape of this world, exactly once per vector.
+fn named_cell_position(
+    name: &crate::parser::CellName,
+    tape_names: &[&str],
+    seen: &mut HashSet<usize>,
+) -> Result<usize, CompileError> {
+    let pos = tape_names
+        .iter()
+        .position(|t| *t == name.name)
+        .ok_or(CompileError {
+            span: name.span,
+            kind: CompileErrorKind::UnresolvedTapeTarget(name.name.clone()),
+        })?;
+    if !seen.insert(pos) {
+        return Err(CompileError {
+            span: name.span,
+            kind: CompileErrorKind::DuplicateNamedCell {
+                name: name.name.clone(),
+            },
+        });
+    }
+    Ok(pos)
+}
+
+/// Each of the three folds shares the shape — form check, name resolution,
+/// positional fill — but not the cell type, so each spells its own default.
+fn position_pattern_cells(p: &mut Pattern, tape_names: &[&str]) -> Result<(), CompileError> {
+    if p.cells.iter().all(|c| c.name.is_none()) {
+        return Ok(());
+    }
+    let named_form = p.cells[0].name.is_some();
+    let mut out = vec![
+        PatternCell {
+            name: None,
+            kind: PatternCellKind::Wildcard,
+            binding: None,
+            span: p.span,
+        };
+        tape_names.len()
+    ];
+    let mut seen = HashSet::new();
+    for mut c in std::mem::take(&mut p.cells) {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if !named_form {
+            // A positional form with any name in the vector: the named cell
+            // was refused at its own loop turn, before this one runs. A cell
+            // matching the positional form just waits out the inevitable.
+            continue;
+        }
+        let n = c.name.take().expect("the form was checked");
+        out[named_cell_position(&n, tape_names, &mut seen)?] = c;
+    }
+    p.cells = out;
+    Ok(())
+}
+
+fn position_write_cells(w: &mut WriteVec, tape_names: &[&str]) -> Result<(), CompileError> {
+    if w.cells.iter().all(|c| c.name.is_none()) {
+        return Ok(());
+    }
+    let named_form = w.cells[0].name.is_some();
+    let mut out = vec![
+        WriteCell {
+            name: None,
+            kind: WriteCellKind::Keep,
+            span: w.span,
+        };
+        tape_names.len()
+    ];
+    let mut seen = HashSet::new();
+    for mut c in std::mem::take(&mut w.cells) {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if !named_form {
+            continue;
+        }
+        let n = c.name.take().expect("the form was checked");
+        out[named_cell_position(&n, tape_names, &mut seen)?] = c;
+    }
+    w.cells = out;
+    Ok(())
+}
+
+fn position_move_cells(m: &mut MoveVec, tape_names: &[&str]) -> Result<(), CompileError> {
+    if m.cells.iter().all(|c| c.name.is_none()) {
+        return Ok(());
+    }
+    let named_form = m.cells[0].name.is_some();
+    let mut out = vec![
+        MoveCell {
+            name: None,
+            dir: MoveDir::Stay,
+            span: m.span,
+        };
+        tape_names.len()
+    ];
+    let mut seen = HashSet::new();
+    for mut c in std::mem::take(&mut m.cells) {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if !named_form {
+            continue;
+        }
+        let n = c.name.take().expect("the form was checked");
+        out[named_cell_position(&n, tape_names, &mut seen)?] = c;
+    }
+    m.cells = out;
+    Ok(())
 }
 
 /// A world's states with every set-naming pattern cell resolved: the name
@@ -4065,7 +4248,11 @@ fn resolve_machine_world(
             leaves: None,
         });
     }
-    let states = resolve_pattern_sets(&m.states, &[], sets, set_refs)?;
+    let mut states = resolve_pattern_sets(&m.states, &[], sets, set_refs)?;
+    position_named_cells(
+        &mut states,
+        &tapes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+    )?;
     let (grafts, binds, entry) =
         resolve_world_reuse(&m.grafts, &m.binds, &states, &[], scopes, externals)?;
     let calls = resolve_world_calls(&states, &binds, &[], scopes);
@@ -5767,6 +5954,10 @@ mod tests {
                 expected: 2,
                 got: 3,
             },
+            CompileErrorKind::DuplicateNamedCell {
+                name: "x".into(),
+            },
+            CompileErrorKind::MixedCellForms,
             CompileErrorKind::TooManyStateParams(256),
             CompileErrorKind::StateArgsNeedDeclarations("x".into()),
             CompileErrorKind::NoreturnViolated("x".into()),
