@@ -33,6 +33,25 @@ only in `*` never share a spliced fragment. The 0.2 refusal named
 | `.tmc` language | **0.3** — a graft's map admits the open marker | 0.2 |
 | everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
 
+### Named vector cells — 2026-11-22
+
+A rule vector may name its tapes — `[king: '♔', file: '0'..'7' as f]` —
+leaving every tape it does not name at its default (`*` in a pattern, `-`
+in a write vector, `.` in a move vector). On a wide world a rule that
+touches three of sixteen tapes writes three cells, and the tape's NAME,
+not its position in the comma list, is what the reader sees and what a
+generator cannot get wrong silently. Pure spelling — the named and
+positional forms of one rule compile to byte-identical rows — and each
+vector takes one form: mixed named and positional cells are refused, as
+is a name that is no tape of the world or one tape named twice. `tmt fmt`
+prints whichever form was written; generated headers print the positional
+form, like the disassembly.
+
+| Version space | This change | Previous |
+|---|---|---|
+| `.tmc` language | **0.3, no movement** — the acceptance addition folds into the standing bump: a language version bumps once per `next` cycle relative to `master`, the minimal bump | 0.3 |
+| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+
 ## [0.5.0] - 2026-09-02
 
 Two release candidates preceded this cut on the same day: the first so

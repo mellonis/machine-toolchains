@@ -389,7 +389,10 @@ stream. A block comment stays inline wherever it was written —
 `state /* mid */ s {`, `machine /* x */ {`, `tape main /* c */ : ab;`,
 `routine r(tape t: ab) /* c */ {` are all fixed points. A comment is
 never glued to a neighbouring token, so a `:` or `;` that normally
-abuts its predecessor takes a space when a comment intervenes.
+abuts its predecessor takes a space when a comment intervenes. A named
+vector cell owns its `name`-to-`:` slot the same way — `[t /* c */: 'a']
+-> stop;` and `[t: /* c */ 'a'] -> stop;` are fixed points like any other
+(docs/tmt/language.md (named vector cells)).
 
 **On the state-block grid**, a BLOCK comment keeps its rule on the grid,
 occupying its column: it joins the first column the grid has at or after

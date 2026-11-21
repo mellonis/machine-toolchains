@@ -725,6 +725,36 @@ entry state s {
 }
 ```
 
+### Named vector cells
+
+A rule vector may name its tapes — `[y: 'a', z: 'b'] -> write [y: 'b']
+move [z: <]` — leaving every tape it does not name at its default: `*` in
+a pattern, `-` in a write vector, `.` in a move vector. A rule that
+touches three of a world's sixteen tapes writes three cells. The name is
+the tape's NAME in the enclosing world, never its position.
+
+A name is a spelling, not a semantics: the named form and the positional
+form of one rule compile to the same rows, byte for byte. A rule written
+named keeps its meaning when the world grows a tape; names are resolved
+against the world at compile time. Each vector takes ONE form — a vector
+mixing named with positional cells is refused (`mixed-cell-forms`, at the
+first cell that breaks the form its first cell set) — a name that is no
+tape of the world is `unresolved-tape-target` (a `state` parameter is not
+a tape either), and naming one tape twice in one vector is
+`duplicate-named-cell`, at the second name. A named vector is
+width-correct by construction; the `row-width` check speaks of the
+positional form.
+
+A named cell carries anything a cell can carry — a range with a binding
+(`[file: '0'..'7' as f]`), a set reference, or a substitution — and a
+comment may sit before or after its `:`, exactly as between any two
+tokens (docs/tmt/fmt.md (comments are never moved)).
+
+`tmt fmt` prints whichever form was written. Generated artifacts speak
+the positional form: `tmt interface` and the `.tmh` headers print a named
+body in full-width positional shape, like the disassembly — a name never
+leaves the source it was written in.
+
 ### Pattern cells
 
 Each cell position matches the symbol under that tape's head. A cell is
