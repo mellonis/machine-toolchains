@@ -1,0 +1,12 @@
+alphabet ab { '_', 'a', 'b' }
+set pair { 'a', 'b' }
+
+machine {
+  tape x: ab;
+  tape y: ab;
+  tape z: ab;
+  entry state s {
+    [y: 'a', z: pair as p, x: 'b' as v] -> write [x: {v}, z: 'a', y: -] move [z: <, x: >, y: .] goto s;
+    [x: '_']                            -> stop;
+  }
+}

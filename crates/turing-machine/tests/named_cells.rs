@@ -457,3 +457,51 @@ fn lint_findings_are_the_twin_s_exact() {
         .collect();
     assert_eq!(unused.len(), 2, "a3 and a4 are untouched, named: {unused:?}");
 }
+
+// ---------------------------------------------------------------------------
+// fmt keeps the written spelling: a named cell survives the canonical
+// printer WITH its name (the clean-cell reprint cannot drop it), and both
+// spellings format idempotently.
+// ---------------------------------------------------------------------------
+
+use mtc_turing_machine::fmt::format;
+
+const FMT_NAMED: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape x: ab;
+  tape y: ab;
+  entry state s {
+    [y: 'a'] -> write [y: 'b'] move [y: >] goto s;
+    [x: '_'] -> stop;
+  }
+}
+";
+
+#[test]
+fn a_named_spelling_survives_fmt_verbatim() {
+    // Already canonical: the formatter must not move a byte, and above all
+    // must not drop the `name:` prefixes on the clean reprint path.
+    assert_eq!(format(FMT_NAMED).expect("formats"), FMT_NAMED);
+}
+
+const FMT_SCRAGGLY: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape x: ab;
+  tape y: ab;
+  entry state s {
+    [ y:'a' ,x:'_' ] -> write [ x: '_' ] stop;
+  }
+}
+";
+
+#[test]
+fn a_named_spelling_formats_idempotently_and_keeps_its_names() {
+    let once = format(FMT_SCRAGGLY).expect("formats");
+    assert!(once.contains("y: 'a'"), "the name survives: {once}");
+    assert!(once.contains("x: '_'"), "the name survives: {once}");
+    assert_eq!(format(&once).expect("formats"), once, "idempotent");
+}

@@ -1046,13 +1046,24 @@ fn join_cells_with_interior(cells: &[String], interior: &Interior<'_>) -> String
     out
 }
 
+/// A named cell's `name: ` prefix: the written spelling's one addition to a
+/// cell's printed text — the clean reprint must carry it, or the formatter
+/// would silently drop names (docs/tmt/language.md (named vector cells)).
+fn cell_name_prefix(name: &Option<crate::parser::CellName>) -> String {
+    match name {
+        Some(n) => format!("{}: ", n.name),
+        None => String::new(),
+    }
+}
+
 fn pattern_cell_text(cell: &PatternCell) -> String {
-    let mut out = match &cell.kind {
+    let mut out = cell_name_prefix(&cell.name);
+    out.push_str(&match &cell.kind {
         PatternCellKind::Wildcard => "*".to_string(),
         PatternCellKind::Single(sym) => sym_text(sym),
         PatternCellKind::Range { lo, hi } => format!("{}..{}", sym_text(lo), sym_text(hi)),
         PatternCellKind::SetRef { name, .. } => name.clone(),
-    };
+    });
     if let Some(binding) = &cell.binding {
         out.push_str(" as ");
         out.push_str(&binding.name);
@@ -1064,11 +1075,12 @@ fn pattern_cell_text(cell: &PatternCell) -> String {
 /// token run — see [`subst_body_text`] for why a substitution reprints
 /// from tokens rather than from its parsed value.
 fn write_cell_text(cell: &WriteCell, tokens: &[Token]) -> String {
-    match &cell.kind {
+    let body = match &cell.kind {
         WriteCellKind::Keep => "-".to_string(),
         WriteCellKind::Lit(sym) => sym_text(sym),
         WriteCellKind::Subst { expr } => format!("{{{}}}", subst_body_text(&expr.span, tokens)),
-    }
+    };
+    format!("{}{}", cell_name_prefix(&cell.name), body)
 }
 
 /// Reprint a substitution `{…}` from its SOURCE TOKENS, tight (no interior
@@ -1118,12 +1130,12 @@ fn fold_token_text(kind: &TokenKind) -> &str {
 }
 
 fn move_cell_text(cell: &MoveCell) -> String {
-    match cell.dir {
+    let dir = match cell.dir {
         MoveDir::Left => "<",
         MoveDir::Right => ">",
         MoveDir::Stay => ".",
-    }
-    .to_string()
+    };
+    format!("{}{}", cell_name_prefix(&cell.name), dir)
 }
 
 fn continuation_text(cont: &Continuation) -> String {

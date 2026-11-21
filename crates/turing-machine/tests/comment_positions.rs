@@ -4,10 +4,11 @@
 //! around it, never which tokens it sits between
 //! (docs/tmt/fmt.md (comments are never moved)).
 //!
-//! One template per grammatical position a comment can occupy — 81 of them:
+//! One template per grammatical position a comment can occupy — 87 of them:
 //! the 61 of the measured 2026-08-30 audit, two for the `noreturn` clause,
-//! and eighteen for the head-position clauses, `never writes`, the open-map
-//! `*` and glyph sets — each with a `@C@` slot run in BOTH flavours
+//! eighteen for the head-position clauses, `never writes`, the open-map
+//! `*` and glyph sets, and six for the named-cell slots (`name` before its
+//! `:`, the cell after it) — each with a `@C@` slot run in BOTH flavours
 //! (`/* c */` and `// c`). Each case runs
 //! three mechanical gates: the comment's significant-token NEIGHBOURS are
 //! unchanged, the significant-token stream is unchanged (fmt is
@@ -471,4 +472,39 @@ const RULE_ACTION_SLOT: &[(&str, &str)] = &[
 #[test]
 fn rule_action_comments_stay_in_their_slot() {
     run_group(RULE_ACTION_SLOT);
+}
+
+/// The named-cell slots: between a cell's `name` and its `:`, and between
+/// `:` and the cell's content, in each of the three vectors
+/// (docs/tmt/language.md (named vector cells)).
+const NAMED_CELL_SLOTS: &[(&str, &str)] = &[
+    (
+        "named/pattern-before-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [main @C@\n    : 'a'] -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/pattern-after-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [main: @C@\n    'a'] -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/write-before-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write [main @C@\n    : 'a'] stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/write-after-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write [main: @C@\n    'a'] stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/move-before-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> move [main @C@\n    : >] stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/move-after-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> move [main: @C@\n    >] stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+];
+
+#[test]
+fn named_cell_comments_stay_in_their_slot() {
+    run_group(NAMED_CELL_SLOTS);
 }
