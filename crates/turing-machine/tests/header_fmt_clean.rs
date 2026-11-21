@@ -171,6 +171,38 @@ fn every_shipped_source_header_is_fmt_clean() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
 
+/// An exported graph body carrying an OPEN graft: the printed header keeps
+/// the body — `*` marker and all — and stays canonical under `tmt fmt`
+/// (docs/tmt/language.md (open grafts)). The printer arms run the formatter,
+/// so this pins that the marker survives the round trip.
+#[test]
+fn an_open_graft_in_an_exported_graph_body_prints_fmt_clean() {
+    let dir = scratch("header_fmt_clean_open_graft");
+    let src = dir.join("unit.tmc");
+    std::fs::write(
+        &src,
+        "\
+export alphabet wide { '_', 'a', 'b', 'c', 'd' }
+export alphabet three { '_', '0', '1' }
+
+export graph peek(tape n: three, state done) {
+  entry state go {
+    ['0'] -> done;
+    [*]   -> move [>] goto go;
+  }
+}
+
+export graph outer(tape n: three, state fin) {
+  entry graft peek(n = n with map { '0' -> '0', '1' -> '1', * }, done = fin) as scan;
+}
+",
+    )
+    .unwrap();
+    let header = dir.join("unit.tmh");
+    interface_to(&src, None, &header);
+    assert!(fmt_check(&header).is_none());
+}
+
 /// The object arm: every shipped `.tmc` compiled to a `.tmo`, `tmt
 /// interface` over the object, then `tmt fmt --check` on the printed
 /// header. The object arm prints no graphs, so the grid never arises here,

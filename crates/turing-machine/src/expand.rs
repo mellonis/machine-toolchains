@@ -3432,6 +3432,40 @@ machine {
     }
 
     #[test]
+    fn an_open_map_with_no_pairs_kills_unnamed_glyph_rows() {
+        // Under an open map a glyph the pairs do not name is opaque: no host
+        // symbol reads as it, so a rule whose cells are all unnamed dies and
+        // warns `empty-expansion`. Its message ("the binding maps no host
+        // symbol to a match cell") reads true for the opaque class too — the
+        // whole class is precisely "no match cell".
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+
+graph mark(tape n: alp, state done) {
+  entry state go {
+    ['0'] -> done;
+    ['1'] -> done;
+    [*]   -> done;
+  }
+}
+
+machine {
+  tape data: cot;
+  entry graft mark(n = data with map { * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let dying: Vec<_> = ex
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "empty-expansion")
+            .collect();
+        assert_eq!(dying.len(), 2, "{:?}", ex.diagnostics);
+    }
+
+    #[test]
     fn a_state_without_a_covering_wildcard_is_refused() {
         // The open map makes unlisted `five` symbols opaque; the graph's state
         // has no `*` row on the bound tape, so an opaque symbol would decide

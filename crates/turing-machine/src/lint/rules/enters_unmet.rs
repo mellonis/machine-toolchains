@@ -197,6 +197,37 @@ machine {
     /// Mutation: seeding every entry state with the whole alphabet
     /// unconditionally instead of the world's own `enters` — `walk`'s call
     /// into `plusOne` starts firing.
+    /// A graft edge is not a report site of this analysis — settled here for
+    /// OPEN maps too: an open graft whose graph declares `enters { '0' }`
+    /// emits no `enters-unmet`, even though the spliced rows may see opaque
+    /// symbols under the head. The graft's own diagnostics are the coverage
+    /// refusal and the trap rows; the analysis's boundary is first documented
+    /// in `head_flow`'s module docs. Recorded as behaviour, not a gap to
+    /// rediscover (docs/tmt/language.md (open grafts)).
+    #[test]
+    fn an_open_graft_site_reports_no_enters_unmet() {
+        let src = "\
+alphabet wide { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph peek(tape n: three enters { '0' }, state done) {
+  entry state go {
+    ['0'] -> write ['0'] done;
+    [*]   -> move [>] goto go;
+  }
+}
+
+machine {
+  tape t: wide;
+  graft peek(n = t with map { 'a' -> '0', * }, done = s2) as inst;
+  entry state go { [*] -> goto inst; }
+  state s2 { [*] -> stop; }
+}
+";
+        assert!(findings(&src).is_empty(), "{:?}", findings(&src));
+        assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
+    }
+
     #[test]
     fn a_callers_own_enters_clause_seeds_its_entry_state() {
         let src = program(
