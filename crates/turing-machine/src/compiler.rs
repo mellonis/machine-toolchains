@@ -1153,7 +1153,7 @@ impl std::fmt::Display for CompileErrorKind {
                     "state `{state}` would decide whether a row matches on a \
                      symbol this graft's open map leaves opaque on tape `{tape}` \
                      — give the state a row whose `{tape}` cell is `*`, or name \
-                     the symbols in the map"
+                     every symbol of the map so nothing is left opaque"
                 )
             }
             CompileErrorKind::MapNotClosed(g) => {

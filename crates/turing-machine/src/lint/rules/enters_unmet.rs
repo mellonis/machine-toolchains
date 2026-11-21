@@ -187,16 +187,6 @@ machine {
         assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
     }
 
-    /// A caller that declares its OWN `enters` and then calls from an
-    /// unconstrained `[*]` row — silent, because the world's entry state is
-    /// seeded from that clause rather than from the whole alphabet. The
-    /// machine's own call into it is pattern-constrained, so it stays
-    /// silent under the mutation too and the fixture reports exactly one
-    /// new finding when the seed breaks.
-    ///
-    /// Mutation: seeding every entry state with the whole alphabet
-    /// unconditionally instead of the world's own `enters` — `walk`'s call
-    /// into `plusOne` starts firing.
     /// A graft edge is not a report site of this analysis — settled here for
     /// OPEN maps too: an open graft whose graph declares `enters { '0' }`
     /// emits no `enters-unmet`, even though the spliced rows may see opaque
@@ -228,6 +218,16 @@ machine {
         assert!(other_codes(src).is_empty(), "{:?}", other_codes(src));
     }
 
+    /// A caller that declares its OWN `enters` and then calls from an
+    /// unconstrained `[*]` row — silent, because the world's entry state is
+    /// seeded from that clause rather than from the whole alphabet. The
+    /// machine's own call into it is pattern-constrained, so it stays
+    /// silent under the mutation too and the fixture reports exactly one
+    /// new finding when the seed breaks.
+    ///
+    /// Mutation: seeding every entry state with the whole alphabet
+    /// unconditionally instead of the world's own `enters` — `walk`'s call
+    /// into `plusOne` starts firing.
     #[test]
     fn a_callers_own_enters_clause_seeds_its_entry_state() {
         let src = program(

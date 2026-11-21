@@ -38,9 +38,12 @@ Lift the refusal, for the symmetry of the three binding constructs.
   lands, an open graft lowered as a call IS the open binding that already
   exists; that future shape is a note, not this work.
 - No equality semantics for repeated pattern names (the other half of #127).
-- Writes stay closed: the graph writes back only what the pairs map;
-  `* as v` stays `wildcard-binding`. The wmap side of `build_tapemap` is
-  unchanged.
+- Writes stay closed, *harder* under openness: the graph writes back only
+  what the pairs map — `close_unlisted` runs on the write map unconditionally
+  under an open map (equal cards included), the mirror of the call-side rule
+  that an open binding closes its write half (`* as v` stays
+  `wildcard-binding`). The wmap side of `build_tapemap` changes exactly that
+  one gate and nothing else.
 - Formats (MO/MX/MT) do not move: a spliced graph leaves plain rows
   downstream; graft provenance digests cover the BODY, not the site's map.
 

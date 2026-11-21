@@ -1774,8 +1774,26 @@ fn expand_grafts_into<'a>(
             if !tm.open {
                 continue;
             }
+            // Nothing to protect where the map names every symbol: the opaque
+            // class is empty, so no row can ever decide on a member of it.
+            if !(0..tm.host_card as u16).any(|p| tm.read_class(p) == ReadClass::Opaque) {
+                continue;
+            }
             for st in &gx.states {
-                let rows: Vec<&[Cell]> = st.rules.iter().map(|r| r.pattern.as_slice()).collect();
+                // A row whose read cells have no host preimage is dropped at
+                // the splice (`map_rule`) and cannot decide anything — only
+                // rows that will actually exist enter the cover question.
+                let rows: Vec<&[Cell]> = st
+                    .rules
+                    .iter()
+                    .filter(|r| {
+                        r.pattern.iter().enumerate().all(|(i, c)| match c {
+                            Cell::Wild => true,
+                            Cell::Sym(v) => !comp.tapes[i].preimage(*v).is_empty(),
+                        })
+                    })
+                    .map(|r| r.pattern.as_slice())
+                    .collect();
                 if !crate::ir::rows_admit_opaque_index_over_rows(&[rows.as_slice()], k, |c| {
                     *c == Cell::Wild
                 }) {
@@ -3458,6 +3476,59 @@ machine {
             .filter(|d| d.code == "empty-expansion")
             .collect();
         assert_eq!(dying.len(), 2, "{:?}", ex.diagnostics);
+    }
+
+    #[test]
+    fn an_open_graft_map_that_names_every_symbol_needs_no_wildcard() {
+        // The map names every non-blank host symbol, so the opaque class is
+        // EMPTY — nothing can decide a row match on a symbol that does not
+        // exist here, and the coverage refusal must not fire. (It did before:
+        // the check asked about "a symbol this open map leaves opaque" while
+        // leaving none.)
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+
+graph both(tape n: alp, state done) {
+  entry state go {
+    ['0'] -> done;
+    ['1'] -> done;
+    ['_'] -> done;
+  }
+}
+
+machine {
+  tape data: cot;
+  entry graft both(n = data with map { 'a' -> '0', 'b' -> '1', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let _ = expand_ok(src);
+    }
+
+    #[test]
+    fn a_state_whose_rows_all_die_needs_no_cover() {
+        // The state's only row reads a glyph no pair maps — no host symbol
+        // reads as it, so `map_rule` DROPS the row at the splice and no row
+        // can ever decide on an opaque symbol. Refusing it would be refusing
+        // nothing; the row must be filtered out of the cover question.
+        let src = "\
+alphabet wide { '_', 'a', 'b', 'c' }
+alphabet alp { '_', '0', '1' }
+
+graph ghost(tape n: alp, state done) {
+  entry state go {
+    ['1'] -> done;
+  }
+}
+
+machine {
+  tape data: wide;
+  entry graft ghost(n = data with map { 'a' -> '0', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let _ = expand_ok(src);
     }
 
     #[test]
