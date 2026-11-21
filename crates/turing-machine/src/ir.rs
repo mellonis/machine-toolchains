@@ -764,8 +764,7 @@ pub(crate) fn rows_admit_opaque_index_over_rows<C: PartialEq>(
             rules.iter().any(|w| {
                 matches!(w.get(k), Some(wc) if is_wild(wc))
                     && w.len() == r.len()
-                    && w
-                        .iter()
+                    && w.iter()
                         .zip(r.iter())
                         .enumerate()
                         .all(|(i, (wc, rc))| i == k || is_wild(wc) || wc == rc)

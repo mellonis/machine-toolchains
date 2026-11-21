@@ -224,8 +224,8 @@ machine {
   state s2 { [*] -> stop; }
 }
 ";
-        assert!(findings(&src).is_empty(), "{:?}", findings(&src));
-        assert!(other_codes(&src).is_empty(), "{:?}", other_codes(&src));
+        assert!(findings(src).is_empty(), "{:?}", findings(src));
+        assert!(other_codes(src).is_empty(), "{:?}", other_codes(src));
     }
 
     #[test]

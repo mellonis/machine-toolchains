@@ -1775,13 +1775,10 @@ fn expand_grafts_into<'a>(
                 continue;
             }
             for st in &gx.states {
-                let rows: Vec<&[Cell]> =
-                    st.rules.iter().map(|r| r.pattern.as_slice()).collect();
-                if !crate::ir::rows_admit_opaque_index_over_rows(
-                    &[rows.as_slice()],
-                    k,
-                    |c| *c == Cell::Wild,
-                ) {
+                let rows: Vec<&[Cell]> = st.rules.iter().map(|r| r.pattern.as_slice()).collect();
+                if !crate::ir::rows_admit_opaque_index_over_rows(&[rows.as_slice()], k, |c| {
+                    *c == Cell::Wild
+                }) {
                     let tape = graph.tapes[k].name.clone();
                     let span = graft
                         .args
@@ -3038,7 +3035,9 @@ machine {
         let m = machine(&ex);
         let f = state(m, "f");
         assert!(
-            !f.rules.iter().any(|r| r.transition == Transition2::TrapRead),
+            !f.rules
+                .iter()
+                .any(|r| r.transition == Transition2::TrapRead),
             "{:?}",
             f.rules
         );
@@ -3344,22 +3343,18 @@ machine {
         // The innermost fragment still carries the `*` row that catches the
         // outer map's opaque symbols.
         assert!(
-            m.states.iter().any(|s| {
-                s.rules
-                    .iter()
-                    .any(|r| r.pattern == vec![Cell::Wild])
-            }),
+            m.states
+                .iter()
+                .any(|s| { s.rules.iter().any(|r| r.pattern == vec![Cell::Wild]) }),
             "{:?}",
             m.states
         );
         // And the named pair still reads: the inner `['0']` row is alive over
         // host 'a' (index 1).
         assert!(
-            m.states.iter().any(|s| {
-                s.rules
-                    .iter()
-                    .any(|r| r.pattern == vec![Cell::Sym(1)])
-            }),
+            m.states
+                .iter()
+                .any(|s| { s.rules.iter().any(|r| r.pattern == vec![Cell::Sym(1)]) }),
             "{:?}",
             m.states
         );
