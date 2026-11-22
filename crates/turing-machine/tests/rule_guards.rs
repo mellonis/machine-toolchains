@@ -901,3 +901,67 @@ fn guard_text_canon_is_one_spelling() {
         "{head}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// fmt: the guard is written text between `]` and `->` — fmt prints its
+// tokens as written (parentheses included) with canonical whitespace, and
+// never drops one (docs/tmt/fmt.md (comments are never moved) for the
+// comment slots; the audit in tests/comment_positions.rs is that rule's
+// executable form).
+// ---------------------------------------------------------------------------
+
+use mtc_turing_machine::fmt::format;
+
+/// A canonical guarded source — the fixture is ITS OWN fmt output: names,
+/// written parentheses and offsets all print as written, whitespace
+/// normalized only.
+const FMT_CANONICAL: &str = "\
+alphabet ab { '_', 'a', 'z' }
+set pair { 'z', 'a' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    [t: 'a'..'z' as x, u: 'a'..'z' as y] where { x in pair && (x == y || x == y - 1) } -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn a_guard_survives_fmt_verbatim() {
+    let out = format(FMT_CANONICAL).unwrap_or_else(|e| panic!("fmt failed: {e:?}"));
+    assert_eq!(
+        out, FMT_CANONICAL,
+        "the clean reprint changed a written form"
+    );
+}
+
+/// A scraggly guard (tight operators, stray spaces around written parens,
+/// an offset spelled `y -1`) settles at ONE pass, and the guard survives
+/// it whole.
+const FMT_SCRAGGLY: &str = "\
+alphabet ab { '_', 'a', 'z' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where{x==y|| ( x == y -1 ) }->stop;
+    [*, *] -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn a_scraggly_guard_settles_at_one_pass() {
+    let once = format(FMT_SCRAGGLY).unwrap_or_else(|e| panic!("fmt failed: {e:?}"));
+    let twice = format(&once).unwrap_or_else(|e| panic!("second pass: {e:?}"));
+    assert_eq!(once, twice, "fmt is not idempotent over a scraggly guard");
+    assert!(
+        once.contains("where { x == y || (x == y - 1) } -> stop;"),
+        "the guard did not survive as written: {once}"
+    );
+}
