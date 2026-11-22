@@ -30,6 +30,9 @@ ast_node!(pub struct WorldView: TmcKind::World.into());
 ast_node!(pub struct TapeView: TmcKind::Tape.into());
 ast_node!(pub struct StateView: TmcKind::State.into());
 ast_node!(pub struct RuleView: TmcKind::Rule.into());
+// A rule's `where { … }` GUARD node — the rule's node says which extent is
+// the guard (it exists only when `where` does).
+ast_node!(pub struct GuardView: TmcKind::Guard.into());
 ast_node!(pub struct GraftView: TmcKind::Graft.into());
 ast_node!(pub struct BindView: TmcKind::Bind.into());
 ast_node!(pub struct DocRunView: TmcKind::DocRun.into());
@@ -1020,6 +1023,13 @@ impl RuleView {
     /// behind but the `;` that would have followed a written one either
     /// way. A later reader must not "fix" this `None` into a panic.
     pub fn transition(&self) -> Option<TransitionView> {
+        child(self.syntax())
+    }
+
+    /// The `where { … }` guard this rule carries, when one was written.
+    /// Like `transition`/`write_vec`, a keyword-decided extent: `None`
+    /// here is simply an unguarded rule, never an error.
+    pub fn guard(&self) -> Option<GuardView> {
         child(self.syntax())
     }
 }

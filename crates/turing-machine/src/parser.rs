@@ -10,7 +10,7 @@
 //! write vector `check_char_arithmetic` inspects — and build no second
 //! node tree of their own alongside it.
 //!
-//! The 31 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
+//! The 32 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
 //! expected. `deprecated` is contextual (an attribute word) and is not in that
 //! set.
@@ -414,6 +414,10 @@ impl QualName {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub pattern: Pattern,
+    /// The rule's `where { … }` guard, when one was written — the predicate
+    /// that filters this pattern's expansion (docs/tmt/language.md
+    /// (rule guards)).
+    pub guard: Option<Guard>,
     /// A leading `debugger` in the action.
     pub debugger: bool,
     pub write: Option<WriteVec>,
@@ -482,6 +486,78 @@ pub struct SetCellMembers {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetMember {
     pub label: String,
+}
+
+/// A rule guard `where { … }`: a compile-time predicate over the rule's
+/// bindings that filters the pattern's cartesian expansion at expansion
+/// time (docs/tmt/language.md (rule guards)). `span` is the
+/// keyword-decided extent — `where` through `}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Guard {
+    pub expr: GuardExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardExpr {
+    /// `a == b`, `a != b` — glyph identity between offset-free terms; order
+    /// comparisons and any offset are sequence-position work instead.
+    Cmp(GuardCmp),
+    /// `x in S` — restricts x to the set's members within the occurrence's
+    /// cone and makes S's member order x's position sequence there.
+    In(GuardIn),
+    And(Box<GuardExpr>, Box<GuardExpr>),
+    Or(Box<GuardExpr>, Box<GuardExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardCmp {
+    pub left: GuardTerm,
+    pub op: CmpOp,
+    pub right: GuardTerm,
+    /// Left operand start → right operand end.
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardIn {
+    /// The binding the conjunct restricts.
+    pub binding: CellName,
+    /// The set named. `in` itself is contextual — only `S` is a name.
+    pub set: CellName,
+    /// Binding start → set name end.
+    pub span: Span,
+}
+
+/// One guard operand: a base with a constant offset — `y - 1` is
+/// `base y, offset -1`. The offset participates in POSITION arithmetic
+/// only; a bare identity comparison always carries offset 0
+/// (docs/tmt/language.md (rule guards)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardTerm {
+    pub base: GuardBase,
+    pub offset: i64,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardBase {
+    /// A pattern binding by its written name.
+    Binding(CellName),
+    /// A glyph or number literal: identity for `==`/`!=`, and its position
+    /// in the other operand's sequence where a sequence is needed.
+    Lit(SymLit),
+}
+
+/// The six comparison operators a guard may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 /// Where a rule's write vector applies arithmetic to a glyph-bound name:
@@ -1056,6 +1132,12 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::Comment(_) => "a comment".into(),
         TokenKind::DocLine(_) => "a doc line".into(),
         TokenKind::AttentionLine(_) => "an attention line".into(),
+        TokenKind::EqEq => "`==`".into(),
+        TokenKind::NotEq => "`!=`".into(),
+        TokenKind::LtEq => "`<=`".into(),
+        TokenKind::GtEq => "`>=`".into(),
+        TokenKind::AmpAmp => "`&&`".into(),
+        TokenKind::PipePipe => "`||`".into(),
     }
 }
 
@@ -2263,6 +2345,13 @@ impl Parser<'_> {
     /// is dropped, and extraction rebuilds it from the green tree.
     fn rule(&mut self) -> Result<(), CompileError> {
         let pattern = self.pattern()?;
+        // The guard is validated and bracketed (a GUARD node) here; the AST
+        // value itself is extraction's, reached via `reparse_guard` — the
+        // reparse-unit rule `syntax/kinds` states for keyword-decided
+        // extents.
+        if self.at_kw("where") {
+            self.guard()?;
+        }
         self.expect(&TokenKind::Arrow, "`->` after the pattern")?;
         let debugger = if self.at_kw("debugger") {
             self.bump();
@@ -2336,6 +2425,131 @@ impl Parser<'_> {
             }),
             None => Ok(()),
         }
+    }
+
+    /// `where { … }` — a rule's guard. The node opens at `where` (the
+    /// value's own first token, per the keyword-decided-extent rule) and
+    /// closes at `}`; the span matches the node extent exactly the way
+    /// `WriteVec::span` matches WRITE_VEC's.
+    fn guard(&mut self) -> Result<Guard, CompileError> {
+        self.g_flush_start(TmcKind::Guard);
+        let kw = self.peek().clone();
+        self.bump(); // `where` — the caller's `at_kw` already decided
+        self.expect(&TokenKind::LBrace, "`{` to open the guard")?;
+        let expr = self.guard_or()?;
+        let rb = self.expect(&TokenKind::RBrace, "`}` to close the guard")?;
+        self.g_finish(); // Guard
+        Ok(Guard {
+            expr,
+            span: join(kw.span(), rb.span()),
+        })
+    }
+
+    /// `or := and ('||' and)*` — `&&` binds tighter (`docs/tmt/language.md`
+    /// (rule guards)).
+    fn guard_or(&mut self) -> Result<GuardExpr, CompileError> {
+        let mut expr = self.guard_and()?;
+        while self.peek().kind == TokenKind::PipePipe {
+            self.bump();
+            let rhs = self.guard_and()?;
+            expr = GuardExpr::Or(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
+    fn guard_and(&mut self) -> Result<GuardExpr, CompileError> {
+        let mut expr = self.guard_test()?;
+        while self.peek().kind == TokenKind::AmpAmp {
+            self.bump();
+            let rhs = self.guard_test()?;
+            expr = GuardExpr::And(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
+    /// One test: `x in S` (membership) or a comparison. Disambiguated by
+    /// a one-token lookahead — `in` is contextual (only the word after a
+    /// bare name makes a membership), so a binding may even be named `in`.
+    fn guard_test(&mut self) -> Result<GuardExpr, CompileError> {
+        let lookahead_in = {
+            let next = self.tokens.get(self.pos + 1);
+            self.tokens
+                .get(self.pos)
+                .is_some_and(|t| matches!(t.kind, TokenKind::Ident(_)))
+                && next.is_some_and(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "in"))
+        };
+        if lookahead_in {
+            let (name, span) = self.name("a guard binding name")?;
+            let binding = CellName { name, span };
+            self.bump(); // `in`
+            let (name, span) = self.name("a set name after `in`")?;
+            let set = CellName { name, span };
+            return Ok(GuardExpr::In(GuardIn {
+                span: join(binding.span, set.span),
+                binding,
+                set,
+            }));
+        }
+        let left = self.guard_term()?;
+        let op = match self.peek().kind {
+            TokenKind::EqEq => CmpOp::Eq,
+            TokenKind::NotEq => CmpOp::Ne,
+            TokenKind::Lt => CmpOp::Lt,
+            TokenKind::LtEq => CmpOp::Le,
+            TokenKind::Gt => CmpOp::Gt,
+            TokenKind::GtEq => CmpOp::Ge,
+            _ => {
+                return Err(Self::expected(
+                    self.peek(),
+                    "`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `&&`, `||`, or `}` in the guard",
+                ));
+            }
+        };
+        self.bump();
+        let right = self.guard_term()?;
+        Ok(GuardExpr::Cmp(GuardCmp {
+            span: join(left.span, right.span),
+            left,
+            op,
+            right,
+        }))
+    }
+
+    /// `operand := (binding | literal) [ ('+' | '-') integer ]` — a base
+    /// with at most one constant offset (no `*`/`%`; the guard's arithmetic
+    /// is `± k` and nothing else).
+    fn guard_term(&mut self) -> Result<GuardTerm, CompileError> {
+        let t = self.peek().clone();
+        let base_span = t.span();
+        let base = match &t.kind {
+            TokenKind::Ident(_) => {
+                let (name, span) = self.name("a guard binding name")?;
+                GuardBase::Binding(CellName { name, span })
+            }
+            TokenKind::Glyph(_) | TokenKind::Number(_, _) => GuardBase::Lit(self.sym_lit()?),
+            _ => return Err(Self::expected(&t, "a binding or symbol in the guard")),
+        };
+        let offset = match self.peek().kind {
+            TokenKind::Plus | TokenKind::Dash => {
+                let neg = self.peek().kind == TokenKind::Dash;
+                self.bump();
+                let n = self.peek().clone();
+                match &n.kind {
+                    TokenKind::Number(v, _) => {
+                        self.bump();
+                        let v = i64::from(*v);
+                        Ok(if neg { -v } else { v })
+                    }
+                    _ => Err(Self::expected(&n, "an integer after `+`/`-` in the guard")),
+                }
+            }
+            _ => Ok(0),
+        }?;
+        Ok(GuardTerm {
+            base,
+            offset,
+            span: join(base_span, self.tokens[self.pos - 1].span()),
+        })
     }
 
     /// Parses a bracketed pattern. The [`Pattern`] is what
@@ -3234,6 +3448,18 @@ pub(crate) fn reparse_move_vec(tokens: &[Token]) -> MoveVec {
     bare_parser(tokens)
         .move_vec()
         .expect("reparse_move_vec: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a RULE's own GUARD node: re-parses it
+/// through [`Parser::guard`]. The node's own tokens already start at
+/// `where`, the value's own first token — `crate::syntax::kinds`'s own
+/// module doc records why (the node's extent is chosen to match
+/// `Guard::span` exactly) — which is exactly where that production
+/// expects to begin.
+pub(crate) fn reparse_guard(tokens: &[Token]) -> Guard {
+    bare_parser(tokens)
+        .guard()
+        .expect("reparse_guard: extraction only ever runs on an already-parsed tree")
 }
 
 /// Retokenization reuse shim for a GRAFT/BIND target: re-parses it

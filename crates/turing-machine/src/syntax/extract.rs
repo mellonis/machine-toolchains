@@ -68,7 +68,8 @@ use crate::lexer::{Comment, CommentKind, GLYPH_ESCAPES, Token, TokenKind, normal
 use crate::parser::{
     Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, MapDecl, Program, Routine, Rule,
     SetDecl, Signature, State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems,
-    reparse_binding_arg, reparse_doc_items, reparse_map_pairs, reparse_move_vec, reparse_pattern,
+    reparse_binding_arg, reparse_doc_items, reparse_guard, reparse_map_pairs, reparse_move_vec,
+    reparse_pattern,
     reparse_qual_name, reparse_sig_param, reparse_transition, reparse_write_vec,
 };
 use crate::parser::{DocRunItem, DocRunKind};
@@ -229,6 +230,12 @@ pub(crate) fn token_from_syntax(t: &SyntaxToken, index: &TextLineIndex) -> Token
         // because either is exercised.
         k if k == TmcKind::At.into() => TokenKind::At,
         k if k == TmcKind::Bang.into() => TokenKind::Bang,
+        k if k == TmcKind::EqEq.into() => TokenKind::EqEq,
+        k if k == TmcKind::NotEq.into() => TokenKind::NotEq,
+        k if k == TmcKind::LtEq.into() => TokenKind::LtEq,
+        k if k == TmcKind::GtEq.into() => TokenKind::GtEq,
+        k if k == TmcKind::AmpAmp.into() => TokenKind::AmpAmp,
+        k if k == TmcKind::PipePipe.into() => TokenKind::PipePipe,
         k if k == TmcKind::DocLine.into() => {
             TokenKind::DocLine(normalize_doc_payload(&text[sigil_len(text)..]))
         }
@@ -866,6 +873,7 @@ pub(crate) fn extract_rule(view: &RuleView, index: &TextLineIndex) -> Rule {
     Rule {
         line: pattern.span.start.line,
         pattern,
+        guard: view.guard().map(|g| reparse_guard(&sig_tokens(g.syntax(), index))),
         debugger,
         write: view
             .write_vec()
@@ -1294,6 +1302,7 @@ mod tests {
                    \x20 entry state s {\n\
                    \x20   ['0'] -> write [-, {(v+1)%6}, {v-1}] move [<, >, .] goto s;\n\
                    \x20   [*] -> stop;\n\
+                   \x20   ['0' as gv] where { gv == gv && gv != gv || gv <= gv && gv >= gv || gv in qq } -> stop;\n\
                    \x20 }\n\
                    \x20 graft g(t = t with map { '0'->'1', '2'=>'3' }) as inst;\n\
                    }\n\
@@ -1331,6 +1340,12 @@ mod tests {
                     TokenKind::Comma => "Comma",
                     TokenKind::Semi => "Semi",
                     TokenKind::Colon => "Colon",
+                    TokenKind::EqEq => "EqEq",
+                    TokenKind::NotEq => "NotEq",
+                    TokenKind::LtEq => "LtEq",
+                    TokenKind::GtEq => "GtEq",
+                    TokenKind::AmpAmp => "AmpAmp",
+                    TokenKind::PipePipe => "PipePipe",
                     TokenKind::DocLine(_) => "DocLine",
                     TokenKind::AttentionLine(_) => "AttentionLine",
                     TokenKind::At | TokenKind::Bang | TokenKind::Eof | TokenKind::Comment(_) => {
@@ -1364,23 +1379,29 @@ mod tests {
             "Comma",
             "Semi",
             "Colon",
+            "EqEq",
+            "NotEq",
+            "LtEq",
+            "GtEq",
+            "AmpAmp",
+            "PipePipe",
             "DocLine",
             "AttentionLine",
         ] {
             assert!(seen.contains(kind), "fixture is missing a {kind} token");
         }
         // Proves only that THIS fixture's own kind set is exactly these
-        // 26 names — no fewer (the loop above already checked that),
-        // and no unlisted 27th kind smuggled in alongside them. It is
+        // 32 names — no fewer (the loop above already checked that),
+        // and no unlisted kind smuggled in alongside them. It is
         // NOT independent evidence that the reachable domain's true
-        // size is 26; that count comes from the empirical grep census
-        // this module's own doc comments describe (`token_kind`'s 28
+        // size is 32; that count comes from the empirical grep census
+        // this module's own doc comments describe (`token_kind`'s 34
         // significant `TmcKind` variants minus the two, `At` and
         // `Bang`, no production ever matches).
         assert_eq!(
             seen.len(),
-            26,
-            "this fixture's own token-kind set must be exactly the 26 named above"
+            32,
+            "this fixture's own token-kind set must be exactly the 32 named above"
         );
 
         let root = SyntaxNode::new_root(parse_green(src).expect("parses"));
