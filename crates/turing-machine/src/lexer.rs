@@ -1275,5 +1275,4 @@ mod tests {
         assert!(lex("a & b").is_err());
         assert!(lex("a | b").is_err());
     }
-
 }

@@ -69,8 +69,7 @@ use crate::parser::{
     Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, MapDecl, Program, Routine, Rule,
     SetDecl, Signature, State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems,
     reparse_binding_arg, reparse_doc_items, reparse_guard, reparse_map_pairs, reparse_move_vec,
-    reparse_pattern,
-    reparse_qual_name, reparse_sig_param, reparse_transition, reparse_write_vec,
+    reparse_pattern, reparse_qual_name, reparse_sig_param, reparse_transition, reparse_write_vec,
 };
 use crate::parser::{DocRunItem, DocRunKind};
 
@@ -873,7 +872,9 @@ pub(crate) fn extract_rule(view: &RuleView, index: &TextLineIndex) -> Rule {
     Rule {
         line: pattern.span.start.line,
         pattern,
-        guard: view.guard().map(|g| reparse_guard(&sig_tokens(g.syntax(), index))),
+        guard: view
+            .guard()
+            .map(|g| reparse_guard(&sig_tokens(g.syntax(), index))),
         debugger,
         write: view
             .write_vec()
