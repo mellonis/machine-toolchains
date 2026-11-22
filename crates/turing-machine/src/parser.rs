@@ -525,6 +525,12 @@ pub struct GuardIn {
     pub binding: CellName,
     /// The set named. `in` itself is contextual — only `S` is a name.
     pub set: CellName,
+    /// What the set resolved to in the world's own scope — filled at
+    /// resolution exactly as `PatternCellKind::SetRef`'s `resolved` is:
+    /// every reader past resolution reads the MEMBERS, in the set's own
+    /// order (which is what order comparisons count positions against),
+    /// never the name (docs/tmt/language.md (rule guards)).
+    pub resolved: Option<SetCellMembers>,
     /// Binding start → set name end.
     pub span: Span,
 }
@@ -2446,7 +2452,9 @@ impl Parser<'_> {
     }
 
     /// `or := and ('||' and)*` — `&&` binds tighter (`docs/tmt/language.md`
-    /// (rule guards)).
+    /// (rule guards)). Parentheses group wherever the author writes them;
+    /// they are grammar-only, leaving no node in the tree — the cone rules
+    /// speak of `&&`/`||` shape alone.
     fn guard_or(&mut self) -> Result<GuardExpr, CompileError> {
         let mut expr = self.guard_and()?;
         while self.peek().kind == TokenKind::PipePipe {
@@ -2458,13 +2466,26 @@ impl Parser<'_> {
     }
 
     fn guard_and(&mut self) -> Result<GuardExpr, CompileError> {
-        let mut expr = self.guard_test()?;
+        let mut expr = self.guard_primary()?;
         while self.peek().kind == TokenKind::AmpAmp {
             self.bump();
-            let rhs = self.guard_test()?;
+            let rhs = self.guard_primary()?;
             expr = GuardExpr::And(Box::new(expr), Box::new(rhs));
         }
         Ok(expr)
+    }
+
+    /// A parenthesized sub-guard or one comparison/membership. The parens
+    /// themselves keep no shape: `x in S && (A || B)` is `And(In, Or(A, B))`
+    /// in the tree, exactly the cone shape the semantics read.
+    fn guard_primary(&mut self) -> Result<GuardExpr, CompileError> {
+        if self.peek().kind == TokenKind::LParen {
+            self.bump();
+            let inner = self.guard_or()?;
+            self.expect(&TokenKind::RParen, "`)` to close the guard group")?;
+            return Ok(inner);
+        }
+        self.guard_test()
     }
 
     /// One test: `x in S` (membership) or a comparison. Disambiguated by
@@ -2488,6 +2509,7 @@ impl Parser<'_> {
                 span: join(binding.span, set.span),
                 binding,
                 set,
+                resolved: None,
             }));
         }
         let left = self.guard_term()?;

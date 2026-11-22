@@ -467,6 +467,20 @@ pub enum CompileErrorKind {
     /// [`crate::ir::validate_world`]. Never a user error — the message
     /// carries the underlying diagnostic. The `.pmc` compiler's `Internal`.
     Internal(String),
+
+    // -- rule guards --------------------------------------------------------
+    /// A guard's order/offset comparison whose operands have no one common
+    /// sequence (`left` and `right` name the two contexts — set or
+    /// alphabet names). The hint is the remedy: narrow both with `in`.
+    GuardOrderContext { left: String, right: String },
+    /// A guard name that is no pattern binding of its rule.
+    GuardUnknownBinding { name: String },
+    /// `in S` where `S` names symbols the binding's tape alphabet does not
+    /// carry (`set` as written, `alphabet` the tape's).
+    GuardSetOutsideAlphabet { set: String, alphabet: String },
+    /// A guard comparison with no binding operand: it varies with nothing a
+    /// rule could ever match differently.
+    GuardConstantComparison,
 }
 
 /// The two reasons a tape's alphabet reference can go unresolved
@@ -702,6 +716,10 @@ impl CompileErrorKind {
         CompileErrorKind::NoreturnViolated(_) => "noreturn-violated",
         CompileErrorKind::ThenRequired(_) => "then-required",
         CompileErrorKind::Internal(_) => "internal-error",
+        CompileErrorKind::GuardOrderContext { .. } => "guard-order-context",
+        CompileErrorKind::GuardUnknownBinding { .. } => "guard-unknown-binding",
+        CompileErrorKind::GuardSetOutsideAlphabet { .. } => "guard-set-outside-alphabet",
+        CompileErrorKind::GuardConstantComparison => "guard-constant-comparison",
     }
 }
 
@@ -1276,6 +1294,21 @@ impl std::fmt::Display for CompileErrorKind {
                 )
             }
             CompileErrorKind::Internal(m) => write!(f, "internal compiler error: {m}"),
+            CompileErrorKind::GuardOrderContext { left, right } => write!(
+                f,
+                "`{left}` and `{right}` have no one common sequence to compare positions in — narrow both to one set with `in`, or stay on identity (`==`/`!=`)"
+            ),
+            CompileErrorKind::GuardUnknownBinding { name } => {
+                write!(f, "`{name}` is no pattern binding of this rule")
+            }
+            CompileErrorKind::GuardSetOutsideAlphabet { set, alphabet } => write!(
+                f,
+                "set `{set}` names symbols outside the tape's alphabet `{alphabet}`"
+            ),
+            CompileErrorKind::GuardConstantComparison => write!(
+                f,
+                "a guard comparison with no binding varies with nothing — write it as rows"
+            ),
         }
     }
 }
@@ -3922,6 +3955,7 @@ fn resolve_world(
         &mut states,
         &tapes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
     )?;
+    check_world_guards(&mut states, &tapes, alphabets, sets, ns, set_refs)?;
     let (grafts, binds, entry) =
         resolve_world_reuse(grafts, binds, &states, ns, scopes, externals)?;
     let calls = resolve_world_calls(&states, &binds, ns, scopes);
@@ -4198,6 +4232,52 @@ fn resolve_pattern_sets(
     Ok(out)
 }
 
+/// Type-check each rule's `where { … }` guard and resolve its `in` sets —
+/// run after `resolve_pattern_sets` and the named-cell fill, so a vector's
+/// form and a set reference keep their error priority over guard typing,
+/// and every pattern cell is positional (cells[i] speaks of tapes[i]).
+/// Set names resolve through the same [`SetScope`] call pattern-set cells
+/// use, references included.
+fn check_world_guards(
+    states: &mut [State],
+    tapes: &[ResolvedTape],
+    alphabets: &HashMap<String, ResolvedAlphabet>,
+    sets: &SetScope,
+    ns: &[String],
+    set_refs: &mut HashSet<String>,
+) -> Result<(), CompileError> {
+    let ctx = crate::guard::GuardContext {
+        tape_labels: tapes
+            .iter()
+            .map(|t| {
+                alphabets
+                    .get(&t.alphabet)
+                    .map(|a| a.glyphs.clone())
+                    .expect("a resolved tape alphabet is in the table")
+            })
+            .collect(),
+        tape_alphabets: tapes.iter().map(|t| t.alphabet.clone()).collect(),
+    };
+    for state in states.iter_mut() {
+        for rule in &mut state.rules {
+            crate::guard::check_rule_guard(rule, &ctx, |name, span| {
+                let set = sets.members(name, span, ns, set_refs)?;
+                Ok(SetCellMembers {
+                    set: set.name.clone(),
+                    members: set
+                        .glyphs
+                        .iter()
+                        .map(|label| SetMember {
+                            label: label.clone(),
+                        })
+                        .collect(),
+                })
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve every `call` transition in a world's rules to a [`ResolvedCall`]
 /// (structure only; arg + kind validation is `check_worlds`). A single-segment
 /// target naming a world-local bind is a bind-call; everything else resolves
@@ -4284,6 +4364,7 @@ fn resolve_machine_world(
         &mut states,
         &tapes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
     )?;
+    check_world_guards(&mut states, &tapes, alphabets, sets, &[], set_refs)?;
     let (grafts, binds, entry) =
         resolve_world_reuse(&m.grafts, &m.binds, &states, &[], scopes, externals)?;
     let calls = resolve_world_calls(&states, &binds, &[], scopes);
@@ -5992,6 +6073,16 @@ mod tests {
             CompileErrorKind::NoreturnViolated("x".into()),
             CompileErrorKind::ThenRequired("x".into()),
             CompileErrorKind::Internal("x".into()),
+            CompileErrorKind::GuardOrderContext {
+                left: "x".into(),
+                right: "y".into(),
+            },
+            CompileErrorKind::GuardUnknownBinding { name: "x".into() },
+            CompileErrorKind::GuardSetOutsideAlphabet {
+                set: "s".into(),
+                alphabet: "a".into(),
+            },
+            CompileErrorKind::GuardConstantComparison,
         ];
         let witnessed: Vec<&str> = all.iter().map(|k| k.code()).collect();
         assert_eq!(
