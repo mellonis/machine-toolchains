@@ -52,6 +52,37 @@ form, like the disassembly.
 | `.tmc` language | **0.3, no movement** — the acceptance addition folds into the standing bump: a language version bumps once per `next` cycle relative to `master`, the minimal bump | 0.3 |
 | everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
 
+### Rule guards — 2026-11-22
+
+A rule may carry a `where { … }` guard between its pattern and the
+arrow — a predicate over the pattern's bindings that removes rows from
+the pattern's cartesian expansion. `['a'..'z' as x, 'a'..'z' as y]
+where { x == y || x == y - 1 }` keeps 51 of 676 rows, the diagonal and
+the subdiagonal, and those 51 are ordinary rows: nothing downstream of
+the expander ever sees a guard, and the rows a rule has stay derivable
+by hand from what is written. The guard's tests are glyph identity
+(offset-free `==`/`!=`, cross-alphabet included) and sequence position
+(order comparisons, and any constant offset — `y - 1` counts positions
+in one common sequence, never the label numbers write-folds fold over).
+An order comparison needs its license written out: both operands
+narrowed by an `in S` conjunct to one set, or both on one alphabet; a
+one-sided narrowing is refused naming both contexts. `in S` narrows
+within its `&&` cone — the conjunction it sits in, `||` operands
+included, and nothing outside — so typing reads tree shape and no
+branch leans on a sibling's narrowing. At a graft splice the guard has
+already filtered the rows in the graph's own world and the surviving
+rows travel through the map; generated headers print the guard and the
+graft digest covers its `in` sets, so twin spellings agree and set drift
+stays loud. `tmt fmt` keeps the guard verbatim. A guard keeping no rows
+warns as `empty-expansion`; an `in` narrowing nothing is the new
+warn-tier audit `redundant-guard-narrowing`, on by default and
+suppressible in the shared allow namespace.
+
+| Version space | This change | Previous |
+|---|---|---|
+| `.tmc` language | **0.3, no movement** — the acceptance addition folds into the standing bump: a language version bumps once per `next` cycle relative to `master`, the minimal bump | 0.3 |
+| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+
 ## [0.5.0] - 2026-09-02
 
 Two release candidates preceded this cut on the same day: the first so
