@@ -1100,3 +1100,31 @@ fn a_cross_alphabet_pair_leaning_on_the_conjunct_stays_silent() {
         "the pair leans on both conjuncts as its license"
     );
 }
+
+/// The reviewer's corner: the set's list COINCIDES with one tape's, so a
+/// one-sided "its own list is unchanged" test would warn — but two sets
+/// of conjuncts are the pair's ONLY common context and no edit compiles:
+/// dropping one side is `guard-order-context` (one-sided), dropping both
+/// (`ab` vs `cd`) is the same. Silence: nothing here is redundant.
+const SET_COINCIDES_WITH_ONE_TAPE: &str = "\
+alphabet ab { 'b', 'c' }
+alphabet cd { 'b', 'c', 'd' }
+set k { 'b', 'c' }
+
+machine {
+  tape t: ab;
+  tape u: cd;
+  entry state s {
+    ['b'..'c' as x, 'b'..'c' as y] where { x in k && y in k && x < y } -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn a_removal_that_would_not_compile_stays_silent() {
+    assert!(
+        redundant(SET_COINCIDES_WITH_ONE_TAPE).is_empty(),
+        "the conjuncts are the pair's only common context"
+    );
+}

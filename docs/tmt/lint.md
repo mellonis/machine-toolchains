@@ -905,11 +905,17 @@ can carry a symbol outside `S` makes the conjunct a real filter: silent.
 **License-free.** An order comparison — or any comparison carrying an
 offset — counts POSITIONS in one sequence: the set's member order with
 the conjunct, whatever remains without it (the binding's own tape
-alphabet, or another narrowing). Where those two lists differ the
-conjunct IS the pair's one common context, however inert its restriction:
-a cross-alphabet pair leaning on `in` on both sides reports nothing. An
-offset-free `==`/`!=` is glyph identity and needs no sequence at all, so
-nothing leans on a narrowing beside one.
+alphabet, or another narrowing). Where a comparison leans on `in`, the
+edit that must compile drops every inert conjunct of the comparison's
+cluster at once — one conjunct alone is usually refused as one-sided —
+and the finding stays quiet unless the pair re-licenses without them,
+both operands narrowing to one set or both sitting on one alphabet,
+with every operand's sequence list unchanged. A cross-alphabet pair
+leaning on `in` on both sides therefore reports nothing, even where one
+tape's order happens to coincide with the set's: those conjuncts ARE
+the pair's one common context. An offset-free `==`/`!=` is glyph
+identity and needs no sequence at all, so nothing leans on a narrowing
+beside one.
 
 The `in` must sit where it NARROWS: the `in` conjuncts of an `&&` chain
 (another narrowing's scope reaches the chain's `||` operands too). An
