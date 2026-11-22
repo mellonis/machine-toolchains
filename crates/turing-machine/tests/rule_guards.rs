@@ -965,3 +965,138 @@ fn a_scraggly_guard_settles_at_one_pass() {
         "the guard did not survive as written: {once}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `redundant-guard-narrowing` (warn-tier, default-on, allow-off): an
+// `in S` conjunct that narrows nothing says so — the cell can only carry
+// symbols already in `S`, AND the guard reads the same without it
+// (docs/tmt/lint.md (redundant-guard-narrowing)).
+// ---------------------------------------------------------------------------
+
+fn redundant(src: &str) -> Vec<String> {
+    lint(src, LintOptions::default())
+        .expect("lints")
+        .diagnostics
+        .into_iter()
+        .filter(|d| d.code == "redundant-guard-narrowing")
+        .map(|d| d.message)
+        .collect()
+}
+
+/// `all` is the whole alphabet (same members, same order): both `in`
+/// conjuncts narrow nothing — the cells already lie within, and `x < y`
+/// keeps its one common context without either.
+const NARROW_NOTHING: &str = "\
+alphabet abc { 'a'..'z' }
+set all { 'a'..'z' }
+
+machine {
+  tape t: abc;
+  tape u: abc;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where { x in all && y in all && x < y } -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn a_narrowing_that_narrows_nothing_says_so() {
+    let msgs = redundant(NARROW_NOTHING);
+    assert_eq!(msgs.len(), 2, "one per inert conjunct: {msgs:?}");
+    assert!(msgs[0].contains("narrows nothing"), "{:?}", msgs);
+}
+
+/// An identity comparison needs no sequence at all, so a whole-alphabet
+/// `in` next to one has no license to keep either — same verdict, and the
+/// message says the conjunct's name.
+const NARROW_NOTHING_IDENTITY: &str = "\
+alphabet abc { 'a'..'z' }
+set all { 'a'..'z' }
+
+machine {
+  tape t: abc;
+  tape u: abc;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where { x in all && x == y } -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn an_identity_comparison_keeps_no_license_for_a_narrowing() {
+    let msgs = redundant(NARROW_NOTHING_IDENTITY);
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(
+        msgs[0].contains("narrows nothing") && msgs[0].contains("all"),
+        "{:?}",
+        msgs
+    );
+}
+
+/// `few` FAILS the first half: the cell can carry symbols outside the set,
+/// so the conjunct cuts rows and earns its place — silence, whether the
+/// comparison leans on it or not.
+const CELL_CAN_LEAVE: &str = "\
+alphabet abc { 'a'..'z' }
+set few { 'a', 'b' }
+
+machine {
+  tape t: abc;
+  tape u: abc;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where { x in few && y in few && x < y } -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+const CELL_CAN_LEAVE_IDENTITY: &str = "\
+alphabet abc { 'a'..'z' }
+set few { 'a', 'b' }
+
+machine {
+  tape t: abc;
+  tape u: abc;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where { x in few && x == y } -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn a_conjunct_whose_cell_can_leave_the_set_stays_silent() {
+    assert!(redundant(CELL_CAN_LEAVE).is_empty(), "the pair shape");
+    assert!(redundant(CELL_CAN_LEAVE_IDENTITY).is_empty(), "identity");
+}
+
+/// The cross-alphabet pair: each conjunct is restriction-inert on its own
+/// tape (the `b'..'c'` cell lies within `k`) but the pair's ONE common
+/// context IS the set — remove a conjunct and its operand counts in its
+/// own tape's order instead. Silence: the conjunct carries its license.
+/// **Mutation:** the "license survives" half dropped — this pair becomes
+/// a false positive and the test reddens.
+const CROSSES_LEAN: &str = "\
+alphabet ab { 'a', 'b', 'c' }
+alphabet cd { 'b', 'c', 'd' }
+set k { 'b', 'c' }
+
+machine {
+  tape t: ab;
+  tape u: cd;
+  entry state s {
+    ['b'..'c' as x, 'b'..'c' as y] where { x in k && y in k && x < y } -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
+#[test]
+fn a_cross_alphabet_pair_leaning_on_the_conjunct_stays_silent() {
+    assert!(
+        redundant(CROSSES_LEAN).is_empty(),
+        "the pair leans on both conjuncts as its license"
+    );
+}

@@ -275,7 +275,7 @@ fn lit_label(sym: &SymLit) -> String {
 /// The tape a binding sits on: wherever its `as name` is, in the
 /// world's own positional pattern fill (a name on two cells resolves to
 /// the first — duplicates are their own earlier refusal).
-fn binding_tape(pattern: &crate::parser::Pattern, name: &str) -> Option<usize> {
+pub(crate) fn binding_tape(pattern: &crate::parser::Pattern, name: &str) -> Option<usize> {
     pattern
         .cells
         .iter()
