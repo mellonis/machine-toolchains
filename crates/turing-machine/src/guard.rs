@@ -26,7 +26,7 @@ use mtc_core::diagnostics::Span;
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::parser::{
-    CmpOp, GuardBase, GuardCmp, GuardExpr, GuardIn, GuardTerm, Rule, SetCellMembers, SymLit,
+    CmpOp, Guard, GuardBase, GuardCmp, GuardExpr, GuardIn, GuardTerm, Rule, SetCellMembers, SymLit,
 };
 
 /// What guard typing needs about the enclosing world, in tape order: each
@@ -90,7 +90,13 @@ pub(crate) fn check_rule_guard(
     let tape_of = |name: &str| binding_tape(&rule.pattern, name);
     match &mut rule.guard {
         None => Ok(()),
-        Some(g) => type_expr(&mut g.expr, &mut Vec::new(), ctx, &tape_of, &mut resolve_set),
+        Some(g) => type_expr(
+            &mut g.expr,
+            &mut Vec::new(),
+            ctx,
+            &tape_of,
+            &mut resolve_set,
+        ),
     }
 }
 
@@ -116,7 +122,7 @@ fn resolve_in_cell(
         if set
             .members
             .iter()
-            .any(|m| !ctx.tape_labels[tape].iter().any(|l| *l == m.label))
+            .any(|m| !ctx.tape_labels[tape].contains(&m.label))
         {
             return Err(CompileError {
                 span: in_node.set.span,
@@ -179,7 +185,11 @@ fn type_expr(
 }
 
 /// The conjuncts of one `&&` chain, nested `&&` transparent.
-fn flatten_chain<'e>(into: &mut Vec<&'e mut GuardExpr>, a: &'e mut GuardExpr, b: &'e mut GuardExpr) {
+fn flatten_chain<'e>(
+    into: &mut Vec<&'e mut GuardExpr>,
+    a: &'e mut GuardExpr,
+    b: &'e mut GuardExpr,
+) {
     match a {
         GuardExpr::And(x, y) => flatten_chain(into, x, y),
         other => into.push(other),
@@ -291,9 +301,8 @@ fn type_cmp(
     // Checked before the narrowing-clash test: identity deliberately lives
     // under two different narrowings ("the restrictions simply
     // intersect").
-    let identity = matches!(cmp.op, CmpOp::Eq | CmpOp::Ne)
-        && cmp.left.offset == 0
-        && cmp.right.offset == 0;
+    let identity =
+        matches!(cmp.op, CmpOp::Eq | CmpOp::Ne) && cmp.left.offset == 0 && cmp.right.offset == 0;
     if identity {
         // Still every name must be a binding.
         for t in [&cmp.left, &cmp.right] {
@@ -329,9 +338,7 @@ fn type_cmp(
                 (Seq::Alphabet(a), Seq::Alphabet(b)) => {
                     ctx.tape_alphabets[*a] == ctx.tape_alphabets[*b]
                 }
-                (Seq::Set(a), Seq::Set(b)) => {
-                    a.resolved == b.resolved && a.members == b.members
-                }
+                (Seq::Set(a), Seq::Set(b)) => a.resolved == b.resolved && a.members == b.members,
                 _ => false,
             };
             if licensed {
@@ -390,11 +397,7 @@ use crate::expand::BoundVal;
 
 /// The filter `expand` runs per candidate row: does the guard keep this
 /// one? An unguarded rule keeps everything.
-pub(crate) fn row_matches(
-    rule: &Rule,
-    env: &HashMap<&str, &BoundVal>,
-    ctx: &GuardContext,
-) -> bool {
+pub(crate) fn row_matches(rule: &Rule, env: &HashMap<&str, &BoundVal>, ctx: &GuardContext) -> bool {
     let Some(g) = &rule.guard else {
         return true;
     };
@@ -527,10 +530,7 @@ fn eval_cmp(
 
     // Offset-free `==`/`!=` is glyph identity — the label space, whatever
     // sequences the cone carries.
-    if matches!(c.op, CmpOp::Eq | CmpOp::Ne)
-        && c.left.offset == 0
-        && c.right.offset == 0
-    {
+    if matches!(c.op, CmpOp::Eq | CmpOp::Ne) && c.left.offset == 0 && c.right.offset == 0 {
         return (l == r) == matches!(c.op, CmpOp::Eq);
     }
 
@@ -567,4 +567,84 @@ fn eval_cmp(
         CmpOp::Gt => l > r,
         CmpOp::Ge => l >= r,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Printing — the canonical render the header printer puts in a `.tmh`'s
+// rule text (docs/tmt/language.md (rule guards); headers print semantics,
+// fmt prints the written tokens). Written parentheses carry no node, so
+// the renderer reinserts exactly the ones PRECEDENCE needs: a `||` column
+// under `&&` keeps its parens or the print would re-parse through a
+// different cone; a redundant pair is dropped — one spelling per tree.
+// ---------------------------------------------------------------------------
+
+/// The guard's canonical text between `where {` and `}`.
+pub(crate) fn guard_text(g: &Guard) -> String {
+    expr_text(&g.expr, 0)
+}
+
+/// One operand's canonical text: the base's written spelling, its
+/// constant offset spelled out (`y - 1`), bare at offset 0.
+fn term_text(t: &GuardTerm) -> String {
+    let base = match &t.base {
+        GuardBase::Binding(n) => n.name.clone(),
+        GuardBase::Lit(s) => crate::patterns::written_spelling(s),
+    };
+    match t.offset {
+        0 => base,
+        n if n < 0 => format!("{base} - {}", -n),
+        n => format!("{base} + {n}"),
+    }
+}
+
+fn op_text(op: CmpOp) -> &'static str {
+    match op {
+        CmpOp::Eq => "==",
+        CmpOp::Ne => "!=",
+        CmpOp::Lt => "<",
+        CmpOp::Le => "<=",
+        CmpOp::Gt => ">",
+        CmpOp::Ge => ">=",
+    }
+}
+
+/// Precedence-climbed: `&&` binds tighter than `||` (the grammar has
+/// nothing else), and a subexpression PRECEDENCE would re-bind differently
+/// takes parentheses.
+fn expr_text(e: &GuardExpr, min_prec: u8) -> String {
+    let binary = |a: &GuardExpr, b: &GuardExpr, op: &str, prec: u8| {
+        let t = format!("{} {op} {}", expr_text(a, prec), expr_text(b, prec));
+        if prec < min_prec { format!("({t})") } else { t }
+    };
+    match e {
+        GuardExpr::Cmp(c) => format!(
+            "{} {} {}",
+            term_text(&c.left),
+            op_text(c.op),
+            term_text(&c.right)
+        ),
+        GuardExpr::In(n) => format!("{} in {}", n.binding.name, n.set.name),
+        GuardExpr::And(a, b) => binary(a, b, "&&", 2),
+        GuardExpr::Or(a, b) => binary(a, b, "||", 1),
+    }
+}
+
+/// Every `in S` conjunct of a guard, `&&`- and `||`-nested alike: the set
+/// names a header must print alongside the body that names them, and the
+/// names a digest's named-content appendix must cover — a guard names a
+/// set by NAME only, so member drift moves nothing without these.
+pub(crate) fn in_conjuncts(g: &Guard) -> Vec<&GuardIn> {
+    fn walk<'e>(e: &'e GuardExpr, out: &mut Vec<&'e GuardIn>) {
+        match e {
+            GuardExpr::In(n) => out.push(n),
+            GuardExpr::And(a, b) | GuardExpr::Or(a, b) => {
+                walk(a, out);
+                walk(b, out);
+            }
+            GuardExpr::Cmp(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&g.expr, &mut out);
+    out
 }

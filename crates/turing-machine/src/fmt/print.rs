@@ -195,9 +195,9 @@ use crate::syntax::extract::{
     extract_map_decl, extract_rule, extract_set_decl, sig_tokens,
 };
 use crate::syntax::{
-    AlphabetView, BindView, DocRunView, GraftView, MachineView, MapDeclView, NamespaceView,
-    ReuseKind, ReuseView, RootView, RuleView, SetDeclView, StateView, TapeView, TmcKind, TopView,
-    UseView, WorldView,
+    AlphabetView, BindView, DocRunView, GraftView, GuardView, MachineView, MapDeclView,
+    NamespaceView, ReuseKind, ReuseView, RootView, RuleView, SetDeclView, StateView, TapeView,
+    TmcKind, TopView, UseView, WorldView,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -761,6 +761,11 @@ fn nested_map_pairs(list_owner: &SyntaxNode) -> Vec<(usize, usize, Comment)> {
 enum ActionSlot {
     /// Between the pattern's `]` and the `->` — joins the pattern column.
     Arrow,
+    /// Between a written guard's `}` and the `->`: the same pattern
+    /// column, but the comment trails the guard text — the guard is
+    /// written text between `]` and `->`, and a comment prints between
+    /// the two significant tokens it was written between.
+    ArrowTail,
     /// In the action region, starting at column `n` of the grid order
     /// (0 = debugger, 1 = write, 2 = move, 3 = ahead of the transition):
     /// the comment sits after every landmark before `n` and prints in
@@ -810,6 +815,10 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
     let write_vec = child(TmcKind::WriteVec).map(|n| n.text_range());
     let move_vec = child(TmcKind::MoveVec).map(|n| n.text_range());
     let transition = child(TmcKind::Transition).map(|n| n.text_range());
+    // A written guard sits between `]` and `->` as written text: a
+    // boundary comment before its end joins the pattern column AHEAD of
+    // it, one past it trails it (`ArrowTail`).
+    let guard_end = child(TmcKind::Guard).map(|n| n.text_range().end);
     // The pattern's brackets are the rule's own direct children, so a
     // comment INSIDE them is a direct child too — it belongs to the
     // pattern's cell split, never to a boundary slot.
@@ -847,7 +856,11 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
                 from = 3;
             }
             let slot = if arrow.is_some_and(|a| p < a) {
-                ActionSlot::Arrow
+                if guard_end.is_some_and(|g| p >= g) {
+                    ActionSlot::ArrowTail
+                } else {
+                    ActionSlot::Arrow
+                }
             } else if within(&write_kw, &write_vec) {
                 ActionSlot::WriteBracket
             } else if within(&move_kw, &move_vec) {
@@ -1496,6 +1509,11 @@ struct PreparedRule {
     pattern_parts: VecParts,
     write_parts: Option<VecParts>,
     move_parts: Option<VecParts>,
+    /// The `where { … }` guard's written tokens, print-ready — the guard
+    /// is written text between `]` and `->`, printed verbatim
+    /// (`guard_tokens_text`), not canonicalized like a header's
+    /// `guard_text` (docs/tmt/language.md (rule guards)).
+    guard: Option<String>,
     interior: RuleInterior,
     off_grid: bool,
 }
@@ -1546,6 +1564,7 @@ fn prepare_rule(view: &RuleView, index: &TextLineIndex) -> PreparedRule {
         pattern_parts,
         write_parts,
         move_parts,
+        guard: view.guard().map(|g| guard_tokens_text(&g)),
         interior,
         off_grid,
     }
@@ -1594,14 +1613,53 @@ fn breaks_the_grid(
             .any(|(_, c)| matches!(c.kind, CommentKind::Line) || c.text.contains('\n'))
 }
 
-/// A rule's pattern column text: the vector from its parts, plus any
-/// comment written between the pattern's `]` and the `->` — appended,
-/// widening the pattern column exactly as an in-pattern spliced comment
-/// always has (docs/tmt/fmt.md (comments are never moved)).
+/// One `where { … }` guard's written tokens reprinted in order with
+/// canonical spacing — the guard is written text: names, literals and
+/// parentheses keep their written spelling, unlike a header's canonical
+/// `guard_text` (docs/tmt/language.md (rule guards)). Group parentheses
+/// glue inward (`(a || b)`), everything else takes one space. A comment
+/// INSIDE the guard is the never-move audit's slot work — the boundary
+/// slots (`]`-`where`, `}`-`->`) are the rule's own and claim theirs in
+/// [`rule_interior`].
+fn guard_tokens_text(view: &GuardView) -> String {
+    let mut out = String::new();
+    let mut after_open = false;
+    for e in view.syntax().children_with_tokens() {
+        let SyntaxElement::Token(t) = e else {
+            continue;
+        };
+        if is_ws(t.kind()) || is_comment_kind(t.kind()) {
+            continue;
+        }
+        let text = t.text();
+        if !out.is_empty() && !after_open && text != ")" {
+            out.push(' ');
+        }
+        out.push_str(text);
+        after_open = text == "(";
+    }
+    out
+}
+
+/// A rule's pattern column text: the vector from its parts, plus the
+/// written `where` guard and any comment written between the pattern's
+/// `]` and the `->` — each in its written slot, widening the pattern
+/// column exactly as an in-pattern spliced comment always has
+/// (docs/tmt/fmt.md (comments are never moved)).
 fn pattern_full_text(prepared: &PreparedRule) -> String {
     let mut out = vec_full_text(&prepared.pattern_parts);
     for (slot, c) in &prepared.interior.boundaries {
         if *slot == ActionSlot::Arrow {
+            out.push(' ');
+            out.push_str(&normalize_comment_text(&c.text));
+        }
+    }
+    if let Some(g) = &prepared.guard {
+        out.push(' ');
+        out.push_str(g);
+    }
+    for (slot, c) in &prepared.interior.boundaries {
+        if *slot == ActionSlot::ArrowTail {
             out.push(' ');
             out.push_str(&normalize_comment_text(&c.text));
         }
@@ -1645,7 +1703,7 @@ fn action_texts(prepared: &PreparedRule, has: [bool; 3]) -> ([String; 3], String
     for (slot, c) in &prepared.interior.boundaries {
         let text = normalize_comment_text(&c.text);
         let from = match slot {
-            ActionSlot::Arrow => continue,
+            ActionSlot::Arrow | ActionSlot::ArrowTail => continue,
             ActionSlot::WriteBracket => {
                 brackets[0].push(text);
                 continue;

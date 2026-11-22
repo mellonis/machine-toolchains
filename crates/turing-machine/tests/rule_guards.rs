@@ -11,8 +11,7 @@ fn parse_ok(src: &str) {
 }
 
 fn refusal(src: &str) -> CompileError {
-    compile(src, CompileOptions::default())
-        .expect_err("the fixture must be refused")
+    compile(src, CompileOptions::default()).expect_err("the fixture must be refused")
 }
 
 /// The 1-based `Pos` of a needle's first character — the parser battery's
@@ -49,7 +48,9 @@ machine {
 
 #[test]
 fn one_sided_narrowing_names_both_contexts() {
-    let src = format!("{HEAD}    ['a'..'c' as x, 'a'..'c' as y] where {{ x in pair && x < y }} -> stop;\n  }}\n}}\n");
+    let src = format!(
+        "{HEAD}    ['a'..'c' as x, 'a'..'c' as y] where {{ x in pair && x < y }} -> stop;\n  }}\n}}\n"
+    );
     let e = refusal(&src);
     assert_eq!(
         e.kind,
@@ -118,7 +119,12 @@ fn an_in_off_alphabet_is_refused() {
     let p = at(&src, "x in foreign");
     assert_eq!(
         e.span,
-        Span::new(p.line, p.col + 5, p.line, p.col + 5 + "foreign".len() as u32)
+        Span::new(
+            p.line,
+            p.col + 5,
+            p.line,
+            p.col + 5 + "foreign".len() as u32
+        )
     );
 }
 
@@ -148,8 +154,6 @@ fn a_comparison_types_by_its_own_cone() {
 // (rule guards)). Derivation-first: the guarded fixture's rows equal a
 // twin written out rule by rule in the test code itself.
 // ---------------------------------------------------------------------------
-
-use std::collections::HashMap;
 
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -268,10 +272,7 @@ fn headline_written() -> String {
         rules.push_str(&format!("    ['{g}', '{g}'] -> stop;\n"));
     }
     for pair in glyphs.windows(2) {
-        rules.push_str(&format!(
-            "    ['{}', '{}'] -> stop;\n",
-            pair[0], pair[1]
-        ));
+        rules.push_str(&format!("    ['{}', '{}'] -> stop;\n", pair[0], pair[1]));
     }
     HEADLINE_WRITTEN_RULES.replace("%s", &rules)
 }
@@ -405,12 +406,7 @@ machine {
         CompileOptions::default(),
     )
     .expect("compiles");
-    let codes: Vec<&str> = out
-        .report
-        .diagnostics
-        .iter()
-        .map(|d| d.code)
-        .collect();
+    let codes: Vec<&str> = out.report.diagnostics.iter().map(|d| d.code).collect();
     assert!(
         codes.contains(&"empty-expansion"),
         "a guard keeping nothing warns: {codes:?}"
@@ -446,4 +442,462 @@ machine {
         .filter(|d| d.code == "binding-product-threshold")
         .count();
     assert_eq!(products, 1, "the lint recounts the same pre-filter product");
+}
+
+// ---------------------------------------------------------------------------
+// Cross-unit truth: a header carries the guard and the digest covers its
+// sets, so a grafted guard filters in GRAPH space and drift stays loud
+// (docs/tmt/language.md (rule guards), docs/formats.md (routine
+// interfaces)).
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use mtc_core::formats::object::{ObjectFile, SymbolDef};
+use mtc_core::linker::LinkError;
+use mtc_turing_machine::cli::execute;
+use mtc_turing_machine::compiler::Declarations;
+
+/// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
+/// uniquely by process id + an atomic counter (the repo's collision-free
+/// temp-path rule for parallel test runs).
+fn scratch(name: &str) -> ScratchDir {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("{name}-{}-{n}", std::process::id()));
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns; `Drop` removes it again once the
+/// test ends, passing or panicking.
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ScratchDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, content).unwrap();
+    path
+}
+
+fn args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// `tmt interface SRC -o OUT` — the real printer, never a hand-written
+/// stand-in.
+fn interface(dir: &Path, src: &Path, out_name: &str) -> PathBuf {
+    let out = dir.join(out_name);
+    let result = execute(&args(&[
+        "interface",
+        src.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("interface {}: {e}", src.display()));
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    out
+}
+
+/// `tmt interface SRC` to stdout — the header text itself.
+fn interface_stdout(dir: &Path, name: &str, src: &str) -> String {
+    let input = write_file(dir, name, src);
+    let result = execute(&args(&["interface", input.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("interface {name}: {e}"));
+    assert_eq!(result.code, 0, "{name}: {}", result.stderr);
+    result.stdout
+}
+
+/// `tmt fmt --check HEADER` — the generated `.tmh` is already canonical,
+/// its bytes the fixed point of the printer (docs/tmt/cli.md (interface)).
+fn fmt_check(header: &Path) {
+    let out = execute(&args(&["fmt", "--check", header.to_str().unwrap()]))
+        .unwrap_or_else(|e| panic!("fmt --check {}: {e}", header.display()));
+    assert_eq!(
+        out.code, 0,
+        "the generated header is not fmt-canonical: {}{}",
+        out.stdout, out.stderr
+    );
+}
+
+/// `tmt compile SRC --nostdlib --extern HEADER -o OUT`, through the CLI.
+fn compile_extern(dir: &Path, name: &str, src: &str, header: &Path) -> ObjectFile {
+    let input = write_file(dir, name, src);
+    let out = dir.join(format!("{name}.tmo"));
+    let result = execute(&args(&[
+        "compile",
+        input.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        header.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("compile {name}: {e}"));
+    assert_eq!(result.code, 0, "{}: {}", name, result.stderr);
+    ObjectFile::from_bytes(&std::fs::read(&out).unwrap()).unwrap()
+}
+
+fn compile_alone(src: &str) -> ObjectFile {
+    compile(
+        src,
+        CompileOptions {
+            externals: Declarations::none(),
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile: {e}"))
+    .object
+}
+
+/// The blob bytes of the symbol named `name`.
+fn blob_of<'a>(object: &'a ObjectFile, name: &str) -> &'a [u8] {
+    let symbol = object
+        .symbols
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no symbol named `{name}` in {:?}", object.symbols));
+    match symbol.def {
+        SymbolDef::Defined { blob } | SymbolDef::Local { blob } => &object.blobs[blob as usize],
+        SymbolDef::External => panic!("`{name}` is external, not defined in this object"),
+    }
+}
+
+/// Link `objects` and run on one seeded band per tape.
+fn run_objects(objects: Vec<ObjectFile>, seeds: &[(TapeSnapshot, u32)]) -> Outcome {
+    let exe = link(&objects, &[], LinkOptions::default())
+        .unwrap_or_else(|e| panic!("link: {e}"))
+        .executable;
+    let mut tapes: Vec<WideTape> = seeds
+        .iter()
+        .map(|(s, w)| WideTape::from_snapshot(s, *w).expect("seed fits its width"))
+        .collect();
+    let mut registry = ArchRegistry::new();
+    registry.register(Box::new(Tm1::new(exe.tape_count)));
+    let machine = Machine::from_executable(&exe, &registry).expect("loads");
+    let mut devices: Vec<&mut dyn Tape> = tapes.iter_mut().map(|t| t as &mut dyn Tape).collect();
+    machine
+        .run_tapes(
+            &mut devices,
+            RunOptions {
+                limits: RunLimits {
+                    max_steps: Some(1_000_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("run set-up ok")
+        .outcome
+}
+
+/// The guarded library: `x < y` counts positions in ITS OWN `ab` (order
+/// `_ < a < z`), so the only row its guard keeps is (`a`, `z`). The twin
+/// is that row written out — the derivation, not a run's output.
+const GUARDED_LIB: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a', 'z' }
+
+  export graph pick(tape p: ab, tape q: ab, state done) {
+    entry state s {
+      ['a'..'z' as x, 'a'..'z' as y] where { x < y } -> goto done;
+    }
+  }
+}
+";
+
+const TWIN_LIB: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a', 'z' }
+
+  export graph pick(tape p: ab, tape q: ab, state done) {
+    entry state s {
+      ['a', 'z'] -> goto done;
+    }
+  }
+}
+";
+
+/// The host: its own `hb` (`_ < p < q`) and an order-NON-preserving glyph
+/// map at each binding (`'p' -> 'z'`, `'q' -> 'a'` reverses `ab`'s order),
+/// so the surviving graph row (`a`, `z`) lands on the host as the
+/// DESCENDING pair (q, p) — rows a host-side `x < y` reading over `hb`
+/// could never produce. Filter-then-map, never host-space.
+const HOST_PICK: &str = "\
+alphabet hb { '_', 'p', 'q' }
+use lib::pick;
+machine {
+  tape t: hb;
+  tape u: hb;
+  entry graft pick(
+    p = t with map { '_' -> '_', 'p' -> 'z', 'q' -> 'a' },
+    q = u with map { '_' -> '_', 'p' -> 'z', 'q' -> 'a' },
+    done = fin
+  ) as inst;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// A library whose set is named only by the guard's `in` — the one name
+/// the digest's named-content appendix must see on the guard's account.
+const DRIFT_LIB: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a', 'z' }
+  export set qq { 'z', 'a' }
+
+  export graph pick(tape p: ab, tape q: ab, state done) {
+    entry state s {
+      ['a'..'z' as x, 'a'..'z' as y] where { x in qq && y in qq && x < y } -> goto done;
+    }
+  }
+}
+";
+
+const HOST_QQ: &str = "\
+use lib::ab;
+use lib::pick;
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry graft pick(p = t, q = u, done = fin) as inst;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// A raw guard spelling per test below; every expected string is DERIVED
+/// here in comments, never read off a run.
+const CANON_PIPE: &str = "\
+namespace twin {
+  export alphabet ab { '_', 'a', 'z' }
+
+  export graph pick(tape p: ab, tape q: ab, state done) {
+    entry state s {
+      ['a'..'z' as x, 'a'..'z' as y] where { (x == y) || (x == 'z') } -> goto done;
+    }
+  }
+}
+";
+
+const CANON_PAREN: &str = "\
+namespace twin {
+  export alphabet ab { '_', 'a', 'z' }
+  export set qq { 'z', 'a' }
+
+  export graph pick(tape p: ab, tape q: ab, state done) {
+    entry state s {
+      ['a'..'z' as x, 'a'..'z' as y] where { x in qq && (x == y || x == 'z') } -> goto done;
+    }
+  }
+}
+";
+
+/// The same graph, spelled with named vector cells — `name:` is pure
+/// spelling, so both sources print ONE header (docs/tmt/language.md
+/// (named vector cells)).
+const TWIN_NAMED: &str = "\
+namespace twin {
+  export alphabet ab { '_', 'a', 'z' }
+
+  export graph pick(tape t: ab, tape u: ab, state done) {
+    entry state s {
+      [t: 'a'..'z' as x, u: 'a'..'z' as y] where { x == y || x == y - 1 } -> goto done;
+    }
+  }
+}
+";
+
+const TWIN_POSITIONAL: &str = "\
+namespace twin {
+  export alphabet ab { '_', 'a', 'z' }
+
+  export graph pick(tape t: ab, tape u: ab, state done) {
+    entry state s {
+      ['a'..'z' as x, 'a'..'z' as y] where { x == y || x == y - 1 } -> goto done;
+    }
+  }
+}
+";
+
+/// The task's central claim: a header-grafted guarded graph keeps exactly
+/// the rows its guard keeps in GRAPH space, mapped onto the host — the
+/// emitted `main` equals the same host grafting the hand-written twin.
+/// **Mutation:** the header dropping the guard — the twin keeps one row,
+/// the guarded graft keeps four, and the blobs part.
+#[test]
+fn a_guarded_graph_body_splices_graph_space() {
+    let dir = scratch("guard_graph_space");
+    let lib_src = write_file(&dir, "lib.tmc", GUARDED_LIB);
+    let header = interface(&dir, &lib_src, "lib.tmh");
+    let twin_src = write_file(&dir, "twin.tmc", TWIN_LIB);
+    let twin_header = interface(&dir, &twin_src, "twin.tmh");
+
+    let guarded = compile_extern(&dir, "guarded_app", HOST_PICK, &header);
+    let twin = compile_extern(&dir, "twin_app", HOST_PICK, &twin_header);
+    assert_eq!(
+        blob_of(&guarded, "main"),
+        blob_of(&twin, "main"),
+        "the guard filtered anywhere but the graph's own row space"
+    );
+
+    // The surviving row lands as the host's DESCENDING pair (q, p)…
+    let lib = compile_alone(GUARDED_LIB);
+    assert_eq!(
+        run_objects(
+            vec![guarded, lib],
+            &[(snap(0, &[2], 0), 3), (snap(0, &[1], 0), 3)]
+        ),
+        Outcome::Stopped,
+        "the spliced survivor is the host pair (q, p)"
+    );
+    // …and the host-ascending pair (p, q) — what a host-side `x < y`
+    // reading over `hb` would have kept — has no row and traps.
+    let lib2 = compile_alone(GUARDED_LIB);
+    let guarded2 = compile_extern(&dir, "guarded_app2", HOST_PICK, &header);
+    assert!(matches!(
+        run_objects(
+            vec![guarded2, lib2],
+            &[(snap(0, &[1], 0), 3), (snap(0, &[2], 0), 3)]
+        ),
+        Outcome::Trapped(_),
+    ));
+}
+
+/// Named and positional spellings of one guarded rule print one header,
+/// and the header text really carries the guard — the twin comparison
+/// alone also holds for two headers printing nothing at all.
+#[test]
+fn a_twin_header_is_still_one_header() {
+    let dir = scratch("guard_twin_header");
+    let named = interface(
+        &dir,
+        &write_file(&dir, "named.tmc", TWIN_NAMED),
+        "named.tmh",
+    );
+    let positional = interface(
+        &dir,
+        &write_file(&dir, "positional.tmc", TWIN_POSITIONAL),
+        "positional.tmh",
+    );
+    let named_text = std::fs::read_to_string(&named).unwrap();
+    let positional_text = std::fs::read_to_string(&positional).unwrap();
+    assert_eq!(named_text, positional_text);
+    assert!(
+        positional_text.contains(
+            "['a'..'z' as x, 'a'..'z' as y] where { x == y || x == y - 1 } -> goto done;"
+        ),
+        "the header lost the guard (or the pattern): {positional_text}"
+    );
+}
+
+/// A guard's `in S` set drifts between two units' declarations: the
+/// digest appendix must see it, or `GraftDrift` goes quiet — which is
+/// exactly what it must not do. The matching pair links (control).
+/// **Mutation:** dropping the appendix's guard scan — the drift goes
+/// silent and this test red on `expect_err`.
+#[test]
+fn guard_set_drift_is_still_graft_drift() {
+    let dir = scratch("guard_drift");
+    let lib_src = write_file(&dir, "lib.tmc", DRIFT_LIB);
+    let header = interface(&dir, &lib_src, "lib.tmh");
+    let consumer = compile_extern(&dir, "drift_app", HOST_QQ, &header);
+
+    // A DIFFERENT member set under the SAME name — the guard's rows change
+    // with it, and the appendix is the only thing naming those members.
+    let drifted = DRIFT_LIB.replace("set qq { 'z', 'a' }", "set qq { '_', 'a' }");
+    assert_ne!(drifted, DRIFT_LIB, "the replacement did not fire");
+    let drifted_lib = compile_alone(&drifted);
+
+    let err = link(&[consumer, drifted_lib], &[], LinkOptions::default())
+        .expect_err("a drift in a guard's `in` set must be refused");
+    assert!(
+        matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "lib::pick"),
+        "{err}"
+    );
+
+    let consumer2 = compile_extern(&dir, "match_app", HOST_QQ, &header);
+    let lib = compile_alone(DRIFT_LIB);
+    link(&[consumer2, lib], &[], LinkOptions::default())
+        .unwrap_or_else(|e| panic!("the matching pair must link: {e}"));
+}
+
+/// Two truths must not split: `tmt interface` prints the guard a source
+/// wrote, and the generated `.tmh` is its own `tmt fmt` fixed point and
+/// reads back byte-identically through `tmt interface`.
+#[test]
+fn an_unfiltered_guard_never_reaches_a_header() {
+    let dir = scratch("guard_header_roundtrip");
+    let src = write_file(&dir, "lib.tmc", CANON_PAREN);
+    let header = interface(&dir, &src, "lib.tmh");
+    let text = std::fs::read_to_string(&header).unwrap();
+    assert!(
+        text.contains("where { x in qq && (x == y || x == 'z') } -> goto done;"),
+        "the header dropped the guard: {text}"
+    );
+    fmt_check(&header);
+    let again = interface(&dir, &header, "again.tmh");
+    assert_eq!(
+        std::fs::read_to_string(&again).unwrap(),
+        text,
+        "a generated header does not read back to itself"
+    );
+}
+
+/// `guard_text` is one canonical spelling per tree: written parens are
+/// dropped, semantic parens reinserted (a column under `||`), names and
+/// literals as written, offsets spelled out.
+#[test]
+fn guard_text_canon_is_one_spelling() {
+    let dir = scratch("guard_canon");
+    // Written parens around top-level `||` operands vanish: the tree is
+    // Or(Cmp, Cmp), printed bare.
+    let pipes = interface_stdout(&dir, "pipes.tmc", CANON_PIPE);
+    assert!(
+        pipes.contains("where { x == y || x == 'z' } -> goto done;"),
+        "{pipes}"
+    );
+    // A `||` column UNDER `&&` keeps its parentheses on the way out —
+    // dropping them would re-parse into a different cone.
+    let parens = interface_stdout(&dir, "parens.tmc", CANON_PAREN);
+    assert!(
+        parens.contains("where { x in qq && (x == y || x == 'z') } -> goto done;"),
+        "{parens}"
+    );
+    // The headline shape: offsets spelled `y - 1`, no parens invented at
+    // the top of an `||`.
+    let head = interface_stdout(&dir, "head.tmc", TWIN_POSITIONAL);
+    assert!(
+        head.contains("where { x == y || x == y - 1 } -> goto done;"),
+        "{head}"
+    );
 }
