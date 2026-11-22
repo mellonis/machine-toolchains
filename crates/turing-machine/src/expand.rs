@@ -508,8 +508,10 @@ fn splice_state(
             // generically-written rule can never fire in this instance. A
             // warning, not an error: the graph's author could not know the
             // binding, the body itself matched only symbols of its own
-            // alphabet, and the graft site is legal. This is the one place
-            // `empty-expansion` fires (docs/tmt/language.md (rules)).
+            // alphabet, and the graft site is legal. One of two places
+            // `empty-expansion` fires — the other is a guard filtering
+            // every row of its own rule (`expand_rule`;
+            // docs/tmt/language.md (rule guards)).
             warn.push(Diagnostic {
                 code: "empty-expansion",
                 span: r.span,
@@ -576,8 +578,10 @@ impl TapeInfo {
 /// number the label names (`label_number`), `None` when it names none, and a
 /// fold over such a binding is refused before any evaluation.
 #[derive(Debug, Clone)]
-struct BoundVal {
-    glyph: String,
+pub(crate) struct BoundVal {
+    /// The glyph label as the alphabet names it — the identity a pattern
+    /// writes and a guard compares (`expand::glyph_label`'s canon).
+    pub(crate) glyph: String,
     value: Option<i64>,
 }
 
@@ -782,6 +786,10 @@ fn expand_rule(
     }
 
     let transition = lower_tr(&rule.transition);
+    let guard_ctx = crate::guard::GuardContext {
+        tape_labels: tapes.iter().map(|t| t.glyphs.clone()).collect(),
+        tape_alphabets: tapes.iter().map(|t| t.alphabet.clone()).collect(),
+    };
     let mut out = Vec::with_capacity(combos.len());
     for combo in combos {
         let pattern: Vec<Cell> = combo.iter().map(|(c, _)| *c).collect();
@@ -789,6 +797,12 @@ fn expand_rule(
             .iter()
             .filter_map(|(_, b)| b.as_ref().map(|(n, v)| (n.as_str(), v)))
             .collect();
+        // A `where` guard drops rows HERE, before the write/move folds see
+        // the env: what survives is indistinguishable from a hand-written
+        // product (docs/tmt/language.md (rule guards)).
+        if !crate::guard::row_matches(rule, &env, &guard_ctx) {
+            continue;
+        }
         let write = resolve_write(rule.write.as_ref(), tapes, &env)?;
         let moves = resolve_moves(rule.mov.as_ref(), arity);
         out.push(ExpandedRule {
@@ -798,6 +812,22 @@ fn expand_rule(
             moves,
             transition: transition.clone(),
             span: rule.span,
+        });
+    }
+    // The product is never empty (`cell_options` refuses a cell with no
+    // alternative), so an empty `out` here can only mean a guard filtered
+    // every row of this rule away. A warning of the existing
+    // `empty-expansion` kind — the rows are the author's to prune
+    // deliberately, but a rule that can never fire says so
+    // (docs/tmt/language.md (rule guards)).
+    if rule.guard.is_some() && out.is_empty() {
+        warn.push(Diagnostic {
+            code: "empty-expansion",
+            span: rule.span,
+            message: "this rule's guard keeps no rows — every expanded row fails the predicate, \
+                      so the rule can never fire"
+                .to_string(),
+            fix: None,
         });
     }
     Ok(out)

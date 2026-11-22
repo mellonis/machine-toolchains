@@ -86,15 +86,8 @@ pub(crate) fn check_rule_guard(
     mut resolve_set: impl FnMut(&str, Span) -> Result<SetCellMembers, CompileError>,
 ) -> Result<(), CompileError> {
     // The pattern is the world's own positional fill by now: cells[i]
-    // speaks of tape i. A binding's tape is wherever `as name` sits; a name
-    // on two cells resolves to the first (duplicates are their own earlier
-    // refusal).
-    let tape_of = |name: &str| -> Option<usize> {
-        rule.pattern
-            .cells
-            .iter()
-            .position(|c| c.binding.as_ref().is_some_and(|b| b.name == name))
-    };
+    // speaks of tape i.
+    let tape_of = |name: &str| binding_tape(&rule.pattern, name);
     match &mut rule.guard {
         None => Ok(()),
         Some(g) => type_expr(&mut g.expr, &mut Vec::new(), ctx, &tape_of, &mut resolve_set),
@@ -226,7 +219,7 @@ fn collect_chain_narrowings(
 fn seq_of(
     term: &GuardTerm,
     active: &[Narrowing],
-    ctx: &GuardContext,
+    _ctx: &GuardContext,
     tape_of: &dyn Fn(&str) -> Option<usize>,
 ) -> Result<Seq, CompileError> {
     let GuardBase::Binding(n) = &term.base else {
@@ -262,8 +255,21 @@ fn seq_of(
 fn lit_label(sym: &SymLit) -> String {
     match sym {
         SymLit::Glyph { value, .. } => value.clone(),
-        SymLit::Number { written, .. } => written.clone(),
+        // The expander's canon (`expand::glyph_label`): a number literal's
+        // label is its decimal value, not its written spelling — the label
+        // space guards compare in is the alphabet's.
+        SymLit::Number { value, .. } => value.to_string(),
     }
+}
+
+/// The tape a binding sits on: wherever its `as name` is, in the
+/// world's own positional pattern fill (a name on two cells resolves to
+/// the first — duplicates are their own earlier refusal).
+fn binding_tape(pattern: &crate::parser::Pattern, name: &str) -> Option<usize> {
+    pattern
+        .cells
+        .iter()
+        .position(|c| c.binding.as_ref().is_some_and(|b| b.name == name))
 }
 
 fn type_cmp(
@@ -368,5 +374,197 @@ fn lic_lit(
                 right: seq.label(ctx),
             },
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation — the row filter `expand` runs. The cone bookkeeping mirrors
+// typing's exactly: an occurrence counts positions in its own cone's
+// sequence, a value off that sequence matches nothing (the same off-line
+// rule as `y - 1` for the sequence's first member).
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+
+use crate::expand::BoundVal;
+
+/// The filter `expand` runs per candidate row: does the guard keep this
+/// one? An unguarded rule keeps everything.
+pub(crate) fn row_matches(
+    rule: &Rule,
+    env: &HashMap<&str, &BoundVal>,
+    ctx: &GuardContext,
+) -> bool {
+    let Some(g) = &rule.guard else {
+        return true;
+    };
+    let tape_of = |name: &str| binding_tape(&rule.pattern, name);
+    eval_expr(&g.expr, &mut Vec::new(), env, ctx, &tape_of)
+}
+
+/// The conjuncts of one `&&` chain, nested `&&` transparent (shared-refs
+/// variant for evaluation — typing's mutable one rebuilds `In`
+/// resolutions).
+fn flatten_chain_ref<'e>(into: &mut Vec<&'e GuardExpr>, a: &'e GuardExpr, b: &'e GuardExpr) {
+    match a {
+        GuardExpr::And(x, y) => flatten_chain_ref(into, x, y),
+        other => into.push(other),
+    }
+    match b {
+        GuardExpr::And(x, y) => flatten_chain_ref(into, x, y),
+        other => into.push(other),
+    }
+}
+
+/// The narrowings one side of an `&&` chain contributes at evaluation:
+/// `in` conjuncts reachable crossing only `&&`, reconstructed from the
+/// RESOLUTION typing already filled in (an `in` under a `||` stays in its
+/// own branch).
+fn narrows_at(e: &GuardExpr, out: &mut Vec<Narrowing>) {
+    match e {
+        GuardExpr::In(n) => {
+            if let Some(r) = &n.resolved {
+                out.push(Narrowing {
+                    binding: n.binding.name.clone(),
+                    written: n.set.name.clone(),
+                    resolved: r.set.clone(),
+                    members: r.members.iter().map(|m| m.label.clone()).collect(),
+                });
+            }
+        }
+        GuardExpr::And(a, b) => {
+            narrows_at(a, out);
+            narrows_at(b, out);
+        }
+        GuardExpr::Or(_, _) | GuardExpr::Cmp(_) => {}
+    }
+}
+
+fn eval_expr(
+    e: &GuardExpr,
+    active: &mut Vec<Narrowing>,
+    env: &HashMap<&str, &BoundVal>,
+    ctx: &GuardContext,
+    tape_of: &dyn Fn(&str) -> Option<usize>,
+) -> bool {
+    match e {
+        GuardExpr::In(n) => {
+            // Restriction: the row's glyph must be one of the set's.
+            let Some(v) = env.get(n.binding.name.as_str()) else {
+                return false;
+            };
+            n.resolved
+                .as_ref()
+                .is_some_and(|r| r.members.iter().any(|m| m.label == v.glyph))
+        }
+        GuardExpr::Cmp(c) => eval_cmp(c, active, env, ctx, tape_of),
+        GuardExpr::Or(a, b) => {
+            eval_expr(a, active, env, ctx, tape_of) || eval_expr(b, active, env, ctx, tape_of)
+        }
+        GuardExpr::And(a, b) => {
+            // A conjunction's own narrowings scope every conjunct under it,
+            // `||` operands included — and then every conjunct must hold.
+            let mut own = active.clone();
+            narrows_at(a, &mut own);
+            narrows_at(b, &mut own);
+            let mut conj = Vec::new();
+            flatten_chain_ref(&mut conj, a, b);
+            conj.into_iter()
+                .all(|c| eval_expr(c, &mut own, env, ctx, tape_of))
+        }
+    }
+}
+
+/// A binding operand's sequence at this occurrence — `None` for a literal,
+/// which rides the other side's.
+fn seq_at(
+    term: &GuardTerm,
+    active: &[Narrowing],
+    _ctx: &GuardContext,
+    tape_of: &dyn Fn(&str) -> Option<usize>,
+) -> Option<Seq> {
+    let GuardBase::Binding(n) = &term.base else {
+        return None;
+    };
+    let tape = tape_of(&n.name)?;
+    let mut narrows = active.iter().filter(|x| x.binding == n.name);
+    Some(match narrows.next() {
+        // Two narrowings in one cone never reach evaluation — typing
+        // refused that shape wherever a position was needed; the first is
+        // the sequence here by construction.
+        Some(x) => Seq::Set(x.clone()),
+        None => Seq::Alphabet(tape),
+    })
+}
+
+fn pos_in(seq: &Seq, ctx: &GuardContext, label: &str) -> Option<i64> {
+    let where_ = |labels: &[String]| labels.iter().position(|l| l == label).map(|i| i as i64);
+    match seq {
+        Seq::Alphabet(t) => where_(&ctx.tape_labels[*t]),
+        Seq::Set(n) => where_(&n.members),
+    }
+}
+
+fn eval_cmp(
+    c: &GuardCmp,
+    active: &[Narrowing],
+    env: &HashMap<&str, &BoundVal>,
+    ctx: &GuardContext,
+    tape_of: &dyn Fn(&str) -> Option<usize>,
+) -> bool {
+    let label = |t: &GuardTerm| -> Option<String> {
+        match &t.base {
+            GuardBase::Binding(n) => env.get(n.name.as_str()).map(|v| v.glyph.clone()),
+            GuardBase::Lit(sym) => Some(lit_label(sym)),
+        }
+    };
+    let Some(l) = label(&c.left) else {
+        return false;
+    };
+    let Some(r) = label(&c.right) else {
+        return false;
+    };
+
+    // Offset-free `==`/`!=` is glyph identity — the label space, whatever
+    // sequences the cone carries.
+    if matches!(c.op, CmpOp::Eq | CmpOp::Ne)
+        && c.left.offset == 0
+        && c.right.offset == 0
+    {
+        return (l == r) == matches!(c.op, CmpOp::Eq);
+    }
+
+    // Position domain: each binding operand counts in its OWN sequence, a
+    // literal in the pair's one effective sequence. A value off its
+    // sequence matches nothing.
+    let ls = seq_at(&c.left, active, ctx, tape_of);
+    let rs = seq_at(&c.right, active, ctx, tape_of);
+    let (lp, rp) = match (&ls, &rs) {
+        (Some(a), Some(b)) => {
+            let (Some(lp), Some(rp)) = (pos_in(a, ctx, &l), pos_in(b, ctx, &r)) else {
+                return false;
+            };
+            (lp, rp)
+        }
+        (lseq, rseq) => {
+            let eff = lseq.as_ref().or(rseq.as_ref());
+            let Some(eff) = eff else {
+                return false;
+            };
+            let (Some(lp), Some(rp)) = (pos_in(eff, ctx, &l), pos_in(eff, ctx, &r)) else {
+                return false;
+            };
+            (lp, rp)
+        }
+    };
+    let l = lp + c.left.offset;
+    let r = rp + c.right.offset;
+    match c.op {
+        CmpOp::Eq => l == r,
+        CmpOp::Ne => l != r,
+        CmpOp::Lt => l < r,
+        CmpOp::Le => l <= r,
+        CmpOp::Gt => l > r,
+        CmpOp::Ge => l >= r,
     }
 }
