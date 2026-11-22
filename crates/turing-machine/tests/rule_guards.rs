@@ -1128,3 +1128,110 @@ fn a_removal_that_would_not_compile_stays_silent() {
         "the conjuncts are the pair's only common context"
     );
 }
+
+/// The cone rule at RUN level: a narrowing never leaks into a sibling
+/// `||` branch. `rev`'s order (`z < a`) CONTRADICTS `ab`'s (`a < z`), so
+/// the narrowed leg keeps (z, a) while the bare leg — outside the cone —
+/// keeps (a, z) in the ALPHABET's order. Both pairs stop; either landing
+/// on the other leg's truth is the leak.
+#[test]
+fn a_narrowing_never_leaks_into_a_sibling_branch() {
+    let src = "\
+alphabet ab { '_', 'a', 'z' }
+set rev { 'z', 'a' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where { x in rev && y in rev && x < y || x < y } -> stop;
+  }
+}
+";
+    assert_eq!(
+        run_on(src, &[(snap(0, &[2], 0), 3), (snap(0, &[1], 0), 3)]),
+        Outcome::Stopped,
+        "the narrowed leg keeps (z, a) in the set's order"
+    );
+    assert_eq!(
+        run_on(src, &[(snap(0, &[1], 0), 3), (snap(0, &[2], 0), 3)]),
+        Outcome::Stopped,
+        "the bare sibling leg keeps (a, z) in the alphabet's order"
+    );
+}
+
+/// The same leak in its real shape: a narrowing WRITTEN under a nested
+/// `&&` inside one `||` operand has that operand alone as its cone — it
+/// must not reach the rest of the conjunction. `x in rev` here must not
+/// touch the outer `x < y`, which counts in `ab`'s order (`a < z`): it
+/// keeps (a, z) and ONLY that pair — (z, a) traps. A leak would re-order
+/// the outer comparison and keep both off-diagonal pairs.
+#[test]
+fn a_narrowing_written_under_a_branch_stays_in_that_branch() {
+    let src = "\
+alphabet ab { '_', 'a', 'z' }
+set rev { 'z', 'a' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where { x < y && ((x in rev && x == y) || x != y) } -> stop;
+  }
+}
+";
+    assert_eq!(
+        run_on(src, &[(snap(0, &[1], 0), 3), (snap(0, &[2], 0), 3)]),
+        Outcome::Stopped,
+        "the outer `x < y` counts in the alphabet's order: (a, z) keeps"
+    );
+    assert!(
+        matches!(
+            run_on(src, &[(snap(0, &[2], 0), 3), (snap(0, &[1], 0), 3)]),
+            Outcome::Trapped(_)
+        ),
+        "a branch's narrowing must not leak into the outer comparison"
+    );
+}
+
+/// The no-wrap boundary, derived by hand: `x == y - 1` over the whole
+/// three-symbol alphabet keeps exactly (`_`, `a`) and (`a`, `b`) — y at
+/// the sequence's FIRST member would need a position off the line, which
+/// matches nothing (no cyclic arithmetic). The boundary pair (b, `_`) —
+/// what a wrap-around would keep — traps.
+#[test]
+fn an_off_line_value_matches_nothing() {
+    let src = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['_'..'b' as x, '_'..'b' as y] where { x == y - 1 } -> stop;
+  }
+}
+";
+    let twin = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['_', 'a'] -> stop;
+    ['a', 'b'] -> stop;
+  }
+}
+";
+    let rows = rows_of(src);
+    assert_eq!(rows, rows_of(twin), "exactly the two derived rows");
+    assert_eq!(rows.len(), 2, "the boundary pair must not wrap: {rows:?}");
+    assert!(
+        matches!(
+            run_on(src, &[(snap(0, &[2], 0), 3), (snap(0, &[0], 0), 3)]),
+            Outcome::Trapped(_)
+        ),
+        "the (b, _) boundary pair wraps only in a cyclic world"
+    );
+}
