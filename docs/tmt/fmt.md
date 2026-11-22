@@ -394,6 +394,22 @@ vector cell owns its `name`-to-`:` slot the same way — `[t /* c */ : 'a']
 -> stop;` and `[t: /* c */ 'a'] -> stop;` are fixed points like any other
 (docs/tmt/language.md (named vector cells)).
 
+A rule guard's own tokens are written text, printed as written — names,
+literals and parentheses intact — and its comments hold the rule in
+every slot around it: between `]` and `where`, between `where` and its
+`{`, after the `{` and before the `}`, on either side of the `==`, `!=`,
+`in`, `&&`, `||` and order operators inside, and between the closing
+`}` and the `->` (docs/tmt/language.md (rule guards)):
+
+```
+['a' as x] /* c */ where { x /* d */ == 'a' /* e */ } -> stop;
+```
+
+A LINE comment inside a guard ends its line and the run continues at
+the continuation indent, exactly as one in a vector does, and takes the
+rule off the grid like any LINE comment. Comments aside, the guard sits
+in the pattern column, which widens for it as for any column content.
+
 **On the state-block grid**, a BLOCK comment keeps its rule on the grid,
 occupying its column: it joins the first column the grid has at or after
 the position it was written in, ahead of that column's own content, and

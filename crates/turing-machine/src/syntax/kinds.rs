@@ -138,6 +138,27 @@ pub enum TmcKind {
     /// tokens — a set reference's `::`-joined IDENTs included — sit
     /// directly under it with no node of their own.
     SetDecl = 56,
+    // Appended after `SetDecl` so no existing discriminant moves — at the
+    // cost of the "significant tokens first" grouping this file's header
+    // describes, which is cosmetic where wire stability is not. These two
+    // blocks landed in the rule-guards round.
+    /// `==` — guard equality (mirrors `lexer::TokenKind::EqEq`).
+    EqEq = 57,
+    /// `!=` — guard inequality.
+    NotEq = 58,
+    /// `<=` — guard at-most.
+    LtEq = 59,
+    /// `>=` — guard at-least.
+    GtEq = 60,
+    /// `&&` — guard conjunction.
+    AmpAmp = 61,
+    /// `||` — guard disjunction.
+    PipePipe = 62,
+    /// `where { … }` on a rule — a keyword-decided extent (rule 1 of the
+    /// granularity note): it exists only when `where` does, opening at the
+    /// keyword and closing at `}`. Also the unit a reparse consumes
+    /// (`Parser::guard`), hence doubly bracketed.
+    Guard = 63,
 }
 
 impl From<TmcKind> for SyntaxKind {
@@ -214,6 +235,7 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
         k if k == TmcKind::Error.into() => "ERROR",
         k if k == TmcKind::MapDecl.into() => "MAP_DECL",
         k if k == TmcKind::SetDecl.into() => "SET_DECL",
+        k if k == TmcKind::Guard.into() => "GUARD",
         _ => "?",
     }
 }
@@ -256,6 +278,12 @@ pub(crate) fn token_kind(t: &TokenKind) -> TmcKind {
         TokenKind::Colon => TmcKind::Colon,
         TokenKind::At => TmcKind::At,
         TokenKind::Bang => TmcKind::Bang,
+        TokenKind::EqEq => TmcKind::EqEq,
+        TokenKind::NotEq => TmcKind::NotEq,
+        TokenKind::LtEq => TmcKind::LtEq,
+        TokenKind::GtEq => TmcKind::GtEq,
+        TokenKind::AmpAmp => TmcKind::AmpAmp,
+        TokenKind::PipePipe => TmcKind::PipePipe,
         TokenKind::DocLine(_) => TmcKind::DocLine,
         TokenKind::AttentionLine(_) => TmcKind::AttentionLine,
         TokenKind::Comment(c) => match c.kind {
@@ -271,12 +299,12 @@ mod tests {
     use super::*;
     use crate::lexer::{LexMode, lex_with};
 
-    /// The 28 significant `TokenKind` variants, one payload-bearing
+    /// The 34 significant `TokenKind` variants, one payload-bearing
     /// value each — `token_kind` never reads a payload, so any
     /// placeholder works. Mirrors `token_kind`'s own arm order; when a
     /// lexer variant is added, its no-wildcard match already forces a
     /// visit there, so add the matching entry here in the same edit.
-    fn all_significant_tokens() -> [TokenKind; 28] {
+    fn all_significant_tokens() -> [TokenKind; 34] {
         [
             TokenKind::Ident("x".into()),
             TokenKind::Number(0, "0".into()),
@@ -304,6 +332,12 @@ mod tests {
             TokenKind::Colon,
             TokenKind::At,
             TokenKind::Bang,
+            TokenKind::EqEq,
+            TokenKind::NotEq,
+            TokenKind::LtEq,
+            TokenKind::GtEq,
+            TokenKind::AmpAmp,
+            TokenKind::PipePipe,
             TokenKind::DocLine("d".into()),
             TokenKind::AttentionLine("a".into()),
         ]
@@ -324,8 +358,8 @@ mod tests {
         let tokens = all_significant_tokens();
         assert_eq!(
             tokens.len(),
-            28,
-            "the significant TokenKind domain is documented as 28 variants"
+            34,
+            "the significant TokenKind domain is documented as 34 variants"
         );
         let mut by_kind: std::collections::HashMap<TmcKind, &TokenKind> =
             std::collections::HashMap::new();
@@ -337,32 +371,32 @@ mod tests {
         }
         assert_eq!(
             by_kind.len(),
-            28,
-            "expected 28 distinct kinds, got {}",
+            34,
+            "expected 34 distinct kinds, got {}",
             by_kind.len()
         );
 
         // The array's own length is a compile-time constant sized by its
         // return type, so comparing it against a literal (as this test
         // used to) proves nothing — it is the array comparing itself to
-        // itself. What DOES bite: the significant kinds occupy a
-        // contiguous discriminant run at the start of `TmcKind`,
-        // `Ident = 0` through `AttentionLine = 27` (spelled as a literal,
-        // not derived from the enum — `TmcKind::AttentionLine as u16`
-        // would reintroduce the same self-referential comparison). A new
-        // significant kind inserted anywhere but the very end of that
-        // run renumbers every member after it, so an array entry left
-        // stale for the new kind makes the produced set diverge from the
-        // literal run — a gap where the stale entry now lands, and an
-        // overrun past 27 from the entries that shifted up. An insertion
-        // appended as the run's very last member is the one placement
-        // this cannot catch, since nothing already tested moves.
+        // itself. What DOES bite: the produced set equals a LITERAL
+        // enumeration of the significant discriminant space — the
+        // original contiguous run `Ident = 0` through `AttentionLine =
+        // 27`, plus the guard round's six comparison operators appended
+        // after the node block (`EqEq = 57` through `PipePipe = 62`).
+        // Appended for the same reason the node kinds are: no existing
+        // discriminant moves. Both runs are spelled as literals, never
+        // derived from the enum (`TmcKind::… as u16` would reintroduce
+        // the self-referential comparison), and a stale array entry
+        // outside both runs — or either run grown without this test
+        // knowing — diverges immediately.
         let mut produced: Vec<u16> = by_kind.keys().map(|k| *k as u16).collect();
         produced.sort_unstable();
-        let expected: Vec<u16> = (0..=27).collect();
+        let mut expected: Vec<u16> = (0..=27).collect();
+        expected.extend(57..=62);
         assert_eq!(
             produced, expected,
-            "produced kinds are not the contiguous significant run 0..=27"
+            "produced kinds are not the literal significant set 0..=27 ∪ 57..=62"
         );
     }
 

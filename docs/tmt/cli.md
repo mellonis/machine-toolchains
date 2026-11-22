@@ -362,6 +362,10 @@ subsection.
 | `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
 | `duplicate-named-cell` | Two named cells of one rule vector name the same tape — write each tape at most once per vector. The second name is the one reported. |
 | `mixed-cell-forms` | One rule vector mixes named and positional cells — spell every cell with `name:`, or none. The first cell sets the vector's form; the first cell that breaks it is the one reported. |
+| `guard-order-context` | A guard's order comparison — or one carrying a constant offset — has operands with no one common sequence to count positions in. Either both are narrowed in their `&&` cone to one set with `in`, or both sit on one alphabet; anything else, stay on identity (`==`/`!=`). The message names the two contexts. |
+| `guard-unknown-binding` | A guard names an identifier that is no pattern binding of its rule. |
+| `guard-set-outside-alphabet` | `in S` on a guard whose set `S` names a symbol the binding's own tape alphabet cannot hold. The set name as written and the alphabet are the ones reported. |
+| `guard-constant-comparison` | A guard comparison with no binding operand — nothing a rule could ever match differently varies with it. Write it as rows. |
 | `too-many-state-params` | A signature declares more than 255 `state` parameters — the published exit count is one byte wide. |
 | `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (declare it locally, or supply its declarations to this compile). |
 | `noreturn-violated` | A routine's signature declares `noreturn`, but its body has a way to return — a `return` transition, a `then return`, or `return` handed to a callee as a `state` argument, counted conservatively over the whole body. |

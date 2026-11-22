@@ -195,9 +195,9 @@ use crate::syntax::extract::{
     extract_map_decl, extract_rule, extract_set_decl, sig_tokens,
 };
 use crate::syntax::{
-    AlphabetView, BindView, DocRunView, GraftView, MachineView, MapDeclView, NamespaceView,
-    ReuseKind, ReuseView, RootView, RuleView, SetDeclView, StateView, TapeView, TmcKind, TopView,
-    UseView, WorldView,
+    AlphabetView, BindView, DocRunView, GraftView, GuardView, MachineView, MapDeclView,
+    NamespaceView, ReuseKind, ReuseView, RootView, RuleView, SetDeclView, StateView, TapeView,
+    TmcKind, TopView, UseView, WorldView,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -761,6 +761,11 @@ fn nested_map_pairs(list_owner: &SyntaxNode) -> Vec<(usize, usize, Comment)> {
 enum ActionSlot {
     /// Between the pattern's `]` and the `->` — joins the pattern column.
     Arrow,
+    /// Between a written guard's `}` and the `->`: the same pattern
+    /// column, but the comment trails the guard text — the guard is
+    /// written text between `]` and `->`, and a comment prints between
+    /// the two significant tokens it was written between.
+    ArrowTail,
     /// In the action region, starting at column `n` of the grid order
     /// (0 = debugger, 1 = write, 2 = move, 3 = ahead of the transition):
     /// the comment sits after every landmark before `n` and prints in
@@ -810,6 +815,10 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
     let write_vec = child(TmcKind::WriteVec).map(|n| n.text_range());
     let move_vec = child(TmcKind::MoveVec).map(|n| n.text_range());
     let transition = child(TmcKind::Transition).map(|n| n.text_range());
+    // A written guard sits between `]` and `->` as written text: a
+    // boundary comment before its end joins the pattern column AHEAD of
+    // it, one past it trails it (`ArrowTail`).
+    let guard_end = child(TmcKind::Guard).map(|n| n.text_range().end);
     // The pattern's brackets are the rule's own direct children, so a
     // comment INSIDE them is a direct child too — it belongs to the
     // pattern's cell split, never to a boundary slot.
@@ -847,7 +856,11 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
                 from = 3;
             }
             let slot = if arrow.is_some_and(|a| p < a) {
-                ActionSlot::Arrow
+                if guard_end.is_some_and(|g| p >= g) {
+                    ActionSlot::ArrowTail
+                } else {
+                    ActionSlot::Arrow
+                }
             } else if within(&write_kw, &write_vec) {
                 ActionSlot::WriteBracket
             } else if within(&move_kw, &move_vec) {
@@ -1496,8 +1509,98 @@ struct PreparedRule {
     pattern_parts: VecParts,
     write_parts: Option<VecParts>,
     move_parts: Option<VecParts>,
+    /// The `where { … }` guard's written elements — the guard is written
+    /// text between `]` and `->`, printed verbatim (`guard_span`), not
+    /// canonicalized like a header's `guard_text`
+    /// (docs/tmt/language.md (rule guards)).
+    guard: Option<GuardPrint>,
     interior: RuleInterior,
     off_grid: bool,
+}
+
+/// One guard's print-ready elements: significant tokens' written
+/// spellings and comments, in written order. The render happens at print
+/// time because only then is the continuation indent known.
+struct GuardPrint {
+    segs: Vec<GuardSeg>,
+    /// A LINE, own-line or multi-line comment inside: the rule cannot be a
+    /// grid row (the same rule every vector interior follows).
+    breaks: bool,
+}
+
+enum GuardSeg {
+    /// A significant token's written spelling and its kind (the spacing
+    /// context).
+    Tok(String, SyntaxKind),
+    /// A comment in its written slot.
+    Comment(Comment),
+}
+
+/// Canonical no-space pairs inside a guard's token run: `(` glues
+/// forward and `)` backward (group parentheses read as written), `::`
+/// on both sides (a qualified set name). Unlike [`glued_pair`] there is
+/// no call shape — no token glues to a `(` on its LEFT.
+fn glued_guard(prev: SyntaxKind, next: SyntaxKind) -> bool {
+    prev == TmcKind::LParen.into()
+        || next == TmcKind::RParen.into()
+        || prev == TmcKind::ColonColon.into()
+        || next == TmcKind::ColonColon.into()
+}
+
+/// One guard printed from its [`GuardPrint`], comments kept in their
+/// written slots (docs/tmt/fmt.md (comments are never moved)): a BLOCK
+/// comment stays inline, a LINE comment ends its line and the run
+/// continues at `cont_pad`, an own-line or multi-line comment keeps a
+/// line of its own. [`span_with_comments`] is this same walk for
+/// declaration token runs.
+fn guard_span(print: &GuardPrint, cont_pad: &str) -> String {
+    let mut out = String::new();
+    let mut prev: Option<SyntaxKind> = None;
+    let mut at_line_start = false;
+    for seg in &print.segs {
+        match seg {
+            GuardSeg::Tok(text, kind) => {
+                let spaced = !at_line_start
+                    && prev.is_some_and(|p| is_comment_kind(p) || !glued_guard(p, *kind));
+                if spaced {
+                    out.push(' ');
+                }
+                out.push_str(text);
+                prev = Some(*kind);
+                at_line_start = false;
+            }
+            GuardSeg::Comment(c) => {
+                let is_line = matches!(c.kind, CommentKind::Line);
+                let own = c.own_line || c.text.contains('\n');
+                if own && !at_line_start && !out.is_empty() {
+                    out.push('\n');
+                    out.push_str(cont_pad);
+                    at_line_start = true;
+                }
+                let spaced = !at_line_start && prev.is_some();
+                if spaced {
+                    out.push(' ');
+                }
+                out.push_str(&normalize_comment_text(&c.text));
+                if is_line || own {
+                    out.push('\n');
+                    out.push_str(cont_pad);
+                    at_line_start = true;
+                } else {
+                    at_line_start = false;
+                }
+                prev = Some(
+                    if is_line {
+                        TmcKind::LineComment
+                    } else {
+                        TmcKind::BlockComment
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// A RULE node → the pieces the grid and the row renderer need.
@@ -1540,12 +1643,15 @@ fn prepare_rule(view: &RuleView, index: &TextLineIndex) -> PreparedRule {
             move_cell_text(&rule.mov.as_ref().expect("the vector was found").cells[i])
         })
     });
-    let off_grid = breaks_the_grid(&pattern_parts, &write_parts, &move_parts, &interior);
+    let guard = view.guard().map(|g| guard_print(&g));
+    let off_grid = breaks_the_grid(&pattern_parts, &write_parts, &move_parts, &interior)
+        || guard.as_ref().is_some_and(|g| g.breaks);
     PreparedRule {
         rule,
         pattern_parts,
         write_parts,
         move_parts,
+        guard,
         interior,
         off_grid,
     }
@@ -1594,14 +1700,51 @@ fn breaks_the_grid(
             .any(|(_, c)| matches!(c.kind, CommentKind::Line) || c.text.contains('\n'))
 }
 
-/// A rule's pattern column text: the vector from its parts, plus any
-/// comment written between the pattern's `]` and the `->` — appended,
-/// widening the pattern column exactly as an in-pattern spliced comment
-/// always has (docs/tmt/fmt.md (comments are never moved)).
+/// One `where { … }` guard's written elements collected in order:
+/// significant tokens keep their written spelling (names, literals,
+/// parentheses), comments claim their written slots
+/// (docs/tmt/fmt.md (comments are never moved); the header's canonical
+/// `guard_text` is the other reader of the same tree).
+fn guard_print(view: &GuardView) -> GuardPrint {
+    let mut segs = Vec::new();
+    let mut breaks = false;
+    for e in view.syntax().children_with_tokens() {
+        let SyntaxElement::Token(t) = e else {
+            continue;
+        };
+        if is_ws(t.kind()) {
+            continue;
+        }
+        if is_comment_kind(t.kind()) {
+            let c = comment_from(&t);
+            breaks |= matches!(c.kind, CommentKind::Line) || c.own_line || c.text.contains('\n');
+            segs.push(GuardSeg::Comment(c));
+        } else {
+            segs.push(GuardSeg::Tok(t.text().to_string(), t.kind()));
+        }
+    }
+    GuardPrint { segs, breaks }
+}
+
+/// A rule's pattern column text: the vector from its parts, plus the
+/// written `where` guard and any comment written between the pattern's
+/// `]` and the `->` — each in its written slot, widening the pattern
+/// column exactly as an in-pattern spliced comment always has
+/// (docs/tmt/fmt.md (comments are never moved)).
 fn pattern_full_text(prepared: &PreparedRule) -> String {
     let mut out = vec_full_text(&prepared.pattern_parts);
     for (slot, c) in &prepared.interior.boundaries {
         if *slot == ActionSlot::Arrow {
+            out.push(' ');
+            out.push_str(&normalize_comment_text(&c.text));
+        }
+    }
+    if let Some(g) = &prepared.guard {
+        out.push(' ');
+        out.push_str(&guard_span(g, ""));
+    }
+    for (slot, c) in &prepared.interior.boundaries {
+        if *slot == ActionSlot::ArrowTail {
             out.push(' ');
             out.push_str(&normalize_comment_text(&c.text));
         }
@@ -1645,7 +1788,7 @@ fn action_texts(prepared: &PreparedRule, has: [bool; 3]) -> ([String; 3], String
     for (slot, c) in &prepared.interior.boundaries {
         let text = normalize_comment_text(&c.text);
         let from = match slot {
-            ActionSlot::Arrow => continue,
+            ActionSlot::Arrow | ActionSlot::ArrowTail => continue,
             ActionSlot::WriteBracket => {
                 brackets[0].push(text);
                 continue;
@@ -1869,6 +2012,13 @@ fn render_rule_off_grid(prepared: &PreparedRule, indent: usize) -> String {
 
     line.push_str(&vec_text(&prepared.pattern_parts, indent));
     boundary(&mut line, ActionSlot::Arrow);
+    if let Some(g) = &prepared.guard {
+        if !line.ends_with(' ') && !line.ends_with(&cont_pad) {
+            line.push(' ');
+        }
+        line.push_str(&guard_span(g, &cont_pad));
+    }
+    boundary(&mut line, ActionSlot::ArrowTail);
     if !line.ends_with(' ') && !line.ends_with(&cont_pad) {
         line.push(' ');
     }

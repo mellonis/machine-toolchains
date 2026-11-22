@@ -886,6 +886,47 @@ and the embedded standard library's declarations. `tmt lint` takes no
 sibling sources or libraries — so a clause declared in one of those is
 NOT honoured, and a call into such a callee is never reported.
 
+### redundant-guard-narrowing
+
+A `where` guard's `in S` conjunct that narrows nothing: every symbol the
+binding's pattern cell can carry is already in `S`, so the conjunct never
+drops a row — and the guard reads the same with the conjunct removed
+(`docs/tmt/language.md (rule guards)`). Both halves are required for the
+finding:
+
+```
+g.tmc:9:24: lint: this `in` narrows nothing here: the cell can only carry symbols already in `all`, and the guard reads the same without it
+```
+
+**Restriction-inert.** The cell's produced symbols (the same facts
+`binding-product-threshold` counts) all lie within the set. A cell that
+can carry a symbol outside `S` makes the conjunct a real filter: silent.
+
+**License-free.** An order comparison — or any comparison carrying an
+offset — counts POSITIONS in one sequence: the set's member order with
+the conjunct, whatever remains without it (the binding's own tape
+alphabet, or another narrowing). Where a comparison leans on `in`, the
+edit that must compile drops every inert conjunct of the comparison's
+cluster at once — one conjunct alone is usually refused as one-sided —
+and the finding stays quiet unless the pair re-licenses without them,
+both operands narrowing to one set or both sitting on one alphabet,
+with every operand's sequence list unchanged. A cross-alphabet pair
+leaning on `in` on both sides therefore reports nothing, even where one
+tape's order happens to coincide with the set's: those conjuncts ARE
+the pair's one common context. An offset-free `==`/`!=` is glyph
+identity and needs no sequence at all, so nothing leans on a narrowing
+beside one.
+
+The `in` must sit where it NARROWS: the `in` conjuncts of an `&&` chain
+(another narrowing's scope reaches the chain's `||` operands too). An
+`in` under a `||` is a disjunct filter, never a narrowing — removing it
+would rewrite the disjunction — and is never reported.
+
+No quickfix: dropping the conjunct is the author's edit to make. An
+author writing `in` for documentation suppresses the finding in the
+shared allow namespace (`--allow redundant-guard-narrowing`, or
+`lint.allow` in `tmt.json`).
+
 ### state-may-trap (opt-in)
 
 A state whose rules leave some input unmatched and that has no

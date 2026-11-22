@@ -745,12 +745,13 @@ fn a_range_element_inside_a_clause_formats_canonically() {
 /// test once demanded `seen >= 6` against eight files) allows outright.
 /// The list is the floor; the scan below compares against it in both
 /// directions.
-const ADVERSARIAL: [&str; 11] = [
+const ADVERSARIAL: [&str; 12] = [
     "brace_comments",
     "declarations_only",
     "divergence_semicolon_block_comment",
     "doc_run_interior_comment",
     "docs_and_attention",
+    "guards",
     "interior_lists",
     "named_cells",
     "noreturn_clause",

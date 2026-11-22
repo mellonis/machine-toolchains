@@ -189,6 +189,10 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
         rules::unreachable_continuation::check,
     ),
     ("enters-unmet", rules::enters_unmet::check),
+    (
+        "redundant-guard-narrowing",
+        rules::redundant_guard_narrowing::check,
+    ),
 ];
 
 /// The opt-in rule table: off by default, run only when `--warn` names the

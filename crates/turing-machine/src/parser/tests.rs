@@ -1444,3 +1444,210 @@ fn a_name_leaves_char_arithmetic_pointing_at_the_variable() {
         Span::point(at(NAMED_CHAR, "v + 1").line, at(NAMED_CHAR, "v + 1").col)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rule guards: `where { … }` between a rule's pattern and `->` — a
+// predicate over the rule's bindings, stored as written. The AST shape is
+// pinned field-by-field here; typing and evaluation live downstream
+// (docs/tmt/language.md (rule guards)).
+// ---------------------------------------------------------------------------
+
+fn bind(t: &GuardTerm) -> &str {
+    match &t.base {
+        GuardBase::Binding(n) => &n.name,
+        other => panic!("not a binding term: {other:?}"),
+    }
+}
+
+const GRD: &str = "\
+alphabet ab { '_', 'a', 'z' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where { x == y /* keep */ || x == y - 1 } -> stop;
+  }
+}
+";
+
+#[test]
+fn a_guard_parses_to_its_ast() {
+    let p = parse_src(GRD).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    let g = r.guard.as_ref().expect("the rule carries its guard");
+    // `x == y || x == y - 1`: Or(Cmp(Eq), Cmp(Eq with the right side one
+    // behind)) — every operand a binding, offsets 0 / 0 / 0 / -1.
+    let (a, b) = match &g.expr {
+        GuardExpr::Or(a, b) => (a, b),
+        other => panic!("not an Or: {other:?}"),
+    };
+    match a.as_ref() {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Eq);
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(bind(&c.right), "y");
+            assert_eq!(c.left.offset, 0);
+            assert_eq!(c.right.offset, 0);
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+    match b.as_ref() {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Eq);
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(bind(&c.right), "y");
+            assert_eq!(c.left.offset, 0);
+            assert_eq!(c.right.offset, -1);
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+    // The guard's span is its keyword-decided extent: `where` through `}`.
+    let w = at(GRD, "where");
+    assert_eq!(g.span.start, w);
+    assert_eq!(
+        g.span.end.col,
+        w.col + "where { x == y /* keep */ || x == y - 1 }".len() as u32
+    );
+}
+
+const GRD_IN: &str = "\
+alphabet ab { '_', 'a', 'z' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['a' as x, 'z' as y] where { x in qq && y in qq || x == y } -> stop;
+  }
+}
+";
+
+#[test]
+fn membership_and_conjunction_parse_with_and_binding_tighter() {
+    let p = parse_src(GRD_IN).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    let g = r.guard.as_ref().expect("guard");
+    // `x in qq && y in qq || x == y` == `(x in qq && y in qq) || (x == y)`.
+    let (a, b) = match &g.expr {
+        GuardExpr::Or(a, b) => (a.as_ref(), b.as_ref()),
+        other => panic!("not an Or: {other:?}"),
+    };
+    let (l, r2) = match a {
+        GuardExpr::And(l, r2) => (l.as_ref(), r2.as_ref()),
+        other => panic!("not an And: {other:?}"),
+    };
+    match l {
+        GuardExpr::In(i) => {
+            assert_eq!(i.binding.name, "x");
+            assert_eq!(i.set.name, "qq");
+        }
+        other => panic!("not an In: {other:?}"),
+    }
+    match r2 {
+        GuardExpr::In(i) => {
+            assert_eq!(i.binding.name, "y");
+            assert_eq!(i.set.name, "qq");
+        }
+        other => panic!("not an In: {other:?}"),
+    }
+    match b {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Eq);
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(bind(&c.right), "y");
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+}
+
+const GRD_TERM: &str = "\
+alphabet ab { '_', 'a', 'z' }
+
+machine {
+  tape t: ab;
+  entry state s {
+    ['a' as x] where { x + 1 == 'z' - 2 && x < 'a' && x >= x } -> stop;
+  }
+}
+";
+
+#[test]
+fn terms_carry_offsets_and_literals() {
+    let p = parse_src(GRD_TERM).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    let g = r.guard.as_ref().expect("guard");
+    let (a, rest) = match &g.expr {
+        GuardExpr::And(a, rest) => (a.as_ref(), rest.as_ref()),
+        other => panic!("not an And: {other:?}"),
+    };
+    // `x + 1 == 'z' - 2`
+    let (l, r2) = match a {
+        GuardExpr::And(l, r2) => (l.as_ref(), r2.as_ref()),
+        other => panic!("not an And: {other:?}"),
+    };
+    match l {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(c.left.offset, 1);
+            match &c.right.base {
+                GuardBase::Lit(SymLit::Glyph { value, .. }) => assert_eq!(value, "z"),
+                other => panic!("not a glyph term: {other:?}"),
+            }
+            assert_eq!(c.right.offset, -2);
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+    // `x < 'a'` and `x >= x`
+    match r2 {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Lt);
+            assert_eq!(bind(&c.left), "x");
+            match &c.right.base {
+                GuardBase::Lit(SymLit::Glyph { value, .. }) => assert_eq!(value, "a"),
+                other => panic!("not a glyph term: {other:?}"),
+            }
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+    match rest {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Ge);
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(bind(&c.right), "x");
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+}
+
+const GRD_ERR: &str = "\
+alphabet ab { '_', 'a' }
+
+machine {
+  tape t: ab;
+  entry state s {
+    ['a' as x] where { x == } -> stop;
+  }
+}
+";
+
+#[test]
+fn a_broken_guard_is_a_typed_error_with_its_span() {
+    let e = parse_src(GRD_ERR).unwrap_err();
+    let w = at(GRD_ERR, "where");
+    assert_eq!(e.span.start.line, w.line, "the span is on the guard's line");
+    assert!(
+        e.span.start.col >= w.col,
+        "the span sits inside the guard: {:?}",
+        e.span
+    );
+    // A typed parse refusal, not a panic: the same `unexpected-token`
+    // family the rest of the grammar produces (`Self::expected`'s code).
+    assert_eq!(e.kind.code(), "unexpected-token");
+}
+
+#[test]
+fn the_green_tree_keeps_a_guard_verbatim() {
+    let root = SyntaxNode::new_root(parse_green(GRD).unwrap());
+    assert_eq!(root.text(), GRD, "a comment inside a guard is not dropped");
+}

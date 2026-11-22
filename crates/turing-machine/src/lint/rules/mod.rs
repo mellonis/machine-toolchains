@@ -12,6 +12,7 @@ pub(crate) mod enters_unmet;
 pub(crate) mod index_identity_map;
 pub(crate) mod inert_never_writes;
 pub(crate) mod leftover_debugger;
+pub(crate) mod redundant_guard_narrowing;
 pub(crate) mod redundant_identity_pairs;
 pub(crate) mod spans;
 pub(crate) mod state_may_trap;

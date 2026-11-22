@@ -13,14 +13,16 @@
 use crate::compiler::{CompileError, CompileErrorKind};
 use mtc_core::diagnostics::Span;
 
-/// The 31 fully-reserved `.tmc` keywords. Canonical home: they are ordinary
+/// The 32 fully-reserved `.tmc` keywords. Canonical home: they are ordinary
 /// identifiers to the lexer (this list only pins the "keywords lex as
 /// `Ident`" contract in the test battery below), and the parser is the ONE
 /// place that rejects them where a name is expected — one place of truth,
 /// so this array is `pub` for the parser to consume rather than redefine.
-/// (`deprecated` is contextual — an attribute word, not a keyword — and is
-/// deliberately absent.)
-pub const RESERVED: [&str; 31] = [
+/// Two contextual words are deliberately absent: `deprecated` (an attribute
+/// word, not a keyword) and `in` (guard membership only — reserving it would
+/// break every program with a tape or binding named `in`;
+/// docs/tmt/language.md (rule guards)).
+pub const RESERVED: [&str; 32] = [
     "alphabet",
     "machine",
     "tape",
@@ -52,6 +54,7 @@ pub const RESERVED: [&str; 31] = [
     "enters",
     "leaves",
     "set",
+    "where",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,9 +98,12 @@ pub enum TokenKind {
     /// `%` — the remainder operator in a write-cell fold expression
     /// (`{(v+1)%6}`). Never begins a multi-character operator.
     Percent,
-    /// `<` — a move-vector glyph (left), never a comparison.
+    /// `<` — a move-vector glyph (left), and the guard's less-than. One
+    /// token, two meanings decided by position: a move vector is the only
+    /// place a bare `<` is a glyph.
     Lt,
-    /// `>` — a move-vector glyph (right), never a comparison.
+    /// `>` — a move-vector glyph (right), and the guard's greater-than
+    /// (`>`/`>=` never begin a `->`).
     Gt,
     LBracket,
     RBracket,
@@ -110,6 +116,19 @@ pub enum TokenKind {
     Colon,
     At,
     Bang,
+    /// `==` — the guard's equality (glyph identity, positions optional).
+    EqEq,
+    /// `!=` — the guard's inequality (glyph identity).
+    NotEq,
+    /// `<=` — the guard's at-most comparison (positions).
+    LtEq,
+    /// `>=` — the guard's at-least comparison (positions).
+    GtEq,
+    /// `&&` — guard conjunction. Lexed as one adjacency pair: a lone `&`
+    /// is an unexpected character, never half of anything.
+    AmpAmp,
+    /// `||` — guard disjunction. Same adjacency rule as `&&`.
+    PipePipe,
     Eof,
     /// Only produced in [`LexMode::WithComments`]. [`lex`] (equivalent to
     /// `lex_with(_, LexMode::WithoutComments)`) never emits this variant,
@@ -479,8 +498,53 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
             let (kind, len) = if cur.peek() == Some('>') {
                 cur.bump();
                 (TokenKind::FatArrow, 2)
+            } else if cur.peek() == Some('=') {
+                cur.bump();
+                (TokenKind::EqEq, 2)
             } else {
                 (TokenKind::Eq, 1)
+            };
+            tokens.push(Token {
+                kind,
+                line,
+                col,
+                len,
+            });
+            continue;
+        }
+        // The guard's remaining multi-character operators: `<=`, `>=`, `!=`,
+        // `&&`, `||` — all adjacency-lexed like the arrows above, so a spaced
+        // pair is two tokens and a lone `&`/`|` is an unexpected character
+        // (docs/tmt/language.md (rule guards)).
+        if c == '<' || c == '>' || c == '!' || c == '&' || c == '|' {
+            cur.bump();
+            let compound = match (c, cur.peek()) {
+                ('<', Some('=')) => Some((TokenKind::LtEq, 2)),
+                ('>', Some('=')) => Some((TokenKind::GtEq, 2)),
+                ('!', Some('=')) => Some((TokenKind::NotEq, 2)),
+                ('&', Some('&')) => Some((TokenKind::AmpAmp, 2)),
+                ('|', Some('|')) => Some((TokenKind::PipePipe, 2)),
+                _ => None,
+            };
+            let (kind, len) = match compound {
+                Some((kind, len)) => {
+                    cur.bump();
+                    (kind, len)
+                }
+                // A bare `&`/`|` starts nothing at all; the three others keep
+                // their single-character identity (`<`/`>` move glyphs, `!`
+                // an attention marker's sibling in error text).
+                None if c == '&' || c == '|' => {
+                    return Err(err(line, col, format!("unexpected character `{c}`")));
+                }
+                None => {
+                    let kind = match c {
+                        '<' => TokenKind::Lt,
+                        '>' => TokenKind::Gt,
+                        _ => TokenKind::Bang,
+                    };
+                    (kind, 1)
+                }
             };
             tokens.push(Token {
                 kind,
@@ -510,14 +574,11 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
         // role as a qualified-name sigil is a parse concern, so the lexer
         // imposes no adjacency rule on it.
         let single = match c {
-            '!' => Some(TokenKind::Bang),
             '+' => Some(TokenKind::Plus),
             ',' => Some(TokenKind::Comma),
             ';' => Some(TokenKind::Semi),
             '*' => Some(TokenKind::Star),
             '%' => Some(TokenKind::Percent),
-            '<' => Some(TokenKind::Lt),
-            '>' => Some(TokenKind::Gt),
             '[' => Some(TokenKind::LBracket),
             ']' => Some(TokenKind::RBracket),
             '{' => Some(TokenKind::LBrace),
@@ -662,12 +723,12 @@ mod tests {
         );
     }
 
-    /// The 31 reserved keywords are lexer-transparent: each is a plain
+    /// The 32 reserved keywords are lexer-transparent: each is a plain
     /// `Ident`. Reservation is a parse-time concern (the parser consumes
     /// [`RESERVED`]); the lexer must never special-case them.
     #[test]
     fn every_reserved_keyword_lexes_as_a_plain_ident() {
-        assert_eq!(RESERVED.len(), 31);
+        assert_eq!(RESERVED.len(), 32);
         for kw in RESERVED {
             assert_eq!(
                 kinds(kw),
@@ -1182,5 +1243,36 @@ mod tests {
             let _ = lex_with(&src, LexMode::WithoutComments);
             let _ = lex_with(&src, LexMode::WithComments);
         }
+    }
+    #[test]
+    fn lexes_the_guard_operators() {
+        use TokenKind::*;
+        assert_eq!(
+            kinds("x == y != z <= w >= v && u || t"),
+            vec![
+                Ident("x".into()),
+                EqEq,
+                Ident("y".into()),
+                NotEq,
+                Ident("z".into()),
+                LtEq,
+                Ident("w".into()),
+                GtEq,
+                Ident("v".into()),
+                AmpAmp,
+                Ident("u".into()),
+                PipePipe,
+                Ident("t".into()),
+                Eof,
+            ]
+        );
+        // The compounds are ADJACENCY lexed: `= =` is two Eq, never `==`,
+        // and a lone `&` / `|` / `!` is not a start of anything.
+        assert_eq!(
+            kinds("a = = b"),
+            vec![Ident("a".into()), Eq, Eq, Ident("b".into()), Eof]
+        );
+        assert!(lex("a & b").is_err());
+        assert!(lex("a | b").is_err());
     }
 }

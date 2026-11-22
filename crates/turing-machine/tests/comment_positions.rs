@@ -4,11 +4,13 @@
 //! around it, never which tokens it sits between
 //! (docs/tmt/fmt.md (comments are never moved)).
 //!
-//! One template per grammatical position a comment can occupy — 87 of them:
+//! One template per grammatical position a comment can occupy — 97 of them:
 //! the 61 of the measured 2026-08-30 audit, two for the `noreturn` clause,
 //! eighteen for the head-position clauses, `never writes`, the open-map
-//! `*` and glyph sets, and six for the named-cell slots (`name` before its
-//! `:`, the cell after it) — each with a `@C@` slot run in BOTH flavours
+//! `*` and glyph sets, six for the named-cell slots (`name` before its
+//! `:`, the cell after it), and ten for a rule guard's slots (`]`-`where`,
+//! `where`-`{`, `{`-operand, the `==`/`&&`/`in` operand slots, `}`-`->`)
+//! — each with a `@C@` slot run in BOTH flavours
 //! (`/* c */` and `// c`). Each case runs
 //! three mechanical gates: the comment's significant-token NEIGHBOURS are
 //! unchanged, the significant-token stream is unchanged (fmt is
@@ -507,4 +509,55 @@ const NAMED_CELL_SLOTS: &[(&str, &str)] = &[
 #[test]
 fn named_cell_comments_stay_in_their_slot() {
     run_group(NAMED_CELL_SLOTS);
+}
+
+/// A rule guard's slots: the guard is written text between `]` and `->`,
+/// so a comment prints between the same two significant tokens there as
+/// anywhere else (docs/tmt/fmt.md (comments are never moved)).
+const GUARD_SLOTS: &[(&str, &str)] = &[
+    (
+        "guard/after-pattern",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] @C@\n    where { x == 'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/after-where",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where @C@\n    { x == 'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/after-open",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { @C@\n    x == 'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-eq-before",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x @C@\n    == 'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-eq-after",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x == @C@\n    'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-and-before",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x == 'a' @C@\n    && x == 'b' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-and-after",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x == 'a' && @C@\n    x == 'b' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-in-before",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x @C@\n    in pair } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-in-after",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x in @C@\n    pair } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/before-arrow",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x == 'a' } @C@\n    -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+];
+
+#[test]
+fn guard_comments_stay_in_their_slot() {
+    run_group(GUARD_SLOTS);
 }

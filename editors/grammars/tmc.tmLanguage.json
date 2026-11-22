@@ -59,7 +59,7 @@
     },
     "keywordsControl": {
       "name": "keyword.control.tmc",
-      "match": "\\b(goto|call|then|return|stop|halt|graft|bind)\\b"
+      "match": "\\b(goto|call|then|return|stop|halt|graft|bind|where)\\b"
     },
     "keywordsOperation": {
       "name": "keyword.control.tmc",

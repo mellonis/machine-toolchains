@@ -1699,6 +1699,113 @@ error: fold arithmetic overflows i64 [fold-overflow]
 error: `150` is not a symbol in this tape's alphabet [fold-out-of-alphabet]
 ```
 
+### Rule guards
+
+A rule may carry a `where { … }` guard between its pattern vector and
+the arrow: a predicate over the pattern's bindings that removes rows
+from the expansion.
+
+```tmc
+['a'..'z' as x, 'a'..'z' as y] where { x == y || x == y - 1 } -> stop;
+```
+
+Over an alphabet of twenty-seven symbols the pattern's product is 676
+rows; the guard keeps 51 — the diagonal and the subdiagonal — and those
+51 are ordinary rows. Nothing downstream of the expander ever sees a
+guard: what a rule has is the written product minus the predicate,
+derivable by hand from what is written. The COST is still the product's
+— a guard is evaluated per candidate row and makes expansion no
+cheaper, so `expansion-threshold` and `binding-product-threshold` count
+the pre-filter product (`docs/tmt/lint.md (binding-product-threshold)`).
+
+A guard is a conjunction and disjunction (with parentheses; `&&` binds
+tighter than `||`) of two kinds of test over the rule's bindings, glyph
+literals and constant offsets:
+
+**Glyph identity.** An offset-free `==` or `!=` compares symbols
+themselves — always legal, cross-alphabet included, no sequence
+consulted. A literal takes part as itself.
+
+**Sequence position.** An order comparison (`<`, `<=`, `>`, `>=`) — or
+ANY comparison carrying an offset (`y - 1`, `x + 1`) — compares
+positions in ONE common sequence:
+
+- two bindings, both narrowed in their own cone to one set with `in S`;
+- or two bindings of one alphabet with no narrowing at all;
+- a literal rides the other operand's sequence and must be a member of
+  it.
+
+Anything else is `guard-order-context`, naming both contexts, with the
+remedy as its hint:
+
+```
+error: `s` and `cde` have no one common sequence to compare positions in — narrow both to one set with `in`, or stay on identity (`==`/`!=`) [guard-order-context]
+```
+
+A one-sided narrowing is never a license — for a pair, *the other one
+needs it added*: `where { x in S && x < y }` is refused whether the
+tapes share an alphabet (x is on `S`'s order, y on the alphabet's) or
+not. Offsets are `± k` with `k` an integer constant, and they count
+**positions**, not the label numbers write-folds fold over
+(`{d+1}`, "Substitution") — the two domains never mix, and no
+write-fold variable is in scope inside a guard. A position off the
+sequence (`y - 1` for the sequence's first member) matches nothing:
+there is no wrap-around.
+
+When the restriction is wanted but the set's order is not, restrict in
+the pattern cell instead — `[qq as x, 'a'..'z' as y] where { x < y }`
+compares in the alphabet's order and needs no `in` at all. Plain
+restriction belongs to the cell; `in S` is written to license a
+sequence.
+
+**The `&&`-cone rule.** An `in S` conjunct narrows every occurrence of
+its binding within its **cone** — the maximal upward chain of `&&` from
+the conjunct: the whole conjunction it sits in, including `||` operands
+nested under it, and nothing outside. A row survives the guard only
+when every conjunct holds, so inside one conjunct-committed cone the
+narrowing is always real, while survival along a sibling `||` branch
+tells us nothing. Typing reads the same shape: every occurrence is
+typed against the narrowings in effect in its own cone, and a branch
+that needs a narrowing needs its own. The three shapes:
+
+```tmc
+/* shared — hoisted into the conjunction, `||` nested under it: */
+['a'..'c' as x, 'a'..'c' as y] where { x in s && y in s && (x < y || x == y) } -> stop;
+
+/* per-branch — each side names its own sequence: */
+['a'..'c' as x, 'a'..'c' as y] where { (x in s && y in s && x < y) || (x in t && y in t && x < y) } -> stop;
+
+/* a branch with no narrowing works on its tape alphabets' default order: */
+['a'..'c' as x, 'a'..'c' as y] where { (x in s && y in s && x < y) || x == y } -> stop;
+```
+
+A guard keeping no rows is a rule that can never fire, and says so as
+the familiar `empty-expansion` (docs/tmt/lint.md):
+
+```
+warning: this rule's guard keeps no rows — every expanded row fails the predicate, so the rule can never fire [empty-expansion]
+```
+
+An `in` that narrows nothing is its own warn-tier audit,
+`redundant-guard-narrowing` (`docs/tmt/lint.md
+(redundant-guard-narrowing)`).
+
+**Across units.** At a graft splice the guard has already done its work
+in the graph's OWN world: the expander expands a graph against its own
+tape contexts and the surviving rows travel through the graft's symbol
+map, so a graph keeps the same rows under any host — the host receives
+mapped, already-filtered rows, and nothing host-side re-filters. A
+generated header prints the guard among the graph body's rules, because
+the body is what a consumer splices (`docs/tmt/cli.md (interface)`);
+`graph_digest` covers the printed guard and every set its `in`
+conjuncts name, so twin spellings digest identically and member drift
+stays loud. `tmt fmt` keeps the guard verbatim — written text, like a
+cell name (`docs/tmt/fmt.md (comments are never moved)`).
+
+Guards are `.tmc` grammar only: the assembly dialects stay positional.
+A guard is parseable in a rule wherever a rule is written, including a
+graph body and a source read for declarations.
+
 ## Namespaces, visibility, and imports
 
 `namespace NAME { … }` nests declarations and prefixes their names.
@@ -2130,7 +2237,7 @@ A deprecated entity's callers are a lint finding
 
 ## Reserved keywords
 
-Thirty-one words are fully reserved and may not be used as any name — a
+Thirty-two words are fully reserved and may not be used as any name — a
 tape, state, world, namespace, alias, binding, or graft-instance name:
 
 ```
@@ -2138,7 +2245,7 @@ alphabet  machine  tape    state   entry   routine  graph   namespace
 export    use      graft   bind    as      map      with    write
 move      goto     call    then    return  stop     halt    debugger
 volatile  writes   never   noreturn
-enters    leaves   set
+enters    leaves   set     where
 ```
 
 Reservation is enforced wherever a name is expected: `tape state: ab;` is
@@ -2243,3 +2350,40 @@ text, and it remains available as an ordinary identifier.
   - `leaves` clauses on every tape parameter of the standard library,
     whose prose was corrected in four places where it described the head
     on exit more narrowly than the bodies behave (`docs/tmt/stdlib.md`).
+
+- **0.3** — rule guards, named vector cells, and open graft maps. A rule
+  filters its own cartesian expansion, a rule vector names the tapes its
+  cells speak of, and a graft's symbol map may leave an opaque class
+  unaliased.
+
+  **New grammar:**
+
+  - `where { … }`, a rule guard between the pattern vector and the
+    arrow: glyph-identity and sequence-position tests over the pattern's
+    bindings, `in`-set narrowings under the `&&`-cone rule, `&&`/`||`
+    with parentheses, and constant offsets counting positions
+    ("Rule guards");
+  - `name:` on a rule vector cell, naming the tape a cell speaks of —
+    pure spelling, two spellings of one rule compile to the same rows
+    ("Named vector cells");
+  - `*` as the last entry of a `graft`'s symbol map, leaving it open
+    ("Open grafts").
+
+  **Acceptance changes** — source 0.2 accepted that 0.3 refuses or reads
+  differently:
+
+  - the reserved words go from thirty-one to thirty-two: `where` joins
+    them, and `in` stays a contextual word, reserved only where a guard
+    reads it. A 0.2 program naming a tape, state, world, namespace,
+    alias, binding or graft instance `where` no longer compiles
+    ("Reserved keywords");
+  - a graft whose map holds symbols its host alphabet lacks — or one
+    mixing listed pairs with a symbol the graph's own alphabet lacks —
+    finds its new readings and refusals in "Open grafts"; the 0.2
+    refusal `open-graft-unsupported` is gone;
+  - one rule vector mixing named and positional cells, one tape named
+    twice in a vector, or a name that is no tape of the world are
+    refused (`mixed-cell-forms`, `duplicate-named-cell`,
+    `unresolved-tape-target`) ("Named vector cells").
+
+  Everything else 0.2 accepted, 0.3 accepts.

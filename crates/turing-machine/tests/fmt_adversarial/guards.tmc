@@ -1,0 +1,16 @@
+alphabet ab { '_', 'a', 'z' }
+set pair { 'z', 'a' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    [t: 'a'..'z' as x]   /* keep */ where{x== 'z' || ( x == 'a' + 1 ) }->stop;
+    ['a' as y] where { y
+      in pair } // narrowed
+      -> stop;
+    [*, *] where { x == 'a' /* identity */ || x in /* the set */ pair } -> stop;
+    [*, *] -> stop;
+  }
+  state fin { [*, *] -> stop; }
+}

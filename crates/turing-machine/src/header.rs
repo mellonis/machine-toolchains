@@ -1707,6 +1707,16 @@ fn collect_graph_body_refs<'p>(graph: &'p Graph, out: &mut HashSet<&'p str>) {
                     out.insert(name.as_str());
                 }
             }
+            // A `where` guard's `in` conjunct names a set exactly as a
+            // pattern cell does — a bare name resolves through an import
+            // (docs/tmt/language.md (rule guards)).
+            if let Some(g) = &rule.guard {
+                for n in crate::guard::in_conjuncts(g) {
+                    if !n.set.name.contains("::") {
+                        out.insert(n.set.name.as_str());
+                    }
+                }
+            }
             if let Transition::Call { target, args, .. } = &rule.transition {
                 if let [only] = target.segments.as_slice() {
                     out.insert(only.as_str());
@@ -1779,6 +1789,16 @@ fn resolved_set_refs<'a>(world: &'a ResolvedWorld, out: &mut HashSet<&'a str>) {
                 } = &cell.kind
                 {
                     out.insert(r.set.as_str());
+                }
+            }
+            // A `where` guard's `in` conjunct names a set the same way —
+            // by NAME alone in the printed body, so the set it names must
+            // print alongside it (docs/tmt/language.md (rule guards)).
+            if let Some(g) = &rule.guard {
+                for n in crate::guard::in_conjuncts(g) {
+                    if let Some(r) = &n.resolved {
+                        out.insert(r.set.as_str());
+                    }
                 }
             }
         }
@@ -1951,6 +1971,25 @@ pub(crate) fn graph_digest(
                         m.set.clone(),
                         format!("set {} {{ {} }}", m.set, members.join(", ")),
                     );
+                }
+            }
+            // A `where` guard's `in` conjunct names a set BY NAME alone in
+            // the body — member drift moves no body line, so the appendix
+            // is where the digest learns of it (docs/tmt/language.md (rule
+            // guards); the GraftDrift half of this round).
+            if let Some(g) = &rule.guard {
+                for n in crate::guard::in_conjuncts(g) {
+                    if let Some(m) = &n.resolved {
+                        let members: Vec<String> = m
+                            .members
+                            .iter()
+                            .map(|g| crate::patterns::label_spelling(&g.label))
+                            .collect();
+                        named.insert(
+                            m.set.clone(),
+                            format!("set {} {{ {} }}", m.set, members.join(", ")),
+                        );
+                    }
                 }
             }
         }
@@ -2277,7 +2316,16 @@ fn rule_text(rule: &Rule) -> String {
     if let Some(text) = transition_text(&rule.transition) {
         action.push(text);
     }
-    format!("{pattern} -> {};", action.join(" "))
+    // A `where` guard is semantics, like a range: the header prints its
+    // CANONICAL text (`guard_text`), between the pattern and the arrow
+    // (docs/tmt/language.md (rule guards)). `fmt` alone prints the written
+    // tokens; the two agree on every tree.
+    let guard = rule
+        .guard
+        .as_ref()
+        .map(|g| format!(" where {{ {} }}", crate::guard::guard_text(g)))
+        .unwrap_or_default();
+    format!("{pattern}{guard} -> {};", action.join(" "))
 }
 
 fn pattern_text(pattern: &Pattern) -> String {
