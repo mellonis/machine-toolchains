@@ -16,5 +16,7 @@ mtc-post-machine = { path = "../post-machine" }
 mtc-turing-machine = { path = "../turing-machine" }
 # Pinned exactly: the wasm-bindgen CLI that post-processes the module must
 # be the same version, and scripts/build-wasm-bundle.sh reads this line.
-wasm-bindgen = "=0.2.127"
-js-sys = "0.3.104"
+# js-sys is version-paired with wasm-bindgen (0.3.N ships against 0.2.N+23);
+# bump both together and install the matching CLI.
+wasm-bindgen = "=0.2.130"
+js-sys = "0.3.107"
