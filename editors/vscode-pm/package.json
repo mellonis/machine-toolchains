@@ -152,9 +152,12 @@
     "compile": "npm run typecheck && npm run bundle",
     "package": "npm run compile && vsce package"
   },
-  "dependencies": { "vscode-languageclient": "^10.1.0" },
+  "dependencies": { "vscode-languageclient": "^11.0.1" },
   "devDependencies": {
-    "@types/node": "^20.0.0", "@types/vscode": "^1.91.0",
-    "@vscode/vsce": "^3.9.2", "esbuild": "^0.25.0", "typescript": "^5.9.0"
+    "@types/node": "^26.6.6", "@types/vscode": "^1.146.0",
+    "@vscode/vsce": "^4.1.1", "esbuild": "^0.28.2", "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "minimatch": "^11.0.9"
   }
 }
