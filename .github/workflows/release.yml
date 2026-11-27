@@ -1,12 +1,24 @@
 name: release
 
-# Attaches the browser bundle to the GitHub release for a pushed `v*` tag.
-# The release itself is still created by the maintainer (`gh release
-# create`, with the editor plugin artifacts); this job only adds the wasm
-# bundle, built on CI from the tagged commit with the pinned toolchain and
-# the pinned wasm-bindgen CLI, and smoke-tested under Node before it is
-# attached, so the artifact is reproducible, verified, and never depends
-# on a laptop's tool versions.
+# Attaches the browser bundle and the prebuilt `pmt`/`tmt` binaries to the
+# GitHub release for a pushed `v*` tag. The release itself is still created
+# by the maintainer (`gh release create`, with the editor plugin
+# artifacts); these jobs only add what CI can build from the tagged commit
+# with the pinned toolchain, so the artifacts are reproducible and never
+# depend on a laptop's tool versions. The bundle is smoke-tested under Node
+# before it is attached; a binary is run once (`--version`) on the runner
+# that built it wherever that runner can execute its target.
+#
+# Binaries: one archive per tool per target — ten assets — named
+# `<tool>-<tag>-<target>.tar.gz` (`.zip` on Windows), each holding the
+# binary, LICENSE and README.md, with a `.sha256` beside it. The two
+# tools package separately on purpose: a user of one editor plugin needs
+# one binary. Shell completions and the man page are not in the archive:
+# the binary prints them itself (`<tool> completions <shell>`,
+# `<tool> man`).
+#
+# A manual run (`workflow_dispatch`) builds and packages everything and
+# uploads nothing — the dry run to make before tagging.
 #
 # Ordering: `gh release create vX.Y.Z` both creates the tag and the
 # release, so the release normally exists before this job starts. If the
@@ -17,6 +29,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -46,6 +59,7 @@ jobs:
       - name: Smoke-test the bundle
         run: node scripts/wasm-smoke.mjs target/wasm-bundle/dist
       - name: Wait for the release, then attach the bundle
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -53,6 +67,90 @@ jobs:
           for i in $(seq 1 30); do
             if gh release view "$tag" >/dev/null 2>&1; then
               gh release upload "$tag" target/wasm-bundle/*.tar.gz --clobber
+              echo "attached to $tag"
+              exit 0
+            fi
+            echo "release $tag not found yet (attempt $i/30); waiting 60s"
+            sleep 60
+          done
+          echo "no release for $tag after 30 minutes" >&2
+          exit 1
+
+
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            run: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            run: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            run: true
+          # Cross-built on the arm64 runner; not executed there.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            run: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            run: true
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      # The channel comes from rust-toolchain.toml; only the target is
+      # added here.
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Add the target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build pmt and tmt
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin pmt --bin tmt
+      - name: Run each binary once
+        if: matrix.run
+        run: |
+          for tool in pmt tmt; do
+            "target/${{ matrix.target }}/release/$tool" --version
+          done
+      - name: Package one archive per tool
+        run: |
+          # A manual run has no tag; name its archives after the commit.
+          if [ "${{ github.ref_type }}" = tag ]; then label="${GITHUB_REF_NAME}"; else label="${GITHUB_SHA::8}"; fi
+          mkdir -p dist
+          for tool in pmt tmt; do
+            name="$tool-$label-${{ matrix.target }}"
+            stage="stage/$name"
+            mkdir -p "$stage"
+            cp LICENSE README.md "$stage/"
+            if [ "${{ runner.os }}" = Windows ]; then
+              cp "target/${{ matrix.target }}/release/$tool.exe" "$stage/"
+              (cd stage && 7z a -tzip "../dist/$name.zip" "$name" >/dev/null)
+              asset="$name.zip"
+            else
+              cp "target/${{ matrix.target }}/release/$tool" "$stage/"
+              tar -czf "dist/$name.tar.gz" -C stage "$name"
+              asset="$name.tar.gz"
+            fi
+            (cd dist && if command -v sha256sum >/dev/null; then sha256sum "$asset"; else shasum -a 256 "$asset"; fi > "$asset.sha256")
+          done
+          ls -l dist
+      - name: Wait for the release, then attach the archives
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          for i in $(seq 1 30); do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" dist/* --clobber
               echo "attached to $tag"
               exit 0
             fi

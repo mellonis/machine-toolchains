@@ -264,9 +264,10 @@ impl Program {
     }
 
     /// A function is the library's exactly when the linker recorded the
-    /// library as its origin, so a user routine shadowing a `std::` name
-    /// is the user's, and a linker-synthesized copy takes the provenance
-    /// of the input it was stamped from.
+    /// library as its origin, so every function reports the one input
+    /// that defined it (a user routine may not share a `std::` name the
+    /// program reaches — that link is refused), and a linker-synthesized
+    /// copy takes the provenance of the input it was stamped from.
     pub fn line_of(&self, addr: u32) -> Option<SourceLoc> {
         self.line_index.resolve(addr).map(|loc| SourceLoc {
             file: match loc.source {

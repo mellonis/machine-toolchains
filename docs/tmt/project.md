@@ -15,14 +15,15 @@ directory). Every key is validated strictly: an unrecognized key at any
 level, or a value of the wrong shape, is a hard error naming the file and
 the offending key. `tmt.json` itself carries no literal version marker;
 this page and the release notes track the `project` section's schema as
-its own versioned contract, currently **0.2**. The lint-only shape that
+its own versioned contract, currently **0.3**. The lint-only shape that
 existed before the `project` section was added is retroactively **0.1**.
 
 `tmt.json` and PM-1's `pmt.json` are separate contracts that happen to
-share a version number. `tmt build` reads only `tmt.json` and `pmt build`
-only `pmt.json`; the two files never merge, and neither tool looks at the
-other's. At 0.2 the two schemas already diverge — `call-mech` and the
-differently-shaped `run` block exist only here.
+share a version number when they move together, and diverge otherwise.
+`tmt build` reads only `tmt.json` and `pmt build` only `pmt.json`; the two
+files never merge, and neither tool looks at the other's. `call-mech` and
+the differently-shaped `run` block exist only here; `strip-asserts` moved
+`tmt.json` alone to 0.3, with `pmt.json` unchanged at 0.2.
 
 ## Discovery
 
@@ -117,9 +118,9 @@ cross-target build order for a bare `tmt build`.
 | `call-mech` | `"mono"` \| `"frames"` \| `"hybrid"` | project-level value | This target's bound-call lowering, overriding the project default. |
 | `run` | object | absent | Optional run settings for `tmt build --run` — see The `run` block below. |
 
-Library resolution is **first-wins** in declared order, and a user
-definition of the same exported symbol silently shadows a library's — no
-warning is emitted (`docs/core.md (linking)`). Linking is lazy by
+A name a declared library defines may not also be defined by a source, or
+by an earlier library, once the program reaches it
+(`docs/core.md (linking)`). Linking is lazy by
 reachability, so a declared library that no effective source references
 contributes nothing to the output.
 
@@ -135,27 +136,41 @@ parser rejects it as an unknown flag, the same refusal any unrecognized
 dashed token gets).
 
 **Every declaration source in a target — its effective sources and its
-effective libraries — is read together, through one shared fixpoint.**
-Each one is read against a context that starts as just the embedded
-standard library (unless `stdlib: false`, which reaches every read here
-just as it reaches the link stage — a library header depending on
-`std::` resolves exactly as a sibling would) and grows to include every
-OTHER source's declarations the moment IT reads clean, iterated pass
-after pass until a whole pass makes no further progress. This is what
-lets a library header depend on another library, a sibling depend on
-another sibling, or a library depend on a sibling, of any dependency
-depth and regardless of declared order — a library authored with `tmt
-interface --extern` (below) commonly ships a header that itself still
-`use`s another unit's declarations, and this is what lets `tmt build`
-read it back. Only the FINAL table's precedence is fixed: every OTHER
-source of the same target, in its declared order, then each declared
-library, in `-l`/manifest order, then the embedded standard library
-unless opted out — the same objects-then-libraries-then-stdlib order the
-linker itself resolves names in.
+effective libraries — is read together, to a fixed point.** Each one is
+read against the declarations of all the OTHERS read so far, then the
+embedded standard library (unless `stdlib: false`, which reaches every
+read here just as it reaches the link stage — a library header depending
+on `std::` resolves exactly as a sibling would), and is read again
+whenever one of the others changes what it publishes, until nothing
+changes. What a `.tmc` publishes can depend on the others — an
+uncontracted tape's write set and a routine's `noreturn` are inferred
+through its calls, and a callee nobody has declared yet is taken to write
+its whole alphabet — and those inferences only narrow as declarations
+arrive, so the readings settle to one result whatever order the sources
+are declared in. This is what lets a library header depend on another
+library, a sibling depend on another sibling, or a library depend on a
+sibling, of any dependency depth and regardless of declared order — a
+library authored with `tmt interface --extern` (below) commonly ships a
+header that itself still `use`s another unit's declarations, and this is
+what lets `tmt build` read it back. A refusal that depends on the others
+— a `writes` contract broken through a call into another source, a
+`conflicting-declaration` — is decided against the settled readings
+only. The FINAL table lists every OTHER source of the same target, in its
+declared order, then each declared library, in `-l`/manifest order, then
+the embedded standard library unless opted out. The order decides
+nothing about what the sources publish through a PUBLISHED name, and
+nothing about a published name itself: the others may declare it only
+identically, privately or not (`docs/tmt/language.md (declarations)`).
+A name two sources carry only privately, in different forms, is taken
+from the first of them in table order, so a source that grafts or calls
+that name can publish differently by order.
 
-A `.tmc` sibling is read LENIENTLY: a routine's body is parsed and
-simply unused (a routine's declared shape is its signature, not its
-body), but a GRAPH's body is kept in full — a graph's only form is its
+A `.tmc` sibling is read LENIENTLY: a routine's declared shape is its
+signature, and its body contributes what its generated header would
+print — its `noreturn` and its uncontracted tapes' inferred write sets,
+inferred from the body exactly as `tmt interface` infers them, so a caller
+may omit `then` against a sibling it could omit it against through that
+sibling's generated header, and is held to the same write sets — but a GRAPH's body is kept in full — a graph's only form is its
 source, so this is what makes a sibling's exported graph graftable by
 another sibling, exactly as a library's own header does. A `.tma`/`.tmo`
 sibling is assembled/loaded and its OBJECT's own interface feeds the
@@ -186,20 +201,30 @@ declared order, so the actual root cause is never displaced by one of
 its own downstream symptoms regardless of which file happens to be
 listed first.
 
-**Mutually dependent units are not supported**: if two sources need EACH
-OTHER's declarations to read clean (most commonly two mutually recursive
-routines split across files, each under a narrow write contract that can
-only be validated once the other's declared contract is known), neither
-source's own read ever sees the other — each treats its absent peer as
-an unconstrained, opaque callee, infers a wider write footprint than its
-OWN declared contract allows, and fails with a contract violation that
-is really a missing-peer symptom wearing a different diagnostic. Both
-sources are named in the build's own error, in either declared order,
-together with a trailing note describing the pattern and its escape:
-break the cycle by hand — write a header for one of the two units, edit
-it to state the fact the other side needs without the routine bodies
-that create the cycle, and give it to the build as a library instead of
-a sibling.
+**Units may depend on each other.** Two sources whose routines call each
+other — mutually recursive routines split across files, each under its
+own `writes` contract — build: each contract is checked against what the
+other publishes once the readings have settled, and a contract the
+settled pair really breaks is refused, naming the routine and the glyphs,
+in either declared order. What is still refused is a pair in which each
+source needs the OTHER's declarations merely to be READ — each naming an
+alphabet that only the other declares, for example: neither can be read
+first, so there is nothing for the fixed point to start from. Both
+sources are then named in the build's own error, in either declared
+order, with a trailing note describing the pattern and its escape: break
+the cycle by hand — write a header for one of the two units and give it
+to the build as a library instead of a sibling.
+
+Two limits of such a pair. First, passing the declarations stage is not
+linking: when the routines call each other with state parameters (an
+exit-bearing call), the pair links only under `--call-mech=frames`; the
+default mechanism and `mono` refuse the link with the copy-path message
+that names that cure, the same limit a single recursive unit meets
+(`docs/tmt/language.md (state parameters)`). Second, a cycle none of
+whose members states a `writes` clause settles at the whole alphabet, so
+a caller under a narrower contract is refused with
+`writes-outside-contract` even when nothing in the cycle writes more;
+one `writes` clause on one member of the cycle cures it.
 
 For each declared library, **whatever exists of `<name>.tmo` (its
 interface section) and `<name>.tmh` (graphs, named maps, doc lines) on
@@ -214,28 +239,30 @@ rebuilt object actually does (a stale header next to a freshly rebuilt
 which the linker's own graft-drift check DOES verify digest-for-digest
 against every consumer that spliced it (`docs/core.md (graft drift)`).
 Regenerating a library's header from its current source (`tmt interface`)
-alongside rebuilding its object is the way to keep the two honest. A
+alongside rebuilding its object is the way to keep the two honest — the
+build never does this on its own, so a committed header is checked
+against its current source or object with `tmt interface --check
+FILE.tmh INPUT` (docs/tmt/cli.md (tmt interface)). A
 **header-only library** (no `<name>.tmo` on the search path at all)
 contributes declarations and is never handed to the linker: nothing to
 link means nothing for the graft-drift check to compare a spliced body
 against either, which is by design — a header-only library is the one
 place a header is trusted outright (`docs/core.md (graft drift)`).
 
-**A generated header is STRONGER than the source it came from.** A
-declarations reading uses declared facts only (`docs/tmt/language.md
-(declarations)`): a routine that declares no `writes` clause is read as
-able to write its whole alphabet, and one that does not say `noreturn`
-is read as able to return. `tmt interface` is where the compiler's own
-INFERENCE is turned into a declared fact — it writes the inferred write
-set into a `writes { … }` clause and prints `noreturn` for a routine
-whose body cannot return, whether or not the source said either. So the
-SAME unit supports strictly more when it is read as its own generated
-header than when it is read as a sibling source: a caller under a narrow
-write contract, or one omitting `then` at a call that never returns, can
-build against the header and fail against the sibling. Two ways to
-settle it, both fine: declare the clauses in the source so both readings
-agree, or generate the header with `tmt interface` and build against
-that.
+**A generated header is STRONGER than the source it came from** in
+one respect, the write set. A declarations reading uses the DECLARED
+write set only (`docs/tmt/language.md (declarations)`): a routine that
+declares no `writes` clause is read as able to write its whole alphabet.
+`tmt interface` is where the compiler's own inference is turned into a
+declared fact — it writes the inferred write set into a `writes { … }`
+clause whether or not the source said one. So a caller under a narrow
+write contract can build against the header and fail against the
+sibling. Two ways to settle it, both fine: declare the clauses in the
+source so both readings agree, or generate the header with `tmt
+interface` and build against that. `noreturn` is not part of that gap:
+a lenient read infers it through the same inference `tmt interface`
+prints it from, so a call omitting `then` builds against either form
+alike.
 
 Argv mode's own `-L`/`-l` (`docs/tmt/cli.md (build)`) select compile-time
 declarations too, exactly like a manifest's `libraries` — `tmt link`'s
@@ -296,22 +323,23 @@ experiment against that commitment for a single build without editing
 ### Profiles
 
 `profiles` holds at most two keys, `debug` and `release` — any other name
-is rejected. Each names up to four overrides, all optional:
+is rejected. Each names up to five overrides, all optional:
 
 | Key | Type | Meaning |
 |---|---|---|
 | `opt` | `"O0"` \| `"O1"` | Optimization level. |
 | `debug-info` | bool | Record debug info (labels + `.tmc` lines). |
 | `strip-debugger` | bool | Drop `brk` at codegen. |
+| `strip-asserts` | bool | Drop contract-check states. |
 | `werror` | bool | Treat post-refinement warnings as errors. |
 
 An override layers on top of one of two fixed bases, which mirror the CLI
 presets (`docs/tmt/cli.md`, `tmt compile`'s `--debug`/`--release`):
 
-| Base | `opt` | `debug-info` | `strip-debugger` | `werror` |
-|---|---|---|---|---|
-| `debug` | `O0` | `true` | `false` | `false` |
-| `release` | `O1` | `false` | `true` | `false` |
+| Base | `opt` | `debug-info` | `strip-debugger` | `strip-asserts` | `werror` |
+|---|---|---|---|---|---|
+| `debug` | `O0` | `true` | `false` | `false` | `false` |
+| `release` | `O1` | `false` | `true` | `true` | `false` |
 
 Profile selection happens once per `tmt build` invocation, not per
 target: `--release` selects the `release` base for every target built in
@@ -320,9 +348,10 @@ that invocation, and omitting both `--release` and `--debug` selects the
 means a bare `tmt build` (no flags at all) still resolves the full
 `debug` base, including `debug-info: true` — unlike `tmt compile`'s own
 true no-flags default, which carries no debug info. The individual
-compile-side flags (`-g`, `-O0`/`-O1`, `--strip-debugger`, `-Werror`)
-override the resolved profile's matching key for that invocation only;
-the manifest is never rewritten (`docs/tmt/cli.md (build)`, "flags win").
+compile-side flags (`-g`, `-O0`/`-O1`, `--strip-debugger`,
+`--strip-asserts`, `-Werror`) override the resolved profile's matching key
+for that invocation only; the manifest is never rewritten
+(`docs/tmt/cli.md (build)`, "flags win").
 
 Two compile-side flags have **no profile key at all**: `--fno-<pass>` and
 `--foutline`. Pass selection is not part of the schema, so those two

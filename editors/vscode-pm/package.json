@@ -2,7 +2,7 @@
   "name": "pmc",
   "displayName": "PMC (Post machine toolchain)",
   "description": "Language support for .pmc via pmt lsp: diagnostics, completions, navigation, formatting, semantic tokens.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "mellonis",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -154,7 +154,7 @@
   },
   "dependencies": { "vscode-languageclient": "^11.0.1" },
   "devDependencies": {
-    "@types/node": "^26.6.6", "@types/vscode": "^1.146.0",
+    "@types/node": "^26.6.6", "@types/vscode": "~1.91.0",
     "@vscode/vsce": "^4.1.1", "esbuild": "^0.28.2", "typescript": "^7.0.2"
   },
   "overrides": {

@@ -192,12 +192,12 @@ use crate::parser::{
 };
 use crate::syntax::extract::{
     comment_from, extract_alphabet, extract_bind, extract_doc_items, extract_graft, extract_import,
-    extract_map_decl, extract_rule, sig_tokens,
+    extract_map_decl, extract_rule, extract_set_decl, sig_tokens,
 };
 use crate::syntax::{
-    AlphabetView, BindView, DocRunView, GraftView, MachineView, MapDeclView, NamespaceView,
-    ReuseKind, ReuseView, RootView, RuleView, StateView, TapeView, TmcKind, TopView, UseView,
-    WorldView,
+    AlphabetView, BindView, DocRunView, GraftView, GuardView, MachineView, MapDeclView,
+    NamespaceView, ReuseKind, ReuseView, RootView, RuleView, SetDeclView, StateView, TapeView,
+    TmcKind, TopView, UseView, WorldView,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -761,6 +761,11 @@ fn nested_map_pairs(list_owner: &SyntaxNode) -> Vec<(usize, usize, Comment)> {
 enum ActionSlot {
     /// Between the pattern's `]` and the `->` — joins the pattern column.
     Arrow,
+    /// Between a written guard's `}` and the `->`: the same pattern
+    /// column, but the comment trails the guard text — the guard is
+    /// written text between `]` and `->`, and a comment prints between
+    /// the two significant tokens it was written between.
+    ArrowTail,
     /// In the action region, starting at column `n` of the grid order
     /// (0 = debugger, 1 = write, 2 = move, 3 = ahead of the transition):
     /// the comment sits after every landmark before `n` and prints in
@@ -810,6 +815,10 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
     let write_vec = child(TmcKind::WriteVec).map(|n| n.text_range());
     let move_vec = child(TmcKind::MoveVec).map(|n| n.text_range());
     let transition = child(TmcKind::Transition).map(|n| n.text_range());
+    // A written guard sits between `]` and `->` as written text: a
+    // boundary comment before its end joins the pattern column AHEAD of
+    // it, one past it trails it (`ArrowTail`).
+    let guard_end = child(TmcKind::Guard).map(|n| n.text_range().end);
     // The pattern's brackets are the rule's own direct children, so a
     // comment INSIDE them is a direct child too — it belongs to the
     // pattern's cell split, never to a boundary slot.
@@ -847,7 +856,11 @@ fn rule_interior(node: &SyntaxNode) -> RuleInterior {
                 from = 3;
             }
             let slot = if arrow.is_some_and(|a| p < a) {
-                ActionSlot::Arrow
+                if guard_end.is_some_and(|g| p >= g) {
+                    ActionSlot::ArrowTail
+                } else {
+                    ActionSlot::Arrow
+                }
             } else if within(&write_kw, &write_vec) {
                 ActionSlot::WriteBracket
             } else if within(&move_kw, &move_vec) {
@@ -1019,6 +1032,7 @@ fn alphabet_elem_text(elem: &AlphabetElem) -> String {
     match elem {
         AlphabetElem::Single(sym) => sym_text(sym),
         AlphabetElem::Range { lo, hi, .. } => format!("{}..{}", sym_text(lo), sym_text(hi)),
+        AlphabetElem::SetRef { name, .. } => name.clone(),
     }
 }
 
@@ -1045,12 +1059,24 @@ fn join_cells_with_interior(cells: &[String], interior: &Interior<'_>) -> String
     out
 }
 
+/// A named cell's `name: ` prefix: the written spelling's one addition to a
+/// cell's printed text — the clean reprint must carry it, or the formatter
+/// would silently drop names (docs/tmt/language.md (named vector cells)).
+fn cell_name_prefix(name: &Option<crate::parser::CellName>) -> String {
+    match name {
+        Some(n) => format!("{}: ", n.name),
+        None => String::new(),
+    }
+}
+
 fn pattern_cell_text(cell: &PatternCell) -> String {
-    let mut out = match &cell.kind {
+    let mut out = cell_name_prefix(&cell.name);
+    out.push_str(&match &cell.kind {
         PatternCellKind::Wildcard => "*".to_string(),
         PatternCellKind::Single(sym) => sym_text(sym),
         PatternCellKind::Range { lo, hi } => format!("{}..{}", sym_text(lo), sym_text(hi)),
-    };
+        PatternCellKind::SetRef { name, .. } => name.clone(),
+    });
     if let Some(binding) = &cell.binding {
         out.push_str(" as ");
         out.push_str(&binding.name);
@@ -1062,11 +1088,12 @@ fn pattern_cell_text(cell: &PatternCell) -> String {
 /// token run — see [`subst_body_text`] for why a substitution reprints
 /// from tokens rather than from its parsed value.
 fn write_cell_text(cell: &WriteCell, tokens: &[Token]) -> String {
-    match &cell.kind {
+    let body = match &cell.kind {
         WriteCellKind::Keep => "-".to_string(),
         WriteCellKind::Lit(sym) => sym_text(sym),
         WriteCellKind::Subst { expr } => format!("{{{}}}", subst_body_text(&expr.span, tokens)),
-    }
+    };
+    format!("{}{}", cell_name_prefix(&cell.name), body)
 }
 
 /// Reprint a substitution `{…}` from its SOURCE TOKENS, tight (no interior
@@ -1116,12 +1143,12 @@ fn fold_token_text(kind: &TokenKind) -> &str {
 }
 
 fn move_cell_text(cell: &MoveCell) -> String {
-    match cell.dir {
+    let dir = match cell.dir {
         MoveDir::Left => "<",
         MoveDir::Right => ">",
         MoveDir::Stay => ".",
-    }
-    .to_string()
+    };
+    format!("{}{}", cell_name_prefix(&cell.name), dir)
 }
 
 fn continuation_text(cont: &Continuation) -> String {
@@ -1133,12 +1160,13 @@ fn continuation_text(cont: &Continuation) -> String {
     }
 }
 
-/// One `writes { … }` or `preserves { … }` clause, re-encoded losslessly:
+/// One `writes { … }`, `never writes { … }`, `enters { … }`, or `leaves { … }`
+/// clause, re-encoded losslessly:
 /// a single leading space ahead of the keyword, then the same brace-body
 /// spacing an `alphabet` renders inline (`{ elem, elem }`,
-/// [`render_alphabet`]). An empty clause is meaningful — it declares that
-/// the parameter writes (or preserves) nothing, distinct from no clause at
-/// all — and prints `{}` with no inner space; this deliberately does NOT
+/// [`render_alphabet`]). An empty clause is meaningful — `writes {}` declares
+/// that the parameter writes nothing, distinct from no clause at all — and
+/// prints `{}` with no inner space; this deliberately does NOT
 /// mirror `render_alphabet`'s empty-body spacing because a bare `alphabet`
 /// body can never be empty (the compiler rejects it), so that path renders
 /// no real input and sets no convention. A clause carries no interior
@@ -1168,7 +1196,9 @@ fn signature_params(params: &[SigParam]) -> Vec<String> {
                 alphabet,
                 volatile,
                 writes,
-                preserves,
+                never_writes,
+                enters,
+                leaves,
                 ..
             } => {
                 let prefix = if *volatile { "volatile " } else { "" };
@@ -1176,8 +1206,14 @@ fn signature_params(params: &[SigParam]) -> Vec<String> {
                 if let Some(clause) = writes {
                     out.push_str(&contract_clause_text("writes", clause));
                 }
-                if let Some(clause) = preserves {
-                    out.push_str(&contract_clause_text("preserves", clause));
+                if let Some(clause) = never_writes {
+                    out.push_str(&contract_clause_text("never writes", clause));
+                }
+                if let Some(clause) = enters {
+                    out.push_str(&contract_clause_text("enters", clause));
+                }
+                if let Some(clause) = leaves {
+                    out.push_str(&contract_clause_text("leaves", clause));
                 }
                 out
             }
@@ -1250,7 +1286,14 @@ fn binding_value_text(value: &BindingValue, col: usize, map_interior: &Interior<
 /// (module doc, "Argument lists and the width threshold";
 /// docs/tmt/fmt.md (comments inside a list)).
 fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
-    let pairs: Vec<String> = map.pairs.iter().map(map_pair_clean_text).collect();
+    // The open marker is an ENTRY of the list, always its last, so it
+    // takes a slot of its own in both the one-line and the broken form —
+    // which is what lets a comment written beside it key to that slot
+    // rather than to the pair before it ([`map_pair_count`]).
+    let mut pairs: Vec<String> = map.pairs.iter().map(map_pair_clean_text).collect();
+    if map.open.is_some() {
+        pairs.push("*".to_string());
+    }
     if interior.is_empty() {
         return format!("with map {{ {} }}", pairs.join(", "));
     }
@@ -1295,11 +1338,13 @@ fn map_pair_clean_text(pair: &MapPair) -> String {
     format!("{} {arrow} {}", sym_text(&pair.src), sym_text(&pair.dst))
 }
 
-/// The pair count of a binding argument's map, or 0 when it carries none —
-/// what [`bucket`] needs to size a map's own slot list.
+/// The ENTRY count of a binding argument's map, or 0 when it carries none
+/// — what [`bucket`] needs to size a map's own slot list. An open map's
+/// `*` is an entry like any other (it is separated by the same comma and
+/// counted by the same `trivia::interior` walk), so it adds one.
 fn map_pair_count(value: &BindingValue) -> usize {
     match value {
-        BindingValue::Named { map: Some(m), .. } => m.pairs.len(),
+        BindingValue::Named { map: Some(m), .. } => m.pairs.len() + usize::from(m.open.is_some()),
         _ => 0,
     }
 }
@@ -1464,8 +1509,98 @@ struct PreparedRule {
     pattern_parts: VecParts,
     write_parts: Option<VecParts>,
     move_parts: Option<VecParts>,
+    /// The `where { … }` guard's written elements — the guard is written
+    /// text between `]` and `->`, printed verbatim (`guard_span`), not
+    /// canonicalized like a header's `guard_text`
+    /// (docs/tmt/language.md (rule guards)).
+    guard: Option<GuardPrint>,
     interior: RuleInterior,
     off_grid: bool,
+}
+
+/// One guard's print-ready elements: significant tokens' written
+/// spellings and comments, in written order. The render happens at print
+/// time because only then is the continuation indent known.
+struct GuardPrint {
+    segs: Vec<GuardSeg>,
+    /// A LINE, own-line or multi-line comment inside: the rule cannot be a
+    /// grid row (the same rule every vector interior follows).
+    breaks: bool,
+}
+
+enum GuardSeg {
+    /// A significant token's written spelling and its kind (the spacing
+    /// context).
+    Tok(String, SyntaxKind),
+    /// A comment in its written slot.
+    Comment(Comment),
+}
+
+/// Canonical no-space pairs inside a guard's token run: `(` glues
+/// forward and `)` backward (group parentheses read as written), `::`
+/// on both sides (a qualified set name). Unlike [`glued_pair`] there is
+/// no call shape — no token glues to a `(` on its LEFT.
+fn glued_guard(prev: SyntaxKind, next: SyntaxKind) -> bool {
+    prev == TmcKind::LParen.into()
+        || next == TmcKind::RParen.into()
+        || prev == TmcKind::ColonColon.into()
+        || next == TmcKind::ColonColon.into()
+}
+
+/// One guard printed from its [`GuardPrint`], comments kept in their
+/// written slots (docs/tmt/fmt.md (comments are never moved)): a BLOCK
+/// comment stays inline, a LINE comment ends its line and the run
+/// continues at `cont_pad`, an own-line or multi-line comment keeps a
+/// line of its own. [`span_with_comments`] is this same walk for
+/// declaration token runs.
+fn guard_span(print: &GuardPrint, cont_pad: &str) -> String {
+    let mut out = String::new();
+    let mut prev: Option<SyntaxKind> = None;
+    let mut at_line_start = false;
+    for seg in &print.segs {
+        match seg {
+            GuardSeg::Tok(text, kind) => {
+                let spaced = !at_line_start
+                    && prev.is_some_and(|p| is_comment_kind(p) || !glued_guard(p, *kind));
+                if spaced {
+                    out.push(' ');
+                }
+                out.push_str(text);
+                prev = Some(*kind);
+                at_line_start = false;
+            }
+            GuardSeg::Comment(c) => {
+                let is_line = matches!(c.kind, CommentKind::Line);
+                let own = c.own_line || c.text.contains('\n');
+                if own && !at_line_start && !out.is_empty() {
+                    out.push('\n');
+                    out.push_str(cont_pad);
+                    at_line_start = true;
+                }
+                let spaced = !at_line_start && prev.is_some();
+                if spaced {
+                    out.push(' ');
+                }
+                out.push_str(&normalize_comment_text(&c.text));
+                if is_line || own {
+                    out.push('\n');
+                    out.push_str(cont_pad);
+                    at_line_start = true;
+                } else {
+                    at_line_start = false;
+                }
+                prev = Some(
+                    if is_line {
+                        TmcKind::LineComment
+                    } else {
+                        TmcKind::BlockComment
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// A RULE node → the pieces the grid and the row renderer need.
@@ -1508,12 +1643,15 @@ fn prepare_rule(view: &RuleView, index: &TextLineIndex) -> PreparedRule {
             move_cell_text(&rule.mov.as_ref().expect("the vector was found").cells[i])
         })
     });
-    let off_grid = breaks_the_grid(&pattern_parts, &write_parts, &move_parts, &interior);
+    let guard = view.guard().map(|g| guard_print(&g));
+    let off_grid = breaks_the_grid(&pattern_parts, &write_parts, &move_parts, &interior)
+        || guard.as_ref().is_some_and(|g| g.breaks);
     PreparedRule {
         rule,
         pattern_parts,
         write_parts,
         move_parts,
+        guard,
         interior,
         off_grid,
     }
@@ -1562,14 +1700,51 @@ fn breaks_the_grid(
             .any(|(_, c)| matches!(c.kind, CommentKind::Line) || c.text.contains('\n'))
 }
 
-/// A rule's pattern column text: the vector from its parts, plus any
-/// comment written between the pattern's `]` and the `->` — appended,
-/// widening the pattern column exactly as an in-pattern spliced comment
-/// always has (docs/tmt/fmt.md (comments are never moved)).
+/// One `where { … }` guard's written elements collected in order:
+/// significant tokens keep their written spelling (names, literals,
+/// parentheses), comments claim their written slots
+/// (docs/tmt/fmt.md (comments are never moved); the header's canonical
+/// `guard_text` is the other reader of the same tree).
+fn guard_print(view: &GuardView) -> GuardPrint {
+    let mut segs = Vec::new();
+    let mut breaks = false;
+    for e in view.syntax().children_with_tokens() {
+        let SyntaxElement::Token(t) = e else {
+            continue;
+        };
+        if is_ws(t.kind()) {
+            continue;
+        }
+        if is_comment_kind(t.kind()) {
+            let c = comment_from(&t);
+            breaks |= matches!(c.kind, CommentKind::Line) || c.own_line || c.text.contains('\n');
+            segs.push(GuardSeg::Comment(c));
+        } else {
+            segs.push(GuardSeg::Tok(t.text().to_string(), t.kind()));
+        }
+    }
+    GuardPrint { segs, breaks }
+}
+
+/// A rule's pattern column text: the vector from its parts, plus the
+/// written `where` guard and any comment written between the pattern's
+/// `]` and the `->` — each in its written slot, widening the pattern
+/// column exactly as an in-pattern spliced comment always has
+/// (docs/tmt/fmt.md (comments are never moved)).
 fn pattern_full_text(prepared: &PreparedRule) -> String {
     let mut out = vec_full_text(&prepared.pattern_parts);
     for (slot, c) in &prepared.interior.boundaries {
         if *slot == ActionSlot::Arrow {
+            out.push(' ');
+            out.push_str(&normalize_comment_text(&c.text));
+        }
+    }
+    if let Some(g) = &prepared.guard {
+        out.push(' ');
+        out.push_str(&guard_span(g, ""));
+    }
+    for (slot, c) in &prepared.interior.boundaries {
+        if *slot == ActionSlot::ArrowTail {
             out.push(' ');
             out.push_str(&normalize_comment_text(&c.text));
         }
@@ -1613,7 +1788,7 @@ fn action_texts(prepared: &PreparedRule, has: [bool; 3]) -> ([String; 3], String
     for (slot, c) in &prepared.interior.boundaries {
         let text = normalize_comment_text(&c.text);
         let from = match slot {
-            ActionSlot::Arrow => continue,
+            ActionSlot::Arrow | ActionSlot::ArrowTail => continue,
             ActionSlot::WriteBracket => {
                 brackets[0].push(text);
                 continue;
@@ -1837,6 +2012,13 @@ fn render_rule_off_grid(prepared: &PreparedRule, indent: usize) -> String {
 
     line.push_str(&vec_text(&prepared.pattern_parts, indent));
     boundary(&mut line, ActionSlot::Arrow);
+    if let Some(g) = &prepared.guard {
+        if !line.ends_with(' ') && !line.ends_with(&cont_pad) {
+            line.push(' ');
+        }
+        line.push_str(&guard_span(g, &cont_pad));
+    }
+    boundary(&mut line, ActionSlot::ArrowTail);
     if !line.ends_with(' ') && !line.ends_with(&cont_pad) {
         line.push(' ');
     }
@@ -2030,6 +2212,7 @@ fn render_top_item(unit: &Unit, indent: usize, source: &str, index: &TextLineInd
         {
             TopView::Use(v) => render_use(&v, unit, indent, index),
             TopView::Alphabet(v) => render_alphabet(&v, unit, indent, source, index),
+            TopView::SetDecl(v) => render_set_decl(&v, unit, indent, source, index),
             TopView::MapDecl(v) => render_map_decl(&v, unit, indent, source, index),
             TopView::Namespace(v) => render_namespace(&v, unit, indent, source, index),
             TopView::Reuse(v) => render_reuse(&v, unit, indent, source, index),
@@ -2139,22 +2322,75 @@ fn render_alphabet(
     index: &TextLineIndex,
 ) -> Rendered {
     let a = extract_alphabet(view, &[], source, index);
-    let open_trailing = trivia::open_trailing(view.syntax(), index);
+    let decl = ElementListDecl {
+        node: view.syntax(),
+        doc_run: view.doc_run(),
+        keyword: "alphabet",
+        name: &a.name,
+        exported: a.exported,
+        elems: &a.elems,
+    };
+    render_element_list_decl(&decl, unit, indent, source, index)
+}
+
+/// `export? set NAME { … }` — an alphabet's exact shape, keyword aside:
+/// the same header, the same flat element body, the same wrap and comment
+/// rules (docs/tmt/fmt.md (comments are never moved)).
+fn render_set_decl(
+    view: &SetDeclView,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let s = extract_set_decl(view, &[], source, index);
+    let decl = ElementListDecl {
+        node: view.syntax(),
+        doc_run: view.doc_run(),
+        keyword: "set",
+        name: &s.name,
+        exported: s.exported,
+        elems: &s.elems,
+    };
+    render_element_list_decl(&decl, unit, indent, source, index)
+}
+
+/// A top-level declaration whose body is a flat element list — an
+/// `alphabet` or a `set`: everything [`render_element_list_decl`] needs,
+/// already extracted.
+struct ElementListDecl<'a> {
+    node: &'a SyntaxNode,
+    doc_run: Option<DocRunView>,
+    keyword: &'static str,
+    name: &'a str,
+    exported: bool,
+    elems: &'a [AlphabetElem],
+}
+
+fn render_element_list_decl(
+    decl: &ElementListDecl,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let open_trailing = trivia::open_trailing(decl.node, index);
     let pad = " ".repeat(indent);
     let mut code = doc_run_text(
-        &doc_items(view.doc_run(), source, index),
+        &doc_items(decl.doc_run.clone(), source, index),
         indent,
-        trivia::blank_before_decl(view.syntax()),
+        trivia::blank_before_decl(decl.node),
     );
     // A header carrying comments prints them IN PLACE between its own
     // tokens (docs/tmt/fmt.md (comments are never moved)); the extracted
     // fast path below is byte-identical to what a comment-free header
     // always printed. Either way `head` ends with the `{`.
-    let head = head_through_open(view.syntax(), TmcKind::LBrace, &pad).unwrap_or_else(|| {
+    let head = head_through_open(decl.node, TmcKind::LBrace, &pad).unwrap_or_else(|| {
         format!(
-            "{pad}{}alphabet {} {{",
-            if a.exported { "export " } else { "" },
-            a.name
+            "{pad}{}{} {} {{",
+            if decl.exported { "export " } else { "" },
+            decl.keyword,
+            decl.name
         )
     });
     // Entries and boundary comments are derived TOGETHER: the alphabet
@@ -2169,7 +2405,7 @@ fn render_alphabet(
     // pre-brace comment is pending, is subtracted so two claimants
     // cannot both print a brace-riding comment.
     let (entries, body_interior) = {
-        let all: Vec<SyntaxElement> = view.syntax().children_with_tokens().collect();
+        let all: Vec<SyntaxElement> = decl.node.children_with_tokens().collect();
         let close_idx = all
             .iter()
             .rposition(|e| e.kind() == TmcKind::RBrace.into())
@@ -2222,7 +2458,7 @@ fn render_alphabet(
                 let text = if slice_has_comment(&slice) {
                     span_with_comments(&slice, "", &entry_cont, None).0
                 } else {
-                    alphabet_elem_text(&a.elems[entries.len()])
+                    alphabet_elem_text(&decl.elems[entries.len()])
                 };
                 entries.push(text);
             }
@@ -2233,7 +2469,14 @@ fn render_alphabet(
         (entries, pairs)
     };
     let interior = bucket(&body_interior, entries.len());
-    let one_line = format!("{head} {} }}", entries.join(", "));
+    // An empty body — legal for a set, which may name nothing — prints
+    // `{}`, the spelling an empty contract clause takes, rather than a
+    // brace pair padded around nothing.
+    let one_line = if entries.is_empty() {
+        format!("{head}}}")
+    } else {
+        format!("{head} {} }}", entries.join(", "))
+    };
     // The width check measures the LAST line: a line comment in the
     // header breaks `head` across lines, and only the line the body
     // lands on competes with the limit.
@@ -3186,14 +3429,18 @@ mod tests {
     /// rather than exposed — the price of deleting the reference, and the
     /// reason the capture was mechanical rather than hand-written.
     ///
-    /// Deliberately NOT paired with an idempotency assertion: several
-    /// sources here are the formatter's mandated non-idempotent quirks
-    /// (docs/tmt/fmt.md (idempotency)), which such an assertion would
-    /// fail.
+    /// Each pin is also held to a second pass: the formatter is
+    /// idempotent unconditionally (docs/tmt/fmt.md (idempotent)), so
+    /// formatting the pinned output must return it unchanged.
     #[track_caller]
     fn pins(src: &str, expected: &str) {
         let out = format(src).expect("the printer formats");
         assert_eq!(out, expected, "for:\n{src}");
+        assert_eq!(
+            format(&out).expect("the output formats"),
+            out,
+            "a second pass moved something, for:\n{src}"
+        );
     }
 
     #[test]
@@ -3728,8 +3975,8 @@ mod tests {
         );
         pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  \
-             routine r(volatile tape t: ab writes {} preserves { '_'..'a' }, state s) {\n  }\n}\n",
-            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(volatile tape t: ab writes {} preserves { '_'..'a' }, state s) {\n  }\n}\n",
+             routine r(volatile tape t: ab writes {} never writes { '_'..'a' }, state s) {\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(volatile tape t: ab writes {} never writes { '_'..'a' }, state s) {\n  }\n}\n",
         );
         pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g() {\n  }\n}\n",
@@ -4463,6 +4710,40 @@ mod tests {
         assert_eq!(once, src, "the header comment stays in the header");
         let twice = format(&once).expect("the green printer formats");
         assert_eq!(once, twice, "and pass 1 is a fixed point");
+    }
+
+    /// A glyph set declaration prints in the alphabet's own one-line shape,
+    /// and a set reference — bare or qualified — prints verbatim wherever an
+    /// element list takes one: a set body, an alphabet body, a clause.
+    #[test]
+    fn a_set_declaration_and_its_references_round_trip() {
+        pins(
+            "set digits {'0'..'4',low}\n",
+            "set digits { '0'..'4', low }\n",
+        );
+        pins("export set s { 'a' }\n", "export set s { 'a' }\n");
+        pins("set none { }\n", "set none {}\n");
+        pins("set none {}\n", "set none {}\n");
+        pins(
+            "alphabet dec { '_', n::digits }\n",
+            "alphabet dec { '_', n::digits }\n",
+        );
+        pins(
+            "routine r(tape t: dec enters { digits }) {\n  entry state s { [*] -> return; }\n}\n",
+            "routine r(tape t: dec enters { digits }) {\n  entry state s { [*] -> return; }\n}\n",
+        );
+    }
+
+    /// A set declaration too wide for one line wraps like an alphabet body,
+    /// and the wrapped output is itself a fixed point.
+    #[test]
+    fn a_wide_set_declaration_wraps_and_is_idempotent() {
+        let src = "set aVeryLongSetNameForWrapping { 'a'..'e', someOtherLongSetName, \
+                   yetAnotherLongSetName, '0'..'9', finalReferencedSetName }\n";
+        let once = format(src).expect("the green printer formats");
+        assert!(once.lines().count() > 1, "wraps: {once}");
+        let twice = format(&once).expect("the green printer formats");
+        assert_eq!(once, twice, "wrapped output must itself be a fixed point");
     }
 
     /// A named map declaration — the same one-line canonical shape as an

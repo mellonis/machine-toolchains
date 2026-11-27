@@ -7,6 +7,9 @@
 //! never be passed as a binding argument to a `call`/`graft`/`bind`, where a
 //! spliced or called subgraph could touch it out of the machine's own view.
 //!
+//! An argument-less `call`, `graft` or `bind` into another unit binds the
+//! machine's tapes by position, so a machine making one touches every tape.
+//!
 //! New on the lint channel (the deferred hygiene family). Detected
 //! source-level over `Resolved`; the machine world is the only world with
 //! free-standing tape declarations (routine/graph tapes are signature
@@ -38,7 +41,7 @@ fn collect_arg_targets<'a>(args: &'a [BindingArg], names: &mut HashSet<&'a str>)
 }
 
 /// Every tape name the machine world hands to a reuse (`graft`/`bind`/`call`).
-fn bound_tape_names(world: &ResolvedWorld) -> HashSet<&str> {
+pub(crate) fn bound_tape_names(world: &ResolvedWorld) -> HashSet<&str> {
     let mut names: HashSet<&str> = HashSet::new();
     for graft in &world.grafts {
         collect_arg_targets(&graft.args, &mut names);
@@ -56,7 +59,7 @@ fn bound_tape_names(world: &ResolvedWorld) -> HashSet<&str> {
 
 /// True when position `pos` of the machine world's rules is never
 /// distinguished, written, or moved.
-fn position_is_inert(world: &ResolvedWorld, pos: usize) -> bool {
+pub(crate) fn position_is_inert(world: &ResolvedWorld, pos: usize) -> bool {
     for state in &world.states {
         for rule in &state.rules {
             // Pattern: a Single/Range at this position reads a distinguishing
@@ -87,11 +90,33 @@ fn position_is_inert(world: &ResolvedWorld, pos: usize) -> bool {
     true
 }
 
+/// Whether `world` reuses another unit with no argument list — a
+/// `call`/`bind` whose target is external, or a `graft` whose target is
+/// not one of this unit's graphs — which binds its tapes by position and
+/// may therefore touch every one of them (docs/tmt/lint.md (unused-tape)).
+pub(crate) fn makes_transparent_reuse(ctx: &LintContext, world: &ResolvedWorld) -> bool {
+    let call = world.calls.iter().any(|c| {
+        matches!(
+            &c.target,
+            ResolvedCallTarget::Routine { external: true, args, .. } if args.is_empty()
+        )
+    });
+    let bind = world.binds.iter().any(|b| b.external && b.args.is_empty());
+    let graft = world
+        .grafts
+        .iter()
+        .any(|g| g.args.is_empty() && ctx.resolved.worlds.iter().all(|w| w.name != g.target));
+    call || bind || graft
+}
+
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     let Some(idx) = ctx.resolved.entry_world else {
         return;
     };
     let world = &ctx.resolved.worlds[idx];
+    if makes_transparent_reuse(ctx, world) {
+        return;
+    }
     let bound = bound_tape_names(world);
     for (pos, tape) in world.tapes.iter().enumerate() {
         if bound.contains(tape.name.as_str()) {
@@ -156,5 +181,37 @@ machine {
 }
 ";
         assert!(findings(src).is_empty(), "{:?}", findings(src));
+    }
+
+    const UT: &str = "\
+alphabet bin { '_', '^', '$', '0', '1' }
+machine {
+  tape t: bin;
+  entry state go { [*] -> call std::binaryNumbers::plusOne() then stop; }
+}
+";
+
+    const UT_NEAR: &str = "\
+alphabet bin { '_', '^', '$', '0', '1' }
+machine {
+  tape t: bin;
+  tape u: bin;
+  entry state go { [*, *] -> call std::binaryNumbers::plusOne(num = t) then stop; }
+}
+";
+
+    /// Mutation: drop the transparent early return from `check`.
+    #[test]
+    fn a_transparent_call_into_another_unit_touches_every_tape() {
+        assert!(findings(UT).is_empty(), "{:?}", findings(UT));
+    }
+
+    /// Mutation: treat every external call as transparent (ignore whether
+    /// the argument list is empty).
+    #[test]
+    fn a_bound_call_touches_only_the_tapes_it_names() {
+        let f = findings(UT_NEAR);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].contains("`u`"), "{f:?}");
     }
 }

@@ -473,6 +473,190 @@ mod tests {
         );
     }
 
+    /// One thing the script offers: a flag token, a bare word (a
+    /// subcommand, a group's action, a choice positional, an
+    /// `--emit-ir=`-joined token), or a closed value choice of a flag —
+    /// each keyed by the command path whose condition guards it.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    enum Offer {
+        Flag(Vec<String>, String),
+        Word(Vec<String>, String),
+        Value(Vec<String>, String, String),
+    }
+
+    /// Splits one `complete` line into shell words: fish single quotes,
+    /// inside which only `\'` and `\\` are escapes.
+    fn words(line: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut current = String::new();
+        let mut in_word = false;
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\'' => {
+                    in_word = true;
+                    while let Some(q) = chars.next() {
+                        match q {
+                            '\'' => break,
+                            '\\' => match chars.next() {
+                                Some(e @ ('\'' | '\\')) => current.push(e),
+                                Some(e) => {
+                                    current.push('\\');
+                                    current.push(e);
+                                }
+                                None => current.push('\\'),
+                            },
+                            other => current.push(other),
+                        }
+                    }
+                }
+                ' ' => {
+                    if in_word {
+                        out.push(std::mem::take(&mut current));
+                        in_word = false;
+                    }
+                }
+                other => {
+                    in_word = true;
+                    current.push(other);
+                }
+            }
+        }
+        if in_word {
+            out.push(current);
+        }
+        out
+    }
+
+    /// The command path a `-n` condition guards: `__fish_use_subcommand`
+    /// is the root, otherwise every POSITIVE `__fish_seen_subcommand_from`
+    /// clause contributes its word.
+    fn condition_path(condition: &str) -> Vec<String> {
+        if condition == "__fish_use_subcommand" {
+            return Vec::new();
+        }
+        condition
+            .split("; and ")
+            .filter_map(|clause| clause.strip_prefix("__fish_seen_subcommand_from "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The fish option switch back to the flag token it spells.
+    fn token_of(switch: &str, name: &str) -> String {
+        match switch {
+            "-l" => format!("--{name}"),
+            _ => format!("-{name}"),
+        }
+    }
+
+    /// Everything the rendered script offers, read back out of it.
+    fn offers_in(script: &str) -> std::collections::BTreeSet<Offer> {
+        let mut out = std::collections::BTreeSet::new();
+        for line in script.lines().filter(|l| l.starts_with("complete ")) {
+            let w = words(line);
+            let Some(n) = w.iter().position(|x| x == "-n") else {
+                continue; // the global `complete -c tmt -f`
+            };
+            let path = condition_path(&w[n + 1]);
+            let mut flag = None;
+            let mut listed = Vec::new();
+            let mut i = n + 2;
+            while i < w.len() {
+                match w[i].as_str() {
+                    s @ ("-l" | "-s" | "-o") => {
+                        flag = Some(token_of(s, &w[i + 1]));
+                        i += 2;
+                    }
+                    "-a" => {
+                        if !w[i + 1].starts_with('(') {
+                            listed.extend(w[i + 1].split_whitespace().map(str::to_string));
+                        }
+                        i += 2;
+                    }
+                    "-d" => i += 2,
+                    _ => i += 1,
+                }
+            }
+            match flag {
+                Some(token) => {
+                    for value in listed {
+                        out.insert(Offer::Value(path.clone(), token.clone(), value));
+                    }
+                    out.insert(Offer::Flag(path, token));
+                }
+                None => {
+                    for word in listed {
+                        out.insert(Offer::Word(path.clone(), word));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Everything the registry says the script must offer.
+    fn offers_in_registry(reg: &Registry) -> std::collections::BTreeSet<Offer> {
+        let mut out = std::collections::BTreeSet::new();
+        for command in &reg.commands {
+            let path = command.path.clone();
+            if path.len() == 2 {
+                out.insert(Offer::Word(vec![path[0].clone()], path[1].clone()));
+            }
+            for flag in &command.flags {
+                for token in expand(flag) {
+                    out.insert(Offer::Flag(path.clone(), token));
+                }
+                match &flag.kind {
+                    FlagKind::Value(ValueHint::Choices(choices)) => {
+                        for c in choices {
+                            out.insert(Offer::Value(path.clone(), flag.name.clone(), c.clone()));
+                        }
+                    }
+                    FlagKind::OptionalEqualsValue(ValueHint::Choices(choices)) => {
+                        for c in choices {
+                            out.insert(Offer::Word(path.clone(), format!("{}={c}", flag.name)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Positional::One(PositionalHint::Choices(choices))
+            | Positional::OneOrMore(PositionalHint::Choices(choices)) = &command.positional
+            {
+                for c in choices {
+                    out.insert(Offer::Word(path.clone(), c.value.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// The registry-wide guard: every subcommand, group action, flag
+    /// token (suffix-family members included), closed value choice and
+    /// choice positional the registry declares is offered by the script
+    /// under its own command's condition, and the script offers nothing
+    /// else. A set-compare in both directions, so a registry entry the
+    /// renderer drops and an offer the registry never declared both
+    /// redden it. Red if `render_leaf` skips any one flag (e.g. a
+    /// `filter(|f| f.name != "--strip-debugger")` on its flag loop), or
+    /// if the group-action loop is removed.
+    #[test]
+    fn the_script_offers_exactly_what_the_registry_declares() {
+        let reg = registry();
+        let script = render(&reg);
+        let got = offers_in(&script);
+        let want = offers_in_registry(&reg);
+        let missing: Vec<&Offer> = want.difference(&got).collect();
+        let extra: Vec<&Offer> = got.difference(&want).collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "fish script drifted from the registry\nmissing: {missing:#?}\nextra: {extra:#?}"
+        );
+        // The guard reads a non-trivial script: every command is covered.
+        assert!(want.len() > reg.commands.len(), "{want:#?}");
+    }
+
     #[test]
     fn an_apostrophe_in_a_description_is_escaped() {
         let s = script();

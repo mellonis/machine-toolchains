@@ -16,12 +16,49 @@ use super::*;
 /// A fresh scratch directory under `std::env::temp_dir()`, unique per call
 /// (process id + an atomic counter — this crate has no tempfile
 /// dependency, matching the zero-new-deps constraint).
-fn unique_tmp_dir(label: &str) -> PathBuf {
+fn unique_tmp_dir(label: &str) -> ScratchDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("tmt-lsp-test-{label}-{}-{n}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn file_uri(path: &Path) -> String {
@@ -653,8 +690,8 @@ machine {
 
     // Cell 0 draws from `ctl`'s alphabet…
     let first = labels(&complete_typing(head, "*, *", tail));
-    assert!(first.contains(&"'0'".to_string()), "{first:?}");
-    assert!(first.contains(&"'1'".to_string()), "{first:?}");
+    assert!(first.contains(&"0".to_string()), "{first:?}");
+    assert!(first.contains(&"1".to_string()), "{first:?}");
     assert!(!first.contains(&"'a'".to_string()), "{first:?}");
     assert!(first.contains(&"*".to_string()), "{first:?}");
 
@@ -662,7 +699,30 @@ machine {
     let second = labels(&complete_typing(&format!("{head}'0', "), "*", tail));
     assert!(second.contains(&"'a'".to_string()), "{second:?}");
     assert!(second.contains(&"'b'".to_string()), "{second:?}");
-    assert!(!second.contains(&"'1'".to_string()), "{second:?}");
+    assert!(!second.contains(&"1".to_string()), "{second:?}");
+}
+
+/// After `['0'..` in a quoted-digit alphabet the high endpoint completes
+/// bare (the label names a number), and accepting it yields `['0'..9]` —
+/// which must compile: a cell range looks its endpoints up by label, so
+/// the mixed spelling is the same walk as `'0'..'9'`. Mutation: a
+/// completion inserting text that no longer compiles — the mixed pair
+/// refused in a cell.
+#[test]
+fn a_range_high_endpoint_completion_compiles_when_accepted() {
+    let head = "\
+alphabet d { '_', '0'..'9' }
+
+machine {
+  tape t: d;
+  entry state s {
+    ['0'..";
+    let tail = "] -> stop;\n    [*] -> halt;\n  }\n}\n";
+    let got = labels(&complete_typing(head, "'9'", tail));
+    assert!(got.contains(&"9".to_string()), "{got:?}");
+    let accepted = format!("{head}9{tail}");
+    crate::compiler::compile(&accepted, crate::compiler::CompileOptions::default())
+        .unwrap_or_else(|e| panic!("the accepted completion must compile: {e}"));
 }
 
 #[test]
@@ -681,7 +741,7 @@ machine {
     let got = labels(&complete_typing(head, "'a'", tail));
     assert!(got.contains(&"-".to_string()), "{got:?}");
     assert!(got.contains(&"'a'".to_string()), "{got:?}");
-    assert!(!got.contains(&"'1'".to_string()), "{got:?}");
+    assert!(!got.contains(&"1".to_string()), "{got:?}");
 }
 
 #[test]
@@ -696,7 +756,12 @@ machine {
     [*] -> move [";
     let tail = "] stop;\n  }\n}\n";
     let got = labels(&complete_typing(head, ".", tail));
-    assert_eq!(got, vec!["<", ">", "."]);
+    // The first cell may also open the named form, so it offers the tape.
+    assert_eq!(got, vec!["ctl: ", "<", ">", "."]);
+    // Past the first cell of a positional vector: the directions alone.
+    let tail = "] stop;\n  }\n}\n";
+    let later = labels(&complete_typing(&format!("{head}., "), ".", tail));
+    assert_eq!(later, vec!["<", ">", "."]);
 }
 
 #[test]
@@ -999,11 +1064,11 @@ machine {
     // Left of the arrow: the HOST tape's alphabet (`data`, wide).
     let src_side = labels(&complete_typing(head, "'a' -> '1'", tail));
     assert!(src_side.contains(&"'a'".to_string()), "{src_side:?}");
-    assert!(!src_side.contains(&"'1'".to_string()), "{src_side:?}");
+    assert!(!src_side.contains(&"1".to_string()), "{src_side:?}");
 
     // Right of it: the CALLEE tape parameter's alphabet (`num`, bits).
     let dst_side = labels(&complete_typing(&format!("{head}'a' -> "), "'1'", tail));
-    assert!(dst_side.contains(&"'1'".to_string()), "{dst_side:?}");
+    assert!(dst_side.contains(&"1".to_string()), "{dst_side:?}");
     assert!(!dst_side.contains(&"'a'".to_string()), "{dst_side:?}");
 }
 
@@ -1087,7 +1152,7 @@ machine {
 #[test]
 fn after_a_signature_tapes_alphabet_the_clause_position_completion_offers_nothing_yet() {
     // Mirrors `after_volatile_the_item_boundary_completion_offers_nothing_yet`:
-    // `writes`/`preserves` are reserved keywords with no `classify_context`
+    // `writes`/`never writes` are reserved keywords with no `classify_context`
     // arm of their own, so the position right after a signature tape's
     // alphabet name falls through every branch (the previous token is an
     // `Ident`, not a boundary punctuation mark) and returns `None`. This is
@@ -1115,7 +1180,7 @@ fn completions_survive_a_document_that_no_longer_resolves() {
     service.did_update(&uri, &broken);
     let pos = pos_after(&broken, "['1', *]", 1);
     let got = labels(&service.completion(&uri, pos));
-    assert!(got.contains(&"'0'".to_string()), "{got:?}");
+    assert!(got.contains(&"0".to_string()), "{got:?}");
 }
 
 #[test]
@@ -1477,17 +1542,17 @@ routine r(tape num: bits writes { '0', '1' }) {
 #[test]
 fn hovering_a_routine_shows_volatile_with_both_clauses_in_order() {
     // The three modifiers together, not just the pairwise cases: `volatile`
-    // then `writes` then `preserves`, in the fixed grammar order (fmt's own
+    // then `writes` then `never writes`, in the fixed grammar order (fmt's own
     // `volatile_and_both_clauses_compose_in_a_signature_param` pins the same
     // shape for the printer). The head builds this string unconditionally
-    // (writes pushed before preserves) rather than reading an order back out
+    // (writes pushed before never writes) rather than reading an order back out
     // of the source, which is correct only because the parser itself
-    // rejects `preserves` before `writes` — this pins that the two stay in
+    // rejects `never writes` before `writes` — this pins that the two stay in
     // step.
     let src = "\
 alphabet symbols { '0', '1', '#' }
 
-routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {
+routine w(volatile tape num: symbols writes { '0' } never writes { '#' }) {
   entry state s { [*] -> stop; }
 }
 
@@ -1503,7 +1568,7 @@ machine {
     assert!(
         hover
             .text
-            .contains("routine w(volatile tape num: symbols writes { '0' } preserves { '#' })"),
+            .contains("routine w(volatile tape num: symbols writes { '0' } never writes { '#' })"),
         "{}",
         hover.text
     );
@@ -1514,7 +1579,7 @@ fn tape_hover_shows_volatile_with_both_clauses_in_order() {
     let src = "\
 alphabet symbols { '0', '1', '#' }
 
-routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {
+routine w(volatile tape num: symbols writes { '0' } never writes { '#' }) {
   entry state s { [*] -> stop; }
 }
 ";
@@ -1524,7 +1589,7 @@ routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {
         .expect("a hover");
     assert_eq!(
         hover.text,
-        "volatile tape num: symbols writes { '0' } preserves { '#' }"
+        "volatile tape num: symbols writes { '0' } never writes { '#' }"
     );
 }
 
@@ -2574,9 +2639,94 @@ fn formatting_a_document_that_does_not_parse_returns_nothing() {
 fn the_service_declares_the_tmc_language_and_its_watched_config() {
     let service = TmcLanguageService::new();
     assert_eq!(service.language_id(), "tmc");
-    assert_eq!(service.extensions(), [".tmc"]);
+    assert_eq!(service.extensions(), [".tmc", ".tmh"]);
     assert_eq!(service.watched_globs(), ["**/tmt.json"]);
     assert!(!service.trigger_characters().is_empty());
+}
+
+// -- headers ---------------------------------------------------------------
+
+const HEADER: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a' }
+  export routine pick(tape t: ab writes {}, state hit, state miss) noreturn;
+}
+";
+
+/// A `.tmh` is read declarations-only, as `tmt lint`/`tmt interface` read
+/// it: a bodiless signature is its normal shape and raises nothing.
+/// Mutation: read every document as a program — the bodiless routine is
+/// then a parse-or-shape error.
+#[test]
+fn a_header_document_is_clean() {
+    let mut service = TmcLanguageService::new();
+    let diagnostics = service.did_update("untitled:lib.tmh", HEADER);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/// The same text under a `.tmc` name is a program, and a program's routine
+/// needs its body. Mutation: read every document declarations-only.
+#[test]
+fn the_same_text_as_a_source_is_refused() {
+    let mut service = TmcLanguageService::new();
+    let diagnostics = service.did_update("untitled:lib.tmc", HEADER);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == ServiceSeverity::Error),
+        "{diagnostics:?}"
+    );
+}
+
+/// What a header may not hold is reported in the editor as the CLI
+/// reports it: a `machine` block is an error there. The extension is
+/// matched without regard to case, like the routing that bound it.
+#[test]
+fn a_machine_block_in_a_header_is_an_error() {
+    let text = format!("{HEADER}machine {{ tape t: lib::ab; entry state s {{ [*] -> stop; }} }}\n");
+    for uri in ["untitled:lib.tmh", "untitled:LIB.TMH"] {
+        let mut service = TmcLanguageService::new();
+        let diagnostics = service.did_update(uri, &text);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.severity == ServiceSeverity::Error),
+            "{uri}: {diagnostics:?}"
+        );
+    }
+}
+
+/// Only the header rule subset runs on a header (docs/tmt/lint.md
+/// (linting a header)): an exported alphabet no tape of the header uses
+/// is a header's normal shape, while an unused import is still reported.
+/// Mutation: run every rule on a header — `unused-alphabet` fires.
+#[test]
+fn a_header_lints_by_the_header_rule_subset() {
+    let text = "\
+use std::binaryNumbers::plusOne;
+namespace lib {
+  alphabet spare { '_', 'z' }
+  export alphabet ab { '_', 'a' }
+  export routine pick(tape t: ab writes {});
+}
+";
+    let mut service = TmcLanguageService::new();
+    let codes: Vec<_> = service
+        .did_update("untitled:lib.tmh", text)
+        .into_iter()
+        .filter_map(|d| d.code)
+        .collect();
+    assert!(codes.contains(&"unused-import"), "{codes:?}");
+    assert!(!codes.contains(&"unused-alphabet"), "{codes:?}");
+}
+
+/// A header formats like any `.tmc` text: the printer never runs the
+/// program-shape checks.
+#[test]
+fn a_header_document_formats() {
+    let mut service = TmcLanguageService::new();
+    service.did_update("untitled:lib.tmh", HEADER);
+    assert_eq!(service.format("untitled:lib.tmh").as_deref(), Some(HEADER));
 }
 
 #[test]
@@ -2933,7 +3083,7 @@ machine {
         vcell_tail,
     ));
     assert!(
-        vcell_got.contains(&"'1'".to_string()),
+        vcell_got.contains(&"1".to_string()),
         "local glyph control: {vcell_got:?}"
     );
     assert!(
@@ -2967,7 +3117,7 @@ machine {
         map_tail,
     ));
     assert!(
-        mapsrc_got.contains(&"'0'".to_string()),
+        mapsrc_got.contains(&"0".to_string()),
         "host alphabet control: {mapsrc_got:?}"
     );
     assert!(
@@ -3104,11 +3254,13 @@ machine {
 
 #[test]
 fn a_shadowing_sibling_wins_over_the_stdlib_at_every_leg() {
-    // The plan's governing rule, stated in the brief: resolution order is
-    // local file, then declared sources, then declared libraries
-    // (first-wins), then the embedded stdlib LAST — mirroring the
-    // linker's own user-object-beats-library precedence. A sibling that
-    // mangles to the IDENTICAL qualified name an embedded roster entry
+    // The overlay's resolution order is local file, then declared
+    // sources, then declared libraries (first-wins), then the embedded
+    // stdlib LAST — the order the linker reads its inputs in. It decides
+    // only what the editor shows: the linker picks no winner and refuses
+    // such a pair once the program reaches the name
+    // (docs/core.md (linking)). A sibling that mangles to the
+    // IDENTICAL qualified name an embedded roster entry
     // carries is the exact shadowed case the sibling crate shipped
     // BACKWARDS (stdlib-first) and needed a dedicated follow-up fix for.
     // The faithfulness fixtures elsewhere in this file only cover the
@@ -3125,12 +3277,16 @@ fn a_shadowing_sibling_wins_over_the_stdlib_at_every_leg() {
     // like the embedded roster's own entries — `std::binaryNumbers::
     // goToNumber` here is the SAME string the roster carries for the
     // real routine of that name.
+    // The sibling declares the stdlib's exact signature: a different one is
+    // `conflicting-declaration` (docs/tmt/language.md (declarations)), and
+    // the editor would drop the sibling rather than shadow the stdlib.
     let helper_src = "\
-alphabet b { '_', '0' }
 namespace std {
   namespace binaryNumbers {
 ? Shadows the embedded stdlib routine of the same qualified name.
-    export routine goToNumber(tape num: b) { entry state s { [*] -> return; } }
+    export routine goToNumber(tape num: std::binaryNumbers::symbols writes {} leaves { '$' }) {
+      entry state walk { ['$'] -> return; [*] -> move [>] goto walk; }
+    }
   }
 }
 ";
@@ -3601,4 +3757,147 @@ machine {
         .expect("tokens with an overlay");
 
     assert_eq!(without_overlay, with_overlay);
+}
+
+// -- named cells -----------------------------------------------------------
+
+/// Two tapes over different alphabets, every rule spelled with named cells
+/// in all three vectors.
+const NAMED_CELLS: &str = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b' }
+
+machine {
+  tape a: bits;
+  tape b: wide;
+
+  entry state s {
+    [a: '1', b: 'a'] -> write [b: 'b'] move [a: >] stop;
+    [*, *] -> stop;
+  }
+}
+";
+
+/// A label in each of the three vectors reaches its tape's declaration.
+/// Mutation: skip the cell labels in `reference_in_world`.
+#[test]
+fn goto_definition_on_a_cell_label_reaches_the_tape_declaration() {
+    let (mut service, uri) = opened(NAMED_CELLS);
+    for (anchor, tape) in [
+        ("[a: '1'", "a"),
+        (", b: 'a'", "b"),
+        ("write [b: 'b']", "b"),
+        ("move [a: >]", "a"),
+    ] {
+        let at = pos_after(NAMED_CELLS, anchor, anchor.find(tape).expect("label"));
+        let target = service
+            .definition(&uri, at)
+            .unwrap_or_else(|| panic!("a definition for {anchor}"));
+        let decl = pos_after(NAMED_CELLS, &format!("tape {tape}:"), 5);
+        assert_eq!(target.span.start, decl, "{anchor}");
+    }
+}
+
+/// Hover on a label shows the tape, as hover on the declaration does.
+/// Mutation: skip the cell labels in `reference_in_world`.
+#[test]
+fn hovering_a_cell_label_shows_the_tape() {
+    let (mut service, uri) = opened(NAMED_CELLS);
+    let hover = service
+        .hover(&uri, pos_after(NAMED_CELLS, "[a: '1'", 1))
+        .expect("a hover");
+    assert!(hover.text.contains("tape a: bits"), "{}", hover.text);
+}
+
+/// A label naming no tape has no target and does not disturb its
+/// neighbours, in the state where lowering failed and the program is the
+/// unlowered one. Mutation: return the first label of the vector whatever
+/// the cursor touches.
+#[test]
+fn a_cell_label_naming_an_unknown_tape_has_no_target_and_its_neighbours_still_do() {
+    let src = NAMED_CELLS.replace("[a: '1', b: 'a']", "[a: '1', zz: 'a']");
+    let (mut service, uri) = opened(&src);
+    assert!(
+        service
+            .definition(&uri, pos_after(&src, "zz:", 1))
+            .is_none()
+    );
+    assert!(service.hover(&uri, pos_after(&src, "zz:", 1)).is_none());
+    let target = service
+        .definition(&uri, pos_after(&src, "[a: '1'", 1))
+        .expect("the known label still resolves");
+    assert_eq!(target.span.start, pos_after(&src, "tape a:", 5));
+}
+
+const CELL_HEAD: &str = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b' }
+
+machine {
+  tape a: bits;
+  tape b: wide;
+
+  entry state s {
+    ";
+const CELL_TAIL: &str = " -> stop;\n  }\n}\n";
+
+/// In a vector already naming `a`, a cell start offers `b: ` and not `a: `.
+/// Mutation: drop the already-named filter.
+#[test]
+fn completion_at_a_cell_start_offers_the_tapes_not_yet_named() {
+    let got = labels(&complete_typing(
+        &format!("{CELL_HEAD}[a: '1', "),
+        "b: 'a'",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(got.contains(&"b: ".to_string()), "{got:?}");
+    assert!(!got.contains(&"a: ".to_string()), "{got:?}");
+}
+
+/// The first cell of a vector may still go either way: names are offered
+/// next to today's glyphs. Mutation: never offer names.
+#[test]
+fn completion_at_the_first_cell_offers_names_and_glyphs() {
+    let got = labels(&complete_typing(
+        &format!("{CELL_HEAD}["),
+        "*, *",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(got.contains(&"a: ".to_string()), "{got:?}");
+    assert!(got.contains(&"b: ".to_string()), "{got:?}");
+    assert!(got.contains(&"*".to_string()), "{got:?}");
+    assert!(got.contains(&"1".to_string()), "{got:?}");
+}
+
+/// A positional vector keeps today's candidates and gains no names.
+/// Mutation: offer names whatever the form.
+#[test]
+fn completion_in_a_positional_vector_offers_no_tape_names() {
+    let got = labels(&complete_typing(
+        &format!("{CELL_HEAD}['1', "),
+        "*",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(!got.iter().any(|l| l.ends_with(": ")), "{got:?}");
+    assert!(got.contains(&"'a'".to_string()), "{got:?}");
+}
+
+/// After `tape:` the label, not the position, picks the alphabet; and a
+/// named vector's cell start offers no bare glyphs. Mutation: pick the
+/// alphabet by position only.
+#[test]
+fn completion_after_a_label_draws_from_that_tapes_alphabet() {
+    let after_label = labels(&complete_typing(
+        &format!("{CELL_HEAD}[b: "),
+        "'a'",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(after_label.contains(&"'a'".to_string()), "{after_label:?}");
+    assert!(!after_label.contains(&"1".to_string()), "{after_label:?}");
+    let at_start = labels(&complete_typing(
+        &format!("{CELL_HEAD}[a: '1', "),
+        "b: 'a'",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(!at_start.contains(&"*".to_string()), "{at_start:?}");
 }

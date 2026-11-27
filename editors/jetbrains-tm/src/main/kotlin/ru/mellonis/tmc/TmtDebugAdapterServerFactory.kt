@@ -133,7 +133,11 @@ class TmtDebugAdapterDescriptor(
         val fromOptions =
             if (opts?.command.isNullOrBlank()) null else createStartServerCommandLine(options)
         val commandLine: GeneralCommandLine = fromOptions
+            // The working directory is left unset here and settled just
+            // below, where a blank run-configuration field falls back to
+            // the project's base path.
             ?: createStartServerCommandLine(
+                null,
                 defaultDapCommand(),
                 env?.envs ?: emptyMap(),
                 env?.isPassParentEnvs ?: true,

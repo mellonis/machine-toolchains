@@ -119,6 +119,11 @@ fn stdlib_object(level: OptLevel) -> &'static ObjectFile {
                 CompileOptions {
                     opt_level: OptLevel::O0,
                     strip_debugger: true,
+                    // Matches `stdlib::object()`'s O1 side: both strip
+                    // contract-check states, so this stays a behavioral
+                    // opt-level comparison rather than an assert-bearing
+                    // build against a stripped one.
+                    strip_asserts: true,
                     ..Default::default()
                 },
             )

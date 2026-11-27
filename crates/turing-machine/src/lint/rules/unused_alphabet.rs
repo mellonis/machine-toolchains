@@ -3,11 +3,11 @@
 //! names it. Both surface as resolved tapes, so a single scan over every
 //! world's tape table decides use.
 //!
-//! Unlike `unused-graph` / `unused-routine`, an EXPORTED alphabet is flagged
-//! too: a tape may draw only on a locally-defined alphabet, so an alphabet
-//! has no cross-module consumers to protect — an exported-but-undrawn-on
-//! alphabet is as dead as a private one. New on the lint channel (the
-//! deferred hygiene family), detected source-level over `Resolved`.
+//! Like `unused-graph` / `unused-routine`, an EXPORTED alphabet is never
+//! reported: another unit may import it through this unit's header or
+//! sibling source (`docs/tmt/language.md (alphabets, maps and graphs across
+//! units)`), a use this rule cannot see, and the deletion fix would remove
+//! what a consumer needs. Detected source-level over `Resolved`.
 //!
 //! The fix deletes the whole declaration, including any leading doc/attention
 //! run — an orphaned `?`/`!` run is a parse error, so the doc goes with the
@@ -33,7 +33,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     }
 
     for (name, alphabet) in &ctx.resolved.alphabets {
-        if !used.contains(name.as_str()) {
+        if !alphabet.exported && !used.contains(name.as_str()) {
             let fix = decl_span::<AlphabetView>(ctx, alphabet.name_span).map(|span| Fix {
                 description: format!("delete the unused alphabet `{name}`"),
                 applicability: Applicability::MaybeIncorrect,
@@ -55,6 +55,20 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
 #[cfg(test)]
 mod tests {
     use crate::lint::{LintOptions, lint};
+
+    const EXP: &str = "\
+alphabet digit { '_', '0', '1' }
+export alphabet deadA { '_', 'x' }
+alphabet deadB { '_', 'y' }
+export set deadS { '0' }
+set deadT { '1' }
+export map deadM: digit -> digit { '0' -> '1', '1' -> '0' }
+map deadN: digit -> digit { '0' -> '1', '1' -> '0' }
+machine {
+  tape t: digit;
+  entry state go { ['0'] -> write ['1'] stop; [*] -> stop; }
+}
+";
 
     fn findings(src: &str) -> Vec<String> {
         lint(src, LintOptions::default())
@@ -98,5 +112,22 @@ machine {
 }
 ";
         assert!(findings(src).is_empty(), "{:?}", findings(src));
+    }
+
+    /// An exported alphabet is never reported (another unit may import it);
+    /// the same declaration without `export` still is, and keeps its fix.
+    /// Mutation: dropping the `exported` skip in `check` — `deadA` returns.
+    #[test]
+    fn an_exported_alphabet_is_not_reported() {
+        let report = lint(EXP, LintOptions::default()).unwrap();
+        let found: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "unused-alphabet")
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("deadB"), "{found:?}");
+        assert_eq!((found[0].span.start.line, found[0].span.start.col), (3, 10));
+        assert!(found[0].fix.is_some());
     }
 }

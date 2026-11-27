@@ -393,13 +393,6 @@ the observables above are joined by the sequence of reads and writes the
 device actually sees — Volatile programs above, and
 `docs/pmt/optimizer.md (volatile builds)` for the passes that costs.
 
-**Interposition:** `-O1`'s inline pass binds intra-module calls at compile
-time, so if you shadow one of a library's *internal* callees (see
-`docs/pmt/stdlib.md`), the override only affects call sites that survive
-optimization — the linker only guarantees interposition for call sites it
-actually still sees as calls. A library that must stay fully interposable
-should be built with `--fno-inline`.
-
 ## The IR artifact
 
 The compiler's intermediate representation — a per-function control-flow
@@ -412,8 +405,9 @@ implementation detail. `pmt compile --emit-ir[=STAGE]` writes it to
   pass last changed something), or `final` (the default — CFG after the
   whole pipeline, i.e. what codegen consumed).
 - Stage labels can repeat across snapshots: a pass that fires in several optimizer rounds captures several `after:<pass>` snapshots. `--emit-ir=after:<pass>` selects the LAST captured snapshot with that label (last-wins). The flag itself appears at most once per command line — repeating it is an unknown-flag error.
-- `pmt ir graph FILE.ir.json [--function NAME]` renders the IR as a
-  Mermaid flowchart, one per function (or a single named one).
+- `pmt ir graph FILE.ir.json [--function NAME] [--raw|--shape]` renders
+  the IR as a Mermaid flowchart, one per function (or a single named
+  one), in one of three views (`docs/pmt/cli.md (pmt ir)`).
 
 The artifact version tracks its op vocabulary. Version 4 adds two fused
 write+move ops — `wr_lft` and `wr_rgt` — each folding a write to the

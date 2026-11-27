@@ -22,6 +22,8 @@ pub mod linker;
 #[cfg(feature = "std")]
 pub mod lsp;
 #[cfg(feature = "std")]
+pub mod mermaid;
+#[cfg(feature = "std")]
 pub mod source_path;
 #[cfg(feature = "std")]
 pub mod syntax;

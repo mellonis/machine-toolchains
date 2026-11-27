@@ -32,13 +32,50 @@ const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid
 /// name is shared by every concurrently running `cargo test` invocation
 /// that targets the same `CARGO_TARGET_TMPDIR`, so two such invocations
 /// racing on the identical path can interleave their non-atomic writes.
-fn scratch(name: &str) -> std::path::PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("{name}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn write_file(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
@@ -57,6 +94,13 @@ fn assembly(src: &str, level: OptLevel) -> String {
         src,
         CompileOptions {
             opt_level: level,
+            // Every caller here inspects emitted assembly text, including
+            // the stdlib's own (`a_program_without_state_parameters_is_
+            // byte_identical`, whose own doc calls it byte-identical); a
+            // later round's synthesized contract-check states must not
+            // change what this helper prints for a program that declares
+            // none of the exits/rows this file is actually about.
+            strip_asserts: true,
             ..Default::default()
         },
     )
@@ -238,7 +282,7 @@ machine {{
 /// A `then` that names one of the enclosing routine's own `state`
 /// parameters: `outer` calls a leaf that RETURNS normally, and the
 /// continuation leaves `outer` through its own exit instead of resuming
-/// in `outer`. `then never` in the machine halts, so a continuation that
+/// in `outer`. `then unreached` in the machine halts, so a continuation that
 /// wrongly printed `ret` would come back there and change the
 /// termination kind.
 const THEN_EXIT: &str = "\
@@ -255,9 +299,9 @@ routine outer(tape t: ab, state done) {
 machine {
   tape d: ab;
   tape out: ab;
-  entry state go { [*, *] -> call outer(t = d, done = fin) then never; }
-  state fin   { [*, *] -> write [-, '0'] stop; }
-  state never { [*, *] -> halt; }
+  entry state go { [*, *] -> call outer(t = d, done = fin) then unreached; }
+  state fin       { [*, *] -> write [-, '0'] stop; }
+  state unreached { [*, *] -> halt; }
 }
 ";
 
@@ -270,8 +314,8 @@ machine {
 fn a_state_parameter_lowers_to_retx() {
     let tma = assembly(&two_exits("-"), OptLevel::O0);
     assert!(
-        tma.contains(".routine sub, tapes=1, alpha=(3), exits=2"),
-        "the callee publishes its exit count:\n{tma}"
+        tma.contains(".routine sub, tapes=1, alpha=(3), exits=(hit, miss)"),
+        "the callee publishes its exits by name:\n{tma}"
     );
     assert!(
         tma.contains("retx    #0"),
@@ -358,7 +402,7 @@ fn an_exit_bearing_object_disassembles_back_to_itself() {
         .unwrap_or_else(|e| panic!("compile: {e}"))
         .object;
     let text = disassemble_object(&object);
-    assert!(text.contains("exits=2"), "{text}");
+    assert!(text.contains("exits=(hit, miss)"), "{text}");
     assert!(text.contains("retx    #0"), "{text}");
     assert!(text.contains("exits=("), "{text}");
     let again = assemble(&text, false).expect("the disassembly reassembles");
@@ -536,7 +580,7 @@ fn a_then_that_names_a_state_parameter_prints_retx() {
 /// The behavioural half, standing on its own so the consequence is
 /// observed and not merely implied by the text: leaving through the exit
 /// reaches the machine's `fin`, which stops. A continuation that returned
-/// normally instead would come back to `then never`, which halts.
+/// normally instead would come back to `then unreached`, which halts.
 ///
 /// Mutation: print `ret` for such a `then`; every run halts instead of
 /// stopping, and the tape stays blank.
@@ -645,11 +689,11 @@ fn an_exit_bearing_callee_is_not_inlined() {
 
 /// A program that declares no `state` parameter emits exactly what it
 /// emitted before routines could have one: `exits=` prints only for a
-/// nonzero count, and no row lowers to `retx`. The embedded standard
+/// routine that declares one, and no row lowers to `retx`. The embedded standard
 /// library is the corpus program — its compiled object is byte-pinned by
 /// its own golden, so this test's job is the printer, at both opt levels.
 ///
-/// Mutation: print `exits=0` on every `.routine` (or print the clause
+/// Mutation: print `exits=()` on every `.routine` (or print the clause
 /// unconditionally); both halves go red, and the stdlib object's golden
 /// moves with them.
 #[test]
@@ -700,7 +744,7 @@ machine {{
 /// carries are the same check.
 ///
 /// Mutation: narrow that conversion with a bare `as u8`; the
-/// 256-parameter routine publishes `exits=0` while its body leaves
+/// 256-parameter routine publishes no exits while its body leaves
 /// through exit 0, and the compile fails as `internal-error` (the world
 /// invariants catch it) rather than naming the ceiling.
 #[test]
@@ -718,13 +762,78 @@ fn more_than_255_state_parameters_is_a_typed_error() {
     );
 }
 
+/// A signature lists its tapes first: a `tape` parameter after a `state`
+/// one is refused at the tape's name, on a routine and on a graph alike —
+/// an object keeps the two kinds in two lists, so a header rendered from
+/// it could not print any other order.
+///
+/// Mutation: drop the order check where a signature is resolved; both
+/// sources compile.
+#[test]
+fn a_tape_parameter_after_a_state_parameter_is_refused() {
+    for (world, body) in [
+        ("routine", "entry state s { [*, *] -> goto done; }"),
+        ("graph", "entry state s { [*, *] -> goto done; }"),
+    ] {
+        let src = format!(
+            "\
+alphabet ab {{ '_', '0' }}
+
+{world} r(tape a: ab, state done, tape b: ab) {{
+  {body}
+}}
+
+machine {{
+  tape d: ab;
+  entry state m {{ [*] -> stop; }}
+}}
+"
+        );
+        let err = compile(&src, CompileOptions::default())
+            .expect_err("a tape after a state parameter is refused");
+        assert_eq!(err.kind.code(), "tape-after-state-param", "{world}: {err}");
+        assert_eq!(
+            (err.span.start.line, err.span.start.col),
+            (3, world.len() as u32 + 33),
+            "{world}: the diagnostic points at the late tape's name: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("tape parameter `b` follows state parameter `done`"),
+            "{world}: {err}"
+        );
+    }
+}
+
+/// The near miss: tapes first, then the `state` parameters, compiles.
+#[test]
+fn tapes_before_state_parameters_compile() {
+    let src = "\
+alphabet ab { '_', '0' }
+
+routine r(tape a: ab, tape b: ab, state done) {
+  entry state s { [*, *] -> goto done; }
+}
+
+machine {
+  tape d: ab;
+  entry state m { [*] -> stop; }
+}
+";
+    compile(src, CompileOptions::default()).unwrap_or_else(|e| panic!("{e}"));
+}
+
 /// The near miss: exactly 255 is the widest signature the wire can carry,
-/// and it compiles and publishes its count.
+/// and it compiles and publishes every name, in order.
 #[test]
 fn exactly_255_state_parameters_compiles() {
     let tma = assembly(&many_state_params(255), OptLevel::O0);
+    let names: Vec<String> = (0..255).map(|i| format!("p{i}")).collect();
     assert!(
-        tma.contains(".routine wide, tapes=1, alpha=(2), exits=255"),
+        tma.contains(&format!(
+            ".routine wide, tapes=1, alpha=(2), exits=({})",
+            names.join(", ")
+        )),
         "{tma}"
     );
 }
@@ -1356,17 +1465,18 @@ machine {
 }
 ";
 
-/// A tail-position call prints a synthesized `trap #0` right after it,
+/// A tail-position call prints a synthesized `trap #2` right after it,
 /// never `ret`, `retx`, `stp`, `hlt`, or `jmp` — the resume shapes a
 /// WRITTEN `then` would print. An honest program never reaches this
 /// trap (the callee never returns), but it turns a LYING `noreturn`
 /// (a callee that returns anyway) into a controlled stop instead of
-/// falling through into whatever the linker placed next
+/// falling through into whatever the linker placed next, and the kind
+/// names the broken declaration rather than a map hole
 /// (docs/tmt/isa.md (explicit traps)).
 ///
 /// Mutation: falling back to some default resume `Then` (e.g. always
 /// synthesizing `stp`) when `IrTransition::CallThen.then` is `None`;
-/// the line right after `call` would then be `stp` instead of `trap #0`.
+/// the line right after `call` would then be `stp` instead of the trap.
 #[test]
 fn an_exit_bearing_tail_call_prints_a_trap() {
     let tma = assembly(NORETURN_TAIL, OptLevel::O0);
@@ -1377,7 +1487,7 @@ fn an_exit_bearing_tail_call_prints_a_trap() {
         .map(|l| l.trim())
         .unwrap_or_else(|| panic!("no line after the call:\n{tma}"));
     assert_eq!(
-        after_call, "trap    #0",
+        after_call, "trap    #2",
         "the tail call carries no safety trap:\n{tma}"
     );
 }
@@ -1467,14 +1577,18 @@ machine {
 /// LINKED definition actually `return`s — is a run-time TRAP under every
 /// call mechanism, never a silent `Stopped` with execution wandering into
 /// whatever the linker placed after the call. This is the whole point of
-/// the synthesized `trap #0` codegen now emits for a tail-position call:
+/// the synthesized `trap #2` codegen now emits for a tail-position call:
 /// without it, the callee's `ret` lands on the caller's own next
 /// instruction (or, with no instruction of its own to fall into, whatever
-/// code the linker placed physically next) and runs on silently.
+/// code the linker placed physically next) and runs on silently. The
+/// KIND is checked, not just the fact of a trap: a callee that returned
+/// after declaring it never would is a broken contract, and reporting it
+/// as a map fault would send a reader looking at the binding.
 ///
-/// Mutation: reverting `codegen.rs`'s `Term::Call { then: None, .. }`
-/// emission from `trap #0` back to nothing — the run ends `Stopped` with
-/// exit code 0 instead of trapping, under every mechanism.
+/// Mutation: emit the trap with any other kind — or revert
+/// `codegen.rs`'s `Term::Call { then: None, .. }` emission to nothing,
+/// which ends the run `Stopped` with exit code 0 — under every
+/// mechanism.
 #[test]
 fn a_lying_noreturn_header_traps_instead_of_falling_through() {
     let dir = scratch("lying_noreturn");
@@ -1524,8 +1638,8 @@ fn a_lying_noreturn_header_traps_instead_of_falling_through() {
         .executable;
         let (outcome, _) = run_image(&exe, &[2]);
         assert!(
-            matches!(outcome, Outcome::Trapped(Trap::UnmappedRead { .. })),
-            "under {mech} a lying `noreturn` must trap with UnmappedRead, not {outcome:?}"
+            matches!(outcome, Outcome::Trapped(Trap::Contract { .. })),
+            "under {mech} a lying `noreturn` must trap on the broken contract, not {outcome:?}"
         );
     }
 }
@@ -1548,14 +1662,14 @@ export routine liar(tape t: ab writes {}) {
 /// `tmt link` CLI rather than the library entry point, so the RENDERED
 /// warning text is observable. The caller's header trusts `liar`'s
 /// `noreturn` and omits `then`, which the compiler backs with a
-/// synthesized `trap #0` (`an_exit_bearing_tail_call_prints_a_trap`
+/// synthesized `trap #2` (`an_exit_bearing_tail_call_prints_a_trap`
 /// pins the codegen shape) — this test is the LINKER side of the same
 /// story: when the linked `liar` actually returns, the trap sits right
 /// after a call with no continuation, into a callee that CAN return,
 /// which is exactly `tail-call-no-continuation`'s shape.
 ///
 /// The caller's compiled shape is `call liar [t: 0]` immediately
-/// followed by `trap #0`, which HERE also happens to be `main`'s last
+/// followed by `trap #2`, which HERE also happens to be `main`'s last
 /// instruction (this fixture has one state) — the trap arm, not the
 /// "call is the last instruction" one (the compiler always emits the
 /// safety trap, so a real `.tmc` program never reaches the latter, the
@@ -1686,7 +1800,7 @@ machine {
 
 /// The multi-state counterpart to `a_lying_noreturn_header_prints_the_
 /// tail_call_warning`: same lying header, same library that actually
-/// returns, but `go`'s call is now followed by `trap #0` followed by
+/// returns, but `go`'s call is now followed by `trap #2` followed by
 /// `after`'s own block — the trap is NOT `main`'s last instruction. The
 /// warning must still fire: the check looks only at the instruction
 /// right after the call, never at what comes after the trap.
@@ -1785,4 +1899,199 @@ fn an_honest_noreturn_header_prints_no_tail_call_warning_with_a_later_state() {
         "an honest `noreturn` callee must not warn: {}",
         out.stderr
     );
+}
+
+// A `return` handed to an exit is legal only when the argument list is
+// written in a routine (docs/tmt/language.md (`state` parameters)).
+
+const RETURN_GRAPH: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+graph findA(tape t: ab, state hit, state miss) {
+  entry state s {
+    ['a'] -> hit;
+    ['_'] -> miss;
+    [*]   -> move [>] goto s;
+  }
+}
+";
+
+fn return_graft_in_machine(hit: &str, miss: &str) -> String {
+    format!(
+        "{RETURN_GRAPH}
+machine {{
+  tape main: ab;
+  entry graft findA(t = main, hit = {hit}, miss = {miss}) as seek;
+  state done {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+fn return_graft_in_graph() -> String {
+    format!(
+        "{RETURN_GRAPH}
+graph outer(tape t: ab, state done) {{
+  entry graft findA(t = t, hit = done, miss = return) as seek;
+}}
+
+machine {{
+  tape main: ab;
+  entry graft outer(t = main, done = d) as o;
+  state d {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+const RETURN_ROUTINE: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+routine r(tape t: ab, state done) {
+  entry state s { [*] -> done; }
+}
+";
+
+fn return_bind_in_machine(done: &str) -> String {
+    format!(
+        "{RETURN_ROUTINE}
+machine {{
+  tape main: ab;
+  bind r(t = main, done = {done}) as b;
+  entry state go {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+fn return_call_in_machine(done: &str) -> String {
+    format!(
+        "{RETURN_ROUTINE}
+machine {{
+  tape main: ab;
+  entry state go {{ [*] -> call r(t = main, done = {done}) then stop; }}
+}}
+"
+    )
+}
+
+const RETURN_LIB_GRAFT: &str = "\
+machine {
+  tape t: std::binaryNumbers::symbols;
+  entry graft std::binaryNumbers::goToNumberGraph(num = t, done = return) as g;
+}
+";
+
+/// Compile in memory with the embedded stdlib and return the error's code
+/// and position.
+fn refused_at(src: &str) -> (String, u32, u32) {
+    let err = compile(src, CompileOptions::default()).expect_err("must be refused");
+    (
+        err.kind.code().to_string(),
+        err.span.start.line,
+        err.span.start.col,
+    )
+}
+
+fn refused(code: &str, line: u32, col: u32) -> (String, u32, u32) {
+    (code.to_string(), line, col)
+}
+
+/// Two checks refuse this list, each backstopping the other: the world
+/// checks (`check_reuse_targets`' graft arm) and the splice
+/// (`check_graft_args`). Mutation: skip the graft argument lists at BOTH
+/// sites — skipping either one alone leaves the other to refuse it at the
+/// same position.
+#[test]
+fn return_in_a_machine_graft_is_refused() {
+    assert_eq!(
+        refused_at(&return_graft_in_machine("done", "return")),
+        refused("return-outside-routine", 13, 50)
+    );
+}
+
+/// Mutation: check machine worlds only.
+#[test]
+fn return_in_a_graph_body_graft_is_refused() {
+    assert_eq!(
+        refused_at(&return_graft_in_graph()),
+        refused("return-outside-routine", 12, 47)
+    );
+}
+
+/// The graft's second exit used to leave the machine's own state dead and
+/// warn; the cause is now the refusal, at the first `return`. Mutation:
+/// skip the graft argument lists at BOTH sites that refuse them
+/// (`check_reuse_targets`' graft arm and `check_graft_args` at the
+/// splice) — the warning path returns; either site alone still refuses.
+#[test]
+fn the_unreachable_state_symptom_is_now_its_cause() {
+    assert_eq!(
+        refused_at(&return_graft_in_machine("return", "return")),
+        refused("return-outside-routine", 13, 37)
+    );
+}
+
+/// Mutation: skip the bind argument lists in `check_reuse_targets`.
+#[test]
+fn return_in_an_unused_machine_bind_is_refused() {
+    assert_eq!(
+        refused_at(&return_bind_in_machine("return")),
+        refused("return-outside-routine", 9, 27)
+    );
+}
+
+/// Mutation: check only grafts of local graphs (drop the check from
+/// `check_graft_args` and the declared-graph path).
+#[test]
+fn return_in_a_machine_graft_of_a_library_graph_is_refused() {
+    assert_eq!(
+        refused_at(RETURN_LIB_GRAFT),
+        refused("return-outside-routine", 3, 67)
+    );
+}
+
+/// The resolver keeps its own refusal of the same terminator, so skipping
+/// the call lists changes nothing observable; what this pins is the
+/// terminator's own column. Mutation: report the argument's span instead
+/// of the terminator's.
+#[test]
+fn return_in_a_machine_call_is_refused() {
+    assert_eq!(
+        refused_at(&return_call_in_machine("return")),
+        refused("return-outside-routine", 9, 51)
+    );
+}
+
+/// Near miss: the same graft in a routine. Mutation: refuse `return` in
+/// every world.
+#[test]
+fn return_in_a_routine_graft_compiles() {
+    let src = format!(
+        "{RETURN_GRAPH}
+routine seek(tape t: ab, state found) {{
+  entry graft findA(t = t, hit = found, miss = return) as g;
+}}
+
+machine {{
+  tape main: ab;
+  entry state go {{ [*] -> call seek(t = main, found = done) then done; }}
+  state done {{ [*] -> stop; }}
+}}
+"
+    );
+    compile(&src, CompileOptions::default()).expect("a routine may bind an exit to its own return");
+}
+
+/// Near miss for the machine shapes: the same graft, bind and call with a
+/// state in place of `return` compile. Mutation: refuse every argument.
+#[test]
+fn a_named_state_in_the_same_machine_shapes_compiles() {
+    for src in [
+        return_graft_in_machine("done", "done"),
+        return_bind_in_machine("go"),
+        return_call_in_machine("go"),
+    ] {
+        compile(&src, CompileOptions::default()).expect("a named state is legal");
+    }
 }

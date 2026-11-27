@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "ru.mellonis"
-version = "0.2.1"
+version = "0.2.2"
 
 kotlin {
     // Pinned, not just "any JDK 17+": the IntelliJ Platform Gradle Plugin
@@ -27,15 +27,41 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        // 2024.3 (build 243) clears LSP4IJ 0.20.1's since-build=242.0 floor
+        // 2024.3 (build 243) clears LSP4IJ 0.30.1's since-build=242.0 floor
         // with room to spare — the same baseline the PM-1 plugin verified
         // against the pinned LSP4IJ release.
         intellijIdeaCommunity("2024.3")
-        plugin("com.redhat.devtools.lsp4ij:0.20.1")
+        plugin("com.redhat.devtools.lsp4ij:0.30.1")
         bundledPlugin("org.jetbrains.plugins.textmate")
         // JSON schema contribution (tmt.json) — optional at runtime, the
         // extension lives behind an optional depends in plugin.xml.
         bundledPlugin("com.intellij.modules.json")
+        // The IntelliJ Plugin Verifier CLI, for `verifyPlugin` below.
+        pluginVerifier()
+    }
+}
+
+// `./gradlew verifyPlugin` checks the built plugin's binary compatibility
+// — every platform and LSP4IJ API it calls — against real IDE builds. It
+// is the automated half of a release check: it catches an API that moved
+// or went away, and it cannot see behaviour (whether LSP4IJ connects a
+// document to the server is still the sideload checklist's to show).
+//
+// The baseline the plugin is built against is always verified. Installed
+// IDEs are added without a download through the `verifyLocalIdes` Gradle
+// property, a comma-separated list of IDE home directories:
+//
+//   ./gradlew verifyPlugin -PverifyLocalIdes="$HOME/Applications/RustRover.app"
+intellijPlatform {
+    pluginVerification {
+        ides {
+            create(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaCommunity, "2024.3")
+            (providers.gradleProperty("verifyLocalIdes").orNull ?: "")
+                .split(",")
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .forEach { local(file(it)) }
+        }
     }
 }
 

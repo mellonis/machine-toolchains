@@ -213,11 +213,15 @@ const BROKEN: &[BrokenCase] = &[
         "wildcard-binding",
         (4, 20, 4, 21),
     ),
+    // A mixed-spelling range (`['a'..3]`) is no longer a front-end refusal:
+    // a cell range looks each endpoint up by label, and only a body range —
+    // at resolution, past this front — needs one kind. A set name where a
+    // range endpoint goes is the front's refusal at that position now.
     (
-        "mismatched range endpoints",
-        "alphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state s { ['a'..3] -> stop; }\n}\n",
-        "range-kind-mismatch",
-        (4, 20, 4, 26),
+        "set name as a range endpoint",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state s { ['a'..hi] -> stop; }\n}\n",
+        "unexpected-token",
+        (4, 25, 4, 27),
     ),
 ];
 

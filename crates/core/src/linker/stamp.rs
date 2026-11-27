@@ -1372,6 +1372,57 @@ fn body_has_return(syntax: &ArchSyntax, blob: &[u8]) -> bool {
         })
 }
 
+/// Refuses the first routine, in layout order, whose body returns through
+/// an exit index at or above the exit count its interface declares
+/// (docs/core.md (linking)). No call site's exit vector has an entry for
+/// such an index, so a framed call would trap on it at run time and a
+/// copy spliced into a site is refused outright.
+///
+/// Reads the resolved, PRE-stamp records: a stamped copy carries no
+/// interface to compare against. A function with no interface declares
+/// nothing and is not checked — a hand-authored frame descriptor, not a
+/// signature, supplies the exits such a body returns through. Runs
+/// before any mechanism lowers, so it does not depend on the entry
+/// carrying a signature.
+pub(super) fn check_declared_exits(
+    syntax: &ArchSyntax,
+    order: &[FuncRef],
+) -> Result<(), LinkError> {
+    for f in order {
+        let Some(iface) = f.interface else { continue };
+        if let Some((_, k)) = body_exits(syntax, &f.blob)
+            .into_iter()
+            .find(|&(_, k)| k >= iface.exit_count())
+        {
+            return Err(LinkError::UndeclaredExit {
+                routine: f.name.to_string(),
+                exit: k,
+                declared: iface.exit_count(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Every multi-exit return in `blob`, as `(blob offset, exit index)` in
+/// ascending offset order — the sibling of [`body_has_return`] for the
+/// other way a body leaves, read by [`check_declared_exits`].
+fn body_exits(syntax: &ArchSyntax, blob: &[u8]) -> Vec<(u32, u8)> {
+    decode::decode_stream(syntax, blob, 0, blob.len() as u32)
+        .into_iter()
+        .filter_map(|d| match d.body {
+            Body::Instr {
+                mnemonic,
+                operand: DecodedOperand::Imm(k),
+            } => syntax
+                .by_mnemonic(mnemonic)
+                .filter(|e| e.is_exit_return())
+                .map(|_| (d.addr, k)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// What an exit-bearing site needs before a mono path commits to splicing
 /// it (docs/core.md (call mechanisms)): the dialect's far jump to enter
 /// the copy with, and — for a callee that CAN return — an instruction
@@ -1925,7 +1976,7 @@ fn build_stamp(
                 blob.extend_from_slice(&blob_bytes[old_addr as usize..(old_addr + d.len) as usize]);
             }
             OperandKind::Imm8 => {
-                if entry.flow == Flow::Stop {
+                if entry.is_exit_return() {
                     // A multi-exit return. Inside an exit-bearing splice
                     // it becomes a jump to exit `k` of the site's vector;
                     // anywhere else it is a frames instruction the base
@@ -1936,6 +1987,10 @@ fn build_stamp(
                     let DecodedOperand::Imm(k) = operand else {
                         unreachable!("Imm8 decodes to Imm")
                     };
+                    // Defensive: `check_declared_exits` has already refused a
+                    // body returning past its declared exits, so a routine
+                    // with an interface cannot overrun the site's vector
+                    // here; a function without one still can.
                     let Some(&target) = s.exits.get(usize::from(*k)) else {
                         return Err(LinkError::BadBinding {
                             callee: callee.name.to_string(),

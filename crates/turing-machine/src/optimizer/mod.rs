@@ -124,7 +124,8 @@ fn renumber_dense(w: &mut IrWorld) {
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
+                | IrTransition::TrapWrite
+                | IrTransition::TrapContract => {}
             }
         }
     }

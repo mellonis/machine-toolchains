@@ -93,8 +93,8 @@ other:  hlt
 ";
 
 #[test]
-fn dialect_version_is_0_5() {
-    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.5");
+fn dialect_version_is_0_4() {
+    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.4");
 }
 
 /// Every interface form the TM-1 dialect spells, round-tripped at the
@@ -102,7 +102,7 @@ fn dialect_version_is_0_5() {
 const INTERFACE_OBJECT: &str = "\
 .graph lib::findAGraph, 42
 .grafted std::binaryNumbers::plusOneGraph, 7
-.routine main, tapes=2, alpha=(3, 6), exits=1, noreturn
+.routine main, tapes=2, alpha=(3, 6), exits=(e0), noreturn
 .param ctl, ('_', '0', '1'), opaque
 .param data, ('_', 'a', 'b', '0', '1', '$'), writes=('0', '1'), enters=('$'), leaves=('$')
 .func main

@@ -4,19 +4,22 @@
 //! around it, never which tokens it sits between
 //! (docs/tmt/fmt.md (comments are never moved)).
 //!
-//! One template per grammatical position a comment can occupy — 61 of them,
-//! each with a `@C@` slot run in BOTH flavours (`/* c */` and `// c`), ported
-//! from the measured 2026-08-30 audit
-//! (docs/superpowers/specs/2026-08-30-tmc-comment-audit.md). Each case runs
+//! One template per grammatical position a comment can occupy — 97 of them:
+//! the 61 of the measured 2026-08-30 audit, two for the `noreturn` clause,
+//! eighteen for the head-position clauses, `never writes`, the open-map
+//! `*` and glyph sets, six for the named-cell slots (`name` before its
+//! `:`, the cell after it), and ten for a rule guard's slots (`]`-`where`,
+//! `where`-`{`, `{`-operand, the `==`/`&&`/`in` operand slots, `}`-`->`)
+//! — each with a `@C@` slot run in BOTH flavours
+//! (`/* c */` and `// c`). Each case runs
 //! three mechanical gates: the comment's significant-token NEIGHBOURS are
 //! unchanged, the significant-token stream is unchanged (fmt is
 //! whitespace-only), and the output is a fixed point.
 //!
-//! The groups mirror the work plan: `ALREADY_CORRECT` is the regression
-//! guard — 33 positions where the current printer already satisfies the rule
-//! — and each `#[ignore]`d group is one task's work list, its ignore reason
-//! recording the MEASURED destination the comment moves to today.
-//! Un-ignoring a group is how its task proves its surface.
+//! `ALREADY_CORRECT` is the regression guard — the positions the printer
+//! satisfied from the start — and every other group was once an
+//! `#[ignore]`d work list whose ignore reason recorded where the comment
+//! moved; none is ignored any longer.
 //!
 //! Baseline facts, measured on this harness at the branch base: no comment
 //! is ever lost, no fixture fails to parse, and the only non-idempotent
@@ -92,7 +95,7 @@ fn run_group(group: &[(&str, &str)]) {
 }
 
 // ---------------------------------------------------------------------------
-// The regression guard: 33 positions the current printer already gets right.
+// The regression guard: 35 positions the printer already got right.
 // These pass at the branch base and must never stop passing.
 // ---------------------------------------------------------------------------
 
@@ -221,8 +224,8 @@ fn already_correct_positions_stay() {
 }
 
 // ---------------------------------------------------------------------------
-// The work lists. Each group is one task; its ignore reason records the
-// measured destination. Un-ignoring the group is how its task proves itself.
+// The former work lists, one group per construct family, all live now. Each
+// group's doc records where the comment used to land before its fix.
 // ---------------------------------------------------------------------------
 
 /// The `alphabet` header — the worst destination and the only unstable one:
@@ -238,10 +241,73 @@ fn alphabet_header_comments_stay_in_the_header() {
     run_group(ALPHABET_HEADER);
 }
 
+/// A `set` declaration: its header (between the keyword and the name,
+/// between the name and the `{`), its body (between two elements, before
+/// the `}`), and a set reference in an alphabet body — including inside a
+/// qualified reference's own path, the `use/inside-path` analog.
+const SET_DECLS: &[(&str, &str)] = &[
+    ("set/kw-name", "set @C@\n  s { 'a' }\n"),
+    ("set/name-brace", "set s @C@\n  { 'a' }\n"),
+    ("set/between-elems", "set s {\n  'a', @C@\n  'b' }\n"),
+    ("set/before-close", "set s {\n  'a'\n  @C@\n}\n"),
+    (
+        "set/ref-between-elems",
+        "set s { 'a' }\nalphabet ab {\n  '_', @C@\n  s }\n",
+    ),
+    (
+        "set/inside-qualified-ref",
+        "namespace n {\n  set s { 'a' }\n}\nalphabet ab {\n  '_', n:: @C@\n  s }\n",
+    ),
+];
+
+#[test]
+fn set_declaration_comments_stay_where_written() {
+    run_group(SET_DECLS);
+}
+
+/// A set named in a pattern cell: a comment before the name, between the
+/// name and its `as`, between `as` and the binding, after the cell, and
+/// inside a qualified name's own path.
+const SET_CELLS: &[(&str, &str)] = &[
+    (
+        "set-cell/before-name",
+        "set s { 'a' }\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state go {\n    [ @C@\n    s] -> stop;\n    [*] -> stop;\n  }\n}\n",
+    ),
+    (
+        "set-cell/name-as",
+        "set s { 'a' }\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state go {\n    [s @C@\n    as v] -> write [{v}] stop;\n    [*] -> stop;\n  }\n}\n",
+    ),
+    (
+        "set-cell/as-binding",
+        "set s { 'a' }\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state go {\n    [s as @C@\n    v] -> write [{v}] stop;\n    [*] -> stop;\n  }\n}\n",
+    ),
+    (
+        "set-cell/after-cell",
+        "set s { 'a' }\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  tape u: ab;\n  entry state go {\n    [s, @C@\n    *] -> stop;\n    [*, *] -> stop;\n  }\n}\n",
+    ),
+    (
+        "set-cell/inside-qualified-name",
+        "namespace n {\n  set s { 'a' }\n}\nalphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state go {\n    [n:: @C@\n    s] -> stop;\n    [*] -> stop;\n  }\n}\n",
+    ),
+];
+
+#[test]
+fn set_cell_comments_stay_where_written() {
+    run_group(SET_CELLS);
+}
+
 /// The remaining header families. Measured destinations: `namespace`,
 /// `machine`, `state` → own line inside the body (after the `{`);
 /// `routine`, `graft`, `bind` → riding the argument list's `(`;
-/// `tape` → trailing after the whole statement's `;`.
+/// `tape` → trailing after the whole statement's `;`. Three of the
+/// `sig-param` entries are a signature tape parameter's `enters`/`leaves`
+/// head-position clauses: a comment before the `enters` keyword, inside a
+/// clause's own braces, or between the two clauses all stay exactly where
+/// written — a BLOCK comment prints inline, a LINE comment breaks the
+/// whole parameter list to one parameter per line (the same
+/// comment-bearing-parameter path every other signature entry above
+/// takes). The fourth sits between the two words of the one two-token
+/// clause keyword, `never writes`, and stays there the same way.
 const OTHER_HEADERS: &[(&str, &str)] = &[
     (
         "namespace/kw-name",
@@ -307,6 +373,22 @@ const OTHER_HEADERS: &[(&str, &str)] = &[
         "bind/kw-target",
         "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n    entry state s { [*] -> d; }\n  }\n}\nmachine {\n  tape main: ab;\n  bind @C@\n  n::g(t = main, d = fin) as x;\n  state fin { [*] -> stop; }\n}\n",
     ),
+    (
+        "sig-param/before-enters",
+        "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab @C@\n  enters { 'a' } leaves { 'b' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
+    ),
+    (
+        "sig-param/enters-interior",
+        "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab enters { 'a', @C@\n  'b' } leaves { 'b' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
+    ),
+    (
+        "sig-param/between-enters-leaves",
+        "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab enters { 'a' } @C@\n  leaves { 'b' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
+    ),
+    (
+        "sig-param/never-writes-interior",
+        "alphabet ab { '_', 'a', 'b' }\nnamespace n {\n  routine r(tape t: ab never @C@\n  writes { 'a' }) {\n    entry state s { [*] -> stop; }\n  }\n}\n",
+    ),
 ];
 
 #[test]
@@ -333,6 +415,24 @@ const LIST_INTERIORS: &[(&str, &str)] = &[
     (
         "graft/in-arg",
         "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n    entry state s { [*] -> d; }\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = @C@\n  main, d = fin) as i;\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    // The open marker is a list position of its own, and a single token,
+    // so the only slots it has are the two BOUNDARIES around it — plus
+    // the one between `{` and a marker standing alone. All three neighbour
+    // pairs must survive; the map breaking to multi-line around a boundary
+    // comment is the surface's recorded rendering gap
+    // (docs/tmt/fmt.md (comments inside a list)), and it moves no comment.
+    (
+        "map/before-open-marker",
+        "alphabet ab { '_', 'a' }\nalphabet cd { '_', 'a', 'b' }\nroutine r(tape t: ab) {\n  entry state s { [*] -> return; }\n}\nmachine {\n  tape main: cd;\n  entry state g {\n    [*] -> call r(t = main with map { 'a' -> 'a', @C@\n    * }) then fin;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "map/after-open-marker",
+        "alphabet ab { '_', 'a' }\nalphabet cd { '_', 'a', 'b' }\nroutine r(tape t: ab) {\n  entry state s { [*] -> return; }\n}\nmachine {\n  tape main: cd;\n  entry state g {\n    [*] -> call r(t = main with map { 'a' -> 'a', * @C@\n    }) then fin;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "map/before-lone-open-marker",
+        "alphabet ab { '_', 'a' }\nalphabet cd { '_', 'a', 'b' }\nroutine r(tape t: ab) {\n  entry state s { [*] -> return; }\n}\nmachine {\n  tape main: cd;\n  entry state g {\n    [*] -> call r(t = main with map { @C@\n    * }) then fin;\n  }\n  state fin { [*] -> stop; }\n}\n",
     ),
 ];
 
@@ -374,4 +474,90 @@ const RULE_ACTION_SLOT: &[(&str, &str)] = &[
 #[test]
 fn rule_action_comments_stay_in_their_slot() {
     run_group(RULE_ACTION_SLOT);
+}
+
+/// The named-cell slots: between a cell's `name` and its `:`, and between
+/// `:` and the cell's content, in each of the three vectors
+/// (docs/tmt/language.md (named vector cells)).
+const NAMED_CELL_SLOTS: &[(&str, &str)] = &[
+    (
+        "named/pattern-before-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [main @C@\n    : 'a'] -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/pattern-after-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [main: @C@\n    'a'] -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/write-before-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write [main @C@\n    : 'a'] stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/write-after-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write [main: @C@\n    'a'] stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/move-before-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> move [main @C@\n    : >] stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "named/move-after-colon",
+        "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> move [main: @C@\n    >] stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+];
+
+#[test]
+fn named_cell_comments_stay_in_their_slot() {
+    run_group(NAMED_CELL_SLOTS);
+}
+
+/// A rule guard's slots: the guard is written text between `]` and `->`,
+/// so a comment prints between the same two significant tokens there as
+/// anywhere else (docs/tmt/fmt.md (comments are never moved)).
+const GUARD_SLOTS: &[(&str, &str)] = &[
+    (
+        "guard/after-pattern",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] @C@\n    where { x == 'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/after-where",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where @C@\n    { x == 'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/after-open",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { @C@\n    x == 'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-eq-before",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x @C@\n    == 'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-eq-after",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x == @C@\n    'a' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-and-before",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x == 'a' @C@\n    && x == 'b' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-and-after",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x == 'a' && @C@\n    x == 'b' } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-in-before",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x @C@\n    in pair } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/around-in-after",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x in @C@\n    pair } -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+    (
+        "guard/before-arrow",
+        "alphabet ab { '_', 'a', 'b' }\nset pair { 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['a' as x] where { x == 'a' } @C@\n    -> stop;\n  }\n  state fin { [*] -> stop; }\n}\n",
+    ),
+];
+
+#[test]
+fn guard_comments_stay_in_their_slot() {
+    run_group(GUARD_SLOTS);
 }

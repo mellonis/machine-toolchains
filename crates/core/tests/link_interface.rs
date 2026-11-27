@@ -183,12 +183,16 @@ L:      stp
 /// into an exit-bearing callee: an exit-FREE control must therefore call
 /// a callee declaring `exits=0`, not the same one.
 fn exit_program(declared: u8, binding: &str) -> String {
+    let declared = (0..declared)
+        .map(|k| format!("e{k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "\
 .routine main, tapes=2, alpha=(4, 4)
 .param a, ('_', 'x', 'y', 'z')
 .param b, ('_', 'x', 'y', 'z')
-.routine sub, tapes=2, alpha=(4, 4), exits={declared}
+.routine sub, tapes=2, alpha=(4, 4), exits=({declared})
 .param p, ('_', '0', '1', '2')
 .param q, ('_', '0', '1', '2')
 .section code

@@ -107,7 +107,8 @@ fn retarget(w: &mut IrWorld, from: u32, to: u32) {
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
+                | IrTransition::TrapWrite
+                | IrTransition::TrapContract => {}
             }
         }
     }

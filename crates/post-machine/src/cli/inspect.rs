@@ -12,6 +12,7 @@ use mtc_core::vm::LoadError;
 
 use crate::arch::DEFAULT_GLYPHS;
 use crate::ir::IrProgram;
+use crate::ir_graph::GraphView;
 
 use super::{Args, CliOutput, Delimit, parse_keyed, render_tape};
 
@@ -461,13 +462,16 @@ fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
 
 pub(super) const IR_USAGE: &str = "\
 USAGE: pmt ir graph FILE.ir.json|FILE.pmc [--function NAME]
-                    [--variant normal|volatile] [-O0|-O1]
+                    [--variant normal|volatile] [-O0|-O1] [--raw|--shape]
 
 Renders --emit-ir output as a Mermaid flowchart (one per function). A
 .pmc input is compiled in memory first: --variant picks which build
 column's CFG is rendered (default normal) and -O0/-O1 the optimization
 level (default -O0, as in `pmt compile`). Both flags need a .pmc input —
-a .ir.json file already holds exactly one column.
+a .ir.json file already holds exactly one column. By default a check
+whose two arms reach one block is drawn as one edge; --raw draws one
+edge per arm, --shape one edge per pair of blocks, labelled with the
+number of edges it stands for.
 ";
 
 pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
@@ -536,6 +540,20 @@ fn compile_for_inspection(
     })
 }
 
+/// `--raw` / `--shape`, mutually exclusive; neither is the merged default
+/// (docs/pmt/cli.md (pmt ir)). Both apply to a `.ir.json` input as much
+/// as to a `.pmc` one: they choose how to draw, not what to compile.
+fn take_graph_view(args: &mut Args) -> Result<GraphView, String> {
+    match (args.flag("--raw"), args.flag("--shape")) {
+        (true, true) => Err(format!(
+            "--raw and --shape are mutually exclusive\n\n{IR_USAGE}"
+        )),
+        (true, false) => Ok(GraphView::Raw),
+        (false, true) => Ok(GraphView::Shape),
+        (false, false) => Ok(GraphView::Merged),
+    }
+}
+
 fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     if args.help() {
@@ -543,6 +561,7 @@ fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
     }
     let filter = args.value("--function")?;
     let variant = take_variant(&mut args)?;
+    let view = take_graph_view(&mut args)?;
     // -O0 then -O1, exactly as `pmt compile` resolves them: the later
     // check wins when both are written.
     let o0 = args.flag("-O0");
@@ -584,7 +603,7 @@ fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
         out.push_str(&format!(
             "%% {}\n{}\n",
             function.name,
-            function.to_mermaid()
+            function.to_mermaid_view(view)
         ));
     }
     if out.is_empty() {

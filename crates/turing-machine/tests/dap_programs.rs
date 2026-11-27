@@ -28,14 +28,50 @@ use mtc_turing_machine::dap::TmDapAdapter;
 
 /// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
 /// uniquely by process id + an atomic counter.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("dap-{name}-{}-{n}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Assembles hand-written `.tma` (no debug info) and links it standalone,
@@ -2743,4 +2779,69 @@ fn frame_in_a_function_with_no_mapped_lines_stays_sourceless() {
         "a frame with no known line must not carry a source object \
          (DAP: line 0 is only legal sourceless), got: {frame}"
     );
+}
+
+/// A routine whose tape parameter declares where the head may be when a
+/// call enters it, seeded so the promise is false — the one trap kind the
+/// program itself plants rather than the machine faulting.
+const HEAD_CONTRACT_TMC: &str = "\
+alphabet sym { '_', 'a', 'b' }
+
+routine walk(tape num: sym enters { '_' }) {
+  entry state go {
+    [*] -> move [>] return;
+  }
+}
+
+machine {
+  tape t: sym;
+  entry state s { [*] -> call walk(num = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+
+/// A broken contract stops under its OWN reason rather than the
+/// `"exception"` every machine fault shares: it is the program's
+/// declaration failing, not the machine faulting, and a client can offer a
+/// different affordance for it. The description stays the trap's own
+/// `Display`.
+///
+/// Mutation this catches: forwarding the literal `"exception"` for every
+/// trap kind, which is what every other trap in this file still gets.
+#[test]
+fn a_broken_head_contract_stops_with_the_contract_reason() {
+    let dir = scratch("contract");
+    let program = write_tmc_debug(&dir, "contract", HEAD_CONTRACT_TMC);
+    // Seeded on `'a'`, which the `enters` clause does not name.
+    let tape = write_one_tape_block(&dir, "contract", 3, 1);
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, false), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    adapter.handle("continue", &Value::Null, &mut out).unwrap();
+
+    let events = drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Stopped);
+    match events.as_slice() {
+        [
+            AdapterEvent::Stopped {
+                reason,
+                description,
+            },
+        ] => {
+            assert_eq!(*reason, "contract");
+            assert!(
+                description
+                    .as_deref()
+                    .is_some_and(|d| d.contains("contract")),
+                "got: {description:?}"
+            );
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
 }

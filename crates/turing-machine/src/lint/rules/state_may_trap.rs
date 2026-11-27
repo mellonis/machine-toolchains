@@ -18,14 +18,16 @@ use std::collections::HashSet;
 use mtc_core::diagnostics::Diagnostic;
 
 use crate::lint::LintContext;
-use crate::lint::patterns::{Band, band, cell_labels};
+use crate::patterns::{Band, accepted_glyphs, band};
 
 /// The largest input product this rule will enumerate; above it the state is
 /// skipped (coverage left unproven) rather than guessed at.
 const MAX_ENUMERATED: usize = 1 << 16;
 
 /// Each rule's per-cell match set over the tape alphabets, or `None` if any
-/// rule's arity mismatches or carries an unresolvable range cell.
+/// rule's arity mismatches or carries an unresolvable range cell. One call to
+/// [`accepted_glyphs`] per rule — a one-element slice degenerates the shared
+/// union computation to that single rule's own per-tape sets.
 fn rule_sets(
     state: &crate::parser::State,
     tape_glyphs: &[&[String]],
@@ -33,17 +35,7 @@ fn rule_sets(
     state
         .rules
         .iter()
-        .map(|rule| {
-            if rule.pattern.cells.len() != tape_glyphs.len() {
-                return None;
-            }
-            rule.pattern
-                .cells
-                .iter()
-                .zip(tape_glyphs)
-                .map(|(cell, glyphs)| cell_labels(cell, glyphs).map(|v| v.into_iter().collect()))
-                .collect::<Option<Vec<HashSet<String>>>>()
-        })
+        .map(|rule| accepted_glyphs(std::slice::from_ref(rule), tape_glyphs))
         .collect()
 }
 

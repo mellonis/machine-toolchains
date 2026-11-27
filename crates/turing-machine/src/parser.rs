@@ -10,7 +10,7 @@
 //! write vector `check_char_arithmetic` inspects — and build no second
 //! node tree of their own alongside it.
 //!
-//! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
+//! The 32 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
 //! expected. `deprecated` is contextual (an attribute word) and is not in that
 //! set.
@@ -22,6 +22,16 @@ use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
+use crate::patterns::{glyph_label, label_number};
+
+/// What the parser wanted where a set name stood before `..`: a set is
+/// written on its own, never as a range endpoint.
+const SET_ON_ITS_OWN: &str =
+    "a set name on its own — a range endpoint is a glyph or a number, never a set";
+
+/// What the parser wanted where a set name stood after `..`.
+const SET_AS_ENDPOINT: &str =
+    "a glyph or number to end the range — a range endpoint is never a set";
 use crate::syntax::{self, GreenSink, TmcKind};
 
 /// The `.tmc` language acceptance-contract version (the spec's language
@@ -32,8 +42,10 @@ use crate::syntax::{self, GreenSink, TmcKind};
 /// first cut (mirrors PM-1's `PMC_LANG_VERSION` discipline); `0.2` adds the
 /// declarations-only signature alternative — a `;` in place of a `{ … }`
 /// body after a routine or graph signature (docs/tmt/language.md
-/// (headers)).
-/// (An unreleased version amends in place; the bump discipline binds from the first release.)
+/// (headers)) — with everything else the language gained since the last
+/// release (docs/tmt/language.md (grammar version history)). A language
+/// version moves once between two releases, by the minimal bump: an
+/// unreleased version amends in place.
 pub const TMC_LANG_VERSION: &str = "0.2";
 
 // ---------------------------------------------------------------------------
@@ -45,6 +57,8 @@ pub const TMC_LANG_VERSION: &str = "0.2";
 pub struct Program {
     pub imports: Vec<Import>,
     pub alphabets: Vec<Alphabet>,
+    /// Named glyph sets (`set NAME { … }`), in source order.
+    pub sets: Vec<SetDecl>,
     pub maps: Vec<MapDecl>,
     pub routines: Vec<Routine>,
     pub graphs: Vec<Graph>,
@@ -108,12 +122,6 @@ impl SymLit {
             SymLit::Glyph { span, .. } | SymLit::Number { span, .. } => *span,
         }
     }
-
-    /// True for a glyph literal, false for a numeric one — the kind a range's
-    /// two endpoints must agree on, and the kind a pattern binding takes.
-    pub fn is_glyph(&self) -> bool {
-        matches!(self, SymLit::Glyph { .. })
-    }
 }
 
 /// An `export? alphabet NAME { … }` declaration.
@@ -129,12 +137,41 @@ pub struct Alphabet {
     pub doc: Option<Doc>,
 }
 
-/// One alphabet element: a single symbol, or an inclusive `lo..hi` range whose
-/// endpoints are the same kind (`glyph..glyph` or `number..number`).
+/// One alphabet element: a single symbol, an inclusive `lo..hi` range whose
+/// endpoints are the same kind (`glyph..glyph` or `number..number`), or a
+/// reference to a named glyph set, bare or qualified, which expands in place
+/// to the set's members, in the set's own order. The same element
+/// grammar serves an alphabet body, a set body and every contract clause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlphabetElem {
     Single(SymLit),
-    Range { lo: SymLit, hi: SymLit, span: Span },
+    Range {
+        lo: SymLit,
+        hi: SymLit,
+        span: Span,
+    },
+    /// `name` is the reference as written, `::`-joined when qualified;
+    /// `span` covers the first segment's start through the last one's end.
+    SetRef {
+        name: String,
+        span: Span,
+    },
+}
+
+/// An `export? set NAME { … }` declaration — a named glyph set, its body the
+/// alphabet-body element grammar, so a set may name other sets. The
+/// same field shape as [`Alphabet`]: a set is a top-level declaration like
+/// one, namespaced, exportable and importable, but it is never a tape type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub line: u32,
+    pub col: u32,
+    pub exported: bool,
+    pub ns: Vec<String>,
+    pub elems: Vec<AlphabetElem>,
+    pub doc: Option<Doc>,
 }
 
 /// An `export? map NAME: SRC -> DST { pairs }` declaration — a reusable,
@@ -184,10 +221,12 @@ pub struct SigParam {
     pub span: Span,
 }
 
-/// One `writes { … }` or `preserves { … }` contract clause on a signature
-/// tape parameter: the brace-set's elements (the same element grammar as an
-/// alphabet body — singles and ranges), the keyword's own span, and the
-/// whole clause's span (keyword start → closing `}`).
+/// One `writes { … }`, `never writes { … }`, `enters { … }`, or
+/// `leaves { … }` contract clause on a signature tape parameter: the
+/// brace-set's elements (the same element grammar as an alphabet body —
+/// singles, ranges and set references), the keyword's own span (both
+/// words of the two-token `never writes`, and anything written between
+/// them), and the whole clause's span (keyword start → closing `}`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractClause {
     pub elems: Vec<AlphabetElem>,
@@ -201,11 +240,26 @@ pub enum SigParamKind {
         alphabet: String,
         alphabet_span: Span,
         volatile: bool,
+        // The four contract clauses below are all boxed, one policy for
+        // all of them: unboxed they would make this variant dwarf
+        // `State`'s zero-byte payload, and they are signature-only, so
+        // the indirection never touches a world-body hot path.
         /// A declared `writes { … }` clause, signature-only (never present
         /// on a machine tape declaration).
-        writes: Option<ContractClause>,
-        /// A declared `preserves { … }` clause, signature-only.
-        preserves: Option<ContractClause>,
+        writes: Option<Box<ContractClause>>,
+        /// A declared `never writes { … }` clause, signature-only: the
+        /// symbols the body never writes, subtracted from the `writes`
+        /// set (or from the whole alphabet when there is none).
+        never_writes: Option<Box<ContractClause>>,
+        /// A declared `enters { … }` clause, signature-only: the symbols
+        /// the head may be sitting on when a call transfers control into
+        /// this parameter's tape. Canonical order: after `writes`/
+        /// `never writes`, before `leaves`.
+        enters: Option<Box<ContractClause>>,
+        /// A declared `leaves { … }` clause, signature-only: the symbols
+        /// the head may be sitting on when control returns. Canonical
+        /// order: last of the four.
+        leaves: Option<Box<ContractClause>>,
     },
     State,
 }
@@ -360,6 +414,10 @@ impl QualName {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     pub pattern: Pattern,
+    /// The rule's `where { … }` guard, when one was written — the predicate
+    /// that filters this pattern's expansion (docs/tmt/language.md
+    /// (rule guards)).
+    pub guard: Option<Guard>,
     /// A leading `debugger` in the action.
     pub debugger: bool,
     pub write: Option<WriteVec>,
@@ -381,6 +439,10 @@ pub struct Pattern {
 /// One pattern cell, optionally binding its match with `as v`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternCell {
+    /// `king` in `[king: '♔']` — the tape this cell speaks of, as written.
+    /// Pure spelling: resolution folds it to the tape's vector position
+    /// (docs/tmt/language.md (named vector cells)).
+    pub name: Option<CellName>,
     pub kind: PatternCellKind,
     /// `as v`; forbidden on a wildcard (`* as v`).
     pub binding: Option<Binding>,
@@ -391,13 +453,159 @@ pub struct PatternCell {
 pub enum PatternCellKind {
     Wildcard,
     Single(SymLit),
-    Range { lo: SymLit, hi: SymLit },
+    Range {
+        lo: SymLit,
+        hi: SymLit,
+    },
+    /// A named glyph set, bare or `::`-qualified, as written: the cell
+    /// matches each of the set's members, one expanded row per member,
+    /// exactly as a range matches each of its own. The parser knows only
+    /// the name, so `resolved` is `None` as parsed; resolution fills it in
+    /// the world's own scope, and every reader past resolution — expansion,
+    /// the coverage lints, the static head-contract checks — reads the
+    /// members from there, never the name.
+    SetRef {
+        name: String,
+        name_span: Span,
+        resolved: Option<SetCellMembers>,
+    },
+}
+
+/// What a set-naming pattern cell matches, filled by resolution: the set
+/// it resolved to and that set's members, in the set's own order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetCellMembers {
+    /// The set's mangled name.
+    pub set: String,
+    pub members: Vec<SetMember>,
+}
+
+/// One member of a set a pattern cell names: its glyph label. Whether a
+/// binding on the cell may fold over it is its label's own answer
+/// (`patterns::label_number`), never how the set spelled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetMember {
+    pub label: String,
+}
+
+/// A rule guard `where { … }`: a compile-time predicate over the rule's
+/// bindings that filters the pattern's cartesian expansion at expansion
+/// time (docs/tmt/language.md (rule guards)). `span` is the
+/// keyword-decided extent — `where` through `}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Guard {
+    pub expr: GuardExpr,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardExpr {
+    /// `a == b`, `a != b` — glyph identity between offset-free terms; order
+    /// comparisons and any offset are sequence-position work instead.
+    Cmp(GuardCmp),
+    /// `x in S` — restricts x to the set's members within the occurrence's
+    /// cone and makes S's member order x's position sequence there.
+    In(GuardIn),
+    And(Box<GuardExpr>, Box<GuardExpr>),
+    Or(Box<GuardExpr>, Box<GuardExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardCmp {
+    pub left: GuardTerm,
+    pub op: CmpOp,
+    pub right: GuardTerm,
+    /// Left operand start → right operand end.
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardIn {
+    /// The binding the conjunct restricts.
+    pub binding: CellName,
+    /// The set named. `in` itself is contextual — only `S` is a name.
+    pub set: CellName,
+    /// What the set resolved to in the world's own scope — filled at
+    /// resolution exactly as `PatternCellKind::SetRef`'s `resolved` is:
+    /// every reader past resolution reads the MEMBERS, in the set's own
+    /// order (which is what order comparisons count positions against),
+    /// never the name (docs/tmt/language.md (rule guards)).
+    pub resolved: Option<SetCellMembers>,
+    /// Binding start → set name end.
+    pub span: Span,
+}
+
+/// One guard operand: a base with a constant offset — `y - 1` is
+/// `base y, offset -1`. The offset participates in POSITION arithmetic
+/// only; a bare identity comparison always carries offset 0
+/// (docs/tmt/language.md (rule guards)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardTerm {
+    pub base: GuardBase,
+    pub offset: i64,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardBase {
+    /// A pattern binding by its written name.
+    Binding(CellName),
+    /// A glyph or number literal: identity for `==`/`!=`, and its position
+    /// in the other operand's sequence where a sequence is needed.
+    Lit(SymLit),
+}
+
+/// The six comparison operators a guard may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// Where a rule's write vector applies arithmetic to a glyph-bound name:
+/// the span of the leftmost such reference in the first folding `{…}`
+/// cell, or `None`. A bare `{name}` is passthrough — legal for a glyph
+/// binding — so only a cell of any other shape is a fold, and a fold is
+/// numeric-only (docs/tmt/language.md (substitution)). The parser asks
+/// this for the bindings whose kind it can see; resolution asks it again
+/// for the set-bound names, whose members it alone knows.
+pub(crate) fn char_arithmetic_span(write: Option<&WriteVec>, glyph_bound: &[&str]) -> Option<Span> {
+    fn var_span(expr: &FoldExprNode, glyph_bound: &[&str]) -> Option<Span> {
+        match &expr.kind {
+            FoldExprKind::Var(name) => glyph_bound.contains(&name.as_str()).then_some(expr.span),
+            FoldExprKind::Int(_) => None,
+            FoldExprKind::Bin { lhs, rhs, .. } => {
+                var_span(lhs, glyph_bound).or_else(|| var_span(rhs, glyph_bound))
+            }
+        }
+    }
+    write?.cells.iter().find_map(|cell| match &cell.kind {
+        WriteCellKind::Subst { expr } if !matches!(expr.kind, FoldExprKind::Var(_)) => {
+            var_span(expr, glyph_bound)
+        }
+        _ => None,
+    })
 }
 
 /// A pattern-cell binding `as NAME`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub name: String,
+    pub span: Span,
+}
+
+/// A rule-vector cell's tape name — `king` in `[king: '♔']`. The name is
+/// the tape's NAME in the enclosing world, never its position; resolution
+/// folds it to the position and every unnamed tape takes its default
+/// (`*` / `-` / `.`) (docs/tmt/language.md (named vector cells)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellName {
+    pub name: String,
+    /// The name token's own span — what a diagnostic about the name points at.
     pub span: Span,
 }
 
@@ -410,6 +618,7 @@ pub struct WriteVec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteCell {
+    pub name: Option<CellName>,
     pub kind: WriteCellKind,
     pub span: Span,
 }
@@ -470,6 +679,7 @@ pub struct MoveVec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveCell {
+    pub name: Option<CellName>,
     pub dir: MoveDir,
     pub span: Span,
 }
@@ -584,6 +794,17 @@ pub struct SymMap {
     /// `Some((name, name_span))` for `with map NAME`; `None` for the
     /// inline `with map { … }` form.
     pub named: Option<(String, Span)>,
+    /// The `*` marker's own span when the map was left OPEN — `with map
+    /// { 'a' -> 'a', * }` or `with map { * }` — and `None` for a closed
+    /// map (docs/tmt/language.md (symbol maps)). An open map sends every
+    /// caller symbol it does not list onto the callee's opaque index
+    /// rather than holing it, which only a callee whose every reading
+    /// state carries a `*` row can survive; the span is what a
+    /// diagnostic about the marker points at. Carried as the span rather
+    /// than a bare flag for the same reason a declared `noreturn` is
+    /// (`ResolvedWorld::declared_noreturn`): the fact and the place it
+    /// was written are one piece of information.
+    pub open: Option<Span>,
 }
 
 /// One map pair `src -> dst` (bidirectional) or `src => dst` (read-only).
@@ -917,6 +1138,12 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::Comment(_) => "a comment".into(),
         TokenKind::DocLine(_) => "a doc line".into(),
         TokenKind::AttentionLine(_) => "an attention line".into(),
+        TokenKind::EqEq => "`==`".into(),
+        TokenKind::NotEq => "`!=`".into(),
+        TokenKind::LtEq => "`<=`".into(),
+        TokenKind::GtEq => "`>=`".into(),
+        TokenKind::AmpAmp => "`&&`".into(),
+        TokenKind::PipePipe => "`||`".into(),
     }
 }
 
@@ -1216,7 +1443,8 @@ impl Parser<'_> {
     fn next_is_top_doc_accepting(&self) -> bool {
         matches!(&self.peek().kind, TokenKind::Ident(w)
             if matches!(w.as_str(),
-                "export" | "alphabet" | "map" | "routine" | "graph" | "machine" | "namespace"))
+                "export" | "alphabet" | "set" | "map" | "routine" | "graph" | "machine"
+                    | "namespace"))
     }
 
     /// One namespace level's item loop — the recovery seam
@@ -1296,6 +1524,7 @@ impl Parser<'_> {
                     w.as_str(),
                     "use"
                         | "alphabet"
+                        | "set"
                         | "map"
                         | "routine"
                         | "graph"
@@ -1382,6 +1611,11 @@ impl Parser<'_> {
                         self.parse_alphabet()?;
                         self.g_finish(); // Alphabet
                     }
+                    "set" => {
+                        self.g_start_at(cp, TmcKind::SetDecl);
+                        self.parse_set_decl()?;
+                        self.g_finish(); // SetDecl
+                    }
                     "map" => {
                         self.g_start_at(cp, TmcKind::MapDecl);
                         self.parse_map_decl()?;
@@ -1429,6 +1663,11 @@ impl Parser<'_> {
                                 self.parse_alphabet()?;
                                 self.g_finish(); // Alphabet — `export` included
                             }
+                            TokenKind::Ident(w2) if w2 == "set" => {
+                                self.g_start_at(cp, TmcKind::SetDecl);
+                                self.parse_set_decl()?;
+                                self.g_finish(); // SetDecl — `export` included
+                            }
                             TokenKind::Ident(w2) if w2 == "map" => {
                                 self.g_start_at(cp, TmcKind::MapDecl);
                                 self.parse_map_decl()?;
@@ -1447,7 +1686,7 @@ impl Parser<'_> {
                             _ => {
                                 return Err(Self::expected(
                                     &t2,
-                                    "`alphabet`, `map`, `routine`, or `graph` after `export`",
+                                    "`alphabet`, `set`, `map`, `routine`, or `graph` after `export`",
                                 ));
                             }
                         }
@@ -1522,7 +1761,32 @@ impl Parser<'_> {
         Ok(elems)
     }
 
+    /// `set NAME { … }`, the current token already the `set` keyword — the
+    /// same header-then-body shape [`Self::parse_alphabet`] parses, over the
+    /// same [`Self::alphabet_elems`] body loop.
+    fn parse_set_decl(&mut self) -> Result<(), CompileError> {
+        self.bump(); // `set`
+        self.name("a set name")?;
+        self.expect(&TokenKind::LBrace, "`{` to open the set body")?;
+        self.alphabet_elems()?;
+        self.expect(&TokenKind::RBrace, "`}` to close the set body")?;
+        Ok(())
+    }
+
+    /// One element of an alphabet body, a set body or a contract clause. An
+    /// identifier starts a set reference (a name, bare or `::`-qualified);
+    /// anything else is a symbol literal or a range of them.
     fn alphabet_elem(&mut self) -> Result<AlphabetElem, CompileError> {
+        if matches!(self.peek().kind, TokenKind::Ident(_)) {
+            let q = self.qual_name("a set name")?;
+            if matches!(self.peek().kind, TokenKind::DotDot) {
+                return Err(Self::expected(self.peek(), SET_ON_ITS_OWN));
+            }
+            return Ok(AlphabetElem::SetRef {
+                name: q.joined(),
+                span: q.span,
+            });
+        }
         let (lo, hi) = self.sym_or_range()?;
         Ok(match hi {
             None => AlphabetElem::Single(lo),
@@ -1638,18 +1902,38 @@ impl Parser<'_> {
             // (docs/tmt/language.md (qualified names)).
             let q = self.qual_name("an alphabet name")?;
             let (alphabet, alphabet_span) = (q.joined(), q.span);
-            // `writes { … }`, then `preserves { … }`, both optional — the
+            // `writes { … }`, `never writes { … }`, `enters { … }`,
+            // `leaves { … }`, all optional, in that canonical order — the
             // fixed order is a grammar rule, not an fmt convention, because
             // fmt is token-preserving and cannot reorder an author's
-            // clauses.
-            let mut writes: Option<ContractClause> = None;
-            let mut preserves: Option<ContractClause> = None;
+            // clauses. `enters`/`leaves` state head POSITION at a moment
+            // (call-in / return), not a write footprint, so an empty one
+            // has no meaning the way `writes {}`/`never writes {}` do (an
+            // explicit empty SET) — `EmptyHeadClause` catches it right
+            // where it is parsed.
+            let mut writes: Option<Box<ContractClause>> = None;
+            let mut never_writes: Option<Box<ContractClause>> = None;
+            let mut enters: Option<Box<ContractClause>> = None;
+            let mut leaves: Option<Box<ContractClause>> = None;
             loop {
                 if self.at_kw("writes") {
-                    if preserves.is_some() {
+                    if never_writes.is_some() || enters.is_some() || leaves.is_some() {
+                        // Name the nearest already-declared clause in
+                        // canonical order — the one `writes` most directly
+                        // needed to precede.
+                        let before = if never_writes.is_some() {
+                            "never writes"
+                        } else if enters.is_some() {
+                            "enters"
+                        } else {
+                            "leaves"
+                        };
                         return Err(Self::err_at(
                             self.peek(),
-                            CompileErrorKind::ContractClauseOrder,
+                            CompileErrorKind::ContractClauseOrder {
+                                what: "writes",
+                                before,
+                            },
                         ));
                     }
                     if writes.is_some() {
@@ -1658,22 +1942,86 @@ impl Parser<'_> {
                             CompileErrorKind::DuplicateContractClause { what: "writes" },
                         ));
                     }
-                    writes = Some(self.contract_clause()?);
-                } else if self.at_kw("preserves") {
-                    if preserves.is_some() {
+                    writes = Some(Box::new(self.contract_clause()?));
+                } else if self.at_kw("never") {
+                    if enters.is_some() || leaves.is_some() {
+                        let before = if enters.is_some() { "enters" } else { "leaves" };
                         return Err(Self::err_at(
                             self.peek(),
-                            CompileErrorKind::DuplicateContractClause { what: "preserves" },
+                            CompileErrorKind::ContractClauseOrder {
+                                what: "never writes",
+                                before,
+                            },
                         ));
                     }
-                    preserves = Some(self.contract_clause()?);
+                    if never_writes.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::DuplicateContractClause {
+                                what: "never writes",
+                            },
+                        ));
+                    }
+                    never_writes = Some(Box::new(self.contract_clause()?));
+                } else if self.at_kw("preserves") {
+                    // `.tmc` 0.1's spelling of `never writes`. No longer a
+                    // keyword — it names things again — but an identifier
+                    // can never follow a tape parameter's alphabet, so here
+                    // it can only be the old clause: name the new spelling
+                    // rather than fall through to "`,` or `)`"
+                    // (docs/tmt/language.md (version history)).
+                    return Err(Self::expected(
+                        self.peek(),
+                        "`never writes` (the clause `.tmc` 0.1 spelled `preserves` is now `never writes { … }`)",
+                    ));
+                } else if self.at_kw("enters") {
+                    if leaves.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::ContractClauseOrder {
+                                what: "enters",
+                                before: "leaves",
+                            },
+                        ));
+                    }
+                    if enters.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::DuplicateContractClause { what: "enters" },
+                        ));
+                    }
+                    let clause = self.contract_clause()?;
+                    if clause.elems.is_empty() {
+                        return Err(CompileError {
+                            span: clause.span,
+                            kind: CompileErrorKind::EmptyHeadClause,
+                        });
+                    }
+                    enters = Some(Box::new(clause));
+                } else if self.at_kw("leaves") {
+                    if leaves.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::DuplicateContractClause { what: "leaves" },
+                        ));
+                    }
+                    let clause = self.contract_clause()?;
+                    if clause.elems.is_empty() {
+                        return Err(CompileError {
+                            span: clause.span,
+                            kind: CompileErrorKind::EmptyHeadClause,
+                        });
+                    }
+                    leaves = Some(Box::new(clause));
                 } else {
                     break;
                 }
             }
-            let last_span = preserves
-                .as_ref()
-                .or(writes.as_ref())
+            let last_span = leaves
+                .as_deref()
+                .or(enters.as_deref())
+                .or(never_writes.as_deref())
+                .or(writes.as_deref())
                 .map_or(alphabet_span, |c| c.span);
             Ok(SigParam {
                 kind: SigParamKind::Tape {
@@ -1681,7 +2029,9 @@ impl Parser<'_> {
                     alphabet_span,
                     volatile,
                     writes,
-                    preserves,
+                    never_writes,
+                    enters,
+                    leaves,
                 },
                 name,
                 name_span,
@@ -1704,9 +2054,13 @@ impl Parser<'_> {
         }
     }
 
-    /// A `writes { … }` or `preserves { … }` clause body, the current token
-    /// already the keyword: mirrors [`Self::parse_alphabet`]'s body loop
-    /// (comma-separated [`Self::alphabet_elem`], empty allowed). Interior
+    /// A `writes { … }`, `never writes { … }`, `enters { … }`, or
+    /// `leaves { … }` clause, the current token already its (first)
+    /// keyword. `never` must be followed by `writes` — the two words are
+    /// one keyword, and `never` on its own, or before anything else, is an
+    /// error naming the `writes` it needs. The body mirrors
+    /// [`Self::parse_alphabet`]'s body loop (comma-separated
+    /// [`Self::alphabet_elem`], empty allowed). Interior
     /// comments are deliberately not accepted here — unlike an alphabet
     /// body, a clause is a short one-line construct, and a comment splitting
     /// one open is not worth the complexity budget this early; a comment
@@ -1714,12 +2068,24 @@ impl Parser<'_> {
     /// the next fmt pass (the same relocation an author sees writing a
     /// comment inside a signature or binding argument list).
     fn contract_clause(&mut self) -> Result<ContractClause, CompileError> {
-        let kw_span = self.peek().span();
-        // Bracketed here rather than at the two call sites above, so the
-        // node opens at the clause keyword for both — its extent is then
+        let first = self.peek().span();
+        let two_words = self.at_kw("never");
+        // Bracketed here rather than at the call sites above, so the node
+        // opens at the clause keyword for all of them — its extent is then
         // exactly `kw_span` → the closing `}`, i.e. `ContractClause::span`.
+        // For `never writes` both words, and any comment between them, sit
+        // inside the one node.
         self.g_flush_start(TmcKind::ContractClause);
-        self.bump(); // `writes` / `preserves`
+        self.bump(); // `writes` / `never` / `enters` / `leaves`
+        let kw_span = if two_words {
+            let writes = self.expect(
+                &TokenKind::Ident("writes".to_string()),
+                "`writes` after `never` (the clause is `never writes { … }`)",
+            )?;
+            join(first, writes.span())
+        } else {
+            first
+        };
         self.expect(&TokenKind::LBrace, "`{` to open the clause body")?;
         let mut elems: Vec<AlphabetElem> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
@@ -1985,6 +2351,13 @@ impl Parser<'_> {
     /// is dropped, and extraction rebuilds it from the green tree.
     fn rule(&mut self) -> Result<(), CompileError> {
         let pattern = self.pattern()?;
+        // The guard is validated and bracketed (a GUARD node) here; the AST
+        // value itself is extraction's, reached via `reparse_guard` — the
+        // reparse-unit rule `syntax/kinds` states for keyword-decided
+        // extents.
+        if self.at_kw("where") {
+            self.guard()?;
+        }
         self.expect(&TokenKind::Arrow, "`->` after the pattern")?;
         let debugger = if self.at_kw("debugger") {
             self.bump();
@@ -2030,47 +2403,175 @@ impl Parser<'_> {
         pattern: &Pattern,
         write: &Option<WriteVec>,
     ) -> Result<(), CompileError> {
-        let Some(w) = write else {
-            return Ok(());
-        };
+        // A binding folds only over symbols whose labels name numbers
+        // (`patterns::label_number`). A single symbol is decided here; a
+        // range, here when an endpoint already names none — the rest of its
+        // members depend on the alphabet's declared order, and expansion
+        // runs this same check over them; a set's members are unknown until
+        // resolution, which runs it over those.
+        let names_no_number = |s: &SymLit| label_number(&glyph_label(s)).is_none();
         let mut glyph_bound: Vec<&str> = Vec::new();
         for cell in &pattern.cells {
             if let Some(b) = &cell.binding {
                 let is_glyph = match &cell.kind {
-                    PatternCellKind::Single(s) => s.is_glyph(),
-                    PatternCellKind::Range { lo, .. } => lo.is_glyph(),
+                    PatternCellKind::Single(s) => names_no_number(s),
+                    PatternCellKind::Range { lo, hi } => names_no_number(lo) || names_no_number(hi),
                     PatternCellKind::Wildcard => false,
+                    PatternCellKind::SetRef { .. } => false,
                 };
                 if is_glyph {
                     glyph_bound.push(b.name.as_str());
                 }
             }
         }
-        for cell in &w.cells {
-            if let WriteCellKind::Subst { expr } = &cell.kind
-                // A bare name keeps passthrough semantics — legal for a glyph
-                // binding. Any other shape is a fold, which is numeric-only.
-                && !matches!(expr.kind, FoldExprKind::Var(_))
-                && let Some(span) = Self::glyph_var_span(expr, &glyph_bound)
-            {
-                return Err(CompileError {
-                    span,
-                    kind: CompileErrorKind::CharArithmetic,
-                });
-            }
+        match char_arithmetic_span(write.as_ref(), &glyph_bound) {
+            Some(span) => Err(CompileError {
+                span,
+                kind: CompileErrorKind::CharArithmetic,
+            }),
+            None => Ok(()),
         }
-        Ok(())
     }
 
-    /// The span of the first (leftmost) fold-expression reference to a
-    /// glyph-bound name, or `None` if the expression references none.
-    fn glyph_var_span(expr: &FoldExprNode, glyph_bound: &[&str]) -> Option<Span> {
-        match &expr.kind {
-            FoldExprKind::Var(name) => glyph_bound.contains(&name.as_str()).then_some(expr.span),
-            FoldExprKind::Int(_) => None,
-            FoldExprKind::Bin { lhs, rhs, .. } => Self::glyph_var_span(lhs, glyph_bound)
-                .or_else(|| Self::glyph_var_span(rhs, glyph_bound)),
+    /// `where { … }` — a rule's guard. The node opens at `where` (the
+    /// value's own first token, per the keyword-decided-extent rule) and
+    /// closes at `}`; the span matches the node extent exactly the way
+    /// `WriteVec::span` matches WRITE_VEC's.
+    fn guard(&mut self) -> Result<Guard, CompileError> {
+        self.g_flush_start(TmcKind::Guard);
+        let kw = self.peek().clone();
+        self.bump(); // `where` — the caller's `at_kw` already decided
+        self.expect(&TokenKind::LBrace, "`{` to open the guard")?;
+        let expr = self.guard_or()?;
+        let rb = self.expect(&TokenKind::RBrace, "`}` to close the guard")?;
+        self.g_finish(); // Guard
+        Ok(Guard {
+            expr,
+            span: join(kw.span(), rb.span()),
+        })
+    }
+
+    /// `or := and ('||' and)*` — `&&` binds tighter (`docs/tmt/language.md`
+    /// (rule guards)). Parentheses group wherever the author writes them;
+    /// they are grammar-only, leaving no node in the tree — the cone rules
+    /// speak of `&&`/`||` shape alone.
+    fn guard_or(&mut self) -> Result<GuardExpr, CompileError> {
+        let mut expr = self.guard_and()?;
+        while self.peek().kind == TokenKind::PipePipe {
+            self.bump();
+            let rhs = self.guard_and()?;
+            expr = GuardExpr::Or(Box::new(expr), Box::new(rhs));
         }
+        Ok(expr)
+    }
+
+    fn guard_and(&mut self) -> Result<GuardExpr, CompileError> {
+        let mut expr = self.guard_primary()?;
+        while self.peek().kind == TokenKind::AmpAmp {
+            self.bump();
+            let rhs = self.guard_primary()?;
+            expr = GuardExpr::And(Box::new(expr), Box::new(rhs));
+        }
+        Ok(expr)
+    }
+
+    /// A parenthesized sub-guard or one comparison/membership. The parens
+    /// themselves keep no shape: `x in S && (A || B)` is `And(In, Or(A, B))`
+    /// in the tree, exactly the cone shape the semantics read.
+    fn guard_primary(&mut self) -> Result<GuardExpr, CompileError> {
+        if self.peek().kind == TokenKind::LParen {
+            self.bump();
+            let inner = self.guard_or()?;
+            self.expect(&TokenKind::RParen, "`)` to close the guard group")?;
+            return Ok(inner);
+        }
+        self.guard_test()
+    }
+
+    /// One test: `x in S` (membership) or a comparison. Disambiguated by
+    /// a one-token lookahead — `in` is contextual (only the word after a
+    /// bare name makes a membership), so a binding may even be named `in`.
+    fn guard_test(&mut self) -> Result<GuardExpr, CompileError> {
+        let lookahead_in = {
+            let next = self.tokens.get(self.pos + 1);
+            self.tokens
+                .get(self.pos)
+                .is_some_and(|t| matches!(t.kind, TokenKind::Ident(_)))
+                && next.is_some_and(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "in"))
+        };
+        if lookahead_in {
+            let (name, span) = self.name("a guard binding name")?;
+            let binding = CellName { name, span };
+            self.bump(); // `in`
+            let (name, span) = self.name("a set name after `in`")?;
+            let set = CellName { name, span };
+            return Ok(GuardExpr::In(GuardIn {
+                span: join(binding.span, set.span),
+                binding,
+                set,
+                resolved: None,
+            }));
+        }
+        let left = self.guard_term()?;
+        let op = match self.peek().kind {
+            TokenKind::EqEq => CmpOp::Eq,
+            TokenKind::NotEq => CmpOp::Ne,
+            TokenKind::Lt => CmpOp::Lt,
+            TokenKind::LtEq => CmpOp::Le,
+            TokenKind::Gt => CmpOp::Gt,
+            TokenKind::GtEq => CmpOp::Ge,
+            _ => {
+                return Err(Self::expected(
+                    self.peek(),
+                    "`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, `&&`, `||`, or `}` in the guard",
+                ));
+            }
+        };
+        self.bump();
+        let right = self.guard_term()?;
+        Ok(GuardExpr::Cmp(GuardCmp {
+            span: join(left.span, right.span),
+            left,
+            op,
+            right,
+        }))
+    }
+
+    /// `operand := (binding | literal) [ ('+' | '-') integer ]` — a base
+    /// with at most one constant offset (no `*`/`%`; the guard's arithmetic
+    /// is `± k` and nothing else).
+    fn guard_term(&mut self) -> Result<GuardTerm, CompileError> {
+        let t = self.peek().clone();
+        let base_span = t.span();
+        let base = match &t.kind {
+            TokenKind::Ident(_) => {
+                let (name, span) = self.name("a guard binding name")?;
+                GuardBase::Binding(CellName { name, span })
+            }
+            TokenKind::Glyph(_) | TokenKind::Number(_, _) => GuardBase::Lit(self.sym_lit()?),
+            _ => return Err(Self::expected(&t, "a binding or symbol in the guard")),
+        };
+        let offset = match self.peek().kind {
+            TokenKind::Plus | TokenKind::Dash => {
+                let neg = self.peek().kind == TokenKind::Dash;
+                self.bump();
+                let n = self.peek().clone();
+                match &n.kind {
+                    TokenKind::Number(v, _) => {
+                        self.bump();
+                        let v = i64::from(*v);
+                        Ok(if neg { -v } else { v })
+                    }
+                    _ => Err(Self::expected(&n, "an integer after `+`/`-` in the guard")),
+                }
+            }
+            _ => Ok(0),
+        }?;
+        Ok(GuardTerm {
+            base,
+            offset,
+            span: join(base_span, self.tokens[self.pos - 1].span()),
+        })
     }
 
     /// Parses a bracketed pattern. The [`Pattern`] is what
@@ -2095,6 +2596,7 @@ impl Parser<'_> {
     }
 
     fn pattern_cell(&mut self) -> Result<PatternCell, CompileError> {
+        let name = self.cell_name()?;
         let t = self.peek().clone();
         let (kind, kind_span) = match &t.kind {
             TokenKind::Star => {
@@ -2114,10 +2616,26 @@ impl Parser<'_> {
                     }
                 }
             }
+            // An identifier names a glyph set, the way it does in an
+            // alphabet body (`alphabet_elem`).
+            TokenKind::Ident(_) => {
+                let q = self.qual_name("a set name")?;
+                if matches!(self.peek().kind, TokenKind::DotDot) {
+                    return Err(Self::expected(self.peek(), SET_ON_ITS_OWN));
+                }
+                (
+                    PatternCellKind::SetRef {
+                        name: q.joined(),
+                        name_span: q.span,
+                        resolved: None,
+                    },
+                    q.span,
+                )
+            }
             _ => {
                 return Err(Self::expected(
                     &t,
-                    "a pattern element (glyph, number, range, or `*`)",
+                    "a pattern element (glyph, number, range, set name, or `*`)",
                 ));
             }
         };
@@ -2132,25 +2650,53 @@ impl Parser<'_> {
         if matches!(kind, PatternCellKind::Wildcard) && binding.is_some() {
             return Err(Self::err_at(&t, CompileErrorKind::WildcardBinding));
         }
+        let start = name.as_ref().map(|n| n.span).unwrap_or(kind_span);
         Ok(PatternCell {
+            name,
             kind,
             binding,
-            span: join(kind_span, end),
+            span: join(start, end),
         })
     }
 
-    /// A single symbol, or the low end plus a same-kind high end after `..`.
+    /// The optional `NAME:` prefix of a rule-vector cell — decided by
+    /// two-token lookahead before the cell's own dispatch, so bare `roster`
+    /// is a set reference while `king: roster` is a named cell whose content
+    /// happens to be one (docs/tmt/language.md (named vector cells)). The
+    /// name is the enclosing world's NAME for the tape, never a position.
+    fn cell_name(&mut self) -> Result<Option<CellName>, CompileError> {
+        let name = match &self.peek().kind {
+            TokenKind::Ident(n) => n.clone(),
+            _ => return Ok(None),
+        };
+        if !matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(TokenKind::Colon)
+        ) {
+            return Ok(None);
+        }
+        let ntok = self.peek().clone();
+        self.bump(); // the name
+        self.bump(); // `:`
+        Ok(Some(CellName {
+            name,
+            span: ntok.span(),
+        }))
+    }
+
+    /// A single symbol, or the low end plus a high end after `..`. The two
+    /// ends may be spelled differently: a pattern-cell or clause range looks
+    /// each up by its label, so `'0'..9` is `'0'..'9'`; only a body range,
+    /// which walks succession, needs one kind, and resolution refuses a
+    /// mixed one there (`range-kind-mismatch`).
     fn sym_or_range(&mut self) -> Result<(SymLit, Option<SymLit>), CompileError> {
         let lo = self.sym_lit()?;
         if matches!(self.peek().kind, TokenKind::DotDot) {
             self.bump();
-            let hi = self.sym_lit()?;
-            if lo.is_glyph() != hi.is_glyph() {
-                return Err(CompileError {
-                    span: join(lo.span(), hi.span()),
-                    kind: CompileErrorKind::RangeKindMismatch,
-                });
+            if matches!(self.peek().kind, TokenKind::Ident(_)) {
+                return Err(Self::expected(self.peek(), SET_AS_ENDPOINT));
             }
+            let hi = self.sym_lit()?;
             Ok((lo, Some(hi)))
         } else {
             Ok((lo, None))
@@ -2208,37 +2754,37 @@ impl Parser<'_> {
     }
 
     fn write_cell(&mut self) -> Result<WriteCell, CompileError> {
+        let name = self.cell_name()?;
         let t = self.peek().clone();
-        match &t.kind {
+        let (kind, end) = match &t.kind {
             TokenKind::Dash => {
                 self.bump();
-                Ok(WriteCell {
-                    kind: WriteCellKind::Keep,
-                    span: t.span(),
-                })
+                (WriteCellKind::Keep, t.span())
             }
             TokenKind::Glyph(_) | TokenKind::Number(_, _) => {
                 let s = self.sym_lit()?;
-                let span = s.span();
-                Ok(WriteCell {
-                    kind: WriteCellKind::Lit(s),
-                    span,
-                })
+                let end = s.span();
+                (WriteCellKind::Lit(s), end)
             }
             TokenKind::LBrace => {
                 self.bump();
                 let expr = self.fold_expr()?;
                 let rb = self.expect(&TokenKind::RBrace, "`}` to close the substitution")?;
-                Ok(WriteCell {
-                    kind: WriteCellKind::Subst { expr },
-                    span: join(t.span(), rb.span()),
-                })
+                (WriteCellKind::Subst { expr }, rb.span())
             }
-            _ => Err(Self::expected(
-                &t,
-                "a write element (glyph, number, `{binding}`, or `-`)",
-            )),
-        }
+            _ => {
+                return Err(Self::expected(
+                    &t,
+                    "a write element (glyph, number, `{binding}`, or `-`)",
+                ));
+            }
+        };
+        let start = name.as_ref().map(|n| n.span).unwrap_or(t.span());
+        Ok(WriteCell {
+            name,
+            kind,
+            span: join(start, end),
+        })
     }
 
     /// Parse a write-cell fold expression, the assembler's arithmetic grammar
@@ -2355,6 +2901,7 @@ impl Parser<'_> {
     }
 
     fn move_cell(&mut self) -> Result<MoveCell, CompileError> {
+        let name = self.cell_name()?;
         let t = self.peek().clone();
         let dir = match t.kind {
             TokenKind::Lt => MoveDir::Left,
@@ -2365,9 +2912,11 @@ impl Parser<'_> {
             }
         };
         self.bump();
+        let start = name.as_ref().map(|n| n.span).unwrap_or(t.span());
         Ok(MoveCell {
+            name,
             dir,
-            span: t.span(),
+            span: join(start, t.span()),
         })
     }
 
@@ -2624,12 +3173,13 @@ impl Parser<'_> {
         self.g_flush_start(TmcKind::SymMap);
         let map_tok = self.expect_kw_tok("map", "`map` after `with`")?;
         if matches!(self.peek().kind, TokenKind::LBrace) {
-            let (pairs, body_span) = self.map_pairs_body()?;
+            let (pairs, open, body_span) = self.map_pairs_body(true)?;
             self.g_finish(); // SymMap
             Ok(SymMap {
                 pairs,
                 span: join(map_tok.span(), body_span),
                 named: None,
+                open,
             })
         } else {
             let q = self.qual_name("a named map")?;
@@ -2639,6 +3189,7 @@ impl Parser<'_> {
                 pairs: Vec::new(),
                 span: join(map_tok.span(), name_span),
                 named: Some((q.joined(), name_span)),
+                open: None,
             })
         }
     }
@@ -2646,12 +3197,49 @@ impl Parser<'_> {
     /// A `{ pairs }` map body, positioned at `{` — shared by
     /// [`Self::sym_map`]'s inline form and [`Self::parse_map_decl`]'s
     /// declaration body, so the comma/`}` separator rule has one owner.
-    /// Returns the pairs and the body's own span (`{` start → `}` end).
-    fn map_pairs_body(&mut self) -> Result<(Vec<MapPair>, Span), CompileError> {
+    /// Returns the pairs, the `*` marker's span when the body was left
+    /// OPEN, and the body's own span (`{` start → `}` end).
+    ///
+    /// `allow_open` is what keeps the marker out of a top-level `map`
+    /// DECLARATION. Only a binding SITE can be left open: the marker's
+    /// whole meaning is "this site sends its unlisted caller symbols onto
+    /// the callee's opaque index", and a declaration has no site and no
+    /// callee — `parse_map_decl` discards its pairs and every site that
+    /// names the map re-reads them, so a marker written there would be
+    /// swallowed with no open binding anywhere. With `allow_open` off the
+    /// `*` falls through to [`Self::map_pair`], which refuses it as a
+    /// symbol literal exactly as it always has.
+    ///
+    /// The marker is the body's LAST entry, with or without a trailing
+    /// comma (docs/tmt/language.md (symbol maps)): a marker that could
+    /// appear anywhere has no reading that is not arbitrary, and the
+    /// disassembler already prints it last.
+    fn map_pairs_body(
+        &mut self,
+        allow_open: bool,
+    ) -> Result<(Vec<MapPair>, Option<Span>, Span), CompileError> {
         let lb = self.expect(&TokenKind::LBrace, "`{` to open the map")?;
         let mut pairs: Vec<MapPair> = Vec::new();
+        let mut open: Option<Span> = None;
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             loop {
+                if allow_open && matches!(self.peek().kind, TokenKind::Star) {
+                    let star = self.peek().span();
+                    self.bump();
+                    open = Some(star);
+                    // Nothing may follow but the closing brace, optionally
+                    // through one trailing comma.
+                    if matches!(self.peek().kind, TokenKind::Comma) {
+                        self.bump();
+                    }
+                    if !matches!(self.peek().kind, TokenKind::RBrace) {
+                        return Err(Self::expected(
+                            self.peek(),
+                            "`}` — a map's `*` is its last entry",
+                        ));
+                    }
+                    break;
+                }
                 pairs.push(self.map_pair()?);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
@@ -2661,7 +3249,7 @@ impl Parser<'_> {
             }
         }
         let rb = self.expect(&TokenKind::RBrace, "`}` to close the map")?;
-        Ok((pairs, join(lb.span(), rb.span())))
+        Ok((pairs, open, join(lb.span(), rb.span())))
     }
 
     /// `export? map NAME: SRC -> DST { pairs }` — a top-level declaration
@@ -2675,7 +3263,7 @@ impl Parser<'_> {
         self.qual_name("a source alphabet name")?;
         self.expect(&TokenKind::Arrow, "`->` between the map's two alphabets")?;
         self.qual_name("a target alphabet name")?;
-        self.map_pairs_body()?;
+        self.map_pairs_body(false)?;
         Ok(())
     }
 
@@ -2813,6 +3401,11 @@ pub(crate) fn reparse_binding_arg(tokens: &[Token]) -> BindingArg {
 /// the body's opener. Doing the slice here rather than at the call site
 /// keeps "where an alphabet body begins" next to the production that
 /// decides it.
+///
+/// A SET_DECL node reads its body through this same shim: its run is
+/// `DocLine|AttentionLine* export? set NAME { … }`, which carries no
+/// `LBrace` before the body's own either, and [`Parser::parse_set_decl`]
+/// runs the same [`Parser::alphabet_elems`] loop.
 pub(crate) fn reparse_alphabet_elems(tokens: &[Token]) -> Vec<AlphabetElem> {
     let mut p = bare_parser(tokens);
     while !matches!(p.peek().kind, TokenKind::LBrace | TokenKind::Eof) {
@@ -2837,7 +3430,10 @@ pub(crate) fn reparse_map_pairs(tokens: &[Token]) -> Vec<MapPair> {
     while !matches!(p.peek().kind, TokenKind::LBrace | TokenKind::Eof) {
         p.bump();
     }
-    p.map_pairs_body()
+    // `false`, matching `parse_map_decl`: a DECLARATION's body never
+    // carries the open marker, so re-reading one that could would accept
+    // a shape the real parser refused.
+    p.map_pairs_body(false)
         .expect("reparse_map_pairs: extraction only ever runs on an already-parsed tree")
         .0
 }
@@ -2874,6 +3470,18 @@ pub(crate) fn reparse_move_vec(tokens: &[Token]) -> MoveVec {
     bare_parser(tokens)
         .move_vec()
         .expect("reparse_move_vec: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a RULE's own GUARD node: re-parses it
+/// through [`Parser::guard`]. The node's own tokens already start at
+/// `where`, the value's own first token — `crate::syntax::kinds`'s own
+/// module doc records why (the node's extent is chosen to match
+/// `Guard::span` exactly) — which is exactly where that production
+/// expects to begin.
+pub(crate) fn reparse_guard(tokens: &[Token]) -> Guard {
+    bare_parser(tokens)
+        .guard()
+        .expect("reparse_guard: extraction only ever runs on an already-parsed tree")
 }
 
 /// Retokenization reuse shim for a GRAFT/BIND target: re-parses it
@@ -2917,7 +3525,7 @@ pub(crate) fn reparse_sym_map(tokens: &[Token]) -> SymMap {
 /// Retokenization reuse shim for a REUSE's own SIG_PARAM node:
 /// re-parses it through `Parser::sig_param`. Covers both shapes the
 /// production itself branches on — `Tape` (with its optional
-/// `writes`/`preserves` clauses) and the plain `State` parameter.
+/// contract clauses) and the plain `State` parameter.
 pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
     bare_parser(tokens)
         .sig_param()

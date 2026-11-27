@@ -117,55 +117,18 @@ impl IrProgram {
 }
 
 impl IrFunction {
-    /// Mermaid flowchart of the CFG (`pmt ir graph`). Node text: source
-    /// labels, then ops, then a terminal marker for block-ending
-    /// terminators; edges carry the check/goto semantics.
+    /// Mermaid flowchart of the CFG, edge for edge — the raw view of `pmt
+    /// ir graph --raw`. Node text: source labels, then ops, then a terminal
+    /// marker for block-ending terminators; edges carry the check/goto
+    /// semantics.
     pub fn to_mermaid(&self) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::from("flowchart TD\n");
-        for block in &self.blocks {
-            let mut lines: Vec<String> = Vec::new();
-            for &label in &block.labels {
-                lines.push(format!("{label}:"));
-            }
-            for op in &block.ops {
-                lines.push(match op {
-                    IrOp::Lft { .. } => "lft".into(),
-                    IrOp::Rgt { .. } => "rgt".into(),
-                    IrOp::Wr { index, .. } => format!("wr {index}"),
-                    IrOp::WrLft { index, .. } => format!("wrl {index}"),
-                    IrOp::WrRgt { index, .. } => format!("wrr {index}"),
-                    IrOp::Brk { .. } => "brk".into(),
-                    IrOp::Call { name, .. } => format!("call @{name}"),
-                });
-            }
-            match &block.term {
-                IrTerm::Return => lines.push("ret".into()),
-                IrTerm::Halt => lines.push("hlt".into()),
-                IrTerm::TailCall { name } => lines.push(format!("jmp @{name}")),
-                IrTerm::FallThrough { .. } | IrTerm::Goto { .. } | IrTerm::Check { .. } => {}
-            }
-            if lines.is_empty() {
-                lines.push("(empty)".into());
-            }
-            let _ = writeln!(out, "    B{}[\"{}\"]", block.id, lines.join("<br/>"));
-        }
-        for block in &self.blocks {
-            match &block.term {
-                IrTerm::FallThrough { to } => {
-                    let _ = writeln!(out, "    B{} --> B{to}", block.id);
-                }
-                IrTerm::Goto { to } => {
-                    let _ = writeln!(out, "    B{} -->|goto| B{to}", block.id);
-                }
-                IrTerm::Check { marked, blank } => {
-                    let _ = writeln!(out, "    B{} -->|MF| B{marked}", block.id);
-                    let _ = writeln!(out, "    B{} -->|!MF| B{blank}", block.id);
-                }
-                IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. } => {}
-            }
-        }
-        out
+        crate::ir_graph::render(self, crate::ir_graph::GraphView::Raw)
+    }
+
+    /// The same flowchart in any of `pmt ir graph`'s three views
+    /// ([`crate::ir_graph`]).
+    pub fn to_mermaid_view(&self, view: crate::ir_graph::GraphView) -> String {
+        crate::ir_graph::render(self, view)
     }
 }
 

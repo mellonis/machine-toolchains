@@ -8,6 +8,7 @@ mod interface;
 mod layout;
 pub(crate) mod resolve;
 mod stamp;
+mod table_ref;
 
 use crate::asm::ArchSyntax;
 use crate::formats::executable::Executable;
@@ -17,7 +18,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LinkError {
-    DuplicateSymbol(String),
+    /// One exported name defined by two inputs (docs/core.md (linking)):
+    /// two user objects always, a library and any other input once the
+    /// program reaches the name. `first`/`second` are the two inputs'
+    /// names, as `input_name` renders them; equal when one user object
+    /// defines the name twice.
+    DuplicateSymbol {
+        name: String,
+        first: String,
+        second: String,
+    },
     Unresolved(Vec<String>),
     /// The BFS entry symbol (default `main`, or the `--entry` override) is
     /// not defined by any linked object. Carries the entry name so a
@@ -93,6 +103,30 @@ pub enum LinkError {
         graph: String,
         consumer: String,
         library: String,
+    },
+    /// A unit spliced a graph that one input records PRIVATELY, with the
+    /// digest the unit recorded, while another input EXPORTS a graph of
+    /// the same name with a different digest (docs/core.md (graft
+    /// drift)). The splice itself has not drifted — the consumer matches
+    /// its provider — but a private graph beside another input's
+    /// different export of its name is refused, as it is at compile time,
+    /// and the error names both inputs instead of blaming a header the
+    /// consumer never read.
+    PrivateGraftBesideExport {
+        graph: String,
+        consumer: String,
+        provider: String,
+        exporter: String,
+    },
+    /// Two inputs export one graph or one alphabet with different records
+    /// — digests or glyph lists — while some input consumes the name, or
+    /// while both are user objects (docs/core.md (graft drift)). `what` is
+    /// `"graph"` or `"alphabet"`.
+    ConflictingExport {
+        what: &'static str,
+        name: String,
+        first: String,
+        second: String,
     },
     /// A unit imported an alphabet whose glyph list does not match the
     /// one the exporting object declares: the consumer compiled against a
@@ -192,12 +226,35 @@ pub enum LinkError {
     /// the group, which is not a property the caller can be told to rely
     /// on.
     RecursiveExitBearingCall(String),
+    /// A routine whose body returns through an exit index at or above the
+    /// exit count its interface declares (docs/core.md (linking)). The
+    /// assembler refuses such a body, so only an object built another way
+    /// can carry one.
+    UndeclaredExit {
+        routine: String,
+        exit: u8,
+        declared: u8,
+    },
 }
 
 impl std::fmt::Display for LinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DuplicateSymbol(name) => write!(f, "duplicate symbol: {name}"),
+            Self::DuplicateSymbol {
+                name,
+                first,
+                second,
+            } if first == second => {
+                write!(f, "duplicate symbol `{name}`: defined twice by {first}")
+            }
+            Self::DuplicateSymbol {
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "duplicate symbol `{name}`: defined by {first} and by {second}"
+            ),
             Self::Unresolved(names) => write!(f, "unresolved symbols: {}", names.join(", ")),
             Self::NoEntrySymbol(name) => write!(f, "no `{name}` entry symbol"),
             Self::ArchMismatch { expected, found } => write!(
@@ -220,6 +277,14 @@ impl std::fmt::Display for LinkError {
                      sectioned executable header"
                 )
             }
+            Self::UndeclaredExit {
+                routine,
+                exit,
+                declared,
+            } => write!(
+                f,
+                "`{routine}` returns through exit {exit}, but its signature declares {declared} exit(s)"
+            ),
             Self::BadBinding { callee, message } => {
                 write!(f, "bad binding to `{callee}`: {message}")
             }
@@ -257,6 +322,25 @@ impl std::fmt::Display for LinkError {
                 f,
                 "`{graph}` was grafted into {consumer} from a header that does not \
                  match {library}"
+            ),
+            Self::PrivateGraftBesideExport {
+                graph,
+                consumer,
+                provider,
+                exporter,
+            } => write!(
+                f,
+                "`{graph}`, grafted into {consumer}, is provided privately by {provider} \
+                 and exported differently by {exporter}"
+            ),
+            Self::ConflictingExport {
+                what,
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "the {what} `{name}` is exported differently by {first} and by {second}"
             ),
             Self::AlphabetDrift {
                 alphabet,
@@ -436,6 +520,21 @@ pub struct LinkOptions {
     /// default) stamps nothing; a non-empty vector shorter than the input
     /// list leaves the uncovered tail without provenance.
     pub sources: Vec<Option<String>>,
+    /// How a link error names each input (docs/core.md (linking)), indexed
+    /// like `sources` — user objects, then libraries. `None`, or a vector
+    /// shorter than the input list, falls back to the input's `sources`
+    /// entry, then to `input #i`. Never written to the map sidecar.
+    pub labels: Vec<Option<String>>,
+}
+
+/// The name a link error gives input `i`: `names[i]` when present,
+/// otherwise `input #i`.
+pub(super) fn input_name(names: &[Option<String>], i: usize) -> String {
+    names
+        .get(i)
+        .and_then(Option::as_ref)
+        .cloned()
+        .unwrap_or_else(|| format!("input #{i}"))
 }
 
 impl Default for LinkOptions {
@@ -445,6 +544,7 @@ impl Default for LinkOptions {
             entry: None,
             call_mech: CallMech::Hybrid,
             sources: Vec::new(),
+            labels: Vec::new(),
         }
     }
 }
@@ -626,15 +726,29 @@ pub fn link(
     options: LinkOptions,
 ) -> Result<LinkOutput, LinkError> {
     let entry = options.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
-    let resolved = resolve::resolve(objects, libraries, entry)?;
+    let names: Vec<Option<String>> = (0..objects.len() + libraries.len())
+        .map(|i| {
+            options
+                .labels
+                .get(i)
+                .cloned()
+                .flatten()
+                .or_else(|| options.sources.get(i).cloned().flatten())
+        })
+        .collect();
+    let resolved = resolve::resolve(objects, libraries, entry, &names)?;
 
     // Graft provenance is object-level and reachability does not gate it:
     // a unit either spliced that body or it did not
     // (docs/core.md (graft drift)).
-    interface::check_graft_drift(objects, libraries, &options.sources)?;
+    interface::check_graft_drift(objects, libraries, &names)?;
     // Same header-only rule, over imported alphabets instead of grafted
     // graphs (docs/core.md (graft drift)).
-    interface::check_imported_alphabets(objects, libraries, &options.sources)?;
+    interface::check_imported_alphabets(objects, libraries, &names)?;
+    // A body returning through an exit its interface never declared is
+    // refused before anything lowers, whatever the entry carries
+    // (docs/core.md (linking)).
+    stamp::check_declared_exits(syntax, &resolved.order)?;
 
     let arch = objects
         .first()
@@ -835,7 +949,7 @@ pub fn resolve_names(
     libraries: &[ObjectFile],
     entry: &str,
 ) -> Result<ResolvedNames, LinkError> {
-    let resolved = resolve::resolve(objects, libraries, entry)?;
+    let resolved = resolve::resolve(objects, libraries, entry, &[])?;
     let n = objects.len();
     Ok(ResolvedNames {
         reached: resolved

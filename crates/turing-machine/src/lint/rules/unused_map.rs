@@ -1,9 +1,9 @@
 //! `unused-map`: a `map` declaration nothing names by `with map NAME`.
-//! Export-independent, mirroring `unused-alphabet`: a named map has no
-//! cross-module consumer to protect either — an exported-but-unused map is
-//! as dead as a private one, since a name is only ever reached by a
-//! binding-arg site (`docs/tmt/language.md` (named maps)) naming it. New on
-//! the lint channel, detected source-level over `Resolved`.
+//! Like `unused-alphabet`, an EXPORTED map is never reported: another unit
+//! may import it through this unit's header or sibling source
+//! (`docs/tmt/language.md` (named maps)), a use this rule cannot see, and
+//! the deletion fix would remove what a consumer needs. Detected
+//! source-level over `Resolved`.
 //!
 //! Usage is decided by RESOLVED identity, matching `unused-alphabet`'s own
 //! rule: `compiler::expand_named_maps` rewrites a resolved site's own
@@ -58,7 +58,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     }
 
     for (name, map) in &ctx.resolved.maps {
-        if !used.contains(name.as_str()) {
+        if !map.exported && !used.contains(name.as_str()) {
             let fix = decl_span::<MapDeclView>(ctx, map.name_span).map(|span| Fix {
                 description: format!("delete the unused map `{name}`"),
                 applicability: Applicability::MaybeIncorrect,
@@ -92,6 +92,20 @@ mod tests {
             .map(|d| d.message)
             .collect()
     }
+
+    const EXP: &str = "\
+alphabet digit { '_', '0', '1' }
+export alphabet deadA { '_', 'x' }
+alphabet deadB { '_', 'y' }
+export set deadS { '0' }
+set deadT { '1' }
+export map deadM: digit -> digit { '0' -> '1', '1' -> '0' }
+map deadN: digit -> digit { '0' -> '1', '1' -> '0' }
+machine {
+  tape t: digit;
+  entry state go { ['0'] -> write ['1'] stop; [*] -> stop; }
+}
+";
 
     const SRC: &str = "\
 alphabet wide { '_', '^', '$', '0', '1' }
@@ -247,5 +261,22 @@ machine {
         assert!(!fixed.contains("wideToBits"), "{fixed}");
         crate::compiler::compile(&fixed, crate::compiler::CompileOptions::default())
             .expect("the source compiles with the unused map deleted");
+    }
+
+    /// An exported map is never reported (another unit may import it); the
+    /// same declaration without `export` still is, and keeps its fix.
+    /// Mutation: dropping the `exported` skip in `check` — `deadM` returns.
+    #[test]
+    fn an_exported_map_is_not_reported() {
+        let report = lint(EXP, LintOptions::default()).unwrap();
+        let found: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "unused-map")
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].message.contains("deadN"), "{found:?}");
+        assert_eq!((found[0].span.start.line, found[0].span.start.col), (7, 5));
+        assert!(found[0].fix.is_some());
     }
 }

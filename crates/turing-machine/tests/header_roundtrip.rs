@@ -18,18 +18,55 @@ fn args(list: &[&str]) -> Vec<String> {
 
 /// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
 /// uniquely by process id + an atomic counter — copied verbatim from
-/// `tests/mode_equivalence.rs::scratch` (docs/superpowers plan's "temp
+/// `tests/mode_equivalence.rs::scratch` (docs/internal plan's "temp
 /// paths in tests" rule): a literal, non-unique directory name is shared
 /// by every concurrently running `cargo test` invocation that targets the
 /// same `CARGO_TARGET_TMPDIR`, so two such invocations racing on the
 /// identical path can interleave their non-atomic `fs::write`s.
-fn scratch(name: &str) -> std::path::PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("{name}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// A local (non-exported) alphabet and routine alongside an exported
@@ -437,8 +474,24 @@ namespace mylib { // trailing comment
 fn qualified_routines(header: &str) -> BTreeMap<String, String> {
     let mut stack: Vec<Option<String>> = Vec::new();
     let mut out = BTreeMap::new();
+    // A signature `tmt fmt` wrapped past its width limit (the printer
+    // hands its text to the formatter) spans several lines: they are
+    // gathered up to the closing `;` and rejoined as the one-line form,
+    // so a wrapped routine compares its whole signature — `writes`
+    // clause included — rather than its first line alone.
+    let mut pending: Option<(String, String)> = None;
     for raw in header.lines() {
         let trimmed = raw.trim();
+        if let Some((qualified, mut text)) = pending.take() {
+            text.push(' ');
+            text.push_str(trimmed);
+            if trimmed.ends_with(';') {
+                out.insert(qualified, text.replace("( ", "(").replace(" )", ")"));
+            } else {
+                pending = Some((qualified, text));
+            }
+            continue;
+        }
         if trimmed.is_empty() {
             continue;
         }
@@ -461,24 +514,29 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
             } else {
                 format!("{}::{name}", ns.join("::"))
             };
-            out.insert(qualified, trimmed.to_string());
+            if trimmed.ends_with(';') {
+                out.insert(qualified, trimmed.to_string());
+            } else {
+                pending = Some((qualified, trimmed.to_string()));
+            }
             continue;
         }
         if trimmed.ends_with('{') {
             stack.push(None);
         }
     }
+    assert!(pending.is_none(), "an unterminated signature: {pending:?}");
     out
 }
 
-/// Mutation: printing `preserves` from the source arm — `invertNumber`
+/// Mutation: printing `never writes` from the source arm — `invertNumber`
 /// (`std::binaryNumbersBare::invertNumber` and its volatile twin, each
-/// declaring `preserves { '_' }` with no `writes` clause) diverges,
-/// because the object arm has no `preserves` to print back: it only ever
+/// declaring `never writes { '_' }` with no `writes` clause) diverges,
+/// because the object arm has no `never writes` to print back: it only ever
 /// carries the EFFECTIVE set. This pins the wire's own rule — a routine
 /// interface records one write set per tape and has no field for the
-/// source-level `preserves` sugar (docs/formats.md (routine interfaces))
-/// — at the surface where it is observable. VERIFIED RED by hand: printing `preserves`'s raw elements
+/// source-level `never writes` sugar (docs/formats.md (routine interfaces))
+/// — at the surface where it is observable. VERIFIED RED by hand: printing `never writes`'s raw elements
 /// instead of the effective set on the source arm's tape signature made
 /// this test fail on exactly the two `invertNumber` entries, restored
 /// afterward (see the task report).
@@ -512,6 +570,14 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
         stdlib::SOURCE,
         CompileOptions {
             opt_level: OptLevel::O0,
+            // Irrelevant here, spelled out rather than left to the
+            // default: this object exists only so `tmt interface` can
+            // read its declared routine signatures back — a contract
+            // check inside a routine's own body, if one is ever
+            // synthesized, changes no routine's declared `writes=`/param
+            // signature, which is all the two-arms comparison below
+            // reads.
+            strip_asserts: false,
             ..CompileOptions::default()
         },
     )
@@ -539,6 +605,17 @@ fn the_two_arms_agree_on_every_stdlib_routine() {
     for (name, source_line) in &source_routines {
         let object_line = &object_routines[name];
         assert_eq!(source_line, object_line, "`{name}`: the two arms disagree");
+    }
+    // Non-vacuity for a signature the formatter wraps on both arms:
+    // compared line by line, `minusOneFast` would reduce to its first line,
+    // `export routine minusOneFast(`, on each side and agree over nothing.
+    // Its `leaves` clause is part of the line on both arms: a declared
+    // clause travels through the object's interface section.
+    for routines in [&source_routines, &object_routines] {
+        assert_eq!(
+            routines["std::binaryNumbers::minusOneFast"],
+            "export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' } leaves { '_', '$' });"
+        );
     }
 
     // The two arms' `use` lines agree too — both print exactly the same
@@ -600,7 +677,7 @@ fn the_o_flag_writes_the_header_to_a_file_instead_of_stdout() {
     );
 }
 
-/// A tape with NEITHER `writes` nor `preserves` must publish the SAME
+/// A tape with NEITHER `writes` nor `never writes` must publish the SAME
 /// write set on both arms: the compiler's own INFERRED set for that tape,
 /// never the whole alphabet. `touchA`'s body writes exactly one glyph
 /// (`'a'`) of a three-glyph alphabet unconditionally. Mutation: the source
@@ -647,6 +724,169 @@ export routine touchA(tape t: tri) {
     assert_eq!(
         source_out.stdout, object_out.stdout,
         "the two arms disagree on an uncontracted routine's write set"
+    );
+}
+
+/// An exported graph whose body carries a `bind` with an OPEN map: the
+/// printer reproduces the `*` as the map's last entry, and the printed
+/// header re-reads and reprints byte-identically. A graph body is the one
+/// place a header renders a binding site at all, so it is the only place
+/// the marker can reach a `.tmh`.
+///
+/// Mutation it catches: dropping the marker from `header::map_pairs_text`
+/// — the printed header still parses, but it describes a CLOSED map, and
+/// a consumer grafting the graph would splice a body whose unlisted
+/// symbols hole instead of arriving opaque. The round-trip half catches
+/// the opposite error: printing the marker anywhere but last, which does
+/// not re-read.
+#[test]
+fn a_graph_bodys_open_map_prints_its_marker_and_round_trips() {
+    const OPEN_MAP_FIXTURE: &str = "\
+export alphabet five { '_', 'a', 'b', 'c', 'd' }
+export alphabet three { '_', 'a', 'b' }
+
+export routine swapABopen(tape n: three) {
+  entry state walk {
+    ['_'] -> return;
+    ['a'] -> write ['b'] move [>] goto walk;
+    [*]   -> move [>] goto walk;
+  }
+}
+
+export graph drive(tape t: five, state done) {
+  bind swapABopen(n = t with map { 'a' -> 'a', 'b' -> 'b', * }) as go;
+  entry state s { [*] -> call go() then done; }
+}
+";
+    let dir = scratch("header_open_map");
+    let src_path = dir.join("drive.tmc");
+    std::fs::write(&src_path, OPEN_MAP_FIXTURE).unwrap();
+    let first = run_interface(&src_path);
+    assert!(
+        first
+            .stdout
+            .contains("bind swapABopen(n = t with map { 'a' -> 'a', 'b' -> 'b', * }) as go;"),
+        "{}",
+        first.stdout
+    );
+
+    let header_path = dir.join("drive.tmh");
+    std::fs::write(&header_path, &first.stdout).unwrap();
+    let second = run_interface(&header_path);
+    assert_eq!(
+        first.stdout, second.stdout,
+        "a printed header carrying an open map must re-read as itself"
+    );
+}
+
+/// A pattern-cell range walks the alphabet's declared order, so its
+/// endpoints may be glyphs of several characters — `'9'..'10'` — and a
+/// printed graph body spells both as written, then reads back as itself.
+/// Mutation: printing an endpoint the way a lone glyph prints, which
+/// restyles the numeric label `10` bare — the header then reads
+/// `'9'..10`.
+#[test]
+fn a_graph_bodys_multi_character_range_round_trips() {
+    const RANGE_FIXTURE: &str = "\
+export alphabet a { '_', '9', '10' }
+
+export graph g(tape t: a, state d) {
+  entry state s {
+    ['9'..'10'] -> goto d;
+    [*] -> goto d;
+  }
+}
+";
+    let dir = scratch("header_multi_char_range");
+    let src_path = dir.join("g.tmc");
+    std::fs::write(&src_path, RANGE_FIXTURE).unwrap();
+    let first = run_interface(&src_path);
+    assert!(
+        first.stdout.contains("['9'..'10'] -> goto d;"),
+        "{}",
+        first.stdout
+    );
+    let header_path = dir.join("g.tmh");
+    std::fs::write(&header_path, &first.stdout).unwrap();
+    let second = run_interface(&header_path);
+    assert_eq!(first.stdout, second.stdout);
+}
+
+/// A routine whose tape is INFERRED opaque — every state reads it through
+/// a `*` cell, so the compiled object's `.param` line carries the
+/// `opaque` suffix — renders identically on both arms, and neither arm
+/// prints the word.
+///
+/// That omission is a rule, not an oversight (`header::tape_param_text`).
+/// `opaque` is a fact inferred from a BODY and published for the linker;
+/// a header is the declarations surface, the `.tmh` grammar is the `.tmc`
+/// grammar, and `.tmc` has no spelling for the bit — so a header that
+/// printed it would not re-read as a header. The two assertions below are
+/// therefore one property seen from both ends: the object really does
+/// carry the bit (otherwise the omission would be vacuous), and the
+/// printed header does not.
+///
+/// Mutation it catches: rendering `opaque` on either arm — the object arm
+/// alone makes the two disagree; on both arms, the printed header stops
+/// parsing and the emitted-header assertion goes red.
+#[test]
+fn an_opaque_tape_renders_identically_on_both_arms_and_names_no_opaque() {
+    const OPAQUE_FIXTURE: &str = "\
+export alphabet tri { '_', 'a', 'b' }
+
+export routine walkRight(tape t: tri) {
+  entry state go {
+    ['b'] -> return;
+    [*]   -> move [>] goto go;
+  }
+}
+";
+    let dir = scratch("header_opaque_agree");
+    let src_path = dir.join("walk_right.tmc");
+    std::fs::write(&src_path, OPAQUE_FIXTURE).unwrap();
+    let source_out = run_interface(&src_path);
+
+    let object = compile(
+        OPAQUE_FIXTURE,
+        CompileOptions {
+            opt_level: OptLevel::O0,
+            ..CompileOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile OPAQUE_FIXTURE: {e}"))
+    .object;
+    // Non-vacuity: the fixture really is opaque on the wire, so the
+    // omission below is about a bit that exists.
+    assert!(
+        object
+            .interface
+            .as_ref()
+            .expect("a compiled object publishes an interface")
+            .routines
+            .iter()
+            .any(|r| r.opaque.iter().any(|&o| o)),
+        "the fixture must compile to an object that publishes `opaque`"
+    );
+
+    let obj_path = dir.join("walk_right.tmo");
+    std::fs::write(&obj_path, object.to_bytes()).unwrap();
+    let object_out = run_interface(&obj_path);
+
+    assert_eq!(
+        source_out.stdout, object_out.stdout,
+        "the two arms disagree on an opaque routine"
+    );
+    assert!(
+        !source_out.stdout.contains("opaque"),
+        "no arm may print the inferred bit: {}",
+        source_out.stdout
+    );
+    assert!(
+        source_out
+            .stdout
+            .contains("export routine walkRight(tape t: tri writes {});"),
+        "{}",
+        source_out.stdout
     );
 }
 
@@ -1551,15 +1791,15 @@ fn the_source_arm_prints_state_parameters_by_name() {
     assert_eq!(run_interface(&header_path).stdout, out.stdout);
 }
 
-/// The object arm has only the exit COUNT — a `state` parameter's name
-/// is compile-time material the wire never carries (docs/formats.md
-/// (routine interfaces)) — so it prints the exits positionally, one
-/// `state exit<k>` per declared exit, and that header re-parses too.
+/// The object arm prints each `state` parameter by the name the object
+/// records for it (docs/formats.md (routine interfaces)) — the same
+/// signature the source arm prints — and that header re-parses too.
 ///
-/// Mutation: printing the tape parameters alone; a caller reading the
-/// object's header would see a routine that takes no exits at all.
+/// Mutation: printing the tape parameters alone, or a positional
+/// stand-in for each exit; a caller naming `hit` against the object's
+/// header would be refused.
 #[test]
-fn the_object_arm_prints_state_parameters_positionally() {
+fn the_object_arm_prints_state_parameters_by_name() {
     let dir = scratch("header_object_state_params");
     let object = compile(
         STATE_PARAM_FIXTURE,
@@ -1576,7 +1816,7 @@ fn the_object_arm_prints_state_parameters_positionally() {
     let out = run_interface(&obj_path);
     assert!(
         out.stdout.contains(
-            "export routine pick(tape n: bits writes {}, state exit0, state exit1) noreturn;"
+            "export routine pick(tape n: bits writes {}, state hit, state miss) noreturn;"
         ),
         "{}",
         out.stdout
@@ -1587,16 +1827,14 @@ fn the_object_arm_prints_state_parameters_positionally() {
     assert_eq!(run_interface(&header_path).stdout, out.stdout);
 }
 
-/// The object arm's positional exit names are freshened against the tape
-/// parameters printed beside them: a routine whose tape is literally
-/// named `exit0` would otherwise produce a signature naming one parameter
-/// twice, which the strict reader rejects as `duplicate-param` — a header
-/// printed at exit 0 that cannot be read back.
+/// A tape parameter that happens to carry a positional-looking name
+/// takes nothing from the exits beside it: the object arm prints the
+/// authored names on both.
 ///
-/// Mutation: print `state exit{k}` unconditionally; the re-parse below
-/// fails.
+/// Mutation: mint `exit<k>` for the exits on the object arm; the
+/// signature names one parameter twice and the re-parse below fails.
 #[test]
-fn the_object_arms_exit_names_never_collide_with_a_tape_parameter() {
+fn the_object_arm_keeps_authored_names_beside_a_tape_named_like_an_exit() {
     const CLASH: &str = "\
 export alphabet bits { '_', '0', '1' }
 
@@ -1620,7 +1858,7 @@ export routine pick(tape exit0: bits, state hit) {
     let out = run_interface(&obj_path);
     assert!(
         out.stdout
-            .contains("export routine pick(tape exit0: bits writes {}, state exit0_1) noreturn;"),
+            .contains("export routine pick(tape exit0: bits writes {}, state hit) noreturn;"),
         "{}",
         out.stdout
     );
@@ -1631,9 +1869,10 @@ export routine pick(tape exit0: bits, state hit) {
 }
 
 /// `TMC_LANG_VERSION` moved `0.1` → `0.2` when the grammar gained the
-/// bodiless-signature alternative a header is written in. Pre-1.0, `N`
-/// bumps on ANY grammar change; there is no patch digit. Mutation:
-/// leaving it at `0.1`.
+/// bodiless-signature alternative a header is written in; every later
+/// grammar change before the next release folds into that one bump — a
+/// language version moves once between two releases. There is no patch
+/// digit. Mutation: leaving it at `0.1`, or moving it a second time.
 #[test]
 fn the_language_version_is_two() {
     assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.2");
@@ -2262,11 +2501,17 @@ namespace a {
 /// is asserted against a floor: without it a defect that made the
 /// printer reject EVERYTHING would leave this test green.
 ///
+/// The `use` lines are held to the other half of the same rule: every one
+/// printed is needed, so deleting it alone makes the header unreadable.
+///
 /// Mutation: make `header::needed_imports` return an empty vector (print
 /// no `use` line at all) — the embedded standard library's volatile-twin
 /// namespaces import their representation alphabet from a sibling
 /// namespace, so `std.tmc`'s own header stops reading back, with
-/// `unresolved-alphabet`.
+/// `unresolved-alphabet`. Mutation: drop `needed_imports`' `used`
+/// filter (print every import unconditionally) — the twins' graph imports,
+/// needed only by bodies a header never prints, then appear, and the
+/// header reads back without them.
 #[test]
 fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader() {
     // The same three directories `tests/syntax_green.rs::corpus` walks
@@ -2298,6 +2543,7 @@ fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader(
 
     let dir = scratch("header_corpus_roundtrip");
     let mut accepted = 0usize;
+    let mut uses = 0usize;
     for (i, path) in sources.iter().enumerate() {
         // A source `tmt interface` cannot render — one needing
         // declarations this walk does not supply — comes back as the
@@ -2332,6 +2578,34 @@ fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader(
             "{}: the header did not reprint to itself",
             path.display()
         );
+
+        // And nothing unneeded: every `use` line the printer emits must be
+        // load-bearing, so the header WITHOUT it no longer reads back.
+        let lines: Vec<&str> = printed.stdout.lines().collect();
+        for (k, line) in lines.iter().enumerate() {
+            if !line.trim_start().starts_with("use ") {
+                continue;
+            }
+            uses += 1;
+            let pruned: String = lines
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != k)
+                .map(|(_, l)| format!("{l}\n"))
+                .collect();
+            let pruned_path = dir.join(format!("corpus{i}_without_use{k}.tmh"));
+            std::fs::write(&pruned_path, &pruned).unwrap();
+            let refused = match execute(&args(&["interface", pruned_path.to_str().unwrap()])) {
+                Err(_) => true,
+                Ok(out) => out.code != 0,
+            };
+            assert!(
+                refused,
+                "{}: the printed `{}` is not needed — the header reads back without it",
+                path.display(),
+                line.trim()
+            );
+        }
     }
     // The floor: every shipped source is accepted today, so a drop means
     // the printer started refusing them rather than that the corpus
@@ -2339,5 +2613,12 @@ fn every_shipped_source_interface_accepts_round_trips_through_the_strict_reader(
     assert!(
         accepted >= 14,
         "only {accepted} shipped sources were accepted — the printer may be rejecting them"
+    );
+    // The `use`-line half's own floor: the standard library's twin
+    // namespaces and the foreign-alphabet map fixture print imports today,
+    // so the check above is never over an empty set.
+    assert!(
+        uses >= 3,
+        "only {uses} printed `use` lines were checked — the minimality half is vacuous"
     );
 }

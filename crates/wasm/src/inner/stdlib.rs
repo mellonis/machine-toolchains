@@ -59,6 +59,11 @@ pub fn object(arch: Arch) -> &'static ObjectFile {
                     CompileOptions {
                         opt_level: OptLevel::O1,
                         strip_debugger: true,
+                        // Mirrors the arch crate's own shipped preset: the
+                        // debug twin strips contract-check states too, so
+                        // its code bytes stay pinned equal to the release
+                        // object's (docs/wasm.md (the standard library)).
+                        strip_asserts: true,
                         // The library vouches for nobody but itself, and must
                         // not consult its own once-per-process cache while
                         // building — the arch crate's own reasoning. Fields

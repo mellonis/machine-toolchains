@@ -192,7 +192,7 @@ impl ObjectFile {
             }
             if let Some(iface) = &self.interface {
                 for routine in &iface.routines {
-                    for name in &routine.params {
+                    for name in routine.params.iter().chain(&routine.exits) {
                         pool.intern(name);
                     }
                     let clauses = routine.enters.iter().chain(&routine.leaves);
@@ -503,7 +503,10 @@ impl ObjectFile {
                             put_glyphs(&mut out, &mut pool, clause);
                         }
                     }
-                    out.push(routine.exits);
+                    out.push(u8::try_from(routine.exits.len()).expect("exit count fits u8"));
+                    for exit in &routine.exits {
+                        put_u32(&mut out, pool.intern(exit));
+                    }
                     out.push(u8::from(routine.returns));
                 }
                 put_u32(
@@ -521,6 +524,7 @@ impl ObjectFile {
                 for graph in &iface.graphs {
                     put_u32(&mut out, pool.intern(&graph.name));
                     put_u32(&mut out, graph.digest);
+                    out.push(u8::from(graph.exported));
                 }
                 put_u32(
                     &mut out,

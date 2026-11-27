@@ -179,7 +179,7 @@ fn a_symbolic_cross_object_binding_links_like_the_numeric_one() {
 }
 
 /// The callee as a LIBRARY rather than a user object: the same
-/// resolution, through the first-wins library namespace.
+/// resolution, through the library namespace.
 ///
 /// Mutation it catches: restrict the interface lookup to user objects and
 /// a library callee resolves nothing.

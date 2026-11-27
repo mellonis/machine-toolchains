@@ -30,6 +30,9 @@ ast_node!(pub struct WorldView: TmcKind::World.into());
 ast_node!(pub struct TapeView: TmcKind::Tape.into());
 ast_node!(pub struct StateView: TmcKind::State.into());
 ast_node!(pub struct RuleView: TmcKind::Rule.into());
+// A rule's `where { … }` GUARD node — the rule's node says which extent is
+// the guard (it exists only when `where` does).
+ast_node!(pub struct GuardView: TmcKind::Guard.into());
 ast_node!(pub struct GraftView: TmcKind::Graft.into());
 ast_node!(pub struct BindView: TmcKind::Bind.into());
 ast_node!(pub struct DocRunView: TmcKind::DocRun.into());
@@ -42,8 +45,9 @@ ast_node!(pub struct TransitionView: TmcKind::Transition.into());
 ast_node!(pub struct BindingArgView: TmcKind::BindingArg.into());
 ast_node!(pub struct SymMapView: TmcKind::SymMap.into());
 ast_node!(pub struct MapDeclView: TmcKind::MapDecl.into());
+ast_node!(pub struct SetDeclView: TmcKind::SetDecl.into());
 
-/// One item that can appear at file level: `use`, `alphabet`,
+/// One item that can appear at file level: `use`, `alphabet`, `set`, `map`,
 /// `machine`, `namespace`, and `reuse` (both `routine` and `graph` —
 /// the two reusable-graph carriers — parse to the same `REUSE` node
 /// kind, distinguished by their own header token, not by kind). A
@@ -55,13 +59,13 @@ ast_node!(pub struct MapDeclView: TmcKind::MapDecl.into());
 /// be nested in a namespace), found `machine`" —
 /// `extract_items`'s own `TopView::Machine` arm at namespace level is
 /// therefore unreachable in practice; kept as a total match rather
-/// than an unreachable panic, since a total match over a closed
-/// five-variant enum costs nothing and stays correct if the grammar
-/// ever changes.
+/// than an unreachable panic, since a total match over a closed enum
+/// costs nothing and stays correct if the grammar ever changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopView {
     Use(UseView),
     Alphabet(AlphabetView),
+    SetDecl(SetDeclView),
     MapDecl(MapDeclView),
     Reuse(ReuseView),
     Machine(MachineView),
@@ -75,6 +79,7 @@ impl TopView {
         UseView::cast(node.clone())
             .map(TopView::Use)
             .or_else(|| AlphabetView::cast(node.clone()).map(TopView::Alphabet))
+            .or_else(|| SetDeclView::cast(node.clone()).map(TopView::SetDecl))
             .or_else(|| MapDeclView::cast(node.clone()).map(TopView::MapDecl))
             .or_else(|| ReuseView::cast(node.clone()).map(TopView::Reuse))
             .or_else(|| MachineView::cast(node.clone()).map(TopView::Machine))
@@ -89,6 +94,7 @@ impl TopView {
         match self {
             TopView::Use(v) => v.syntax(),
             TopView::Alphabet(v) => v.syntax(),
+            TopView::SetDecl(v) => v.syntax(),
             TopView::MapDecl(v) => v.syntax(),
             TopView::Reuse(v) => v.syntax(),
             TopView::Machine(v) => v.syntax(),
@@ -106,6 +112,7 @@ impl TopView {
         match self {
             TopView::Use(_) => TmcKind::Use,
             TopView::Alphabet(_) => TmcKind::Alphabet,
+            TopView::SetDecl(_) => TmcKind::SetDecl,
             TopView::MapDecl(_) => TmcKind::MapDecl,
             TopView::Reuse(_) => TmcKind::Reuse,
             TopView::Machine(_) => TmcKind::Machine,
@@ -149,7 +156,8 @@ impl TopView {
 /// `ROOT` needs no such skip and gets none: a doc run at file level
 /// binds to the declaration that follows it, and one that binds to
 /// nothing is a `DanglingDocRun` parse error, so ROOT's children are
-/// only USE / ALPHABET / REUSE / MACHINE / NAMESPACE.
+/// only USE / ALPHABET / SET_DECL / MAP_DECL / REUSE / MACHINE /
+/// NAMESPACE.
 fn top_items(node: &SyntaxNode) -> impl Iterator<Item = TopView> + '_ {
     node.children()
         .filter(|child| {
@@ -323,6 +331,34 @@ impl AlphabetView {
     }
 }
 
+/// A `SET_DECL`'s header is `export? set NAME` then the mandatory `{` —
+/// exactly `ALPHABET`'s shape with `set` in place of `alphabet` — so both
+/// accessors read the same `alphabet_header_idents` walk, and the same
+/// "last header IDENT is the name" / "first is `export`" rules hold for the
+/// same reason (`set` is a reserved word, so `Parser::name()` refuses it as
+/// the name).
+impl SetDeclView {
+    /// The set's name: the LAST header IDENT before `{`.
+    pub fn name_token(&self) -> SyntaxToken {
+        alphabet_header_idents(self.syntax())
+            .into_iter()
+            .next_back()
+            .expect("SET_DECL always carries a name IDENT before its `{`")
+    }
+
+    /// Whether `export` was written — the first header IDENT's text.
+    pub fn exported(&self) -> bool {
+        alphabet_header_idents(self.syntax())
+            .first()
+            .is_some_and(|t| t.text() == "export")
+    }
+
+    /// The doc run this declaration retro-wraps, when one was written.
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
+    }
+}
+
 /// `MAP_DECL`'s own header IDENTs, in document order — direct child IDENT
 /// tokens up to (not including) the `:` before the source alphabet: an
 /// optional `export`, then the `map` keyword, then the name
@@ -443,7 +479,7 @@ fn reuse_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
 /// `graph`, matched on the header keyword's own text (`crate::lexer`'s
 /// lexer emits no keyword token kind at all: every word, reserved or
 /// not, arrives as an ordinary `IDENT`, and `routine`/`graph` are two
-/// of the 27 fully-reserved words in `crate::lexer::RESERVED` that the
+/// of the 31 fully-reserved words in `crate::lexer::RESERVED` that the
 /// PARSER refuses wherever a name is expected — not a contextual word;
 /// `deprecated` is this language's only contextual one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -779,16 +815,18 @@ impl StateView {
 }
 
 /// A `SIG_PARAM`'s own direct IDENT tokens, in order. Exactly
-/// `volatile? tape NAME ALPHABET` or `state NAME` — the `writes`/
-/// `preserves` keywords are NOT among them, because each clause is a
+/// `volatile? tape NAME ALPHABET` or `state NAME` — the contract-clause
+/// keywords are NOT among them, because each clause is a
 /// `CONTRACT_CLAUSE` child node and this walk is direct-children-only.
 ///
 /// That exclusion is a CONSEQUENCE of bracketing the clauses, not the
 /// reason for it, and the accessors below do not depend on it. Measured
 /// with the `CONTRACT_CLAUSE` bracket removed, on
-/// `volatile tape a: x writes { '0' } preserves { '1' }`: this run
-/// becomes six IDENTs (`volatile`, `tape`, `a`, `x`, `writes`,
-/// `preserves`), and every positional accessor still answers correctly
+/// `volatile tape a: x writes { '0' } preserves { '1' }` (the second
+/// clause in its `.tmc` 0.1 spelling; any one-word clause keyword, e.g.
+/// `enters { '1' }`, gives the same count): this run became six IDENTs
+/// (`volatile`, `tape`, `a`, `x`, `writes`, `preserves`), and every
+/// positional accessor still answered correctly
 /// — `volatile()` true, `kind()` `Tape`, `name_token()` `a`,
 /// `alphabet_token()` `Some("x")` — because a clause keyword can only
 /// ever sit AFTER the alphabet. The single thing that breaks is
@@ -900,7 +938,8 @@ impl SigParamView {
     }
 
     /// This parameter's own contract clauses, in the order written.
-    /// The parser fixes that order (`writes` before `preserves`) and
+    /// The parser fixes that order (`writes` < `never writes` < `enters` <
+    /// `leaves`) and
     /// rejects a duplicate of either, so a caller reads each clause's
     /// own keyword rather than its position.
     pub fn contract_clauses(&self) -> impl Iterator<Item = ContractClauseView> + '_ {
@@ -909,7 +948,9 @@ impl SigParamView {
 }
 
 impl ContractClauseView {
-    /// `writes` or `preserves` — the clause's own first token. The
+    /// `writes`, `never`, `enters` or `leaves` — the clause's own first
+    /// token (`never writes` is the one two-word keyword, and its first
+    /// word alone already says which clause it is). The
     /// keyword is what says which field this clause fills; its position
     /// among the parameter's clauses does not.
     pub fn keyword_token(&self) -> SyntaxToken {
@@ -984,6 +1025,13 @@ impl RuleView {
     pub fn transition(&self) -> Option<TransitionView> {
         child(self.syntax())
     }
+
+    /// The `where { … }` guard this rule carries, when one was written.
+    /// Like `transition`/`write_vec`, a keyword-decided extent: `None`
+    /// here is simply an unguarded rule, never an error.
+    pub fn guard(&self) -> Option<GuardView> {
+        child(self.syntax())
+    }
 }
 
 /// `GRAFT`'s own header IDENTs, in document order — direct child IDENT
@@ -1038,7 +1086,7 @@ fn as_name_after(node: &SyntaxNode, terminator: TmcKind) -> Option<SyntaxToken> 
 impl GraftView {
     /// Whether `entry` was written — the first header IDENT's text, the
     /// same prefix-modifier rule `StateView::is_entry` uses. `entry` is
-    /// one of the 27 fully-reserved words the parser refuses wherever a
+    /// one of the 31 fully-reserved words the parser refuses wherever a
     /// name is expected (`crate::lexer::RESERVED`); it attaches only to
     /// `state`/`graft`, never `bind` (docs/tmt/language.md (entry)).
     pub fn is_entry(&self) -> bool {

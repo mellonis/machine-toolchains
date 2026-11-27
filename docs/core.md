@@ -344,6 +344,11 @@ Trap causes:
 | `UnmappedWrite` | the same, outward |
 | `ExitOutOfRange` | a multi-exit return named an exit the active frame lacks, or fired with no frame active |
 | `ProfileViolation` | an instruction requiring the frames profile ran on a base-profile core |
+| `Contract` | a contract the program declared about itself was broken where a compiler-planted check tested it |
+
+This table is held to the `Trap` enum in both directions by a test: a
+variant added without a row here, or a row left behind by a removed
+variant, fails it.
 
 A non-interactive run reports a trap as a structured trapped outcome;
 under the debug API it instead pauses on the faulting instruction.
@@ -603,6 +608,7 @@ the tables capability.
 | `unknown-table-label` | tables | a table-space label that does not resolve — an operand naming no table, or dispatch targets outside the one owning function |
 | `bad-signature` | tables | a `.routine` signature problem — a duplicate directive, no `.func` of its name, tapes outside 1..=16, an alpha list length mismatch, or a function left unsigned in a file that signs any |
 | `bad-frame` | tables | a `.frame`/`.map`/`.exits` violation — a duplicate `.map k`, an index at or past the frame arity, an orphan directive with no open `.frame`, a map pair that unpins blank |
+| `undeclared-exit` | tables | a routine's body returns through an exit (`retx #k`) at or above the `exits=` count its `.routine` line declares |
 
 The linker and the VM do not participate in this namespace: a link
 error renders as a prose message with no bracketed code, and a trap is
@@ -647,12 +653,20 @@ Objects in, one executable image out, in two phases.
 
 **Resolution** builds the namespace and walks reachability:
 
-- Duplicate exported symbols across user objects are a link-time error.
-- Libraries resolve **first-wins** and may be shadowed by a user object
-  defining the same exported symbol — shadowing is an opt-in property of
-  exported names.
+- An exported name has one definition in a link. Two user objects
+  defining one name are a link-time error whether or not the program
+  reaches it; a name a library also defines — against a user object or
+  another library, the embedded standard library included — is an error
+  once the program reaches it, so two libraries that happen to share a
+  name nothing calls still link together. Inside ONE library object a
+  name recorded twice keeps its first record; compiler output never
+  produces that shape.
+- A link error that concerns two inputs names both: a driver labels each
+  input it hands the linker (a path, a library name, the standard
+  library), and an unlabelled input is named by its position.
 - A **local** symbol binds directly within its own object and never goes
-  through the namespace, so it can neither shadow nor be shadowed. This
+  through the namespace, so it can neither collide with nor be hidden by
+  another object's symbol of the same name. This
   is the linking-visibility rule every source language's private-by-
   default visibility rests on.
 - Reachability is a BFS from the entry symbol — `main` by default (the
@@ -667,6 +681,16 @@ Objects in, one executable image out, in two phases.
   specialized copy, so a generic routine reached before lowering but left
   with no remaining caller afterward is dropped too, exactly as if the
   first BFS had never reached it.
+- A routine whose body returns through an exit index at or above the
+  exit count its interface declares is refused, under every mechanism
+  and whether or not the entry carries a signature — the assembler
+  already refuses such a body, so only an object built another way can
+  carry one. An exit return is the instruction whose operand is an
+  `Imm8` exit index and whose flow is `Stop`; a trap carrying the same
+  operand kind falls through, which is what tells the two apart. A
+  function with no interface declares nothing and is not checked; the
+  check reads each routine as the objects defined it, before any
+  mechanism lowers anything.
 
 **Build columns.** A name may carry two definitions — the two build
 columns of one function, for architectures whose toolchain compiles both
@@ -678,10 +702,9 @@ and the rules around that pair are narrow on purpose:
   or `both` (which claims each). Claiming a column twice is a duplicate
   however the two are tagged, so `{normal, volatile}` is the ONLY
   same-name pair one object may carry.
-- A name's two columns always come from ONE input. A user object's
-  definition shadows a library's whole pair, and library first-wins
-  keeps a pair whole too — the columns of one name never span two
-  inputs.
+- A name's two columns always come from ONE input: a definition is one
+  input's column pair, and a second input offering the same name is a
+  duplicate whatever its columns.
 - An object with no variant records at all reads as all-`normal`
   (`docs/formats.md (MO)`): it offers one column, which is what makes
   every legacy and hand-assembled object link unchanged.
@@ -769,6 +792,17 @@ sections are emitted alongside code, with per-function table bases and
 dispatch entries rebased through the same offset map, so a relaxation
 that moves code keeps table references correct.
 
+**What a table fixup references** is read from the code bytes, since a
+fixup records no kind (`docs/formats.md (object file)`), and every
+place the linker needs it applies one rule: a table-reference opcode
+right before the hole marks a plain match or dispatch table, and only
+when that test fails does a framed-call opcode five bytes back mark the
+frame-descriptor half of a framed call. The order matters. The byte five
+back from a plain table hole is whatever the previous instruction left
+there — the low byte of another table offset, say — and it can equal
+the framed-call opcode by coincidence; tested first, it would read a
+match or dispatch table as a frame descriptor.
+
 **Call width is not spellable in source.** Because this pass owns it,
 a short call mnemonic is a syntax error (`width is linker-selected`),
 and an object carries only far call holes — one relocation per call
@@ -832,8 +866,8 @@ itself a pure binary.
 
 A link error stops the link; a link **warning** does not. The report
 carries them in `diagnostics`, one per graded tape — a site whose two
-tapes are both narrow raises two — each with a stable
-kebab-case **code**, the finding, the function and blob offset it was
+tapes are both narrow raises two — or per graded body instruction,
+each with a stable kebab-case **code**, the finding, the function and blob offset it was
 raised at, and the source line when the objects carried debug data. The
 linker never prints and never decides what a warning means: a consumer
 renders them, suppresses them through its own allow list, and promotes
@@ -930,9 +964,28 @@ name and the digest of the body it actually spliced. When both objects
 are in the link the two must agree, and a mismatch stops it — the
 consumer compiled against a header that has drifted from its object.
 
-A graph no input exports is not checked. That is a header-only library,
-and it is the one place a header is trusted; the trust is deliberate and
-recorded here rather than discovered.
+The exporter is the one input that exports the graph; two inputs exporting
+it with identical digests count as one. Two inputs exporting it with
+DIFFERENT digests are a link error when any input grafts it, and always
+when both are user objects — the link could not say which body the
+consumer spliced. The error names the first exporter in input order and the
+first exporter whose record differs from it (among user objects only, when
+the conflict is between user objects with nothing grafting the graph).
+
+A graph record may be marked private: a unit prints the graph in its header
+without exporting it. A private record never conflicts with another input's
+record of the same name, between any pair of inputs. It only lets the link
+check a consumer that spliced the graph, which must match at least one
+input's private record when no input exports the name. When one input
+holds a graph privately and another EXPORTS a graph of the same name with
+a different digest, a consumer that spliced the private one is refused as
+well — the same pair is refused when it is compiled against — and the
+error says so, naming the input that provides the graph privately and the
+one that exports it differently, rather than reporting a drift.
+
+A graph no input records at all is not checked. That is a header-only
+library, and it is the one place a header is trusted; the trust is
+deliberate and recorded here rather than discovered.
 
 Both sides of that comparison are ordinary compiler output: the TM-1
 compiler records a graph it exports and a graph it spliced on every
@@ -944,9 +997,10 @@ without anyone hand-authoring a signature.
 
 An imported alphabet is verified the same way: a unit that imports an
 alphabet by name records the glyph list it compiled against, the link
-stage compares it against the exporting object's own declaration, and a
-mismatch stops the link — first-wins over the same namespace order, and
-unchecked when no input exports that alphabet.
+stage compares it against the one export of that alphabet (two identical
+exports counting as one), and a mismatch stops the link. Differing exports
+of an imported alphabet are the same link error as for a graph. The import
+is unchecked when no input exports that alphabet.
 
 ## The composition engine
 

@@ -33,8 +33,9 @@ FLAGS:
   -g                 record debug info (labels + .tmc lines)
   -O0 | -O1          optimization level (default -O0)
   --strip-debugger   drop `brk` at codegen
+  --strip-asserts    drop contract-check states
   --debug            preset: -g -O0
-  --release          preset: -O1 --strip-debugger
+  --release          preset: -O1 --strip-debugger --strip-asserts
   -S                 emit the generated .tma instead of an object
   --stamped-asm      emit raw stamped .tma (skip .rept re-detection)
   --emit-ir[=STAGE]  write the world-graph IR JSON next to the output
@@ -45,6 +46,7 @@ FLAGS:
   --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
                      repeatable, in command-line order)
   --nostdlib         do not read the embedded standard library's declarations
+  --allow CODE       suppress a compile warning code (repeatable)
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
 ";
@@ -52,24 +54,24 @@ FLAGS:
 /// `--extern` files, read through the SAME shared fixpoint `tmt build`
 /// uses for its own siblings and libraries
 /// (`crate::header::resolve_declarations`, docs/tmt/project.md
-/// (Declaration derivation)): each file is read against every OTHER
-/// `--extern` file already read clean, then the embedded standard
-/// library (unless `nostdlib`), iterated until no more progress is made
-/// — so one `--extern` file may itself depend on another, in either
-/// command-line order. The FINAL table is still assembled in
-/// command-line order, then the embedded standard library last unless
-/// `nostdlib` — the exact push order [`crate::footprint::
-/// find_external`]'s first-match lookup relies on, so a user's own
-/// `--extern std.tmh` shadows the built-in `std` when both are given;
-/// the fixpoint's OWN read context now pushes stdlib last too, for the
-/// identical reason (`crate::header::resolve_declarations`'s own doc
-/// comment). Every file that never reads clean is reported together,
-/// through [`render_unresolved`], never just the first in command-line
-/// order. Shared with `tmt interface`'s own `--extern`/`--nostdlib`
-/// (`cli/interface.rs`), which takes exactly this same meaning —
-/// `tmt build` derives its own siblings' and libraries' declarations
-/// independently (`cli/driver.rs`) and does NOT call this function,
-/// though it does share [`render_unresolved`] with it.
+/// (Declaration derivation)): each file is read against the declarations
+/// of every OTHER `--extern` file read so far, then the embedded standard
+/// library (unless `nostdlib`), and again whenever one of the others
+/// changes what it publishes, until nothing changes — so one `--extern`
+/// file may itself depend on another, and what the files publish does not
+/// depend on their command-line order. The FINAL table is still assembled
+/// in command-line order, then the embedded standard library last unless
+/// `nostdlib`. That order decides nothing about a published name: every
+/// other file's declaration of it must have the same form, or the compile
+/// fails `conflicting-declaration` (docs/tmt/language.md (declarations));
+/// the fixpoint's OWN read context pushes stdlib last too, so a conflict
+/// names the same origins either way. Every file whose last read failed
+/// is reported together, through [`render_unresolved`], never just the
+/// first in command-line order. Shared with `tmt interface`'s own
+/// `--extern`/`--nostdlib` (`cli/interface.rs`), which takes exactly this
+/// same meaning — `tmt build` derives its own siblings' and libraries'
+/// declarations independently (`cli/driver.rs`) and does NOT call this
+/// function, though it does share [`render_unresolved`] with it.
 pub(super) fn read_externals(paths: &[String], nostdlib: bool) -> Result<Declarations, String> {
     let mut sources = Vec::with_capacity(paths.len());
     for raw in paths {
@@ -145,23 +147,17 @@ const DECLARATIONS_MISSING_CODES: [&str; 4] = [
 /// Classification is by CODE only, never by scanning `message` text, so
 /// a future reword of the rendered prose can never silently defeat it.
 ///
-/// When every remaining failure's code is one of those four, or is
-/// `writes-outside-contract`, a trailing note is appended. `writes-
-/// outside-contract` earns the same treatment for one specific reason:
-/// it is the shape two units that each need the OTHER's declarations
-/// fail with when neither's own read ever sees the other — each treats
-/// its absent peer as an unconstrained (opaque) callee, infers a wider
-/// write footprint than its OWN declared contract allows, and reports a
-/// contract violation that is really a missing-peer symptom wearing a
-/// different code. Two independent sources that each carry their own
-/// unrelated writes-outside-contract bug also trigger this note; that
-/// is accepted imprecision, not a claim that every such pair is a real
-/// cycle — the note only ever supplements the individual diagnostics
-/// already printed above it, never replaces them.
+/// When every failure's code is one of those four, a trailing note is
+/// appended: two units that each need the OTHER's declarations merely to
+/// be read (each naming an alphabet the other declares, say) never get a
+/// reading, and each reports the other's names as not given. That is the
+/// one dependency cycle still refused. A `writes-outside-contract` is
+/// never such a symptom: a contract refusal met before the peers have
+/// settled is provisional (`crate::header::resolve_declarations`), so one
+/// that reaches this function was decided against the settled set and is
+/// a real violation.
 pub(super) fn render_unresolved(failures: &[crate::header::UnresolvedSource]) -> String {
     let is_declarations_missing = |code: &str| DECLARATIONS_MISSING_CODES.contains(&code);
-    let may_be_a_missing_peer_symptom =
-        |code: &str| is_declarations_missing(code) || code == "writes-outside-contract";
 
     let mut ordered: Vec<&crate::header::UnresolvedSource> = failures
         .iter()
@@ -177,34 +173,46 @@ pub(super) fn render_unresolved(failures: &[crate::header::UnresolvedSource]) ->
         out.push_str(&f.message);
     }
 
-    if failures.len() >= 2
-        && failures
-            .iter()
-            .all(|f| may_be_a_missing_peer_symptom(f.code))
-    {
+    if failures.len() >= 2 && failures.iter().all(|f| is_declarations_missing(f.code)) {
         out.push_str(
             "\nnote: every source named above may be failing only because it needs one of \
              the others' declarations, and none of them ever supplied them to each other — \
-             two units that depend on each other's declarations are not supported; break the \
-             cycle by hand-writing a header for one of them and supplying that header in its \
-             place",
+             two units that each depend on the other's declarations merely to be read are not \
+             supported; break the cycle by hand-writing a header for one of them and \
+             supplying that header in its place",
         );
     }
 
     out
 }
 
-pub(super) fn render_warnings(stderr: &mut String, input: &Path, report: &CompileReport) {
+/// Every non-allowed compile warning as `FILE:LINE:COL: warning: MESSAGE
+/// [code]`, one line each (docs/tmt/cli.md (compile warnings)). Returns
+/// how many were printed, which is what `-Werror` counts — an allowed
+/// warning is neither shown nor promoted.
+pub(super) fn render_warnings(
+    stderr: &mut String,
+    input: &Path,
+    report: &CompileReport,
+    allow: &[String],
+) -> usize {
+    let mut n = 0;
     for d in &report.diagnostics {
+        if allow.iter().any(|a| a == d.code) {
+            continue;
+        }
+        n += 1;
         let _ = writeln!(
             stderr,
-            "{}:{}:{}: warning: {}",
+            "{}:{}:{}: warning: {} [{}]",
             input.display(),
             d.span.start.line,
             d.span.start.col,
-            d.message
+            d.message,
+            d.code
         );
     }
+    n
 }
 
 /// Every non-allowed link warning, in the compile-warning format
@@ -297,16 +305,19 @@ pub(super) fn render_opt_report(stderr: &mut String, report: &CompileReport) {
     }
 }
 
-pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
-    let mut args = Args::new(raw);
-    if args.help() {
-        return Ok(CliOutput::ok(COMPILE_USAGE.into(), String::new()));
-    }
+/// The compile-time option surface alone, parsed off `args` in exactly the
+/// order `compile()` itself reads them — factored out so a unit test can
+/// inspect the resulting [`CompileOptions`] directly. `--strip-asserts` has
+/// nothing to strip yet (no contract check synthesizes a state it would
+/// drop), so a disconnected flag and a threaded one produce byte-identical
+/// output; this is the route that catches the disconnected one anyway.
+fn parse_compile_options(args: &mut Args) -> CompileOptions {
     let debug_preset = args.flag("--debug");
     let release_preset = args.flag("--release");
     let mut options = CompileOptions {
         debug_info: debug_preset || args.flag("-g"),
         strip_debugger: release_preset || args.flag("--strip-debugger"),
+        strip_asserts: release_preset || args.flag("--strip-asserts"),
         stamped_asm: args.flag("--stamped-asm"),
         opt_level: if release_preset {
             OptLevel::O1
@@ -324,7 +335,21 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     // `--foutline` enables the default-off `outline` pass; it takes effect
     // only at `-O1` (the optimizer runs nowhere else).
     options.outline = args.flag("--foutline");
+    options
+}
+
+pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
+    let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(COMPILE_USAGE.into(), String::new()));
+    }
+    let mut options = parse_compile_options(&mut args);
     let emit_asm = args.flag("-S");
+    // `--allow` draws from the shared namespace `tmt lint`, `tmt link` and
+    // `tmt build` validate against, so a typo aborts up front
+    // (docs/tmt/lint.md (the allow namespace)).
+    let allow = args.values("--allow")?;
+    crate::lint::validate_allow(&allow).map_err(|e| e.to_string())?;
     let werror = args.flag("-Werror");
     let verbose = args.flag("-v");
     let emit_ir = take_emit_ir(&mut args)?;
@@ -360,14 +385,13 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     })?;
 
     let mut stderr = String::new();
-    render_warnings(&mut stderr, input, &out.report);
+    let warned = render_warnings(&mut stderr, input, &out.report, &allow);
     if verbose {
         render_opt_report(&mut stderr, &out.report);
     }
-    if werror && !out.report.diagnostics.is_empty() {
+    if werror && warned > 0 {
         return Err(format!(
-            "{stderr}-Werror: {} warning(s) treated as errors",
-            out.report.diagnostics.len()
+            "{stderr}-Werror: {warned} warning(s) treated as errors"
         ));
     }
 
@@ -528,6 +552,23 @@ pub(super) fn parse_call_mech(raw: Option<String>) -> Result<CallMech, String> {
     }
 }
 
+/// How a link error names each input (docs/core.md (linking)): a unit or
+/// object by the path it was given as, a `-l` library as ``library `NAME` ``,
+/// the embedded standard library as `the standard library` — in the
+/// linker's own input order: units, then libraries, then the stdlib.
+pub(crate) fn link_labels(
+    units: &[String],
+    libraries: &[String],
+    stdlib: bool,
+) -> Vec<Option<String>> {
+    units
+        .iter()
+        .map(|u| Some(u.clone()))
+        .chain(libraries.iter().map(|l| Some(format!("library `{l}`"))))
+        .chain(stdlib.then(|| Some("the standard library".to_string())))
+        .collect()
+}
+
 pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     if args.help() {
@@ -557,9 +598,10 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     for name in &lib_names {
         libraries.push(find_library(name, &search_dirs)?);
     }
-    // The embedded stdlib links last (first-wins means -l objects and the
-    // command-line inputs shadow it), lazily via reachability, unless opted
-    // out. Mirrors the pmt `link` wiring.
+    // The embedded stdlib links last, lazily via reachability, unless opted
+    // out; a command-line object or `-l` library defining a `std::` name
+    // the program reaches is a duplicate-symbol error, not a shadowing.
+    // Mirrors the pmt `link` wiring.
     if !nostdlib {
         libraries.push(crate::stdlib::object().clone());
     }
@@ -575,6 +617,7 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
             // name — sidecar provenance is a build-driver concern
             // (docs/formats.md (map sidecar)).
             sources: Vec::new(),
+            labels: link_labels(&inputs, &lib_names, !nostdlib),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -704,7 +747,7 @@ mod tests {
     /// by process id + an atomic counter — mirrors `cli/driver.rs`'s own
     /// `unique_tmp_dir` test helper of the same shape (this crate has no
     /// shared test-support module).
-    fn unique_tmp_dir(label: &str) -> PathBuf {
+    fn unique_tmp_dir(label: &str) -> ScratchDir {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -712,8 +755,45 @@ mod tests {
             "tmt-find-library-test-{label}-{}-{n}",
             std::process::id()
         ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        ScratchDir::fresh(dir)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     const FIND_LIBRARY_FIXTURE: &str = "\
@@ -1004,6 +1084,44 @@ namespace glib {
         assert_eq!(
             msg,
             "main+0x0000: warning: x [y]\n-Werror: 2 link warning(s) treated as errors"
+        );
+    }
+
+    // ---- `--strip-asserts` threading -------------------------------------
+    //
+    // Nothing exists yet for the flag to strip, so `tmt compile -S`'s
+    // output cannot tell a threaded `--strip-asserts` apart from a
+    // disconnected one (parsed and accepted, never reaching
+    // `CompileOptions`) — both compile to byte-identical text. These two
+    // tests are the real headline guard: they read the field straight off
+    // the struct `parse_compile_options` returns.
+
+    /// Mutation: dropping `strip_asserts: release_preset ||
+    /// args.flag("--strip-asserts")` from `parse_compile_options` (or
+    /// wiring it to a different flag) — the field stays `false` here.
+    #[test]
+    fn strip_asserts_flag_threads_into_compile_options() {
+        let mut args = Args::new(&["--strip-asserts".to_string()]);
+        let options = parse_compile_options(&mut args);
+        assert!(
+            options.strip_asserts,
+            "--strip-asserts must reach CompileOptions.strip_asserts"
+        );
+    }
+
+    /// `--release` expands to `-O1 --strip-debugger --strip-asserts`.
+    /// Mutation: expanding the preset without the third flag.
+    #[test]
+    fn release_preset_also_sets_strip_asserts() {
+        let mut args = Args::new(&["--release".to_string()]);
+        let options = parse_compile_options(&mut args);
+        assert!(
+            options.strip_debugger,
+            "premise: --release strips the debugger too"
+        );
+        assert!(
+            options.strip_asserts,
+            "--release must also set CompileOptions.strip_asserts"
         );
     }
 }

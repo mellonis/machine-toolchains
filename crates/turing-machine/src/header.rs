@@ -21,14 +21,14 @@
 //! namespaces (`binaryNumbersVolatile`, `binaryNumbersBareVolatile`)
 //! would break the two-arm agreement below on every routine they declare.
 //!
-//! **The printer never emits `preserves`.** A contract clause always
+//! **The printer never emits `never writes`.** A contract clause always
 //! prints as `writes { … }` carrying the tape's PUBLISHED write set
 //! (`compiler::published_writes`, the one function both `ir::lower` and
 //! this module call): the declared EFFECTIVE set when the tape declares
-//! `writes` or `preserves`, or — when neither clause is written — the
+//! `writes` or `never writes`, or — when neither clause is written — the
 //! compiler's own INFERRED write set for that tape, never the whole
 //! alphabet as a stand-in for "no restriction declared" (the wire has no
-//! way to spell that — docs/formats.md (routine interfaces)). `preserves`
+//! way to spell that — docs/formats.md (routine interfaces)). `never writes`
 //! itself is source-level sugar with no representation on the wire, so an
 //! object-arm render could not reproduce it even in principle, and using
 //! it as a stand-in for the uncontracted case would diverge from the
@@ -39,7 +39,11 @@
 //! of the input's whitespace and comments — which is why it renders from
 //! parsed/resolved data structures throughout, never by slicing or
 //! echoing source text. That independence is what lets a later graph
-//! digest be computed over this printer's own output. Two determinism
+//! digest be computed over this printer's own output. The digest is
+//! taken over [`graph_body_lines`], BEFORE the one layout step the
+//! printed header alone goes through — [`canonical`], which hands the
+//! assembled text to the `.tmc` formatter so that `tmt fmt --check`
+//! accepts a generated header unchanged. Two determinism
 //! hazards worth naming because they are easy to reintroduce: this module
 //! never iterates `Resolved::alphabets` (a `HashMap`) directly — the
 //! source arm walks the flat, source-order `Program::alphabets` /
@@ -143,10 +147,11 @@
 //! nothing. The source arm never had this problem: a `machine` block has
 //! no `export` keyword to make it eligible in the first place.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use mtc_core::diagnostics::Span;
 use mtc_core::formats::crc32::crc32;
 use mtc_core::formats::object::{
     ExportedAlphabet, ExportedGraph, Interface, ObjectFile, SymbolDef,
@@ -154,8 +159,9 @@ use mtc_core::formats::object::{
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
-    self, CompileError, ReadMode, Resolved, ResolvedCallTarget, ResolvedWorld, WorldKind,
-    full_name, published_writes,
+    self, CompileError, CompileErrorKind, PeerChecks, ReadMode, Resolved, ResolvedCallTarget,
+    ResolvedWorld, WorldKind, clause_glyphs, full_name, position_named_cells, published_writes,
+    symset_glyphs,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -205,43 +211,7 @@ fn render_from_source(
     // published write set (docs/tmt/cli.md (interface)).
     let analysis = compiler::analyze_with_mode(source, externals, mode)?;
     let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
-    // A routine's `noreturn` fact: INFERRED from its body for a BODIED
-    // routine (`ReadMode::Program`, the ONLY mode where `has_body` is ever
-    // true), through the identical `ir::body_can_return` the compiler
-    // itself runs over a freshly-expanded module — never re-derived by a
-    // second walk. `ReadMode::DeclarationsOnly` gives every routine an
-    // EMPTY body (a header has none to infer from), so `expand::expand`
-    // is skipped there entirely.
-    //
-    // An interface printer answers what a unit DECLARES, not what it
-    // compiles to — `analyze` (resolution) is as far as this render ever
-    // otherwise goes, and expansion errors (a descending range, a graft
-    // map conflict, …) are strictly LATER than that. A unit with such an
-    // error in one routine must still print every OTHER routine's
-    // signature, so a failed expansion here is not propagated: `returns`
-    // is left EMPTY instead, and `render_source`'s own per-routine lookup
-    // already falls back to the routine's DECLARED clause (or its
-    // conservative absence) when an entry is missing — the identical
-    // fallback a bodiless routine always takes, so the two failure modes
-    // share one path rather than needing a second.
-    let returns: HashMap<String, bool> = if analysis.program.routines.iter().any(|r| r.has_body) {
-        crate::expand::expand(&analysis.resolved, externals)
-            .map(|expanded| {
-                expanded
-                    .worlds
-                    .iter()
-                    .map(|w| {
-                        (
-                            w.name.clone(),
-                            crate::ir::body_can_return(w, &analysis.resolved),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
+    let returns = inferred_returns(&analysis.program, &analysis.resolved, externals);
     // The same scope substrate `resolve_program` built while analyzing this
     // very source — rebuilt here from the same `Program` rather than
     // threaded out of the analysis, so nothing on the compile path grows a
@@ -250,13 +220,99 @@ fn render_from_source(
     // unreachable in practice, `analyze_with_mode` having just succeeded
     // through the identical call.
     let scopes = compiler::Scopes::build(&analysis.program)?;
-    Ok(render_source(
+    let text = render_source(
         &analysis.program,
         &analysis.resolved,
         &scopes,
         &footprint,
         &returns,
-    ))
+    );
+    // The renderer's own spans point into the header it just printed, not
+    // into `source`, so a failure is reported without one: it is a printer
+    // bug, never a fault in the input.
+    canonical(&text).map_err(|message| CompileError {
+        span: Span::point(0, 0),
+        kind: CompileErrorKind::Internal(message),
+    })
+}
+
+/// Every BODIED routine's inferred "can return" fact, keyed by mangled
+/// name — the ONE inference both a header's source arm
+/// ([`render_from_source`]) and a lenient declarations read
+/// ([`read_declarations_with_mode`]) take `noreturn` from, so `tmt
+/// interface` and `tmt build`'s sibling read can never disagree on it
+/// (docs/tmt/project.md (Declaration derivation)). It runs the identical
+/// `ir::body_can_return` the compiler itself runs over a freshly-expanded
+/// module — never a second walk. [`ReadMode::DeclarationsOnly`] gives
+/// every routine an EMPTY body (a header has none to infer from), so
+/// `expand::expand` is skipped there entirely and the map is empty.
+///
+/// A declarations reader answers what a unit DECLARES, not what it
+/// compiles to — `analyze` (resolution) is as far as it otherwise goes,
+/// and expansion errors (a descending range, a graft map conflict, …) are
+/// strictly LATER than that. A unit with such an error in one routine must
+/// still declare every OTHER routine's signature, so a failed expansion
+/// here is not propagated: the map is left EMPTY instead, and
+/// [`noreturn_fact`] falls back to each routine's DECLARED clause — the
+/// identical fallback a bodiless routine always takes, so the two failure
+/// modes share one path rather than needing a second.
+fn inferred_returns(
+    program: &Program,
+    resolved: &Resolved,
+    externals: &Declarations,
+) -> HashMap<String, bool> {
+    if !program.routines.iter().any(|r| r.has_body) {
+        return HashMap::new();
+    }
+    crate::expand::expand(resolved, externals)
+        .map(|expanded| {
+            expanded
+                .worlds
+                .iter()
+                .map(|w| (w.name.clone(), crate::ir::body_can_return(w, resolved)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether routine `name` is `noreturn`: INFERRED when its fact is in
+/// `returns` ([`inferred_returns`] — a bodied routine whose unit
+/// expanded); echoed from the DECLARED clause otherwise — a bodiless
+/// routine has no body to infer from at all, and a bodied one whose unit
+/// failed to expand has no provable fact either, so the author's own
+/// assertion is the best available answer, and its absence conservatively
+/// means "may return" rather than guessing. The one rule both the header
+/// printer and a lenient declarations read apply.
+fn noreturn_fact(returns: &HashMap<String, bool>, name: &str, declared: bool) -> bool {
+    match returns.get(name) {
+        Some(&can_return) => !can_return,
+        None => declared,
+    }
+}
+
+/// The printed header's canonical layout: the assembled text passed once
+/// through `crate::fmt::format`, the same function `tmt fmt` runs, so a
+/// generated header is `fmt`-clean by construction rather than by a second
+/// printer imitating the formatter's grid and wrapping (docs/tmt/fmt.md
+/// (the state-block grid), docs/tmt/fmt.md (argument lists and the width
+/// threshold)).
+/// Both arms end here — [`render_from_source`] and [`from_object`].
+///
+/// Only the PRINTED text goes through it. [`graph_digest`] hashes
+/// [`graph_body_lines`]' own rendering and never this output, so a change
+/// in the formatter's layout never moves a graft digest.
+///
+/// A header carries no comments, so the formatter's comment-sensitive
+/// layout rules never arise. An error here means the renderer produced
+/// text the `.tmc` grammar rejects — surfaced, never papered over by
+/// printing the unformatted text.
+fn canonical(text: &str) -> Result<String, String> {
+    crate::fmt::format(text).map_err(|e| {
+        format!(
+            "the generated header does not re-read at {}:{}: {}",
+            e.span.start.line, e.span.start.col, e.kind
+        )
+    })
 }
 
 /// Read one text declaration source's own shape — a `.tmc`/`.tmh` file
@@ -270,8 +326,10 @@ fn render_from_source(
 /// cannot omit it — this is what makes a sibling's or a library's
 /// exported graph graftable); anything else (a `.tmc`) is read LENIENTLY
 /// as [`ReadMode::Program`]: bodies and a `machine` block are accepted
-/// and simply unused for routines (a routine's body contributes nothing
-/// [`Resolved`] keeps), while a graph's body is read and kept exactly as
+/// and a routine's body contributes what its generated header would print
+/// ([`settle_declarations`]) — its `noreturn`, inferred exactly as `tmt
+/// interface` infers it ([`inferred_returns`]), and its uncontracted
+/// tapes' inferred write sets — while a graph's body is read and kept exactly as
 /// the strict arm keeps it. Text has no container magic to tell a header
 /// from a full source by, so — exactly as in `cli/interface.rs` — the
 /// extension is the one place it IS the signal, never a second front end.
@@ -283,12 +341,24 @@ fn render_from_source(
 /// another declared unit needs that unit's declarations in hand just to
 /// extract its OWN shape. [`resolve_declarations`] is what builds this
 /// context, growing it as more sources resolve.
+#[cfg(test)]
 pub(crate) fn read_extern(
     path: &Path,
     source: &str,
     externals: &Declarations,
 ) -> Result<Resolved, CompileError> {
-    read_declarations_with_mode(source, header_mode_for(path), externals)
+    read_extern_with(path, source, externals, PeerChecks::Enforced)
+}
+
+/// [`read_extern`] with an explicit [`PeerChecks`] — what
+/// [`resolve_declarations`] reads a text source through.
+fn read_extern_with(
+    path: &Path,
+    source: &str,
+    externals: &Declarations,
+    checks: PeerChecks,
+) -> Result<Resolved, CompileError> {
+    read_declarations_with_mode(source, header_mode_for(path), externals, checks)
 }
 
 /// `.tmh` (case-insensitive) selects STRICT [`ReadMode::DeclarationsOnly`]
@@ -314,16 +384,82 @@ fn read_declarations_with_mode(
     source: &str,
     mode: ReadMode,
     externals: &Declarations,
+    checks: PeerChecks,
 ) -> Result<Resolved, CompileError> {
-    let analysis = compiler::analyze_with_mode(source, externals, mode)?;
+    let analysis = compiler::analyze_reading(source, externals, mode, checks)?;
+    let mut resolved = analysis.resolved;
+    settle_declarations(&analysis.program, &mut resolved, externals, mode);
+    Ok(resolved)
+}
+
+/// Settle what a declarations reading of `program` publishes
+/// (docs/tmt/language.md (declarations)): stamp every graph's digest,
+/// settle every routine's `noreturn` from its body, and — for a
+/// [`ReadMode::Program`] read only — publish each routine/graph tape's
+/// write set as the header prints it. The ONE place these facts are
+/// settled: a declarations reading publishes them through it, and the
+/// own-definition check (`published::own_forms`) runs it on a copy of the
+/// unit being compiled, so a unit is compared with its table as the
+/// unit's own reading would be published.
+pub(crate) fn settle_declarations(
+    program: &Program,
+    resolved: &mut Resolved,
+    externals: &Declarations,
+    mode: ReadMode,
+) {
     // Every graph world DOES carry its body (see the mode doc above), so
     // this is exactly where a later graft of one needs its digest to come
     // from — this module's own AST is about to be dropped, and `Resolved`
     // alone carries no way to recompute it (`stamp_graph_digests`).
-    let footprint = footprint::infer_resolved_with(&analysis.resolved, &externals.modules());
-    let mut resolved = analysis.resolved;
-    stamp_graph_digests(&analysis.program, &mut resolved, &footprint);
-    Ok(resolved)
+    let footprint = footprint::infer_resolved_with(resolved, &externals.modules());
+    // A routine's `noreturn` is the one fact a consumer reads off a
+    // routine world that a lenient `.tmc` read would otherwise lose: the
+    // body is about to be dropped with the AST, and `ir::known_noreturn`
+    // believes only `declared_noreturn` for an out-of-unit callee. So the
+    // fact is settled HERE, by the same inference and the same rule `tmt
+    // interface` prints it by — a strict read (a header, or an object's
+    // rendered one) has no bodies, `returns` is empty, and every world
+    // keeps its declared clause untouched.
+    let returns = inferred_returns(program, resolved, externals);
+    for world in resolved
+        .worlds
+        .iter_mut()
+        .filter(|w| w.kind == WorldKind::Routine)
+    {
+        let noreturn = noreturn_fact(&returns, &world.name, world.declared_noreturn.is_some());
+        // An inferred fact with no clause behind it carries the routine's
+        // own name as its span — the one place a diagnostic about the
+        // routine's return behaviour can point to.
+        world.declared_noreturn =
+            noreturn.then(|| world.declared_noreturn.unwrap_or(world.name_span));
+    }
+    // Stamped BEFORE the write sets below are rewritten: the digest is
+    // computed from the tapes as the source declared them (the printed
+    // signature goes through `published_writes` either way, so the order
+    // cannot change a digest; stamping first makes that independent of it).
+    stamp_graph_digests(program, resolved, &footprint);
+    // A routine's or graph's tape publishes the set its header would
+    // print (`published_writes`): the declared effective set where a
+    // clause exists, else the body's inferred set. Never for a header
+    // read: a bodiless routine's inferred set is empty, and publishing it
+    // would claim the routine writes nothing.
+    if mode == ReadMode::Program {
+        for world in resolved
+            .worlds
+            .iter_mut()
+            .filter(|w| w.kind != WorldKind::Machine)
+        {
+            for i in 0..world.tapes.len() {
+                let inferred = footprint
+                    .worlds
+                    .get(&world.name)
+                    .and_then(|wf| wf.tapes.get(i).copied());
+                let tape = &mut world.tapes[i];
+                tape.writes = Some(published_writes(tape, inferred));
+                tape.never_writes = None;
+            }
+        }
+    }
 }
 
 /// The ONE path from a compiled object to a [`Declarations`] module
@@ -351,9 +487,20 @@ fn read_declarations_with_mode(
 /// object with nothing to show is worth naming; here, feeding an object
 /// with nothing to declare to another unit is not a mistake at all — it
 /// declares nothing because it exports nothing.
+#[cfg(test)]
 pub(crate) fn declarations_from_object(
     obj: &ObjectFile,
     externals: &Declarations,
+) -> Result<Resolved, UnresolvedSource> {
+    declarations_from_object_with(obj, externals, PeerChecks::Enforced)
+}
+
+/// [`declarations_from_object`] with an explicit [`PeerChecks`] — what
+/// [`resolve_declarations`] reads an object source through.
+fn declarations_from_object_with(
+    obj: &ObjectFile,
+    externals: &Declarations,
+    checks: PeerChecks,
 ) -> Result<Resolved, UnresolvedSource> {
     if obj.interface.is_none() {
         return Ok(empty_resolved());
@@ -362,7 +509,7 @@ pub(crate) fn declarations_from_object(
         message,
         code: OBJECT_INTERFACE_UNREADABLE,
     })?;
-    read_declarations_with_mode(&text, ReadMode::DeclarationsOnly, externals).map_err(|e| {
+    read_declarations_with_mode(&text, ReadMode::DeclarationsOnly, externals, checks).map_err(|e| {
         UnresolvedSource {
             message: format!(
                 "{}:{}: error: {} [{}]",
@@ -433,10 +580,21 @@ pub(crate) struct DeclarationSource {
 }
 
 impl DeclarationSource {
-    fn read(&self, externals: &Declarations) -> Result<Resolved, UnresolvedSource> {
+    /// The file this source was read from, for a diagnostic.
+    fn path(&self) -> &Path {
+        match &self.text {
+            DeclarationText::Source { path, .. } | DeclarationText::Object { path, .. } => path,
+        }
+    }
+
+    fn read(
+        &self,
+        externals: &Declarations,
+        checks: PeerChecks,
+    ) -> Result<Resolved, UnresolvedSource> {
         match &self.text {
             DeclarationText::Source { path, text } => {
-                read_extern(path, text, externals).map_err(|e| UnresolvedSource {
+                read_extern_with(path, text, externals, checks).map_err(|e| UnresolvedSource {
                     message: format!(
                         "{}:{}:{}: error: {} [{}]",
                         path.display(),
@@ -448,74 +606,214 @@ impl DeclarationSource {
                     code: e.kind.code(),
                 })
             }
-            DeclarationText::Object { path, object } => declarations_from_object(object, externals)
-                .map_err(|inner| UnresolvedSource {
-                    message: format!("{}: {}", path.display(), inner.message),
-                    code: inner.code,
-                }),
+            DeclarationText::Object { path, object } => {
+                declarations_from_object_with(object, externals, checks).map_err(|inner| {
+                    UnresolvedSource {
+                        message: format!("{}: {}", path.display(), inner.message),
+                        code: inner.code,
+                    }
+                })
+            }
+        }
+    }
+
+    /// One read of this source against `externals`, as the settling loop
+    /// of [`resolve_declarations`] takes it: the reading (when one can be
+    /// had) and the verdict of the full, checked read (`None` when it read
+    /// clean). The checked read comes first, so a source that reads clean
+    /// is read exactly once. A refusal by one of the peer-dependent checks
+    /// (`compiler::PEER_CHECK_CODES`) does not cost the source its
+    /// reading: those checks change nothing a reading publishes, so the
+    /// source is read again with them deferred and its peers still see
+    /// what it declares; whether the refusal stands is decided by the
+    /// read made against the settled set.
+    fn read_settling(
+        &self,
+        externals: &Declarations,
+    ) -> (Option<Resolved>, Option<UnresolvedSource>) {
+        match self.read(externals, PeerChecks::Enforced) {
+            Ok(reading) => (Some(reading), None),
+            Err(refusal) if compiler::PEER_CHECK_CODES.contains(&refusal.code) => (
+                self.read(externals, PeerChecks::Deferred).ok(),
+                Some(refusal),
+            ),
+            Err(refusal) => (None, Some(refusal)),
         }
     }
 }
 
-/// Read every source in `sources` against a shared, GROWING context
-/// (docs/tmt/project.md (Declaration derivation)): it starts empty and
-/// gains each source's own declarations the moment it reads clean, one
-/// pass at a time, until a WHOLE pass makes no further progress — THEN
-/// the embedded standard library is pushed, unless `stdlib` is false (a
-/// switch that therefore reaches EVERY read here, siblings, libraries
-/// and `--extern` files alike). Pushing stdlib last, after every peer,
-/// is deliberate and matches the FINAL table's own precedence below —
-/// `Declarations`' own lookup is first-match, so a read run against
-/// stdlib pushed FIRST would let the built-in library win a name a
-/// peer's own declarations are about to shadow, even though the real
-/// compile (reading the same peer's declarations from the final table)
-/// believes the peer. This is what lets a library header depend on
-/// another library, a sibling on another sibling, or an `--extern` file
-/// on another `--extern` file, of any dependency depth and regardless
-/// of the order they were given in — only the FINAL table's precedence
-/// order (siblings, then libraries in `-l` order, then stdlib; or
-/// `--extern` files in command-line order, then stdlib) is fixed, and
-/// that assembly happens separately, in the caller, from these same
-/// results; this function's own read context now matches it exactly,
-/// peer-then-stdlib either way.
+/// What [`resolve_declarations`] did, for the tests that pin its cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SettleStats {
+    /// Sweeps over the sources.
+    pub passes: usize,
+    /// Checked reads made (a deferred re-read after a provisional refusal
+    /// is not counted separately).
+    pub reads: usize,
+    /// The largest sweep guard computed — `passes` stays at or below it
+    /// unless the readings failed to settle.
+    pub guard: usize,
+    /// Readings that REPLACED an earlier reading of their source without
+    /// narrowing it ([`narrowing_left`] did not drop). The sweep guard
+    /// assumes there are none; a test holds this at zero over every
+    /// fixture, so a field that starts to change on its own shows up.
+    pub non_narrowing_changes: usize,
+}
+
+/// A sentinel [`UnresolvedSource::code`] for a set of sources whose
+/// declarations did not settle within the pass limit of
+/// [`resolve_declarations`] — never one of the compiler's own codes.
+const DECLARATIONS_UNSETTLED: &str = "declarations-unsettled";
+
+/// Read every source in `sources` against the declarations of all the
+/// OTHERS, until what they publish stops changing
+/// (docs/tmt/project.md (Declaration derivation)). The result does not
+/// depend on the order the sources are given in.
+///
+/// What a source publishes depends on its peers: a `.tmc` read publishes
+/// each uncontracted tape's INFERRED write set and each routine's inferred
+/// `noreturn` ([`settle_declarations`]), and both inferences read the
+/// callees' declarations — a callee nobody has declared yet is assumed to
+/// write the whole alphabet and to return. So a source is read again
+/// whenever a peer's reading has changed since its last read, each read
+/// against the latest reading of EVERY other source that has one (then
+/// the embedded standard library, pushed last unless `stdlib` is false —
+/// the final table's own order, so a conflict names the same origins in
+/// either place), and its new reading REPLACES the old one: one source
+/// contributes exactly one reading. The inferences only narrow as
+/// declarations arrive (a write set shrinks, `noreturn` goes from unknown
+/// to known), so the readings settle, to the same result whatever the
+/// order: with no cycle of calls between the sources each sweep settles
+/// at least one more, so `sources.len() + 1` sweeps suffice; a cycle of
+/// calls through maps that shift glyphs can lose one glyph per trip and
+/// take longer. The loop simply runs until nothing is due a read. The
+/// narrowing has one corner this function cannot rule out: a unit whose
+/// expansion fails only against a richer table makes [`inferred_returns`]
+/// fall back to the routine's declared `noreturn` clause, which can widen
+/// a reading instead of narrowing it. No input that reaches that corner
+/// is known. Its only guard is a safety net for the monotonicity it
+/// relies on, and no input known to reach it: every sweep but the last changes a reading,
+/// and a change is a first reading or a narrowing, so the sweeps cannot
+/// exceed the number of sources plus what the readings in hand can still
+/// lose ([`settle_height`]). Past that, every source still due a read
+/// fails with an internal-consistency error rather than looping or being
+/// accepted unsettled.
+///
+/// A read made before the set has settled can be refused for a reason the
+/// settled set removes — a caller's `writes` contract violated only
+/// because its callee had not yet been read against ITS callee, or two
+/// readings of one unit that disagree only until the later one narrows.
+/// Such a refusal (`compiler::PEER_CHECK_CODES`) is PROVISIONAL: the
+/// source keeps a reading taken with those checks deferred
+/// ([`DeclarationSource::read_settling`]), and its verdict is the one its
+/// last read gave — which, once nothing is due a read, was made against
+/// the settled set. A refusal that persists there is reported as before;
+/// every other error (syntax, an unresolved name) costs the source its
+/// new reading at once, and an earlier reading of it, if any, stays for
+/// its peers.
+///
+/// This is what lets a library header depend on another library, a
+/// sibling on another sibling, or an `--extern` file on another `--extern`
+/// file, of any dependency depth and regardless of the order they were
+/// given in; the FINAL table's assembly (siblings, then libraries in `-l`
+/// order, then stdlib; or `--extern` files in command-line order, then
+/// stdlib) happens separately, in the caller, from these same results.
 ///
 /// Returns one outcome per input source, same order, same length: `Ok`
-/// from the pass that first read it clean, `Err` (its own error, from
-/// its own LAST read attempt — the richest context it ever saw — naming
-/// its own path) once the fixpoint stops making progress with it still
-/// unread. Two sources that genuinely need EACH OTHER's declarations
-/// never converge; both come back `Err` (docs/tmt/project.md
-/// (Declaration derivation) — mutual dependency is not supported; give
-/// one of them a hand-written header instead). The caller — never this
-/// function — decides how to render several such `Err`s together
-/// (`cli/build.rs::render_unresolved`): reporting every one of them,
-/// not choosing a single "most likely" cause, is what lets a mutual
-/// pair's two names both reach the user regardless of which was listed
-/// first.
+/// with its settled reading, or `Err` with the error of its own LAST read
+/// — naming its own path. Two sources that each need the OTHER's
+/// declarations merely to be read (each naming an alphabet the other
+/// declares, say) never get a reading; both come back `Err`
+/// (docs/tmt/project.md (Declaration derivation) — give one of them a
+/// hand-written header instead). The caller — never this function —
+/// decides how to render several such `Err`s together
+/// (`cli/build.rs::render_unresolved`).
 ///
-/// Cost: in the ordinary case (no source needs more than one or two
-/// peers) parse work stays close to one read per source. The worst case
-/// — a source that resolves only on the LAST pass — re-reads it once per
-/// pass, `O(sources)` passes of `O(sources)` reads; accepted as the price
-/// of never depending on declared order for correctness, not a cost this
-/// function tries to hide.
+/// Cost: a source that reads clean and whose peers then stay as they are
+/// is read once — a lone source is read exactly once. Otherwise each
+/// change of a peer costs one more read.
 pub(crate) fn resolve_declarations(
     sources: &[DeclarationSource],
     stdlib: bool,
 ) -> Vec<Result<Resolved, UnresolvedSource>> {
+    resolve_declarations_counted(sources, stdlib).0
+}
+
+/// How many times one reading can still narrow: one step per routine or
+/// graph (its `noreturn`) and one per glyph of each of its tapes (its
+/// published write set).
+fn settle_height(reading: &Resolved) -> usize {
+    reading
+        .worlds
+        .iter()
+        .filter(|w| w.kind != WorldKind::Machine)
+        .map(|w| 1 + w.tapes.iter().map(|t| t.cardinality).sum::<usize>())
+        .sum()
+}
+
+/// What a reading can still lose by narrowing: per routine or graph, one
+/// for a `noreturn` not yet known plus the size of each tape's published
+/// write set (the whole alphabet where none is stated). Every change of a
+/// reading the settling loop expects lowers this.
+fn narrowing_left(reading: &Resolved) -> usize {
+    reading
+        .worlds
+        .iter()
+        .filter(|w| w.kind != WorldKind::Machine)
+        .map(|w| {
+            usize::from(w.declared_noreturn.is_none())
+                + w.tapes
+                    .iter()
+                    .map(|t| t.writes.map_or(t.cardinality, |set| set.len() as usize))
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+/// [`resolve_declarations`], also reporting what it cost.
+pub(crate) fn resolve_declarations_counted(
+    sources: &[DeclarationSource],
+    stdlib: bool,
+) -> (Vec<Result<Resolved, UnresolvedSource>>, SettleStats) {
     let n = sources.len();
-    let mut resolved: Vec<Option<Resolved>> = vec![None; n];
-    let mut last_err: Vec<Option<UnresolvedSource>> = vec![None; n];
-    loop {
-        let mut progress = false;
+    let mut readings: Vec<Option<Resolved>> = vec![None; n];
+    // The verdict of each source's LAST read: `None` once it read clean.
+    let mut verdicts: Vec<Option<UnresolvedSource>> = vec![None; n];
+    // Due a read: never read, or a peer's reading changed since.
+    let mut due = vec![true; n];
+    let mut stats = SettleStats::default();
+    while due.contains(&true) {
+        // Every sweep but the last changes a reading, and a change is a
+        // first reading (at most one per source) or a narrowing: a glyph
+        // leaves a published write set, or a routine becomes `noreturn`.
+        // So the readings in hand bound the sweeps still possible.
+        let narrowings: usize = readings.iter().flatten().map(settle_height).sum();
+        stats.guard = stats.guard.max(n + narrowings);
+        if stats.passes > n + narrowings {
+            for i in (0..n).filter(|&i| due[i]) {
+                verdicts[i] = Some(UnresolvedSource {
+                    message: format!(
+                        "{}: internal error: the declarations of this build's sources did \
+                         not settle after {} passes over them; this is a defect in tmt, \
+                         not in the source [{DECLARATIONS_UNSETTLED}]",
+                        sources[i].path().display(),
+                        stats.passes
+                    ),
+                    code: DECLARATIONS_UNSETTLED,
+                });
+            }
+            break;
+        }
+        stats.passes += 1;
         for i in 0..n {
-            if resolved[i].is_some() {
+            if !due[i] {
                 continue;
             }
+            due[i] = false;
             let mut context = Declarations::none();
-            for (j, entry) in resolved.iter().enumerate() {
+            for (j, reading) in readings.iter().enumerate() {
                 if i != j
-                    && let Some(r) = entry
+                    && let Some(r) = reading
                 {
                     context.push(sources[j].origin.clone(), r.clone());
                 }
@@ -525,25 +823,37 @@ pub(crate) fn resolve_declarations(
             if stdlib {
                 context.push_stdlib();
             }
-            match sources[i].read(&context) {
-                Ok(r) => {
-                    resolved[i] = Some(r);
-                    progress = true;
+            stats.reads += 1;
+            let (reading, verdict) = sources[i].read_settling(&context);
+            verdicts[i] = verdict;
+            if let Some(reading) = reading
+                && readings[i].as_ref() != Some(&reading)
+            {
+                if let Some(old) = &readings[i]
+                    && narrowing_left(&reading) >= narrowing_left(old)
+                {
+                    stats.non_narrowing_changes += 1;
                 }
-                Err(e) => last_err[i] = Some(e),
+                // REPLACED, never added beside the old one: the slot is
+                // the source's one reading.
+                readings[i] = Some(reading);
+                for (j, flag) in due.iter_mut().enumerate() {
+                    if j != i {
+                        *flag = true;
+                    }
+                }
             }
         }
-        if !progress {
-            break;
-        }
     }
-    resolved
+    let results = readings
         .into_iter()
-        .zip(last_err)
-        .map(|(r, e)| {
-            r.ok_or_else(|| e.expect("every still-unresolved source was attempted at least once"))
+        .zip(verdicts)
+        .map(|(reading, verdict)| match verdict {
+            Some(refusal) => Err(refusal),
+            None => Ok(reading.expect("a source with no refusal read clean")),
         })
-        .collect()
+        .collect();
+    (results, stats)
 }
 
 /// A [`Resolved`] declaring nothing — [`declarations_from_object`]'s
@@ -551,6 +861,8 @@ pub(crate) fn resolve_declarations(
 fn empty_resolved() -> Resolved {
     Resolved {
         alphabets: HashMap::new(),
+        sets: HashMap::new(),
+        set_refs: HashSet::new(),
         maps: HashMap::new(),
         worlds: Vec::new(),
         entry_world: None,
@@ -612,11 +924,12 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
             })?;
             let (ns, local) = split_ns(&symbol.name);
             let mut params = Vec::with_capacity(routine.params.len());
-            for ((param_name, glyphs), writes) in routine
+            for (((param_name, glyphs), writes), (enters, leaves)) in routine
                 .params
                 .iter()
                 .zip(&routine.glyphs)
                 .zip(&routine.writes)
+                .zip(routine.enters.iter().zip(&routine.leaves))
             {
                 let alphabet_name = match resolve_object_alphabet(
                     interface,
@@ -638,21 +951,19 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
                         synth
                     }
                 };
-                params.push(tape_param_text(param_name, &alphabet_name, writes));
+                params.push(tape_param_text(
+                    param_name,
+                    &alphabet_name,
+                    writes,
+                    enters.as_deref(),
+                    leaves.as_deref(),
+                ));
             }
-            // The wire carries the exit COUNT and no names — a `state`
-            // parameter's name is compile-time material the object never
-            // holds (docs/formats.md (routine interfaces)) — so the exits
-            // print positionally. A caller reading this header binds them
-            // by position, which is exactly how the vector travels. The
-            // minted names are freshened against the tape parameters this
-            // routine already prints: a tape literally named `exit0` would
-            // otherwise yield a signature naming one parameter twice,
-            // which the strict reader rejects — a header that does not
-            // re-parse.
-            let mut taken: HashSet<String> = routine.params.iter().cloned().collect();
-            for k in 0..routine.exits {
-                params.push(format!("state {}", fresh_param_name(&mut taken, k)));
+            // The wire carries each `state` parameter's name
+            // (docs/formats.md (routine interfaces)), so the exits print
+            // as the source declared them, after the tapes.
+            for name in &routine.exits {
+                params.push(format!("state {name}"));
             }
             // `noreturn` reads straight off the wire's `returns` bit — the
             // one fact a bodiless header has no body to infer, so this arm
@@ -678,7 +989,7 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
 
     let mut out = String::new();
     root.render(0, &mut out);
-    Ok(out)
+    canonical(&out)
 }
 
 /// One tape's alphabet identifier on the object arm — the first rule that
@@ -957,24 +1268,8 @@ fn render_source(
     // that is the `use`-line rule's own job, exactly as an external
     // alphabet/map reference already is, and there is no local declaration
     // for this render to print for it regardless.
-    let mut referenced_graphs: HashSet<&str> = HashSet::new();
-    let mut graph_frontier: Vec<&ResolvedWorld> = program
-        .graphs
-        .iter()
-        .filter(|g| g.exported)
-        .filter_map(|g| worlds.get(full_name(&g.ns, &g.name).as_str()).copied())
-        .collect();
-    while let Some(world) = graph_frontier.pop() {
-        for graft in &world.grafts {
-            let target = graft.target.as_str();
-            if let Some(&target_world) = worlds.get(target)
-                && target_world.kind == WorldKind::Graph
-                && referenced_graphs.insert(target)
-            {
-                graph_frontier.push(target_world);
-            }
-        }
-    }
+    let printed_graphs = printed_graph_names(program, resolved);
+    let referenced_graphs: HashSet<&str> = printed_graphs.iter().map(String::as_str).collect();
     // A graph this render will PRINT (exported, or reached from a printed
     // graph's own body) — the same test the alphabet/map/`use`-line rules
     // below extend to cover it with.
@@ -995,6 +1290,19 @@ fn render_source(
         if is_printed_graph(graph) {
             let full = full_name(&graph.ns, &graph.name);
             resolved_map_refs(worlds[full.as_str()], &mut referenced_maps);
+        }
+    }
+
+    // Every set a PRINTED graph body's pattern cells name, by the mangled
+    // name resolution stored on each cell — the one place a header prints
+    // a set NAME rather than a set's members, so the set it names must
+    // print too: the same "referenced, printed even if not itself
+    // exported" rule a map gets.
+    let mut referenced_sets: HashSet<&str> = HashSet::new();
+    for graph in &program.graphs {
+        if is_printed_graph(graph) {
+            let full = full_name(&graph.ns, &graph.name);
+            resolved_set_refs(worlds[full.as_str()], &mut referenced_sets);
         }
     }
 
@@ -1050,6 +1358,12 @@ fn render_source(
             printed_full_names.insert(full);
         }
     }
+    for set in &program.sets {
+        let full = full_name(&set.ns, &set.name);
+        if set.exported || referenced_sets.contains(full.as_str()) {
+            printed_full_names.insert(full);
+        }
+    }
     for map in &program.maps {
         let full = full_name(&map.ns, &map.name);
         if map.exported || referenced_maps.contains(full.as_str()) {
@@ -1083,6 +1397,24 @@ fn render_source(
             alphabet_lines(&alphabet.name, glyphs, alphabet.exported),
         );
     }
+    // Named glyph sets: exported ones, and the ones a printed graph body's
+    // pattern cells name, printed as their EXPANDED members
+    // (docs/tmt/cli.md (interface)). An alphabet and every contract clause
+    // print their resolved glyphs, so a pattern cell is the only printed
+    // text that names a set; a set built from other sets (this unit's or
+    // an imported one) still reads back with no `use` line and no sibling
+    // declaration behind it.
+    for set in &program.sets {
+        let full = full_name(&set.ns, &set.name);
+        if !set.exported && !referenced_sets.contains(full.as_str()) {
+            continue;
+        }
+        let resolved_set = resolved
+            .sets
+            .get(&full)
+            .expect("resolution guarantees every declared set is resolved");
+        root.insert(&set.ns, set_lines(resolved_set, &set.name, set.exported));
+    }
     // Named maps: exported, or referenced from a printed graph body — the
     // same rule an alphabet gets. A map an exported graph names but this
     // unit does not itself declare (an imported one) has no declaration
@@ -1102,18 +1434,9 @@ fn render_source(
         }
         let full = full_name(&routine.ns, &routine.name);
         let world = worlds[full.as_str()];
-        // Inferred when this routine's own fact is in `returns` (a bodied
-        // routine, expansion having succeeded); echoed from the declared
-        // clause otherwise — a bodiless routine has no body to infer from
-        // at all, and a bodied one whose UNIT failed to expand (a sibling
-        // routine's own error, `render_from_source`'s own doc) has no
-        // provable fact either, so the declared clause — the author's own
-        // assertion — is the best available answer, and its absence
-        // conservatively omits `noreturn` rather than guessing.
-        let noreturn = match returns.get(&full) {
-            Some(&can_return) => !can_return,
-            None => routine.noreturn.is_some(),
-        };
+        // Inferred when this routine's own fact is in `returns`, echoed
+        // from the declared clause otherwise (`noreturn_fact`).
+        let noreturn = noreturn_fact(returns, &full, routine.noreturn.is_some());
         root.insert(
             &routine.ns,
             routine_lines(routine, world, resolved, footprint, noreturn),
@@ -1153,6 +1476,7 @@ fn render_source(
         .alphabets
         .iter()
         .map(|a| full_name(&a.ns, &a.name))
+        .chain(program.sets.iter().map(|s| full_name(&s.ns, &s.name)))
         .chain(program.maps.iter().map(|m| full_name(&m.ns, &m.name)))
         .chain(program.routines.iter().map(|r| full_name(&r.ns, &r.name)))
         .chain(program.graphs.iter().map(|g| full_name(&g.ns, &g.name)))
@@ -1327,7 +1651,8 @@ fn collect_sig_refs<'p>(sig: &'p Signature, out: &mut HashSet<&'p str>) {
 
 /// Every BARE (single-segment) reuse target a printed graph body spells
 /// unqualified — its top-level `graft`/`bind` instances, plus any `call`
-/// target inside a rule's transition. std.tmc's own exported graphs never
+/// target inside a rule's transition — and every bare set name a pattern
+/// cell spells. std.tmc's own exported graphs never
 /// exercise the `call` case (a graph carries no `call` in this library's
 /// design — see its own header comment — every cross-namespace call is a
 /// plain routine's), but the printer stays correct for one regardless: a
@@ -1348,6 +1673,25 @@ fn collect_graph_body_refs<'p>(graph: &'p Graph, out: &mut HashSet<&'p str>) {
     }
     for state in &graph.states {
         for rule in &state.rules {
+            // A bare set name in a pattern cell resolves through an import
+            // exactly as a bare graft target does.
+            for cell in &rule.pattern.cells {
+                if let PatternCellKind::SetRef { name, .. } = &cell.kind
+                    && !name.contains("::")
+                {
+                    out.insert(name.as_str());
+                }
+            }
+            // A `where` guard's `in` conjunct names a set exactly as a
+            // pattern cell does — a bare name resolves through an import
+            // (docs/tmt/language.md (rule guards)).
+            if let Some(g) = &rule.guard {
+                for n in crate::guard::in_conjuncts(g) {
+                    if !n.set.name.contains("::") {
+                        out.insert(n.set.name.as_str());
+                    }
+                }
+            }
             if let Transition::Call { target, args, .. } = &rule.transition {
                 if let [only] = target.segments.as_slice() {
                     out.insert(only.as_str());
@@ -1407,6 +1751,35 @@ fn resolved_map_refs<'a>(world: &'a ResolvedWorld, out: &mut HashSet<&'a str>) {
     }
 }
 
+/// Every set one RESOLVED world's pattern cells name, by the MANGLED name
+/// resolution stored on each cell — the set-cell counterpart of
+/// [`resolved_map_refs`], deciding whether a printed graph body's set name
+/// needs its declaration printed alongside it.
+fn resolved_set_refs<'a>(world: &'a ResolvedWorld, out: &mut HashSet<&'a str>) {
+    for state in &world.states {
+        for rule in &state.rules {
+            for cell in &rule.pattern.cells {
+                if let PatternCellKind::SetRef {
+                    resolved: Some(r), ..
+                } = &cell.kind
+                {
+                    out.insert(r.set.as_str());
+                }
+            }
+            // A `where` guard's `in` conjunct names a set the same way —
+            // by NAME alone in the printed body, so the set it names must
+            // print alongside it (docs/tmt/language.md (rule guards)).
+            if let Some(g) = &rule.guard {
+                for n in crate::guard::in_conjuncts(g) {
+                    if let Some(r) = &n.resolved {
+                        out.insert(r.set.as_str());
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn alphabet_lines(name: &str, glyphs: &[String], exported: bool) -> Vec<String> {
     let keyword = if exported {
         "export alphabet"
@@ -1414,6 +1787,29 @@ fn alphabet_lines(name: &str, glyphs: &[String], exported: bool) -> Vec<String> 
         "alphabet"
     };
     vec![format!("{keyword} {name} {}", braced_list(glyphs))]
+}
+
+/// A glyph set as its members — [`alphabet_lines`]' spelling with `set` in
+/// place of `alphabet`: `export set` for an exported set, a plain `set` for
+/// one printed only because a printed graph body names it. A member whose
+/// label names a number (`patterns::label_number`, fold arithmetic's rule)
+/// prints bare, whatever its width and however the source quoted it — `'7'`
+/// and `7` are one symbol, and the bare spelling says it is one a fold may
+/// read. An empty set prints `{}`, which the strict reader reads back as
+/// the same empty set.
+fn set_lines(set: &compiler::ResolvedSet, name: &str, exported: bool) -> Vec<String> {
+    let keyword = if exported { "export set" } else { "set" };
+    let members = if set.glyphs.is_empty() {
+        "{}".to_string()
+    } else {
+        let spelled: Vec<String> = set
+            .glyphs
+            .iter()
+            .map(|g| crate::patterns::label_spelling(g))
+            .collect();
+        format!("{{ {} }}", spelled.join(", "))
+    };
+    vec![format!("{keyword} {name} {members}")]
 }
 
 /// `{ … }` with the elements space-padded, or the bare `{}` a genuinely
@@ -1463,7 +1859,24 @@ fn graph_body_lines(
         "graph"
     };
     let mut lines = vec![format!("{keyword} {}({}) {{", graph.name, sig)];
-    for state in &graph.states {
+    // The body prints the POSITIONAL form whatever the source spelled: a
+    // name is a spelling, and a generated artifact speaks the semantics
+    // (docs/tmt/language.md (named vector cells)). The fold is the same one
+    // resolution runs over `world.states`; over this source-form copy it is
+    // infallible (the unit resolved before printing) or a no-op (the object
+    // arm builds positional rules from rows) — running it is what keeps both
+    // arms, and `graph_digest` over these lines, on one text.
+    let mut states = graph.states.clone();
+    position_named_cells(
+        &mut states,
+        &world
+            .tapes
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .expect("a body prints only for a unit that resolved");
+    for state in &states {
         lines.extend(indented(state_lines(state)));
     }
     for graft in &graph.grafts {
@@ -1510,15 +1923,124 @@ pub(crate) fn graph_digest(
     resolved: &Resolved,
     footprint: &FootprintTable,
 ) -> u32 {
-    let text = graph_body_lines(graph, world, resolved, footprint).join("\n");
+    let mut text = graph_body_lines(graph, world, resolved, footprint).join("\n");
+    // The content a body names only by name (docs/tmt/language.md (grafting a
+    // graph from another unit)): every glyph set a pattern cell names and every
+    // named map an argument names, each once, by qualified name — so a change
+    // to a member or a pair moves the digest. Nothing is appended for a body
+    // that names neither, which keeps every such digest where it was.
+    let mut named: BTreeMap<String, String> = BTreeMap::new();
+    for state in &world.states {
+        for rule in &state.rules {
+            for cell in &rule.pattern.cells {
+                if let PatternCellKind::SetRef {
+                    resolved: Some(m), ..
+                } = &cell.kind
+                {
+                    let members: Vec<String> = m
+                        .members
+                        .iter()
+                        .map(|g| crate::patterns::label_spelling(&g.label))
+                        .collect();
+                    named.insert(
+                        m.set.clone(),
+                        format!("set {} {{ {} }}", m.set, members.join(", ")),
+                    );
+                }
+            }
+            // A `where` guard's `in` conjunct names a set BY NAME alone in
+            // the body — member drift moves no body line, so the appendix
+            // is where the digest learns of it (docs/tmt/language.md (rule
+            // guards); the GraftDrift half of this round).
+            if let Some(g) = &rule.guard {
+                for n in crate::guard::in_conjuncts(g) {
+                    if let Some(m) = &n.resolved {
+                        let members: Vec<String> = m
+                            .members
+                            .iter()
+                            .map(|g| crate::patterns::label_spelling(&g.label))
+                            .collect();
+                        named.insert(
+                            m.set.clone(),
+                            format!("set {} {{ {} }}", m.set, members.join(", ")),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let mut take_args = |args: &[BindingArg]| {
+        for a in args {
+            if let BindingValue::Named { map: Some(m), .. } = &a.value
+                && let Some((name, _)) = &m.named
+            {
+                let open = if m.open.is_some() { ", *" } else { "" };
+                named.insert(
+                    name.clone(),
+                    format!("map {} {{ {}{open} }}", name, map_pair_list_text(&m.pairs)),
+                );
+            }
+        }
+    };
+    for g in &world.grafts {
+        take_args(&g.args);
+    }
+    for b in &world.binds {
+        take_args(&b.args);
+    }
+    for c in &world.calls {
+        if let ResolvedCallTarget::Routine { args, .. } = &c.target {
+            take_args(args);
+        }
+    }
+    if !named.is_empty() {
+        text.push('\n');
+        text.push_str(&named.into_values().collect::<Vec<_>>().join("\n"));
+    }
     crc32(text.as_bytes())
 }
 
-/// Every graph THIS unit exports, with [`graph_digest`] — the exporting
-/// half of the graft-drift check (docs/formats.md (routine interfaces)):
-/// `compiler::compile` writes these as `.graph <name>, <digest>` lines,
-/// which the assembler parses back into `Interface::graphs`.
-pub(crate) fn exported_graph_digests(
+/// Every graph this unit's header prints: each exported graph and, by
+/// mangled name, every local graph an exported body reaches through its
+/// grafts, transitively (docs/tmt/language.md (headers)). A target this
+/// unit does not itself declare (a nested `std::…` graft) is not this
+/// unit's to print.
+pub(crate) fn printed_graph_names(program: &Program, resolved: &Resolved) -> BTreeSet<String> {
+    let worlds: HashMap<&str, &ResolvedWorld> = resolved
+        .worlds
+        .iter()
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut frontier: Vec<&ResolvedWorld> = Vec::new();
+    for g in program.graphs.iter().filter(|g| g.exported) {
+        let full = full_name(&g.ns, &g.name);
+        if let Some(&w) = worlds.get(full.as_str()) {
+            names.insert(full);
+            frontier.push(w);
+        }
+    }
+    while let Some(world) = frontier.pop() {
+        for graft in &world.grafts {
+            let target = graft.target.as_str();
+            if let Some(&target_world) = worlds.get(target)
+                && target_world.kind == WorldKind::Graph
+                && names.insert(target.to_string())
+            {
+                frontier.push(target_world);
+            }
+        }
+    }
+    names
+}
+
+/// `.graph` records for every graph [`printed_graph_names`] names, each with
+/// its [`graph_digest`] — the exporting half of the graft-drift check
+/// (docs/formats.md (routine interfaces)): `compiler::compile` writes these
+/// as `.graph <name>, <digest>` lines (`, private` for a graph the header
+/// prints without exporting), which the assembler parses back into
+/// `Interface::graphs`.
+pub(crate) fn interface_graph_digests(
     program: &Program,
     resolved: &Resolved,
     footprint: &FootprintTable,
@@ -1528,16 +2050,20 @@ pub(crate) fn exported_graph_digests(
         .iter()
         .map(|w| (w.name.as_str(), w))
         .collect();
+    let printed = printed_graph_names(program, resolved);
     program
         .graphs
         .iter()
-        .filter(|g| g.exported)
         .filter_map(|graph| {
             let full = full_name(&graph.ns, &graph.name);
+            if !printed.contains(&full) {
+                return None;
+            }
             let world = worlds.get(full.as_str())?;
             Some(ExportedGraph {
                 digest: graph_digest(graph, world, resolved, footprint),
                 name: full,
+                exported: graph.exported,
             })
         })
         .collect()
@@ -1604,7 +2130,7 @@ fn sig_param_text(
         // and is never checked at a call site (binding a volatile machine
         // tape into a non-volatile-declared parameter "is not
         // diagnosed"), so it is not part of what a caller may rely on —
-        // exactly the line the module doc draws for `preserves`. The
+        // exactly the line the module doc draws for `never writes`. The
         // object arm has no wire bit to read it back from either way, so
         // dropping it here is what keeps the two arms in agreement over
         // std.tmc's volatile-twin routines.
@@ -1633,41 +2159,68 @@ fn sig_param_text(
                 .get(&tape.alphabet)
                 .expect("resolution guarantees every tape alphabet is resolved")
                 .glyphs;
-            let writes: Vec<String> = published
-                .iter()
-                .filter_map(|index| alphabet_glyphs.get(index as usize).cloned())
-                .collect();
-            tape_param_text(&param.name, alphabet, &writes)
+            let writes = symset_glyphs(published, alphabet_glyphs);
+            // The SAME index-to-label step `writes` above just went
+            // through (`compiler::symset_glyphs`), applied to `enters`/
+            // `leaves` (`compiler::clause_glyphs`, over
+            // `ResolvedTape::enters`/`::leaves` — `resolve_contract_
+            // clause`'s own output, the walk that raises
+            // `ContractSymbolUnknown`).
+            let enters = clause_glyphs(tape.enters, alphabet_glyphs);
+            let leaves = clause_glyphs(tape.leaves, alphabet_glyphs);
+            tape_param_text(
+                &param.name,
+                alphabet,
+                &writes,
+                enters.as_deref(),
+                leaves.as_deref(),
+            )
         }
     }
 }
 
-/// The positional name exit `k` prints under on the object arm: `exit<k>`
-/// unless something already printed in this signature claims it, then
-/// `exit<k>_1`, `exit<k>_2`, … Deterministic given the signature, and
-/// distinct from every name beside it, so the rendered header re-parses.
-fn fresh_param_name(taken: &mut HashSet<String>, k: u8) -> String {
-    let base = format!("exit{k}");
-    if taken.insert(base.clone()) {
-        return base;
+/// One tape parameter's rendered text — `tape NAME: ALPHABET writes { … }`,
+/// optionally followed by `enters { … }` and/or `leaves { … }` — the ONE
+/// renderer both the source arm (`sig_param_text`) and the object arm
+/// (`from_object`) call, so the two can never drift apart on how a
+/// parameter is formatted, only on what clauses they pass in (which
+/// `compiler::published_writes`/`compiler::clause_glyphs` also unify — see
+/// the module doc). `enters`/`leaves` print only when `Some` — unlike
+/// `writes`, which always prints (`writes {}` included) because it carries
+/// an inferred fact even when nothing was declared, an absent head-position
+/// clause declares no restriction at all, and a present one is never
+/// empty, so there is no `{}` form to fall back to.
+///
+/// The `opaque` bit is deliberately NOT printed here, on either arm, for
+/// the reason `volatile` is not (see [`sig_param_text`]) and one more.
+/// `opaque` is not a DECLARATION: it is a fact the compiler infers from a
+/// routine's body — whether every state that reads the tape reads it
+/// through a `*` cell — and publishes to the object for the linker to
+/// judge an open binding against (docs/formats.md (routine interfaces)).
+/// A header is the declarations surface, and the `.tmh` grammar is the
+/// `.tmc` grammar under a declarations-only reading; `.tmc` has no
+/// spelling for the bit and is not given one, because a bodiless
+/// declaration has no body for the fact to be true of and a reader of one
+/// could not re-derive it. Printing a word the language cannot read back
+/// would break the round trip that makes `tmt interface`'s output a
+/// header at all. What a caller needs the bit for — may I open this
+/// binding? — is answered by the linker against the OBJECT, which carries
+/// it, not against the header.
+fn tape_param_text(
+    name: &str,
+    alphabet: &str,
+    writes: &[String],
+    enters: Option<&[String]>,
+    leaves: Option<&[String]>,
+) -> String {
+    let mut out = format!("tape {name}: {alphabet} writes {}", braced_list(writes));
+    if let Some(glyphs) = enters {
+        let _ = write!(out, " enters {}", braced_list(glyphs));
     }
-    let mut i = 1;
-    loop {
-        let cand = format!("{base}_{i}");
-        if taken.insert(cand.clone()) {
-            return cand;
-        }
-        i += 1;
+    if let Some(glyphs) = leaves {
+        let _ = write!(out, " leaves {}", braced_list(glyphs));
     }
-}
-
-/// One tape parameter's rendered text — `tape NAME: ALPHABET writes { … }`
-/// — the ONE renderer both the source arm (`sig_param_text`) and the object
-/// arm (`from_object`) call, so the two can never drift apart on how a
-/// parameter is formatted, only on what write set they pass in (which
-/// `compiler::published_writes` also unifies — see the module doc).
-fn tape_param_text(name: &str, alphabet: &str, writes: &[String]) -> String {
-    format!("tape {name}: {alphabet} writes {}", braced_list(writes))
+    out
 }
 
 fn state_lines(state: &State) -> Vec<String> {
@@ -1719,7 +2272,16 @@ fn rule_text(rule: &Rule) -> String {
     if let Some(text) = transition_text(&rule.transition) {
         action.push(text);
     }
-    format!("{pattern} -> {};", action.join(" "))
+    // A `where` guard is semantics, like a range: the header prints its
+    // CANONICAL text (`guard_text`), between the pattern and the arrow
+    // (docs/tmt/language.md (rule guards)). `fmt` alone prints the written
+    // tokens; the two agree on every tree.
+    let guard = rule
+        .guard
+        .as_ref()
+        .map(|g| format!(" where {{ {} }}", crate::guard::guard_text(g)))
+        .unwrap_or_default();
+    format!("{pattern}{guard} -> {};", action.join(" "))
 }
 
 fn pattern_text(pattern: &Pattern) -> String {
@@ -1733,8 +2295,11 @@ fn pattern_text(pattern: &Pattern) -> String {
                     PatternCellKind::Wildcard => "*".to_string(),
                     PatternCellKind::Single(s) => sym_lit_text(s),
                     PatternCellKind::Range { lo, hi } => {
-                        format!("{}..{}", sym_lit_text(lo), sym_lit_text(hi))
+                        format!("{}..{}", range_end_text(lo), range_end_text(hi))
                     }
+                    // The name as written; `render_source` prints the set
+                    // it names alongside, so the header reads back.
+                    PatternCellKind::SetRef { name, .. } => name.clone(),
                 };
                 match &cell.binding {
                     Some(b) => format!("{base} as {}", b.name),
@@ -1751,6 +2316,16 @@ fn sym_lit_text(sym: &SymLit) -> String {
         SymLit::Glyph { value, .. } => render_glyph_element(value),
         SymLit::Number { value, .. } => value.to_string(),
     }
+}
+
+/// A range endpoint as it was written (`patterns::written_spelling`): a
+/// glyph always quoted, with none of [`sym_lit_text`]'s bare-number
+/// shortcut, and a number bare. A pattern cell's range may have an endpoint
+/// of several characters (docs/tmt/language.md (pattern ranges)) —
+/// `'9'..'10'` — which that shortcut would restyle as `'9'..10`, and a body
+/// range needs its two endpoints to keep one kind.
+fn range_end_text(sym: &SymLit) -> String {
+    crate::patterns::written_spelling(sym)
 }
 
 /// A write-cell fold expression, precedence-climbed so parentheses appear
@@ -1863,14 +2438,23 @@ fn binding_value_text(value: &BindingValue) -> String {
     }
 }
 
+/// An inline `with map { … }`'s interior: its pairs, then the open
+/// marker when the site left the map open — the marker is the list's last
+/// entry, the only position the grammar admits it (docs/tmt/language.md
+/// (symbol maps)), so a printed header re-reads as the same site.
 fn map_pairs_text(map: &SymMap) -> String {
-    map_pair_list_text(&map.pairs)
+    let pairs = map_pair_list_text(&map.pairs);
+    match (map.open.is_some(), pairs.is_empty()) {
+        (false, _) => pairs,
+        (true, true) => "*".to_string(),
+        (true, false) => format!("{pairs}, *"),
+    }
 }
 
 /// One comma-`, `-joined pair list — shared by an inline `with map { … }`
 /// ([`map_pairs_text`]) and a named map's own declared body
 /// ([`map_lines`]).
-fn map_pair_list_text(pairs: &[MapPair]) -> String {
+pub(crate) fn map_pair_list_text(pairs: &[MapPair]) -> String {
     pairs
         .iter()
         .map(|pair| {
@@ -1957,4 +2541,254 @@ fn indented(lines: Vec<String>) -> Vec<String> {
 /// directly.
 fn synthesized_alphabet_name(routine_full_name: &str, param_name: &str) -> String {
     format!("{}__{param_name}", routine_full_name.replace("::", "_"))
+}
+
+#[cfg(test)]
+mod settle_tests {
+    //! The settling loop of [`resolve_declarations`]: one outcome in every
+    //! order of the sources, what it costs, and the assumption its sweep
+    //! guard rests on (docs/tmt/project.md (Declaration derivation)).
+
+    use super::*;
+
+    const A_MID: &str = "namespace a {\n  export alphabet ab { '_', 'x', 'y' }\n  export routine mid(tape t: ab) {\n    entry state s { [*] -> call b::leaf(t = t) then d; }\n    state d { [*] -> return; }\n  }\n}\n";
+    const B_LEAF: &str = "namespace b {\n  export alphabet ab { '_', 'x', 'y' }\n  export routine leaf(tape t: ab) {\n    entry state s { [*] -> write ['x'] return; }\n  }\n}\n";
+    const B_RELAY: &str = "namespace b {\n  export alphabet ab { '_', 'x', 'y' }\n  export routine leaf(tape t: ab) {\n    entry state s { [*] -> call d::leaf(t = t) then e; }\n    state e { [*] -> return; }\n  }\n}\n";
+    const D_LEAF: &str = "namespace d {\n  export alphabet ab { '_', 'x', 'y' }\n  export routine leaf(tape t: ab) {\n    entry state s { [*] -> write ['x'] return; }\n  }\n}\n";
+    const C_TOP: &str = "use a::ab;\nroutine top(tape t: ab writes { 'x' }) {\n  entry state s { [*] -> call a::mid(t = t) then d; }\n  state d { [*] -> return; }\n}\nmachine {\n  tape t: ab;\n  entry state go { [*] -> call top(t = t) then fin; }\n  state fin { [*] -> stop; }\n}\n";
+
+    /// `a::f` and `b::g` over one five-glyph alphabet call each other, `f`
+    /// through a map that shifts the glyphs: each trip round the cycle
+    /// drops one glyph from the write sets the two publish.
+    const CYC_A: &str = "namespace a {\n  export alphabet ab { '_', 'a', 'b', 'c', 'd' }\n  export routine f(tape t: ab) {\n    entry state s { [*] -> call b::g(t = t with map { 'a' -> 'b', 'b' -> 'c', 'c' -> 'd', 'd' => '_' }) then e; }\n    state e { [*] -> return; }\n  }\n}\n";
+    const CYC_B: &str = "namespace b {\n  export alphabet ab { '_', 'a', 'b', 'c', 'd' }\n  export routine g(tape t: ab) {\n    entry state s { [*] -> call a::f(t = t) then e; }\n    state e { [*] -> return; }\n  }\n}\n";
+    const CYC_C: &str = "use a::ab;\nmachine {\n  tape t: ab;\n  entry state go { [*] -> call a::f(t = t) then fin; }\n  state fin { [*] -> stop; }\n}\n";
+
+    /// The same cycle over alphabets of five and four glyphs, each call
+    /// through a shifting map; `c`'s `top` promises to write nothing, which
+    /// the settled cycle still breaks by the blank alone.
+    const CYC2_A: &str = "namespace a {\n  export alphabet big { '_', 'a', 'b', 'c', 'd' }\n  export routine f(tape t: big) {\n    entry state s {\n      ['_'] -> return;\n      [*]   -> call b::g(t = t with map { 'a' -> 'x', 'b' -> 'y', 'c' -> 'z' }) then e;\n    }\n    state e { [*] -> return; }\n  }\n}\n";
+    const CYC2_B: &str = "namespace b {\n  export alphabet small { '_', 'x', 'y', 'z' }\n  export routine g(tape t: small) {\n    entry state s {\n      ['_'] -> return;\n      [*]   -> call a::f(t = t with map { 'x' -> 'b', 'y' -> 'c', 'z' -> 'd' }) then e;\n    }\n    state e { [*] -> return; }\n  }\n}\n";
+    const CYC2_C: &str = "use a::big;\nroutine top(tape t: big writes {}) {\n  entry state s { [*] -> call a::f(t = t) then d; }\n  state d { [*] -> return; }\n}\nmachine {\n  tape t: big;\n  entry state go { [*] -> call top(t = t) then fin; }\n  state fin { [*] -> stop; }\n}\n";
+
+    /// Two sources whose routines call each other, each under `writes
+    /// { '0' }`, and the same pair with `bb::rb` really writing `'1'`
+    /// under a contract that allows it — which breaks `aa::ra`'s.
+    const PAIR_A: &str = "namespace aa {\n  export alphabet t { '_', '0', '1' }\n  export routine ra(tape x: t writes { '0' }) {\n    entry state s {\n      ['1'] -> write ['0'] move [>] call bb::rb(x = x) then done;\n      [*]   -> return;\n    }\n    state done { [*] -> return; }\n  }\n}\n";
+    const PAIR_B: &str = "namespace bb {\n  export alphabet t { '_', '0', '1' }\n  export routine rb(tape x: t writes { '0' }) {\n    entry state s {\n      ['1'] -> write ['0'] move [>] call aa::ra(x = x) then done;\n      [*]   -> return;\n    }\n    state done { [*] -> return; }\n  }\n}\n";
+    const PAIR_B_LOUD: &str = "namespace bb {\n  export alphabet t { '_', '0', '1' }\n  export routine rb(tape x: t writes { '0', '1' }) {\n    entry state s {\n      ['0'] -> write ['1'] move [>] call aa::ra(x = x) then done;\n      [*]   -> return;\n    }\n    state done { [*] -> return; }\n  }\n}\n";
+
+    type Outcome = Vec<(String, Result<Resolved, String>)>;
+
+    fn settle(order: &[(&str, &str)]) -> (Outcome, SettleStats) {
+        let sources: Vec<DeclarationSource> = order
+            .iter()
+            .map(|(name, text)| DeclarationSource {
+                origin: Origin::Sibling(PathBuf::from(name)),
+                text: DeclarationText::Source {
+                    path: PathBuf::from(name),
+                    text: text.to_string(),
+                },
+            })
+            .collect();
+        let (results, stats) = resolve_declarations_counted(&sources, false);
+        assert_eq!(results.len(), order.len(), "one outcome per source");
+        let mut outcome: Outcome = order
+            .iter()
+            .zip(results)
+            .map(|((name, _), r)| (name.to_string(), r.map_err(|e| e.message)))
+            .collect();
+        outcome.sort_by(|a, b| a.0.cmp(&b.0));
+        (outcome, stats)
+    }
+
+    fn orderings<'a>(items: &[(&'a str, &'a str)]) -> Vec<Vec<(&'a str, &'a str)>> {
+        if items.len() <= 1 {
+            return vec![items.to_vec()];
+        }
+        let mut all = Vec::new();
+        for i in 0..items.len() {
+            let mut rest = items.to_vec();
+            let head = rest.remove(i);
+            for mut tail in orderings(&rest) {
+                tail.insert(0, head);
+                all.push(tail);
+            }
+        }
+        all
+    }
+
+    /// Settle `sources` in every order: the outcome of each source —
+    /// its whole reading, or its error text — is the same in all of them,
+    /// the sweeps stay within the guard, and no reading was replaced by one
+    /// that did not narrow. Returns that one outcome and the most sweeps
+    /// any order took.
+    fn one_outcome_in_every_order(sources: &[(&str, &str)]) -> (Outcome, usize) {
+        let mut first: Option<Outcome> = None;
+        let mut most = 0;
+        for order in orderings(sources) {
+            let names: Vec<&str> = order.iter().map(|s| s.0).collect();
+            let (outcome, stats) = settle(&order);
+            assert!(stats.passes <= stats.guard, "{names:?}: {stats:?}");
+            assert_eq!(stats.non_narrowing_changes, 0, "{names:?}: {stats:?}");
+            most = most.max(stats.passes);
+            match &first {
+                None => first = Some(outcome),
+                Some(expected) => assert!(expected == &outcome, "{names:?} settled differently"),
+            }
+        }
+        (first.expect("at least one order"), most)
+    }
+
+    fn published_writes_of(outcome: &Outcome, source: &str, routine: &str) -> Vec<String> {
+        let reading = outcome
+            .iter()
+            .find(|(name, _)| name == source)
+            .and_then(|(_, r)| r.as_ref().ok())
+            .unwrap_or_else(|| panic!("{source} has a reading"));
+        let world = reading
+            .worlds
+            .iter()
+            .find(|w| w.name == routine)
+            .expect("the routine is declared");
+        let tape = &world.tapes[0];
+        let glyphs = &reading.alphabets[&tape.alphabet].glyphs;
+        symset_glyphs(
+            tape.writes.expect("a source reading publishes a set"),
+            glyphs,
+        )
+    }
+
+    /// A lone source is read exactly once, in one sweep: the checked read
+    /// comes first and nothing can make it due again. Mutation: mark a
+    /// source itself due when its own reading changes (drop the `j != i`
+    /// test) — it is then read twice.
+    #[test]
+    fn a_lone_source_is_read_exactly_once() {
+        let (outcome, stats) = settle(&[("b.tmc", B_LEAF)]);
+        assert!(outcome[0].1.is_ok());
+        assert_eq!((stats.passes, stats.reads), (1, 1), "{stats:?}");
+    }
+
+    /// The three-source and four-source chains settle to one outcome in
+    /// every order: every source reads clean and `a::mid` publishes only
+    /// the glyph the leaf really writes. Without a cycle of calls each
+    /// sweep settles one more source, so `sources + 1` sweeps suffice.
+    /// Mutation: read each source once (mark a peer due only while it has
+    /// no reading) — in the orders reading `a` before `b`, `a::mid`
+    /// publishes the whole alphabet and `c` is refused.
+    #[test]
+    fn a_chain_of_sources_settles_to_one_outcome_in_every_order() {
+        for sources in [
+            vec![("c.tmc", C_TOP), ("a.tmc", A_MID), ("b.tmc", B_LEAF)],
+            vec![
+                ("c.tmc", C_TOP),
+                ("a.tmc", A_MID),
+                ("b.tmc", B_RELAY),
+                ("d.tmc", D_LEAF),
+            ],
+        ] {
+            let (outcome, most) = one_outcome_in_every_order(&sources);
+            for (name, result) in &outcome {
+                assert!(result.is_ok(), "{name}: {:?}", result.as_ref().err());
+            }
+            assert_eq!(published_writes_of(&outcome, "a.tmc", "a::mid"), ["x"]);
+            assert!(most <= sources.len() + 1, "{most} sweeps");
+        }
+    }
+
+    /// A cycle of calls through a glyph-shifting map loses one glyph per
+    /// trip, so it takes MORE sweeps than `sources + 1` — and still settles
+    /// to one outcome in every order, within the guard: the write sets
+    /// `f` and `g` publish shrink from the whole alphabet to the one or
+    /// two glyphs the maps cannot shift away. Mutation: guard the sweeps by the number
+    /// of sources plus one (drop `narrowings` from the guard) — these
+    /// sources are then refused with the internal-consistency error, in
+    /// some orders and not others.
+    #[test]
+    fn a_cycle_of_calls_through_shifting_maps_settles_to_one_outcome_in_every_order() {
+        let pair = [("a.tmc", CYC_A), ("b.tmc", CYC_B)];
+        let (outcome, most) = one_outcome_in_every_order(&pair);
+        assert!(most > pair.len() + 1, "the cycle settled in {most} sweeps");
+        assert_eq!(published_writes_of(&outcome, "a.tmc", "a::f"), ["_", "a"]);
+        assert_eq!(published_writes_of(&outcome, "b.tmc", "b::g"), ["_", "a"]);
+
+        let (outcome, _) =
+            one_outcome_in_every_order(&[("c.tmc", CYC_C), ("a.tmc", CYC_A), ("b.tmc", CYC_B)]);
+        assert!(outcome.iter().all(|(_, r)| r.is_ok()), "{outcome:?}");
+
+        let three = [("c.tmc", CYC2_C), ("a.tmc", CYC2_A), ("b.tmc", CYC2_B)];
+        let (outcome, most) = one_outcome_in_every_order(&three);
+        assert!(most > three.len() + 1, "the cycle settled in {most} sweeps");
+        assert_eq!(published_writes_of(&outcome, "a.tmc", "a::f"), ["_"]);
+        assert_eq!(published_writes_of(&outcome, "b.tmc", "b::g"), ["_"]);
+        let refusal = outcome[2]
+            .1
+            .as_ref()
+            .expect_err("`top` promises to write nothing");
+        assert_eq!(
+            refusal,
+            "c.tmc:2:13: error: `top` may write '_' on tape `t`, which its contract forbids \
+             [writes-outside-contract]"
+        );
+    }
+
+    /// Two sources whose routines call each other under `writes`
+    /// contracts both read clean, in either order: a contract refusal met
+    /// before the peer had a reading is provisional, and against the
+    /// settled set each body holds its contract given the other's.
+    /// Mutation: treat provisional refusals as final (give a source
+    /// refused by a peer check no reading and keep its refusal) — both
+    /// sources then fail `writes-outside-contract`.
+    #[test]
+    fn two_sources_calling_each_other_under_contracts_both_read_clean() {
+        let (outcome, _) = one_outcome_in_every_order(&[("a.tmc", PAIR_A), ("b.tmc", PAIR_B)]);
+        for (name, result) in &outcome {
+            assert!(result.is_ok(), "{name}: {:?}", result.as_ref().err());
+        }
+    }
+
+    /// The near miss: the same pair with `bb::rb` really writing `'1'`.
+    /// `aa::ra`'s contract is then broken through the call, and that is
+    /// refused in either order with the one diagnostic of the settled set;
+    /// `bb`, whose own contract holds, reads clean. Mutation: accept a
+    /// source once it has a reading, whatever its last checked read said
+    /// (drop the verdict of a read that still yielded a reading) — `aa` is
+    /// then accepted.
+    #[test]
+    fn a_contract_really_broken_through_a_mutual_call_is_refused_in_either_order() {
+        let (outcome, _) = one_outcome_in_every_order(&[("a.tmc", PAIR_A), ("b.tmc", PAIR_B_LOUD)]);
+        assert_eq!(
+            outcome[0]
+                .1
+                .as_ref()
+                .expect_err("`aa::ra` breaks its contract"),
+            "a.tmc:3:21: error: `aa::ra` may write '1' on tape `x`, which its contract forbids \
+             [writes-outside-contract]"
+        );
+        assert!(outcome[1].1.is_ok(), "{:?}", outcome[1].1.as_ref().err());
+    }
+
+    /// One source contributes exactly one reading: the table assembled
+    /// from the settled results holds each name once, so the
+    /// one-declaration check — which compares every pair of readings —
+    /// finds nothing, though `a::mid` had a wider reading on the way.
+    /// Mutation: read each source once (mark a peer due only while it has
+    /// no reading) — `c` is then left refused against `a::mid`'s first,
+    /// wider reading and there is no settled table to assemble.
+    #[test]
+    fn a_settled_source_contributes_one_reading() {
+        let order = [("c.tmc", C_TOP), ("a.tmc", A_MID), ("b.tmc", B_LEAF)];
+        let (outcome, stats) = settle(&order);
+        assert!(stats.passes > 1, "the fixture must re-read a source");
+        let mut table = Declarations::none();
+        for (name, result) in outcome {
+            table.push(
+                Origin::Sibling(PathBuf::from(&name)),
+                result.unwrap_or_else(|e| panic!("{name}: {e}")),
+            );
+        }
+        assert_eq!(table.len(), order.len());
+        assert!(table.check_conflicts().is_ok());
+    }
 }

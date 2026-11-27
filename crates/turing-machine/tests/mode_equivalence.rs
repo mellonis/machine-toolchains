@@ -88,6 +88,7 @@ fn trap_kind(t: Trap) -> &'static str {
         Trap::UnmappedWrite { .. } => "unmapped-write",
         Trap::ExitOutOfRange { .. } => "exit-out-of-range",
         Trap::ProfileViolation { .. } => "profile-violation",
+        Trap::Contract { .. } => "contract",
     }
 }
 
@@ -634,7 +635,12 @@ fn in_range_holes_trap_kinds_are_pinned() {
 /// two binding tapes may not name one caller tape. A hand-assembled `.tma`
 /// object carries binding records without ever passing the `.tmc` compiler,
 /// so the rejection has to exist at the composition choke point as well —
-/// this is the only layer such an object meets.
+/// this is the only layer such an object meets. It is also the whole of
+/// the check an alias at an EXTERNAL bound site meets, the compiler's own
+/// `duplicate-tape-target` covering in-unit callees only: an alias at an
+/// external bound site is a hard link error under all three mechanisms
+/// (`AliasedCallerTape` reported as a bad binding); its message names
+/// tape indices, not parameter names.
 ///
 /// The shape is the one that proved the mechanisms disagree: a 3-arity
 /// callee whose first two tapes both land on caller tape 0, across UNEQUAL
@@ -765,7 +771,7 @@ fn closure_fold() -> String {
 .param t, ('_', 'x', 'y', 'z')
 .routine outer, tapes=1, alpha=(4)
 .param u, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .section code
 .func main
@@ -803,7 +809,7 @@ q:      ret
 const ONE_EXIT_SITE: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine pick, tapes=1, alpha=(3), exits=2
+.routine pick, tapes=1, alpha=(3), exits=(e0, e1)
 .param n, ('_', '0', '1')
 .section tables
 T0:     .row    [0]
@@ -833,7 +839,7 @@ two:    ret
 const THREE_EXIT_SITES: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine pick, tapes=1, alpha=(3), exits=1
+.routine pick, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section tables
 T0:     .row    [0]
@@ -899,7 +905,7 @@ pass:   wrmv    [-], [>]
 const MIXED_SPLICE_AND_FRAME: &str = "\
 .routine main, tapes=1, alpha=(5)
 .param t, ('_', 'a', 'b', 'c', 'd')
-.routine pick, tapes=1, alpha=(5), exits=1
+.routine pick, tapes=1, alpha=(5), exits=(e0)
 .param n, ('_', 'a', 'b', 'c', 'd')
 .routine holey, tapes=1, alpha=(3)
 .param m, ('_', 'a', 'b')
@@ -936,7 +942,7 @@ fn shared_under_frame() -> String {
 .param t, ('_', 'x', 'y', 'z')
 .routine outer, tapes=1, alpha=(4)
 .param u, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .routine holey, tapes=1, alpha=(3)
 .param m, ('_', 'x', 'y')
@@ -973,7 +979,7 @@ const EXITS_UNDER_FRAME: &str = "\
 .param t, ('_', 'a', 'b', 'c', 'd')
 .routine outer, tapes=1, alpha=(3)
 .param u, ('_', 'x', 'y')
-.routine pick, tapes=1, alpha=(3), exits=1
+.routine pick, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', 'x', 'y')
 .section tables
 T0:     .row    [0]
@@ -1011,9 +1017,9 @@ fn twice_spliced_callee(body: usize) -> String {
 .param t, ('_', 'x', 'y', 'z')
 .routine outer, tapes=1, alpha=(4)
 .param u, ('_', 'x', 'y', 'z')
-.routine mid, tapes=1, alpha=(4), exits=1
+.routine mid, tapes=1, alpha=(4), exits=(e0)
 .param v, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .section code
 .func main
@@ -1044,9 +1050,9 @@ r:      retx    #0
 const NESTED_UNDER_EXIT_BEARING: &str = "\
 .routine main, tapes=1, alpha=(4)
 .param t, ('_', 'x', 'y', 'z')
-.routine mid, tapes=1, alpha=(4), exits=1
+.routine mid, tapes=1, alpha=(4), exits=(e0)
 .param v, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .section code
 .func main
@@ -1069,7 +1075,7 @@ r:      retx    #0
 const TAIL_POSITION_NORETURN: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine pick, tapes=1, alpha=(3), exits=2, noreturn
+.routine pick, tapes=1, alpha=(3), exits=(e0, e1), noreturn
 .param n, ('_', '0', '1')
 .section tables
 T0:     .row    [0]
@@ -1105,7 +1111,7 @@ const BROKEN_CYCLE: &str = "\
 .param t, ('_', 'x', 'y')
 .routine outer, tapes=1, alpha=(3)
 .param u, ('_', 'x', 'y')
-.routine b, tapes=1, alpha=(3), exits=1
+.routine b, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', 'x', 'y')
 .routine c, tapes=1, alpha=(3)
 .param m, ('_', 'x', 'y')
@@ -1355,13 +1361,50 @@ fn args(list: &[&str]) -> Vec<String> {
 /// mid-`fs::read` of it, which surfaces as a parse failure and an `unwrap`
 /// panic in the test, not in the library. A unique directory per call
 /// removes the shared path entirely.
-fn scratch(name: &str) -> std::path::PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("{name}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// End to end through the real `tmt` CLI (in-process): assemble program (a)

@@ -50,13 +50,50 @@ use mtc_turing_machine::cli::{CliOutput, execute};
 /// `tests/mode_equivalence.rs::scratch` (temp paths must not collide
 /// across concurrent `cargo test`/`cargo nextest` processes sharing one
 /// `CARGO_TARGET_TMPDIR`).
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("{name}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
@@ -880,6 +917,193 @@ machine {
     assert!(err.contains("num"), "{err}");
 }
 
+/// Two tape arguments naming ONE caller tape, against a callee whose
+/// declarations are given: the same `duplicate-tape-target` compile error
+/// an in-unit callee gets (docs/tmt/language.md (reuse)), blamed on the
+/// second argument — not a compile that succeeds only for the linker to
+/// refuse the binding by tape index. Mutation: dropping the aliasing check
+/// from the out-of-unit branch; the compile succeeds.
+#[test]
+fn two_arguments_naming_one_tape_are_a_compile_error_with_declarations() {
+    let dir = scratch("symbolic_tape_alias_call");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  entry state go { [*] -> call mylib::combine(a = data, b = data) then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[duplicate-tape-target]"), "{err}");
+    assert!(
+        err.contains("binding arguments `a` and `b` both bind tape `data`"),
+        "{err}"
+    );
+    // The second argument, `b = data`, is the one blamed.
+    assert!(err.contains("app.tmc:4:57:"), "{err}");
+}
+
+/// The `bind` form of the same check: a declared argument list goes
+/// through the identical out-of-unit path. Mutation: as above.
+#[test]
+fn two_bind_arguments_naming_one_tape_are_a_compile_error_with_declarations() {
+    let dir = scratch("symbolic_tape_alias_bind");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  bind mylib::combine(a = data, b = data) as h;
+  entry state go { [*] -> call h() then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[duplicate-tape-target]"), "{err}");
+    assert!(
+        err.contains("binding arguments `a` and `b` both bind tape `data`"),
+        "{err}"
+    );
+    assert!(err.contains("app.tmc:4:33:"), "{err}");
+}
+
+/// Two tape arguments naming the same NON-tape: the target is reported as
+/// not a tape of this world, exactly as a local callee's arguments are —
+/// the aliasing check only compares real caller tapes. Mutation: dropping
+/// the host-tape condition from the out-of-unit aliasing check; the error
+/// reads as `duplicate-tape-target` instead.
+#[test]
+fn two_arguments_naming_one_non_tape_are_an_unresolved_target_with_declarations() {
+    let dir = scratch("symbolic_tape_alias_non_tape");
+    let header = write(&dir, "mylib.tmh", MYLIB_COMBINE_HEADER);
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  entry state go { [*] -> call mylib::combine(a = nosuch, b = nosuch) then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let err = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(err.contains("[unresolved-tape-target]"), "{err}");
+    assert!(!err.contains("[duplicate-tape-target]"), "{err}");
+}
+
+/// State parameters are exempt from the aliasing check: two continuations
+/// legitimately share one target state, out of unit as in it. The machine
+/// also has a TAPE named `done`, so the shared target passes the host-tape
+/// condition and only the tape-parameter filter keeps the two state
+/// arguments out of the aliasing check. Mutation: keying the aliasing
+/// check on every named argument rather than on the declared TAPE
+/// parameters only; `hit = done, miss = done` is refused as
+/// `duplicate-tape-target`.
+#[test]
+fn two_state_arguments_sharing_one_state_compile_with_declarations() {
+    let dir = scratch("symbolic_state_alias");
+    let header = write(
+        &dir,
+        "mylib.tmh",
+        "\
+namespace mylib {
+  export alphabet bits { '_', '0', '1' }
+  export routine pick(tape n: bits writes {}, state hit, state miss);
+}
+",
+    );
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+use mylib::bits;
+machine {
+  tape data: bits;
+  tape done: bits;
+  entry state go { [*, *] -> call mylib::pick(n = data, hit = done, miss = done) then done; }
+  state done { [*, *] -> stop; }
+}
+",
+    );
+    let out = compile(
+        &dir,
+        &input,
+        "app.tmo",
+        &["--extern", header.to_str().unwrap()],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+}
+
+/// With NO declarations for the callee there is nothing to check the
+/// arguments against at compile time: the aliased site compiles, and the
+/// linker refuses the binding once it has the callee's real signature.
+/// Mutation: refusing the alias without declarations; the compile fails.
+#[test]
+fn two_arguments_naming_one_tape_are_a_link_error_without_declarations() {
+    let dir = scratch("symbolic_tape_alias_link");
+    let input = write(
+        &dir,
+        "app.tmc",
+        "\
+alphabet bits2 { '_', '0', '1' }
+
+machine {
+  tape data: bits2;
+  entry state go { [*] -> call mylib::combine(a = data, b = data) then done; }
+  state done { [*] -> stop; }
+}
+",
+    );
+    let app_obj = compile(&dir, &input, "app.tmo", &["--nostdlib"]);
+    assert!(app_obj.is_ok(), "{:?}", app_obj.err());
+
+    let lib_src = write(&dir, "mylib.tmc", MYLIB_COMBINE_TMC);
+    let lib_obj = compile(&dir, &lib_src, "mylib.tmo", &["--nostdlib"]);
+    assert!(lib_obj.is_ok(), "{:?}", lib_obj.err());
+
+    let link_err = link(
+        &dir,
+        &[&dir.join("app.tmo"), &dir.join("mylib.tmo")],
+        "app.tmx",
+        &["--nostdlib", "--call-mech", "frames"],
+    )
+    .unwrap_err();
+    assert!(
+        link_err.contains("one caller tape cannot back two callee tapes"),
+        "{link_err}"
+    );
+}
+
 /// A hand-written `.tma` pair carrying the exact operand text
 /// `an_external_bound_call_emits_the_symbolic_operand` above compiles to,
 /// assembled, linked and RUN — the end-to-end proof that a symbolic site
@@ -1335,4 +1559,277 @@ machine {
         .unwrap_or_else(|| panic!("no call line in:\n{tma}"))
         .trim();
     assert_eq!(call_line, "call    mylib::combine [a: 0, b: 1]", "{tma}");
+}
+
+// -- one argument check for a call or bind into a declared routine -------
+
+const C1_TMH: &str = "\
+namespace lib {
+  export alphabet dec { '_', '0', '1' }
+  export routine r(tape a: dec writes {}, state done);
+  export routine q(tape a: dec writes {}, tape b: dec writes {});
+}
+";
+
+const C1: &str = "\
+use lib::dec;
+use lib::q;
+
+machine {
+  tape t: dec;
+  tape u: dec;
+  entry state s { [*, *] -> call q(a = stop, b = u) then stop; }
+}
+";
+
+const C2: &str = "\
+use lib::dec;
+use lib::q;
+
+machine {
+  tape t: dec;
+  tape u: dec;
+  bind q(a = t) as qq;
+  entry state s { [*, *] -> call qq() then stop; }
+}
+";
+
+const C3: &str = "\
+use lib::dec;
+use lib::q;
+
+machine {
+  tape t: dec;
+  tape u: dec;
+  entry state s { [*, *] -> call q(a = stop, b = halt) then stop; }
+}
+";
+
+const C_OK: &str = "\
+use lib::dec;
+use lib::q;
+
+machine {
+  tape t: dec;
+  tape u: dec;
+  entry state s { [*, *] -> call q(a = t, b = u) then stop; }
+}
+";
+
+const C_TRANSPARENT: &str = "\
+alphabet bin { '_', '^', '$', '0', '1' }
+machine {
+  tape t: bin;
+  entry state go { [*] -> call std::binaryNumbers::plusOne() then stop; }
+}
+";
+
+/// Mutation: skip the shared check in `check_call_like`'s out-of-unit arm,
+/// leaving `ir::resolve_binding` as the only external check — the error is
+/// `missing-arg` at the rule again.
+#[test]
+fn a_terminator_for_a_declared_tape_parameter_is_wrong_arg_kind() {
+    let dir = scratch("xunit_terminator_tape");
+    let header = write(&dir, "c1.tmh", C1_TMH);
+    let input = write(&dir, "c1.tmc", C1);
+    let err = compile(
+        &dir,
+        &input,
+        "c1.tmo",
+        &["--nostdlib", "--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(
+            "c1.tmc:7:36: error: binding argument `a` must be a tape target [wrong-arg-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// An argument list made only of terminators used to skip every check.
+/// Mutation: skip the shared check when no argument is `Named` (an
+/// all-terminator list then compiles).
+#[test]
+fn an_all_terminator_call_into_a_declared_routine_is_checked() {
+    let dir = scratch("xunit_all_terminators");
+    let header = write(&dir, "c3.tmh", C1_TMH);
+    let input = write(&dir, "c3.tmc", C3);
+    let err = compile(
+        &dir,
+        &input,
+        "c3.tmo",
+        &["--nostdlib", "--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(
+            "c3.tmc:7:36: error: binding argument `a` must be a tape target [wrong-arg-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// A missing argument on an external `bind` is blamed on the bind's own
+/// first argument, not on the later call of its name. Mutation: check
+/// external binds only at their call site (drop the bind-loop check in
+/// `check_reuse_targets`).
+#[test]
+fn a_missing_argument_on_a_bind_points_at_the_bind() {
+    let dir = scratch("xunit_bind_missing");
+    let header = write(&dir, "c2.tmh", C1_TMH);
+    let input = write(&dir, "c2.tmc", C2);
+    let err = compile(
+        &dir,
+        &input,
+        "c2.tmo",
+        &["--nostdlib", "--extern", header.to_str().unwrap()],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(
+            "c2.tmc:7:10: error: missing binding argument for parameter `b` [missing-arg]"
+        ),
+        "{err}"
+    );
+}
+
+/// An argument-less call is the transparent form and is not checked by
+/// name. Mutation: run the shared check on an empty list (`missing-arg`
+/// for the callee's tape parameter).
+#[test]
+fn a_transparent_call_into_a_declared_routine_compiles() {
+    let dir = scratch("xunit_transparent");
+    let input = write(&dir, "ut.tmc", C_TRANSPARENT);
+    let out = compile(&dir, &input, "ut.tmo", &[]);
+    assert!(out.is_ok(), "{:?}", out.err());
+}
+
+/// Control for the three above: every argument correct. No mutation reddens
+/// it; it guards the shared check against refusing a valid list.
+#[test]
+fn a_correct_call_into_a_declared_routine_compiles() {
+    let dir = scratch("xunit_correct");
+    let header = write(&dir, "c1.tmh", C1_TMH);
+    let input = write(&dir, "ok.tmc", C_OK);
+    let out = compile(
+        &dir,
+        &input,
+        "ok.tmo",
+        &["--nostdlib", "--extern", header.to_str().unwrap()],
+    );
+    assert!(out.is_ok(), "{:?}", out.err());
+}
+
+const GLIB_TMH: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a' }
+  export graph g(tape t: ab, state done) {
+    entry state w { [*] -> write ['a'] goto done; }
+  }
+}
+";
+
+const CALLG: &str = "\
+use lib::ab;
+machine {
+  tape t: ab;
+  entry state s { [*] -> call lib::g(t = t, done = fin) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+const CALLG_BARE: &str = "\
+use lib::ab;
+machine {
+  tape t: ab;
+  entry state s { [*] -> call lib::g() then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+const BINDG_FULL: &str = "\
+use lib::ab;
+machine {
+  tape t: ab;
+  bind lib::g(t = t, done = fin) as b;
+  entry state s { [*] -> call b() then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+const LOCALG: &str = "\
+alphabet ab { '_', 'a' }
+graph g(tape t: ab, state done) {
+  entry state w { [*] -> write ['a'] goto done; }
+}
+machine {
+  tape t: ab;
+  entry state s { [*] -> call g(t = t) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+
+fn wrong_kind_error(name: &str, file: &str, src: &str, with_header: bool) -> String {
+    let dir = scratch(name);
+    let header = write(&dir, "glib.tmh", GLIB_TMH);
+    let input = write(&dir, file, src);
+    let mut flags = vec!["--nostdlib"];
+    if with_header {
+        flags.push("--extern");
+        flags.push(header.to_str().unwrap());
+    }
+    compile(&dir, &input, "out.tmo", &flags).unwrap_err()
+}
+
+/// A `call` naming a graph another unit declares is a wrong target kind.
+/// Mutation: no kind check on the out-of-unit call arm — the call compiles
+/// and only the link says `unresolved symbols: lib::g`.
+#[test]
+fn a_call_naming_a_declared_graph_is_wrong_target_kind() {
+    let err = wrong_kind_error("xunit_call_graph", "callg.tmc", CALLG, true);
+    assert!(
+        err.contains(
+            "callg.tmc:4:31: error: `lib::g` is a graph, not a routine [wrong-target-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// The same with no arguments at all, which the argument-less exemption
+/// would otherwise wave through (or report as a missing argument).
+/// Mutation: the kind check placed after the argument-less exemption.
+#[test]
+fn an_argless_call_naming_a_declared_graph_is_wrong_target_kind() {
+    let err = wrong_kind_error("xunit_call_graph_bare", "callg_bare.tmc", CALLG_BARE, true);
+    assert!(
+        err.contains(
+            "callg_bare.tmc:4:31: error: `lib::g` is a graph, not a routine [wrong-target-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// A `bind` naming a declared graph is a wrong target kind.
+/// Mutation: no kind check on the external-bind arm.
+#[test]
+fn a_bind_naming_a_declared_graph_is_wrong_target_kind() {
+    let err = wrong_kind_error("xunit_bind_graph", "bindg_full.tmc", BINDG_FULL, true);
+    assert!(
+        err.contains(
+            "bindg_full.tmc:4:8: error: `lib::g` is a graph, not a routine [wrong-target-kind]"
+        ),
+        "{err}"
+    );
+}
+
+/// A local graph called as a routine says what it is.
+/// Mutation: `found` left out of the local message.
+#[test]
+fn a_call_naming_a_local_graph_says_what_it_is() {
+    let err = wrong_kind_error("xunit_call_local_graph", "localg.tmc", LOCALG, false);
+    assert!(
+        err.contains("localg.tmc:7:31: error: `g` is a graph, not a routine [wrong-target-kind]"),
+        "{err}"
+    );
 }

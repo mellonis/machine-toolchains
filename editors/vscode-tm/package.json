@@ -1,8 +1,8 @@
 {
   "name": "tmc",
   "displayName": "TMC (Turing machine toolchain)",
-  "description": "Language support for .tmc via tmt lsp: diagnostics, completions, navigation, formatting, semantic tokens.",
-  "version": "0.2.0",
+  "description": "Language support for .tmc, .tmh headers and .tma via tmt lsp: diagnostics, completions, navigation, formatting, semantic tokens.",
+  "version": "0.2.1",
   "publisher": "mellonis",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -15,7 +15,7 @@
   "activationEvents": ["onLanguage:tmc", "onLanguage:tma", "onTaskType:tmt", "onDebug"],
   "contributes": {
     "languages": [{
-      "id": "tmc", "extensions": [".tmc"], "aliases": ["TMC"],
+      "id": "tmc", "extensions": [".tmc", ".tmh"], "aliases": ["TMC"],
       "configuration": "./language-configuration.json"
     }, {
       "id": "tma", "extensions": [".tma"], "aliases": ["TMA"],
@@ -153,7 +153,7 @@
   },
   "dependencies": { "vscode-languageclient": "^11.0.1" },
   "devDependencies": {
-    "@types/node": "^26.6.6", "@types/vscode": "^1.146.0",
+    "@types/node": "^26.6.6", "@types/vscode": "~1.91.0",
     "@vscode/vsce": "^4.1.1", "esbuild": "^0.28.2", "typescript": "^7.0.2"
   },
   "overrides": {

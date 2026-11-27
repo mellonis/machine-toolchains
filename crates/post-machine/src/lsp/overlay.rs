@@ -378,9 +378,11 @@ pub(super) struct OverlaySym {
 }
 
 /// One open document's cross-file symbol table: every name its siblings
-/// and libraries export, first-wins (`R13` — sources before libraries,
-/// each in `ProjectView`'s own order, mirroring the linker's own
-/// user-objects-beat-libraries / first-dir-wins precedent), plus a
+/// and libraries export, first-wins (sources before libraries, each in
+/// `ProjectView`'s own order — the order the linker reads its inputs in.
+/// The linker itself picks no winner: a name two inputs define is a link
+/// error once the program reaches it, docs/core.md (linking), so
+/// first-wins here only decides what the editor shows for it), plus a
 /// `members` index for namespace-qualified lookups (a bare name under
 /// its namespace path; top-level exports live under the empty path;
 /// EVERY intermediate namespace level along a name's path is registered
@@ -517,15 +519,52 @@ mod tests {
     /// dependency, matching the zero-new-deps constraint; house
     /// convention has no shared test-support module, so each file defines
     /// its own local helper).
-    fn temp_tree() -> PathBuf {
+    fn temp_tree() -> ScratchDir {
         static N: AtomicU32 = AtomicU32::new(0);
         let d = std::env::temp_dir().join(format!(
             "pmt-overlay-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&d).unwrap();
-        d
+        ScratchDir::fresh(d)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -541,7 +580,7 @@ mod tests {
         let view =
             project_view(&root.join("app.pmc"), &mut cache).expect("app.pmc is a target member");
 
-        assert_eq!(view.root, root);
+        assert_eq!(view.root, *root);
         assert!(view.stdlib);
         assert_eq!(view.siblings, vec![root.join("shared.pmc")]);
     }
@@ -609,7 +648,7 @@ mod tests {
         let mut cache = ManifestCache::new();
         let view = project_view(&sub.join("deep.pmc"), &mut cache)
             .expect("the lint-only sub/pmt.json is transparent; the root manifest is found");
-        assert_eq!(view.root, root);
+        assert_eq!(view.root, *root);
     }
 
     #[test]
@@ -772,7 +811,7 @@ mod tests {
         .unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: true,
             siblings: vec![sibling.clone()],
             library_paths: vec![],
@@ -813,7 +852,7 @@ mod tests {
         fs::write(&sibling, ".func pub_one\nstp\n.func priv_one local\nstp\n").unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling.clone()],
             library_paths: vec![],
@@ -885,7 +924,7 @@ mod tests {
         fs::write(&as_library, &library_bytes).unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![as_source],
             library_paths: vec![as_library],
@@ -938,7 +977,7 @@ mod tests {
         // source supplying `ns::dup` regardless of whether the library
         // leg contributed anything at all.
         let library_only_view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![],
             library_paths: vec![library.clone()],
@@ -956,7 +995,7 @@ mod tests {
         );
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling.clone()],
             library_paths: vec![library],
@@ -985,7 +1024,7 @@ mod tests {
         fs::write(&fine, "export good() { right; }\n").unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![broken, fine],
             library_paths: vec![],
@@ -1008,7 +1047,8 @@ mod tests {
         // round-trip load-bearing: without one, a bug that stopped
         // percent-encoding (or decoding) would go uncaught, since every
         // character in an unescaped path is already its own encoding.
-        let root = temp_tree().join("has space");
+        let tree = temp_tree();
+        let root = tree.join("has space");
         fs::create_dir_all(&root).unwrap();
         let sibling = root.join("sibling.pmc");
         fs::write(&sibling, "export old() { right; }\n").unwrap();
@@ -1021,7 +1061,7 @@ mod tests {
         open_docs.insert(uri, live);
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling],
             library_paths: vec![],
@@ -1048,7 +1088,7 @@ mod tests {
             let path = root.join(format!("s{i}.pmc"));
             fs::write(&path, format!("export f{i}() {{ right; }}\n")).unwrap();
             let view = ProjectView {
-                root: root.clone(),
+                root: root.to_path_buf(),
                 stdlib: false,
                 siblings: vec![path],
                 library_paths: vec![],
@@ -1067,7 +1107,7 @@ mod tests {
         let path = root.join("changing.pmc");
         fs::write(&path, "export old() { right; }\n").unwrap();
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![path.clone()],
             library_paths: vec![],
@@ -1132,15 +1172,52 @@ mod faithfulness {
     /// convention has no shared test-support module, so each file
     /// defines its own local helper — mirrors `overlay::tests`' own
     /// copy).
-    fn temp_tree() -> PathBuf {
+    fn temp_tree() -> ScratchDir {
         static N: AtomicU32 = AtomicU32::new(0);
         let d = std::env::temp_dir().join(format!(
             "pmt-faithfulness-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&d).unwrap();
-        d
+        ScratchDir::fresh(d)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// Loads one already-resolved source path per its extension, exactly
@@ -1174,22 +1251,21 @@ mod faithfulness {
     fn overlay_resolution_matches_linker_resolution_with_provenance() {
         // One target, everything reachable from `main` (see this module's
         // own doc comment): `shared.pmc` a manifest-level source (bare
-        // top-level `helper`, `ns::inner`, and `ns::dup` — the LAST one
-        // deliberately re-declared by the library below too); `app.pmc`
+        // top-level `helper`, `ns::inner`, and `ns::dup`); `app.pmc`
         // the target's own entry, calling every kind of cross-file name
-        // this task's design distinguishes: a bare `.pmc` sibling export,
-        // a qualified `.pmc` sibling export, the SHADOWED qualified name,
-        // a bare `.pma` sibling export, a bare `.pmo`-backed source
+        // this design distinguishes: a bare `.pmc` sibling export,
+        // a qualified `.pmc` sibling export, a bare `.pma` sibling
+        // export, a bare `.pmo`-backed source
         // export, and a `std::` call routed through the separate stdlib
         // channel; `helpers.pma` a `.pma` sibling; `pre.pmo` a `.pmo`
         // declared directly as a target source; `libs/bitops.pmo` a
-        // declared LIBRARY that also defines `ns::dup` (the shadowing
-        // case: the linker's rule is user objects beat libraries) plus an
-        // unrelated `bit_only` export that APP calls too — the ONLY
-        // library-provenance leg in this fixture: every other name has a
-        // `.pmc`/`.pma`/`.pmo` SOURCE contributor, so `bit_only` is what
-        // proves a `.pmo`-shaped overlay answer can also mean "the
-        // declared library", not just "some source `.pmo`".
+        // declared LIBRARY with a single `bit_only` export that APP calls
+        // too — the ONLY library-provenance leg in this fixture: every
+        // other name has a `.pmc`/`.pma`/`.pmo` SOURCE contributor, so
+        // `bit_only` is what proves a `.pmo`-shaped overlay answer can
+        // also mean "the declared library", not just "some source `.pmo`".
+        // Every name has exactly one definer, as the linker requires of a
+        // reached name.
         let root = temp_tree();
         fs::create_dir_all(root.join("libs")).unwrap();
         fs::write(
@@ -1221,7 +1297,7 @@ mod faithfulness {
         fs::write(root.join("pre.pmo"), &pre_bytes).unwrap();
 
         let bitops_bytes = crate::compiler::compile(
-            "namespace ns {\nexport dup() { left; }\n}\nexport bit_only() { right; }\n",
+            "export bit_only() { right; }\n",
             crate::compiler::CompileOptions::default(),
         )
         .expect("bitops's source compiles")
@@ -1331,23 +1407,7 @@ mod faithfulness {
             SymbolOrigin::Object(0),
             "shared.pmc"
         );
-        // THE discriminating assertion: the linker's own, independently
-        // implemented shadowing rule (`resolve::resolve` — user objects
-        // beat libraries) also picks shared.pmc over libs/bitops.pmo. If
-        // the overlay's first-wins ordering (`insert_export`, above) ever
-        // diverged from the linker's — say, libraries were merged before
-        // sources, or a `.pmo` library name were preferred by
-        // registration order rather than by kind — the two independent
-        // answers being compared here (this one, and the overlay's own
-        // `ns::dup` pick asserted above) would disagree, and only THIS
-        // fixture's duplicate-defined `ns::dup` can catch that: every
-        // other name in this fixture has exactly one definer, so picking
-        // the wrong one would be invisible to a name-only comparison.
-        assert_eq!(
-            origin_of("ns::dup"),
-            SymbolOrigin::Object(0),
-            "shared.pmc must win — NOT libs/bitops.pmo"
-        );
+        assert_eq!(origin_of("ns::dup"), SymbolOrigin::Object(0), "shared.pmc");
         assert_eq!(origin_of("asm_fn"), SymbolOrigin::Object(2), "helpers.pma");
         assert_eq!(origin_of("pre_fn"), SymbolOrigin::Object(3), "pre.pmo");
         assert_eq!(
@@ -1416,26 +1476,25 @@ mod faithfulness {
         );
     }
 
+    /// Mutation: first-wins restored in `resolve` — `resolve_names`
+    /// returns Ok and the test reddens.
     #[test]
-    fn overlay_resolution_matches_linker_resolution_for_a_shadowed_std_name() {
-        // The `ns::dup` shape (the sibling-vs-library shadowing case
-        // above), one level over: a sibling's own `namespace std {
-        // export goToEnd() {...} }` mangles to the SAME `std::goToEnd`
-        // key the embedded stdlib roster answers under, creating a
-        // genuine two-definer collision — the embedded stdlib object
-        // really does export a symbol named `std::goToEnd`
+    fn a_sibling_defining_a_reached_std_name_is_a_link_error_the_overlay_does_not_yet_report() {
+        // A sibling's own `namespace std { export goToEnd() {...} }`
+        // mangles to the SAME `std::goToEnd` key the embedded stdlib
+        // roster answers under, creating a genuine two-definer collision
+        // — the embedded stdlib object really does export a symbol named
+        // `std::goToEnd`
         // (`overlay_resolution_matches_linker_resolution_with_provenance`'s
         // own `origin_of("std::goToEnd") == Library(1)` assertion, for
-        // the UNSHADOWED case, already proves this). Both sides must
-        // pick the sibling: the overlay because a name it owns always
-        // wins over the materialized roster, the linker because the
-        // embedded stdlib links as an ordinary library, appended LAST,
-        // behind every declared source — so its own sources-before-
-        // libraries rule already prefers the sibling. This is exactly
-        // the case an overlay that special-cased the `std::` PREFIX
-        // (routing it straight to the materialized roster without ever
-        // consulting the overlay) would get wrong, and it is what
-        // caught that defect originally.
+        // the collision-free case, already proves this). The overlay
+        // picks the sibling: a name it owns always wins over the
+        // materialized roster — exactly the case an overlay that
+        // special-cased the `std::` PREFIX (routing it straight to the
+        // materialized roster without ever consulting the overlay) would
+        // get wrong. The linker refuses the pair once the program
+        // reaches the name (docs/core.md (linking)); the overlay has no
+        // duplicate diagnostic of its own yet (docs/lsp.md (caveats)).
         let root = temp_tree();
         fs::write(
             root.join("pmt.json"),
@@ -1486,18 +1545,11 @@ mod faithfulness {
             .collect();
         let libraries = vec![crate::stdlib::object().clone()];
 
-        let resolved = resolve_names(&objects, &libraries, "main")
-            .expect("std::goToEnd resolves — the sibling, not a genuine unresolved miss");
-        let origin = resolved
-            .reached
-            .iter()
-            .find(|r| r.name == "std::goToEnd")
-            .expect("std::goToEnd is reached from main")
-            .origin;
-        assert_eq!(
-            origin,
-            SymbolOrigin::Object(0),
-            "shared.pmc must win — NOT the embedded stdlib library"
+        let err = resolve_names(&objects, &libraries, "main")
+            .expect_err("the sibling and the embedded stdlib both define a reached name");
+        assert!(
+            matches!(&err, LinkError::DuplicateSymbol { name, .. } if name == "std::goToEnd"),
+            "{err:?}"
         );
     }
 

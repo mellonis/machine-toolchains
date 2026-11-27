@@ -382,7 +382,8 @@ Each pass below is shown transforming a small program, and every example
 follows the same recipe: compile once with `--emit-ir=lowered` for the
 CFG as lowering produced it, once with `--emit-ir=after:<pass>` for the
 CFG right after that pass last changed something, and render both with
-`pmt ir graph` (`docs/pmt/cli.md (ir)`). `-v` on the first compile shows
+`pmt ir graph --raw` (`docs/pmt/cli.md (ir)`), the edge-for-edge view,
+so a `check` whose arms agree still shows both of its edges. `-v` on the first compile shows
 which passes fired and how often, which is how one can tell that a
 fragment shows what it claims to show.
 
@@ -450,7 +451,7 @@ main() {
 $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo inline.pmc
 opt: 2 round(s)
   inline (module): 1 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -461,7 +462,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:inline -o inlined.pmo inline.pmc
-$ pmt ir graph inlined.ir.json --function main
+$ pmt ir graph inlined.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -491,9 +492,11 @@ $ pmt dis inline.pmx
         stp
 ```
 
-Because inlining binds a call at compile time, a library meant to stay
-fully interposable should be built with `--fno-inline`
-(`docs/pmt/language.md (optimization)`).
+Because inlining binds a call at compile time, a library built with
+`--fno-inline` keeps its internal calls as separate call sites and its
+routines as separate link-time symbols, which is what makes them visible
+in the IR and the disassembly. It does not make a routine replaceable: a
+name has one definition per link (`docs/core.md (linking)`).
 
 **The inline-cap sweep.** `INLINE_MAX_OPS`, the six-op ceiling above, was
 re-measured against a corpus of golden programs (each on its committed
@@ -552,7 +555,7 @@ main() {
 $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo check-fold.pmc
 opt: 2 round(s)
   check-fold main: 1 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -566,7 +569,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:check-fold -o folded.pmo check-fold.pmc
-$ pmt ir graph folded.ir.json --function main
+$ pmt ir graph folded.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -619,7 +622,7 @@ $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo jump-threading.pmc
 opt: 2 round(s)
   jump-threading main: 2 change(s)
   dce main: 2 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -638,7 +641,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:jump-threading -o threaded.pmo jump-threading.pmc
-$ pmt ir graph threaded.ir.json --function main
+$ pmt ir graph threaded.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -661,7 +664,7 @@ passes. By the end of the round `dce` has removed them:
 
 ```
 $ pmt compile -O1 --emit-ir=final -o final.pmo jump-threading.pmc
-$ pmt ir graph final.ir.json --function main
+$ pmt ir graph final.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -727,7 +730,7 @@ $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo cell-state.pmc
 opt: 2 round(s)
   cell-state main: 2 change(s)
   fuse-tape-ops main: 1 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -738,7 +741,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:cell-state -o cells.pmo cell-state.pmc
-$ pmt ir graph cells.ir.json --function main
+$ pmt ir graph cells.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -783,7 +786,7 @@ $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo branch-fold.pmc
 opt: 2 round(s)
   branch-fold main: 1 change(s)
   dce main: 1 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -798,7 +801,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:branch-fold -o branched.pmo branch-fold.pmc
-$ pmt ir graph branched.ir.json --function main
+$ pmt ir graph branched.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -812,7 +815,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=final -o final.pmo branch-fold.pmc
-$ pmt ir graph final.ir.json --function main
+$ pmt ir graph final.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -866,7 +869,7 @@ main() {
 $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo tail-sink.pmc
 opt: 2 round(s)
   tail-sink main: 2 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -884,7 +887,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:tail-sink -o sunk.pmo tail-sink.pmc
-$ pmt ir graph sunk.ir.json --function main
+$ pmt ir graph sunk.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -956,7 +959,7 @@ main() {
 $ pmt compile -O1 -v --emit-ir=after:tail-sink -o brk.pmo tail-sink-brk.pmc
 opt: 2 round(s)
   tail-sink main: 2 change(s)
-$ pmt ir graph brk.ir.json --function main
+$ pmt ir graph brk.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1021,7 +1024,7 @@ inner() {
 $ pmt compile -O1 -v --fno-inline --emit-ir=lowered -o lowered.pmo tail-call.pmc
 opt: 2 round(s)
   tail-call outer: 1 change(s)
-$ pmt ir graph lowered.ir.json --function outer
+$ pmt ir graph lowered.ir.json --function outer --raw
 ```
 
 ```mermaid
@@ -1032,7 +1035,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --fno-inline --emit-ir=after:tail-call -o tailed.pmo tail-call.pmc
-$ pmt ir graph tailed.ir.json --function outer
+$ pmt ir graph tailed.ir.json --function outer --raw
 ```
 
 ```mermaid
@@ -1046,7 +1049,7 @@ op. In the same program `main`'s call to `outer` is in tail position
 too, and stays a call:
 
 ```
-$ pmt ir graph tailed.ir.json --function main
+$ pmt ir graph tailed.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1084,7 +1087,7 @@ opt: 3 round(s)
   tail-merge main: 1 change(s)
   fuse-tape-ops main: 1 change(s)
   check-fold main: 1 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1099,7 +1102,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:tail-merge -o merged.pmo tail-merge.pmc
-$ pmt ir graph merged.ir.json --function main
+$ pmt ir graph merged.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1117,7 +1120,7 @@ by which point `fuse-tape-ops` has also fused the write and the move.
 
 ```
 $ pmt compile -O1 --emit-ir=final -o final.pmo tail-merge.pmc
-$ pmt ir graph final.ir.json --function main
+$ pmt ir graph final.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1144,7 +1147,7 @@ main() {
 $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo return-chain.pmc
 opt: 2 round(s)
   tail-merge main: 1 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1159,7 +1162,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:tail-merge -o chained.pmo return-chain.pmc
-$ pmt ir graph chained.ir.json --function main
+$ pmt ir graph chained.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1211,7 +1214,7 @@ $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo dce.pmc
 dce.pmc:3:5: warning: unreachable code in `main`
 opt: 2 round(s)
   dce main: 1 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1227,7 +1230,7 @@ flowchart TD
 ```
 $ pmt compile -O1 --emit-ir=after:dce -o alive.pmo dce.pmc
 dce.pmc:3:5: warning: unreachable code in `main`
-$ pmt ir graph alive.ir.json --function main
+$ pmt ir graph alive.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1292,7 +1295,7 @@ $ pmt compile -O1 -v --fno-inline --emit-ir=lowered -o lowered.pmo move-elim.pmc
 opt: 2 round(s)
   move-elim main: 1 change(s)
   move-elim g: 1 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1303,7 +1306,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --fno-inline --emit-ir=after:move-elim -o elim.pmo move-elim.pmc
-$ pmt ir graph elim.ir.json --function main
+$ pmt ir graph elim.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1318,7 +1321,7 @@ shows a real function boundary, opens with the pair before any tape
 instruction has run in it:
 
 ```
-$ pmt ir graph lowered.ir.json --function g
+$ pmt ir graph lowered.ir.json --function g --raw
 ```
 
 ```mermaid
@@ -1328,7 +1331,7 @@ flowchart TD
 ```
 
 ```
-$ pmt ir graph elim.ir.json --function g
+$ pmt ir graph elim.ir.json --function g --raw
 ```
 
 ```mermaid
@@ -1438,7 +1441,7 @@ main() {
 $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo fuse-tape-ops.pmc
 opt: 2 round(s)
   fuse-tape-ops main: 2 change(s)
-$ pmt ir graph lowered.ir.json --function main
+$ pmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1449,7 +1452,7 @@ flowchart TD
 
 ```
 $ pmt compile -O1 --emit-ir=after:fuse-tape-ops -o fused.pmo fuse-tape-ops.pmc
-$ pmt ir graph fused.ir.json --function main
+$ pmt ir graph fused.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1492,7 +1495,7 @@ stays the single-file command's job (`docs/pmt/cli.md (build)`).
 Disables one pass for the whole compile, and is repeatable — the names
 are the eleven in the roster above. Two things it is good for: isolating a
 pass while reading IR, as several examples on this page do, and turning
-off `inline` for a library that must stay interposable.
+off `inline` for a library whose routines should stay separate call sites.
 
 ```
 $ pmt compile -O1 -v --fno-cell-state -o cells.pmo cell-state.pmc
@@ -1525,6 +1528,7 @@ pass that never fired captured none, and asking for it is an error. The
 flag itself may appear only once per command line
 (`docs/pmt/cli.md (compile)`).
 
-`pmt ir graph FILE.ir.json [--function NAME]` renders such a document as
-a Mermaid flowchart — one per function, or one named function — which is
-how every graph on this page was produced (`docs/pmt/cli.md (ir)`).
+`pmt ir graph FILE.ir.json [--function NAME] [--raw|--shape]` renders
+such a document as a Mermaid flowchart — one per function, or one named
+function — which is how every graph on this page was produced, in its
+edge-for-edge `--raw` view (`docs/pmt/cli.md (ir)`).

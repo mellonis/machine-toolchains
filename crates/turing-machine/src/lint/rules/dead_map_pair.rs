@@ -62,9 +62,9 @@ use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 use crate::compiler::{ResolvedCallTarget, ResolvedWorld};
 use crate::footprint::{self, FootprintTable};
 use crate::lint::LintContext;
-use crate::lint::patterns::glyph_label;
 use crate::lint::rules::spans::arrow_span;
 use crate::parser::{BindingArg, BindingValue, MapArrow, MapPair};
+use crate::patterns::glyph_label;
 
 /// The position of `glyph` in a glyph vector.
 fn index_of(glyphs: &[String], glyph: &str) -> Option<u32> {

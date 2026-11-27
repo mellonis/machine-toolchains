@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use mtc_turing_machine::cli::execute;
+use mtc_turing_machine::compiler::{CompileOptions, Declarations, compile};
+use mtc_turing_machine::optimizer::OptLevel;
 use mtc_turing_machine::stdlib;
 
 fn args(list: &[&str]) -> Vec<String> {
@@ -20,15 +22,52 @@ fn args(list: &[&str]) -> Vec<String> {
 
 /// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
 /// uniquely by process id + an atomic counter — copied verbatim from
-/// `tests/mode_equivalence.rs::scratch` (docs/superpowers plan's "temp
+/// `tests/mode_equivalence.rs::scratch` (docs/internal plan's "temp
 /// paths in tests" rule).
-fn scratch(name: &str) -> std::path::PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("{name}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// The "generated, do not edit" notice `std.tmh` carries, in the style of
@@ -79,8 +118,24 @@ fn std_tmh_path() -> std::path::PathBuf {
 fn qualified_routines(header: &str) -> BTreeMap<String, String> {
     let mut stack: Vec<Option<String>> = Vec::new();
     let mut out = BTreeMap::new();
+    // A signature `tmt fmt` wrapped past its width limit (the printer
+    // hands its text to the formatter) spans several lines: they are
+    // gathered up to the closing `;` and rejoined as the one-line form,
+    // so a wrapped routine compares its whole signature — `writes`
+    // clause included — rather than its first line alone.
+    let mut pending: Option<(String, String)> = None;
     for raw in header.lines() {
         let trimmed = raw.trim();
+        if let Some((qualified, mut text)) = pending.take() {
+            text.push(' ');
+            text.push_str(trimmed);
+            if trimmed.ends_with(';') {
+                out.insert(qualified, text.replace("( ", "(").replace(" )", ")"));
+            } else {
+                pending = Some((qualified, text));
+            }
+            continue;
+        }
         if trimmed.is_empty() {
             continue;
         }
@@ -103,13 +158,18 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
             } else {
                 format!("{}::{name}", ns.join("::"))
             };
-            out.insert(qualified, trimmed.to_string());
+            if trimmed.ends_with(';') {
+                out.insert(qualified, trimmed.to_string());
+            } else {
+                pending = Some((qualified, trimmed.to_string()));
+            }
             continue;
         }
         if trimmed.ends_with('{') {
             stack.push(None);
         }
     }
+    assert!(pending.is_none(), "an unterminated signature: {pending:?}");
     out
 }
 
@@ -117,6 +177,14 @@ fn qualified_routines(header: &str) -> BTreeMap<String, String> {
 /// keyword to the end. Copied from `header_roundtrip.rs`'s own helper.
 fn write_set_suffix(line: &str) -> &str {
     line.find("writes").map(|i| &line[i..]).unwrap_or(line)
+}
+
+/// One head-position clause of a rendered signature line — `keyword { … }`
+/// through its closing brace — or `None` when the line declares none.
+fn head_clause<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let at = line.find(&format!("{keyword} {{"))?;
+    let close = line[at..].find('}')? + at;
+    Some(&line[at..=close])
 }
 
 /// The byte pin: `std.tmh` is committed, derived output, and this is the
@@ -150,7 +218,7 @@ fn regen() {
 /// against the COMMITTED `std.tmh` text itself, both read by the
 /// identical `qualified_routines`/`write_set_suffix` extraction
 /// `header_roundtrip.rs`'s two-arm test uses. This also proves the
-/// `preserves`-only case specifically: `invertNumber`'s shape must
+/// `never writes`-only case specifically: `invertNumber`'s shape must
 /// compare EQUAL (both sides already publish the same reduced EFFECTIVE
 /// set), not merely happen not to differ. Mutation: dropping the `writes`
 /// clause from the printer entirely — VERIFIED by hand: with
@@ -199,9 +267,56 @@ fn the_header_and_the_source_agree_on_every_declared_contract() {
             write_set_suffix(header_line),
             "write sets disagree for `{name}`:\n source: {source_line}\n header: {header_line}"
         );
+        // The head-position clauses, compared on their own rather than
+        // only as part of the suffix above: a header printing them in a
+        // different place would still move the suffix, but a header
+        // DROPPING both clauses on both arms would not, and neither would
+        // one agreeing on a clause the source never declared.
+        for keyword in ["enters", "leaves"] {
+            assert_eq!(
+                head_clause(source_line, keyword),
+                head_clause(header_line, keyword),
+                "`{keyword}` disagrees for `{name}`:\n source: {source_line}\n header: {header_line}"
+            );
+        }
     }
 
-    // Non-vacuity for the `preserves`-only case specifically: both
+    // Non-vacuity for the head-position clauses: every stdlib routine
+    // declares where its head leaves and none where it enters (every entry
+    // state matches every glyph), on both arms; and one two-glyph clause is
+    // pinned outright, so the agreement cannot be over a clause both arms
+    // print wrong. Mutation: the printer dropping `leaves` (both arms lose
+    // it, the per-routine comparison stays green, this census goes red).
+    for routines in [&source_routines, &header_routines] {
+        for (name, line) in routines.iter() {
+            assert!(
+                head_clause(line, "leaves").is_some(),
+                "`{name}` has no leaves: {line}"
+            );
+            assert!(
+                head_clause(line, "enters").is_none(),
+                "`{name}` has an enters: {line}"
+            );
+        }
+        assert_eq!(
+            head_clause(&routines["std::binaryNumbers::normalizeNumber"], "leaves"),
+            Some("leaves { '_', '$' }")
+        );
+    }
+
+    // Non-vacuity for a signature the formatter wraps: `minusOneFast`'s
+    // four-glyph `writes` clause puts it past the width limit, so it spans
+    // three lines in both texts. Compared line by line, both sides would
+    // extract only `export routine minusOneFast(` — no `writes` at all —
+    // and agree over nothing; the extraction must rejoin the whole clause.
+    for routines in [&source_routines, &header_routines] {
+        assert_eq!(
+            routines["std::binaryNumbers::minusOneFast"],
+            "export routine minusOneFast(tape num: symbols writes { '_', '^', '0', '1' } leaves { '_', '$' });"
+        );
+    }
+
+    // Non-vacuity for the `never writes`-only case specifically: both
     // routines must be present, on both sides, already collapsed to the
     // reduced effective set `{ '0', '1' }` (the alphabet `{ '_', '0', '1' }`
     // minus `'_'`) rather than a coincidental agreement over some other
@@ -257,9 +372,12 @@ fn every_exported_stdlib_graph_is_in_the_header_with_its_body() {
         .count();
     assert_eq!(count, 12, "expected 12 exported stdlib graphs");
 
+    // Its `leaves` clause carries the signature past the width limit, so
+    // the printer wraps it one parameter per line.
     assert!(
-        source_text
-            .contains("export graph goToNumberGraph(tape num: symbols writes {}, state done) {"),
+        source_text.contains(
+            "export graph goToNumberGraph(\n      tape num: symbols writes {} leaves { '$' },\n      state done\n    ) {"
+        ),
         "goToNumberGraph's signature is missing or reformatted"
     );
     assert!(
@@ -270,4 +388,86 @@ fn every_exported_stdlib_graph_is_in_the_header_with_its_body() {
         source_text.contains("['$'] -> goto done;"),
         "goToNumberGraph's body (its rule) is missing"
     );
+}
+
+/// `SOURCE` with every head-position clause (`enters { … }`, `leaves { … }`)
+/// cut out, one leading space included — `writes {} leaves { '$' },`
+/// becomes `writes {},`. A clause's element list holds only quoted glyphs,
+/// never a `}`, so the first `}` after the keyword closes it.
+fn without_head_clauses(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    loop {
+        let next = [" enters {", " leaves {"]
+            .iter()
+            .filter_map(|k| rest.find(k))
+            .min();
+        let Some(at) = next else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..at]);
+        let close = rest[at..].find('}').expect("an unclosed head clause") + at;
+        rest = &rest[close + 1..];
+    }
+}
+
+/// The shipped preset at `level`, spelled as `stdlib::object` spells it:
+/// `brk` and the contract-check states stripped, no external declarations
+/// believed (docs/tmt/cli.md (compile)).
+fn stdlib_preset(level: OptLevel) -> CompileOptions {
+    CompileOptions {
+        opt_level: level,
+        strip_debugger: true,
+        strip_asserts: true,
+        externals: Declarations::none(),
+        ..Default::default()
+    }
+}
+
+/// The stdlib's head-position clauses are interface, never code: compiled
+/// under the shipped preset, `std.tmc` and the same source with every
+/// `enters`/`leaves` clause cut out produce objects identical in
+/// everything but their interface section — code blobs, table blobs,
+/// relocations, symbols and the rest — at both opt levels. The interface
+/// itself must differ, since a declared clause prints on its `.param` line
+/// and moves an exported graph's digest (docs/formats.md (routine
+/// interfaces)); that is the non-vacuity half. The clause census pins what
+/// the annotation derived from the bodies: every one of the 40 tape
+/// parameters (28 routines, 12 graphs) declares where its head leaves, and
+/// none declares where it enters, because every entry state matches every
+/// glyph of its alphabet — the body-derived `enters` would be the whole
+/// alphabet, which promises nothing.
+///
+/// Mutation: build the annotated side with `strip_asserts: false` (a
+/// preset that no longer strips) — the planted check states grow the code
+/// blobs and the object comparison goes red. Also caught: an `enters`
+/// transcribed from the narrower prose (the census), and a deleted clause
+/// (the census).
+#[test]
+fn the_head_clauses_move_the_interface_and_never_the_code() {
+    let stripped = without_head_clauses(stdlib::SOURCE);
+    assert_eq!(stdlib::SOURCE.matches(" leaves {").count(), 40);
+    assert_eq!(stdlib::SOURCE.matches(" enters {").count(), 0);
+    assert!(!stripped.contains(" leaves {"));
+
+    for level in [OptLevel::O0, OptLevel::O1] {
+        let mut annotated = compile(stdlib::SOURCE, stdlib_preset(level))
+            .expect("the embedded stdlib compiles")
+            .object;
+        let mut bare = compile(&stripped, stdlib_preset(level))
+            .expect("the clause-free stdlib compiles")
+            .object;
+        assert_ne!(
+            annotated.interface, bare.interface,
+            "{level:?}: the clauses reach the interface"
+        );
+        annotated.interface = None;
+        bare.interface = None;
+        assert_eq!(
+            annotated.to_bytes(),
+            bare.to_bytes(),
+            "{level:?}: a head clause moved something besides the interface"
+        );
+    }
 }

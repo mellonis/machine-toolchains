@@ -52,6 +52,7 @@ pub(crate) struct ProfileOverrides {
     pub opt: Option<OptLevel>,
     pub debug_info: Option<bool>,
     pub strip_debugger: Option<bool>,
+    pub strip_asserts: Option<bool>,
     pub werror: Option<bool>,
 }
 
@@ -84,7 +85,7 @@ pub(crate) struct RunSpec {
 
 /// The two profile names mirror the CLI presets exactly
 /// (docs/tmt/cli.md (compile presets): `--debug` = `-g -O0`,
-/// `--release` = `-O1 --strip-debugger`); `resolve` layers the
+/// `--release` = `-O1 --strip-debugger --strip-asserts`); `resolve` layers the
 /// manifest's per-key overrides on the preset base. Flags override the
 /// result at the driver (flags win — cli/driver.rs).
 ///
@@ -94,6 +95,7 @@ pub(crate) struct ResolvedProfile {
     pub opt_level: OptLevel,
     pub debug_info: bool,
     pub strip_debugger: bool,
+    pub strip_asserts: bool,
     pub werror: bool,
 }
 
@@ -107,6 +109,7 @@ impl Profiles {
                     opt_level: OptLevel::O1,
                     debug_info: false,
                     strip_debugger: true,
+                    strip_asserts: true,
                     werror: false,
                 },
                 &self.release,
@@ -117,6 +120,7 @@ impl Profiles {
                     opt_level: OptLevel::O0,
                     debug_info: true,
                     strip_debugger: false,
+                    strip_asserts: false,
                     werror: false,
                 },
                 &self.debug,
@@ -126,6 +130,7 @@ impl Profiles {
             opt_level: over.opt.unwrap_or(base.opt_level),
             debug_info: over.debug_info.unwrap_or(base.debug_info),
             strip_debugger: over.strip_debugger.unwrap_or(base.strip_debugger),
+            strip_asserts: over.strip_asserts.unwrap_or(base.strip_asserts),
             werror: over.werror.unwrap_or(base.werror),
         }
     }
@@ -344,7 +349,13 @@ const MANIFEST_KEYS: &[&str] = &[
 ];
 const LIBRARIES_KEYS: &[&str] = &["dirs", "link"];
 const PROFILES_KEYS: &[&str] = &["debug", "release"];
-const PROFILE_KEYS: &[&str] = &["debug-info", "opt", "strip-debugger", "werror"];
+const PROFILE_KEYS: &[&str] = &[
+    "debug-info",
+    "opt",
+    "strip-asserts",
+    "strip-debugger",
+    "werror",
+];
 const TARGET_KEYS: &[&str] = &[
     "call-mech",
     "entry",
@@ -400,6 +411,7 @@ fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverri
             }
             "debug-info" => over.debug_info = Some(as_bool(path, val, "debug-info")?),
             "strip-debugger" => over.strip_debugger = Some(as_bool(path, val, "strip-debugger")?),
+            "strip-asserts" => over.strip_asserts = Some(as_bool(path, val, "strip-asserts")?),
             "werror" => over.werror = Some(as_bool(path, val, "werror")?),
             _ => unreachable!("PROFILE_KEYS gates this match"),
         }
@@ -714,15 +726,52 @@ mod tests {
     /// dependency, matching the zero-new-deps constraint). Mirrors
     /// `config::tests::unique_tmp_dir`, local to this file per this
     /// crate's no-shared-test-support convention.
-    fn unique_tmp_dir(label: &str) -> PathBuf {
+    fn unique_tmp_dir(label: &str) -> ScratchDir {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
             "tmt-project-test-{label}-{}-{n}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        ScratchDir::fresh(dir)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -945,10 +994,10 @@ mod tests {
         }))
         .unwrap();
         let r = m.profiles.resolve(true);
-        assert!(r.werror && r.debug_info && r.strip_debugger);
+        assert!(r.werror && r.debug_info && r.strip_debugger && r.strip_asserts);
         assert_eq!(r.opt_level, crate::optimizer::OptLevel::O1);
         let d = m.profiles.resolve(false);
-        assert!(!d.werror && d.debug_info && !d.strip_debugger);
+        assert!(!d.werror && d.debug_info && !d.strip_debugger && !d.strip_asserts);
         assert_eq!(d.opt_level, crate::optimizer::OptLevel::O0);
     }
 
@@ -1077,7 +1126,7 @@ mod tests {
                 "dirs" | "link" => json!([]),
                 "debug" | "release" => json!({}),
                 "opt" => json!("O0"),
-                "debug-info" | "strip-debugger" | "werror" => json!(true),
+                "debug-info" | "strip-debugger" | "strip-asserts" | "werror" => json!(true),
                 "entry" => json!("main"),
                 "output" => json!("app.tmx"),
                 "run" => json!({}),

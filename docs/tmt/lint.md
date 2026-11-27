@@ -1,13 +1,15 @@
-# Linting `.tmc`/`.tma` — `tmt lint`
+# Linting `.tmc`/`.tmh`/`.tma` — `tmt lint`
 
 `tmt lint` reports hygiene findings the compiler and assembler
 deliberately do not refuse. Each input's extension picks its rule table:
 a `.tmc` file runs the compiler's analysis (through resolution, no code
 generation) against the `.tmc` catalog below; a `.tma` file runs a full
 assemble against the arch-agnostic assembly rules (`docs/core.md`) plus
-the TM-1 additions further down this page. Either way a finding prints
-as `FILE:LINE:COL: lint: MESSAGE`. Exit code 0 means every file is
-clean, 1 means findings or errors somewhere. The command surface — the
+the TM-1 additions further down this page; a `.tmh` header runs a
+subset of the `.tmc` catalog (see Linting a header). Whichever table
+runs, a finding prints as `FILE:LINE:COL: lint: MESSAGE [CODE]`, the code being the
+rule's name — what `--allow` and `lint.allow` take. Exit code 0
+means every file is clean, 1 means findings or errors somewhere. The command surface — the
 directory walk, `--exclude`, the per-file fatal that keeps a batch
 going — is `docs/tmt/cli.md`.
 
@@ -54,8 +56,12 @@ tmt: unknown lint rule `no-such-rule`
 
 `--allow` and `--warn` draw from the UNION of every catalog `tmt` knows:
 the `.tmc` rules, the opt-in rule, the `.tma` additions, core's
-arch-agnostic assembly rules, and — the fifth surface — the linker's own
-link-warning codes (`docs/tmt/cli.md (link warnings)`). One allow-list
+arch-agnostic assembly rules, the linker's own link-warning codes
+(`docs/tmt/cli.md (link warnings)`), and — the sixth surface — the
+compiler's own warning codes (`docs/tmt/cli.md (compile warnings)`).
+A lint run itself never prints a compile warning, so naming one here is
+inert for `tmt lint`; it is `tmt compile`/`tmt build` that honour it.
+One allow-list
 therefore works for a batch mixing both languages — a `.tma`-only code
 named on a `.tmc` run is accepted and simply inert for that file, and a
 `.tmc`-only code on a `.tma` run likewise. That is what lets a single
@@ -176,8 +182,8 @@ still names it.
 | Surface | Reads `tmt.json` |
 |---|---|
 | `tmt lint` | Yes — per input file, unioned with `--allow`; `--no-config` opts out. |
-| `tmt lsp` (both `.tmc` and `.tma` services) | Yes — per document, mtime-cached, unioned with editor settings; both services watch `**/tmt.json` so an edit re-resolves. |
-| `tmt build` (manifest mode) | Partially — the same file its own project-section discovery already located, unioned with `--allow`, for the link stage only (`docs/tmt/cli.md (link warnings)`); no per-file walk, and compile warnings are unaffected. |
+| `tmt lsp` (both `.tmc` and `.tma` services) | Yes — per document, mtime-cached, unioned with editor settings; both services watch `**/tmt.json` so an edit re-resolves. The list filters lint findings only: the editor still shows every compile warning, whatever `lint.allow` names. |
+| `tmt build` (manifest mode) | Partially — the same file its own project-section discovery already located, unioned with `--allow`, for compile warnings and link warnings alike (`docs/tmt/cli.md (compile warnings)`, `docs/tmt/cli.md (link warnings)`); no per-file walk. |
 | `tmt fmt` | No. |
 | every other subcommand | No. |
 
@@ -267,7 +273,7 @@ potential reference), so the rule can let a genuinely dead instance
 through rather than flag a live one.
 
 ```
-b.tmc:13:3: lint: graft instance `deadSplice` is never used
+b.tmc:13:3: lint: graft instance `deadSplice` is never used [unused-graft-instance]
 ```
 
 The fix deletes the whole `graft … ;` statement (doc run included). The
@@ -287,7 +293,7 @@ reachable-but-unreferenced gap `unused-graft-instance` structurally skips
 by entry-ness and never double-report.
 
 ```
-b.tmc:7:3: lint: entry graft instance name `seek` is never used
+b.tmc:7:3: lint: entry graft instance name `seek` is never used [unused-graft-name]
 ```
 
 The fix removes exactly the ` as NAME` clause, leaving a valid unnamed
@@ -307,7 +313,7 @@ two sites differing only in what each instance is called still
 duplicate.
 
 ```
-b.tmc:8:3: lint: graft instance `two` duplicates an earlier graft of `findX` with the same bindings and continuation
+b.tmc:8:3: lint: graft instance `two` duplicates an earlier graft of `findX` with the same bindings and continuation [duplicate-graft-instance]
 ```
 
 The fix deletes the duplicate's whole `graft … ;` statement and rewrites
@@ -323,14 +329,15 @@ instance carries no `as` name for a `goto` to redirect onto.
 ### unused-alphabet
 
 An `alphabet` declaration no tape draws on — neither a machine `tape`
-declaration nor a routine/graph signature tape parameter names it. Unlike
-`unused-routine`/`unused-graph`, an **exported** alphabet is flagged too:
-a tape may draw only on a locally-defined alphabet, so an alphabet has no
-cross-object references in this language version to protect — an
-exported-but-undrawn-on alphabet is as dead as a private one.
+declaration nor a routine/graph signature tape parameter names it. Like
+`unused-routine`/`unused-graph`, an **exported** alphabet is never
+reported: another unit may import it through this unit's header or
+sibling source (`docs/tmt/language.md (alphabets, maps and graphs across
+units)`), which this rule cannot see, and the deletion fix would remove
+what a consumer needs.
 
 ```
-b.tmc:2:10: lint: alphabet `dead` is never used by any tape
+b.tmc:2:10: lint: alphabet `dead` is never used by any tape [unused-alphabet]
 ```
 
 The fix deletes the whole declaration, including any leading doc/attention
@@ -340,13 +347,39 @@ alphabet it documents.
 ### unused-map
 
 A named `map` declaration (`docs/tmt/language.md` (named maps)) nothing
-names with `with map NAME`. Export-independent, the same reasoning as
-`unused-alphabet`: a `with map NAME` site is the only way a map is ever
-reached, so an exported-but-unused declaration is as dead as a private
-one.
+names with `with map NAME`. Like `unused-routine`/`unused-graph`, an
+**exported** map is never reported: another unit may import it through
+this unit's header or sibling source (`docs/tmt/language.md (alphabets,
+maps and graphs across units)`), which this rule cannot see, and the
+deletion fix would remove what a consumer needs.
 
 ```
-b.tmc:3:5: lint: map `dead` is never used by any binding
+b.tmc:3:5: lint: map `dead` is never used by any binding [unused-map]
+```
+
+The fix deletes the whole declaration, including any leading doc/attention
+run, mirroring `unused-alphabet`'s own fix.
+
+### unused-set
+
+A `set NAME { … }` declaration (`docs/tmt/language.md (glyph sets)`) —
+a named glyph set, expanded in place wherever an alphabet body, a
+contract clause, a pattern cell, or another set's own body names it —
+that none of those four sites names. Like `unused-routine`/`unused-graph`,
+an **exported** set is never reported: another unit may import it through
+this unit's header or sibling source (`docs/tmt/language.md (alphabets,
+maps and graphs across units)`), which this rule cannot see, and the
+deletion fix would remove what a consumer needs.
+
+A set named only inside another set's body counts as used for as long as
+that other set is DECLARED — even while the other set is itself reported
+unused. The rule reads recorded references, not reachability from a live
+use, so the inner set stays silent until the outer set's declaration is
+actually deleted; deleting it is what surfaces the inner one in its turn,
+one report at a time.
+
+```
+b.tmc:1:5: lint: set `dead` is never used by any alphabet, contract or pattern [unused-set]
 ```
 
 The fix deletes the whole declaration, including any leading doc/attention
@@ -359,16 +392,62 @@ binds. A tape is untouched when, across every rule of the machine world,
 its pattern cell is a wildcard (or omitted), its write cell keeps (`-`, or
 omitted), and its move cell stays (`.`, or omitted) — and it is never
 passed as a binding argument to a `call`/`graft`/`bind`, where a spliced
-or called subgraph could touch it out of the machine's own view.
+or called subgraph could touch it out of the machine's own view. An
+argument-less `call`, `graft` or `bind` into another unit binds the
+machine's tapes by position, so a machine making one touches every tape.
 
 ```
-b.tmc:4:3: lint: tape `scratch` is never read, written, or moved
+b.tmc:4:3: lint: tape `scratch` is never read, written, or moved [unused-tape]
 ```
 
 `fix: None` — a tape is a vector position, so deleting one narrows the
 arity of every pattern/write/move vector in the world at once, not a safe
 single-span textual edit. The finding is worth surfacing regardless: an
 untouched tape still costs a cell in every emitted row.
+
+### unused-tape-parameter
+
+A `routine` or `graph` tape parameter its body never reads, writes or
+moves, and never passes on to a `call`, `graft` or `bind` — the definition
+`unused-tape` uses for a machine tape. A body that reuses another unit with
+no argument list (a transparent call) binds tapes by position and counts as
+touching every one. It fires regardless of `export`: nobody else can use a
+parameter.
+A contract clause (`writes`, `enters` and the like) alone is not a use: it
+constrains what a body does to the tape, and a body that never touches the
+tape has nothing to constrain.
+
+```
+b.tmc:2:28: lint: tape parameter `u` of `r` is never read, written, moved, or passed on [unused-tape-parameter]
+```
+
+`fix: None` — removing a parameter changes the signature every caller
+binds.
+
+### unused-fold-variable
+
+A pattern binding (`as NAME`) its rule's write vector never reads — a read
+inside an arithmetic substitution (`{x + 1}`) counts.
+
+```
+b.tmc:4:28: lint: pattern binding `x` is never read by this rule's write vector [unused-fold-variable]
+```
+
+`fix: None` — a binding may be kept for readability.
+
+### inert-never-writes
+
+With both `writes` and `never writes` written, a glyph `never writes` names
+but `writes` does not changes nothing: the effective set is `writes` minus
+`never writes`. Reported per element of `never writes`, naming the inert
+glyphs. Source only — a header publishes each tape's effective set as one
+`writes` clause and never prints `never writes`.
+
+```
+b.tmc:2:60: lint: '2' in `never writes` is not in `writes`, so excluding it changes nothing [inert-never-writes]
+```
+
+`fix: None`.
 
 ### unused-exit
 
@@ -380,7 +459,7 @@ site is still obliged to bind. It fires regardless of `export`: an exit no
 body rule targets cannot fire for any caller, exported or not.
 
 ```
-b.tmc:2:38: lint: graph `g` declares exit `miss`, which its body never targets
+b.tmc:2:38: lint: graph `g` declares exit `miss`, which its body never targets [unused-exit]
 ```
 
 `fix: None` — the exit is part of the graph's signature, so removing it is
@@ -394,7 +473,7 @@ attention line (`docs/tmt/language.md`). The finding names the verb and
 appends the attribute's own message when it carries one:
 
 ```
-b.tmc:15:14: lint: call to deprecated `oldHelper`: use newHelper instead
+b.tmc:15:14: lint: call to deprecated `oldHelper`: use newHelper instead [deprecated-call]
 ```
 
 Only locally-defined targets are checked — an imported target's doc map
@@ -425,16 +504,21 @@ The exact band is excluded outright: two wildcard-free rules that
 overlap are a conflict the compiler rejects, not a silent shadow.
 
 ```
-c.tmc:7:5: lint: this rule is unreachable — an earlier rule in `s` already covers it
+c.tmc:7:5: lint: this rule is unreachable — an earlier rule in `s` already covers it [dead-rule]
 ```
 
-`dead-rule` is lint's richer relative of two warnings the compiler raises
-on its own channel (`docs/tmt/language.md`): `unreachable-rule` (a second
-all-wildcard rule — and only that exact shape) and `empty-expansion` (a
-rule whose range/glyph expansion drops to zero rows). Those two live on
-the compile channel because compilation must be total and honest even when
-lint never runs; `dead-rule` is the fuller same-band-cover analysis, done
-only at lint time.
+`dead-rule` is lint's richer relative of three warnings the compiler
+raises on its own channel (`docs/tmt/language.md (which rule fires)`,
+`docs/tmt/cli.md (compile warnings)`): `unreachable-rule` (a second
+all-wildcard rule — and only that exact shape), `shadowed-rule` (a
+wildcard-carrying rule whose expanded pattern is identical to an earlier
+one's — identity only, never cover) and `empty-expansion` (a
+rule of a grafted graph that maps to no host symbol at its splice, so it
+expands to zero rows there — `docs/tmt/language.md (pattern ranges)`; a
+rule naming a symbol its own tape lacks is a compile error, not this
+warning). Those three live on the compile channel because compilation must
+be total and honest even when lint never runs; `dead-rule` is the fuller
+same-band-cover analysis, done only at lint time.
 
 `fix: None` — a remove-the-covered-row deletion would be pure text, but its
 safety rests on the cover analysis (band classification, per-cell superset,
@@ -455,10 +539,14 @@ from an identical alphabet — same glyphs, same order — because identity
 completion is index-based and applies only across equal-size alphabets.
 Anywhere subtler the rule stays quiet: `x -> x` across unequal
 alphabets is load-bearing, not redundant, and a false positive there
-would be advice to break a working program.
+would be advice to break a working program. So is an identity pair in
+an OPEN map (`with map { …, * }`, `docs/tmt/language.md (symbol maps)`),
+which the rule skips whatever the alphabets: there an unlisted symbol
+reads as the callee's opaque index rather than completing to itself, so
+deleting the pair would change what that glyph means to the callee.
 
 ```
-e.tmc:9:41: lint: identity pair `0 -> 0` is redundant — an identity mapping already supplies it
+e.tmc:9:41: lint: identity pair `0 -> 0` is redundant — an identity mapping already supplies it [redundant-identity-pairs]
 ```
 
 `fix: None` — unlike the `.tma` `duplicate-map-source`, whose shadowed pair
@@ -485,7 +573,7 @@ by running expansion, and sharing the expander's cutoff so the two
 always agree.
 
 ```
-d.tmc:7:5: lint: rule expands to 343 match rows (over 256) — the binding product is large
+d.tmc:7:5: lint: rule expands to 343 match rows (over 256) — the binding product is large [binding-product-threshold]
 ```
 
 `fix: None` — the report flags a size to be aware of, not a defect with one
@@ -508,7 +596,7 @@ something unintended; across unequal alphabets the maps complete closed,
 the glyph is a write hole, and crossing it traps.
 
 ```
-e.tmc:12:41: lint: one-way map collapses onto `0`, which `writer` writes — the write bypasses the collapse
+e.tmc:12:41: lint: one-way map collapses onto `0`, which `writer` writes — the write bypasses the collapse [writes-through-collapse]
 ```
 
 The rule fires only on a literal write the local callee provably makes
@@ -593,8 +681,8 @@ the stdlib deliberately avoids:
 
 ```
 $ tmt lint std.tmc
-std.tmc:263:39: lint: the write-back half of `'^' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
-std.tmc:263:51: lint: the write-back half of `'$' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
+std.tmc:263:39: lint: the write-back half of `'^' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_' [dead-map-pair]
+std.tmc:263:51: lint: the write-back half of `'$' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_' [dead-map-pair]
 ```
 
 The two digit pairs on the same call (`'0' -> '0'`, `'1' -> '1'`) stay
@@ -603,36 +691,40 @@ both digits, so their write-back halves are live.
 
 ### contract-clause-overlap
 
-A signature tape parameter declaring BOTH `writes` and `preserves`
+A signature tape parameter declaring BOTH `writes` and `never writes`
 (`docs/tmt/language.md (contract clauses)`), where a glyph appears in
-both. The checker's own effective set is `writes` MINUS `preserves`, so
-naming a glyph in both is not a contradiction — `preserves` wins, and
+both. The checker's own effective set is `writes` MINUS `never writes`, so
+naming a glyph in both is not a contradiction — `never writes` wins, and
 the `writes` entry naming it contributes nothing to what the body may
 write. The rule is purely syntactic: it compares the two DECLARED sets
 the resolver already built and needs no write-footprint inference of its
 own, so it stays cheap regardless of how large a world's body is.
 
+A glyph set named in a clause (`docs/tmt/language.md (glyph sets)`) is
+one source element like any other: the finding lands on the set's name,
+and the removal fix below removes that reference.
+
 The finding is per SOURCE ELEMENT of the `writes` clause, not per glyph:
 a `writes` range straddling the overlap only partially — some of its
-glyphs also named by `preserves`, some not — still gets exactly one
+glyphs also named by `never writes`, some not — still gets exactly one
 finding, naming just the glyphs that overlap, and ships no fix, because
 splitting a range into "the part that stays" and "the part that goes" is
 not a single whitespace-safe text edit:
 
 ```
-g.tmc:3:35: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
+g.tmc:3:35: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert [contract-clause-overlap]
 ```
 
 An element every one of whose glyphs overlaps — a single symbol, or a
-range entirely swallowed by `preserves` — gets a removal fix instead,
+range entirely swallowed by `never writes` — gets a removal fix instead,
 and what exactly the fix removes depends on whether the element is the
 clause's only one. Removing an element takes its adjacent comma with it
 — the comma AFTER it for every element but the last, the comma BEFORE it
 (so the remaining list still parses) when it is last. For a middle
-element of `writes {'0', '1', '2'} preserves {'1'}`:
+element of `writes {'0', '1', '2'} never writes {'1'}`:
 
 ```
-j.tmc:3:40: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
+j.tmc:3:40: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert [contract-clause-overlap]
 ```
 
 Like every fix in this crate, it never appears on the command line
@@ -644,17 +736,17 @@ remove '1' from the `writes` clause
 ```
 
 That fix is `MachineApplicable`: the removed entry was already excluded
-by the `preserves` subtraction, so nothing about what the body may write
+by the `never writes` subtraction, so nothing about what the body may write
 changes. Doing the same thing to the clause's ONLY element would leave
 `writes {}` behind, and `writes {}` is a first-class, far more
 restrictive declaration (explicitly "write nothing") than the vacuous
 clause it would be replacing (a clause whose one listed symbol
-contributed nothing, because `preserves` already cancelled it) — so when
+contributed nothing, because `never writes` already cancelled it) — so when
 the overlapping element is the clause's only one, the fix removes the
-WHOLE clause instead. For `writes {'1'} preserves {'1'}`:
+WHOLE clause instead. For `writes {'1'} never writes {'1'}`:
 
 ```
-i.tmc:3:35: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
+i.tmc:3:35: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert [contract-clause-overlap]
 ```
 
 Again as a code-action title only, never on the command line:
@@ -666,7 +758,7 @@ remove the emptied `writes` clause
 That fix is `MaybeIncorrect`, the same tier every other whole-declaration
 deletion in this crate uses (`unused-alphabet` and its siblings): unlike
 ordinary element removal, widening a writes-nothing declaration to "the
-full alphabet minus `preserves`" is a real semantics change, not an inert
+full alphabet minus `never writes`" is a real semantics change, not an inert
 one. Applying it silently discards an enforced writes-nothing guarantee —
 a later body edit that adds a write to the parameter then compiles clean
 where, before the fix, it would have errored.
@@ -681,7 +773,7 @@ reports in that case, same posture as the partial-range overlap — only
 the fix is missing:
 
 ```
-h.tmc:3:54: lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert
+h.tmc:3:54: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert [contract-clause-overlap]
 ```
 
 ### unreachable-continuation
@@ -700,13 +792,141 @@ nothing here can tell "unreachable" from "merely unproven", and `then`
 stays mandatory at such a site regardless.
 
 ```
-k.tmc:5:34: lint: this `then` is unreachable — `forever` is `noreturn`
+k.tmc:5:34: lint: this `then` is unreachable — `forever` is `noreturn` [unreachable-continuation]
 ```
 
 The fix drops the whole ` then …` clause, `MachineApplicable`: the
 program's observable behavior is unchanged, since the callee was never
 going to resume there anyway. Withheld by the shared comment guard
 (quickfix availability, above) when a comment sits inside the clause.
+
+### enters-unmet
+
+A `call`/`bind` site whose callee declares `enters` on one of its tape
+parameters (`docs/tmt/language.md (head-position clauses)`), where the
+caller's own head-position analysis says the head MAY be sitting on a
+glyph outside that set when control transfers. It finds the commonest
+head-contract mistake before the first run — a `[*]` row in a machine's
+entry state, where nothing has constrained the head yet:
+
+```
+l.tmc:13:26: lint: the head may be on '_' here, outside the `enters { '0', '1' }` that `plusOne`'s tape `num` declares [enters-unmet]
+```
+
+The analysis is a forward dataflow over "where the head may be", one
+world and one tape at a time. A ROUTINE's entry state is seeded from the
+routine's own `enters` clause — the whole alphabet where it declares
+none, which is why a machine's entry state starts unconstrained. A
+GRAPH's clause is deliberately not used for this: nothing enforces it
+(no runtime check is planted for a graph, and a `graft` edge is not a
+site this rule reports), so a graph's body starts on the whole alphabet
+rather than on a promise nobody is held to.
+
+A row narrows that set by its pattern cell and then carries it forward: a
+literal write pins the head's glyph, an unwritten cell keeps what the
+pattern matched, and a move or a `{expr}` write leaves the whole
+alphabet, since neither says where the head lands. After a `then` the
+continuation resumes from the callee's declared `leaves`, mapped back
+through the binding — the whole alphabet where the callee declares none.
+That step BELIEVES the clause rather than proving it: the compiler checks
+`leaves` only where an exit row's leaving glyph is exactly one known
+glyph, and it is the check a debug build plants that enforces the rest,
+including the rows the static half declines. A build with the asserts
+stripped trusts the declaration, by design — the same trust the whole
+scheme rests on. The sets union to a fixpoint, so the finding covers
+every path into the row at once, where a run's own assert sees only the
+path it took.
+
+**Every way into a state widens it**, and the two that leave the world
+and come back are the coarsest. A `graft` instance's body is not spliced
+at this stage, and a callee's EXIT parameters are wired to states of the
+calling world; in neither case can this analysis know where the head was
+left, and a `leaves` clause does not answer it either (that clause
+describes a `return`, not an exit). So a state reached as a graft exit or
+as a call's exit resumes with the whole alphabet. That keeps its own
+sites checked — silence there would hide most of a graft-driven or
+exit-driven program — at the cost of reporting sites a splice-aware
+answer might clear.
+
+At a site the set is projected forward through the binding's symbol map
+into the callee's own alphabet frame, which is the frame the message's
+glyphs are named in. A caller glyph a closed map holds out is not
+reported here: it never reaches the callee's head at all — reading it
+takes the `UnmappedRead` trap instead (`docs/tmt/language.md (symbol
+maps)`). An OPEN map is different: every caller glyph it does not list
+reaches the callee as the callee's opaque index, which no `enters` clause
+can name, so a site where such a glyph may reach the call is reported,
+and the message says so rather than naming a glyph:
+
+```
+m.tmc:12:25: lint: the head may be on '_', or a symbol this open map sends to the callee's opaque index here, outside the `enters { '0', '1' }` that `inc`'s tape `num` declares [enters-unmet]
+```
+
+A pattern cell that names a glyph set narrows the set by the set's
+members, exactly as the equivalent list of glyphs would.
+
+The answer OVER-approximates, and the message says so: "may be on". A
+row that moves on the bound tape reaches the callee with the head on a
+cell nothing read, so such a site is reported unless the clause happens
+to list the tape's whole alphabet — the honest answer, not a defect. A
+guard row that reads the cell after the move, and calls from there, is
+what makes such a site provable. The authority on what
+a given run actually does is the `enters` assert a debug build plants
+(`docs/tmt/language.md (head-position clauses)`), which is why this is a
+warning and not an error, and why it ships **no quickfix**: the remedy
+may be a wider `enters`, a narrower call site, or a guard row ahead of
+the call, and nothing here can tell which was meant.
+
+Two silences are by design. A callee that declares no `enters` is never
+reported — an absent clause permits every glyph, it is not an empty set.
+And a callee whose `enters` this unit cannot see is left alone, because
+nothing here could tell "unmet" from "unknown". What it can see is
+exactly two things: a routine or graph defined in the file being linted,
+and the embedded standard library's declarations. `tmt lint` takes no
+`--extern`, and neither it nor the editor is handed a manifest project's
+sibling sources or libraries — so a clause declared in one of those is
+NOT honoured, and a call into such a callee is never reported.
+
+### redundant-guard-narrowing
+
+A `where` guard's `in S` conjunct that narrows nothing: every symbol the
+binding's pattern cell can carry is already in `S`, so the conjunct never
+drops a row — and the guard reads the same with the conjunct removed
+(`docs/tmt/language.md (rule guards)`). Both halves are required for the
+finding:
+
+```
+g.tmc:9:24: lint: this `in` narrows nothing here: the cell can only carry symbols already in `all`, and the guard reads the same without it [redundant-guard-narrowing]
+```
+
+**Restriction-inert.** The cell's produced symbols (the same facts
+`binding-product-threshold` counts) all lie within the set. A cell that
+can carry a symbol outside `S` makes the conjunct a real filter: silent.
+
+**License-free.** An order comparison — or any comparison carrying an
+offset — counts POSITIONS in one sequence: the set's member order with
+the conjunct, whatever remains without it (the binding's own tape
+alphabet, or another narrowing). Where a comparison leans on `in`, the
+edit that must compile drops every inert conjunct of the comparison's
+cluster at once — one conjunct alone is usually refused as one-sided —
+and the finding stays quiet unless the pair re-licenses without them,
+both operands narrowing to one set or both sitting on one alphabet,
+with every operand's sequence list unchanged. A cross-alphabet pair
+leaning on `in` on both sides therefore reports nothing, even where one
+tape's order happens to coincide with the set's: those conjuncts ARE
+the pair's one common context. An offset-free `==`/`!=` is glyph
+identity and needs no sequence at all, so nothing leans on a narrowing
+beside one.
+
+The `in` must sit where it NARROWS: the `in` conjuncts of an `&&` chain
+(another narrowing's scope reaches the chain's `||` operands too). An
+`in` under a `||` is a disjunct filter, never a narrowing — removing it
+would rewrite the disjunction — and is never reported.
+
+No quickfix: dropping the conjunct is the author's edit to make. An
+author writing `in` for documentation suppresses the finding in the
+shared allow namespace (`--allow redundant-guard-narrowing`, or
+`lint.allow` in `tmt.json`).
 
 ### state-may-trap (opt-in)
 
@@ -716,7 +936,7 @@ enable it with `--warn state-may-trap`.
 
 ```
 $ tmt lint b.tmc --warn state-may-trap
-b.tmc:18:9: lint: state `partial` may trap — its rules do not cover every input and there is no catch-all
+b.tmc:18:9: lint: state `partial` may trap — its rules do not cover every input and there is no catch-all [state-may-trap]
 ```
 
 The rule proves a gap before firing: it builds each rule's per-cell
@@ -746,7 +966,7 @@ first.
 
 ```
 $ tmt lint b.tmc --warn index-identity-map
-b.tmc:8:34: lint: call maps by index across differently-glyphed alphabets ('a' vs 'x' at index 1); glyphs change meaning here
+b.tmc:8:34: lint: call maps by index across differently-glyphed alphabets ('a' vs 'x' at index 1); glyphs change meaning here [index-identity-map]
 ```
 
 Only `call` and `bind` — a graft's omitted map means glyph identity and
@@ -768,6 +988,30 @@ they run — `glyph-mismatch` is default-ON, because at the link boundary a
 re-labelling is far likelier to be an accident than an intention, while
 this rule stays opt-in for exactly the opposite reason inside one unit.
 
+## Linting a header
+
+A `.tmh` header lints with a subset of the `.tmc` rules above. It is
+first read the way `tmt compile --extern` reads it — declarations only
+(`docs/tmt/language.md (headers)`) — so a `machine` block, a routine
+with a body, or a graph without one is a per-file fatal, reported the
+same way a `.tmc` parse error is. Past that read, only these rules run:
+
+- `unused-import`
+- `contract-clause-overlap`
+
+Every other rule is off on a header, including the opt-in ones whatever
+`--warn` names. A routine in a header has no body for the body and
+rule-grid rules to read, and a graph's body is a copy of the library's
+own source, linted where it is written. The `unused-*` declaration rules
+(`unused-graph`, `unused-alphabet`, `unused-map`, `unused-set`, …) are
+off for a different reason: a header is the list of what a unit offers
+its consumers, so an exported declaration nothing else in the header
+names is its normal shape — the shipped stdlib header's graphs are
+exactly that — not dead code (an exported declaration is never reported
+in a source either). `--allow` and `tmt.json`'s `lint.allow`
+apply as for any other file, and naming a code that does not run on a
+header is not an error.
+
 ## The `.tma` additions
 
 TM-1's assembly dialect carries defects the arch-agnostic rules cannot
@@ -787,7 +1031,7 @@ sets). Row `W` covers row `R` when at every position `W`'s cell is a
 wildcard or exactly the index `R` has there.
 
 ```
-f.tma:5:5: lint: this row can never match — the earlier row at line 4 in the same match table already covers it
+f.tma:5:5: lint: this row can never match — the earlier row at line 4 in the same match table already covers it [shadowed-wildcard-rows]
 ```
 
 Consecutive `.row` directives form one table (a labeled row opens a new
@@ -799,12 +1043,15 @@ never reported.
 
 A `retx #k` whose `k` is at or past the exit count of the frame active
 when it runs — the return always traps (`docs/tmt/isa.md`). This is a
-defect the assembler cannot refuse on its own, because the governing
+defect the assembler cannot refuse in general, because the governing
 exit count belongs to the frame descriptor a `call.m` installs, not to
-the returning function.
+the returning function. A routine whose own `.routine` line declares its
+exits is checked by the assembler itself (`undeclared-exit`,
+`docs/core.md (error codes)`); this rule covers the returns a frame
+descriptor governs.
 
 ```
-f.tma:23:9: lint: retx #3 is out of range — the governing frame declares 1 exit(s) (valid #0..#0), so this return always traps
+f.tma:23:9: lint: retx #3 is out of range — the governing frame declares 1 exit(s) (valid #0..#0), so this return always traps [retx-exit-bounds]
 ```
 
 Resolution is in-file only. A routine reached solely from another
@@ -821,7 +1068,7 @@ substituted in the body, so every iteration expands identically — a
 copy-paste count wearing a macro's clothes.
 
 ```
-f.tma:19:9: lint: the `.rept` loop variable `v` is never used in the body — every iteration expands identically
+f.tma:19:9: lint: the `.rept` loop variable `v` is never used in the body — every iteration expands identically [rept-var-unused]
 ```
 
 Substitution only touches `{…}` markers, so a bare mention of the
@@ -842,7 +1089,7 @@ appearing once in each is not a repeat, while a `.map` duplicating in both
 yields one finding per clause.
 
 ```
-f.tma:5:28: lint: source symbol 1 mapped twice; the last mapping wins
+f.tma:5:28: lint: source symbol 1 mapped twice; the last mapping wins [duplicate-map-source]
 ```
 
 The finding spans the later (winning) pair; the fix removes the earlier
@@ -864,10 +1111,10 @@ syntax. They are documented at `docs/core.md`; all five apply here:
 | `leftover-debugger` (`.tma`) | An instruction using the architecture's declared debugger-break opcode. TM-1 declares one (`brk`), so this rule is live here. |
 
 ```
-g.tma:4:9: lint: jump/branch to `nxt` targets the next instruction — fall-through is identical
-g.tma:5:1: lint: leftover debugger break left in source
-g.tma:7:9: lint: unreachable code: no label between here and the preceding unconditional jump/stop
-g.tma:8:81: lint: line is 110 characters long (limit 80)
+g.tma:4:9: lint: jump/branch to `nxt` targets the next instruction — fall-through is identical [redundant-jump-to-next]
+g.tma:5:1: lint: leftover debugger break left in source [leftover-debugger]
+g.tma:7:9: lint: unreachable code: no label between here and the preceding unconditional jump/stop [unreachable-code]
+g.tma:8:81: lint: line is 110 characters long (limit 80) [line-too-long]
 ```
 
 ### `unused-label` and table references

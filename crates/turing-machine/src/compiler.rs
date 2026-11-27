@@ -13,6 +13,7 @@
 //! staged seam) are read only by the language-tooling layers rather than by
 //! `compile()`; each carries its own `dead_code` allow with the reason.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -28,8 +29,12 @@ use crate::lexer::{LexMode, Token, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
-    Graft, Machine, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
-    Transition, parse_green_from_tokens,
+    Graft, Machine, MoveCell, MoveDir, MoveVec, Pattern, PatternCell, PatternCellKind, Program,
+    QualName, Rule, SetCellMembers, SetDecl, SetMember, SigParamKind, State, SymLit, TermKind,
+    Transition, WriteCell, WriteCellKind, WriteVec, parse_green_from_tokens,
+};
+use crate::patterns::{
+    DeclaredRangeMiss, accepted_glyphs, cell_labels, declared_range, label_number,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -83,8 +88,11 @@ pub enum CompileErrorKind {
     /// cheapest row to alphabet size; write the range explicitly so the cost
     /// is visible.
     WildcardBinding,
-    /// A range whose two endpoints are not the same kind (`'a'..3`). A range
-    /// is `glyph..glyph` or `number..number`; there is no count form.
+    /// A range in an alphabet or set body whose two endpoints are not the
+    /// same kind (`'a'..3`): a body range walks succession, which is
+    /// `glyph..glyph` or `number..number`; there is no count form. (A
+    /// pattern-cell or clause range looks its endpoints up by label, so
+    /// `'0'..9` is `'0'..'9'` there.)
     RangeKindMismatch,
     /// Arithmetic on a glyph-bound substitution (`{c+1}`). Char arithmetic is
     /// deliberately absent in 0.1; only numeric bindings fold (`{v±k}`).
@@ -106,14 +114,25 @@ pub enum CompileErrorKind {
     UnknownAttribute(String),
     /// A second `[deprecated]` attribute inside one run.
     DuplicateAttribute,
-    /// A `writes { … }` clause on a signature tape parameter written after
-    /// that same parameter's `preserves` clause. The fixed order — `writes`
-    /// then `preserves` — is a grammar rule, not an fmt convention: fmt is
-    /// token-preserving and cannot reorder an author's clauses.
-    ContractClauseOrder,
-    /// A second `writes` or `preserves` clause on one signature tape
+    /// A signature tape parameter's contract clauses written out of the
+    /// fixed canonical order — `writes` < `never writes` < `enters` <
+    /// `leaves` — a grammar rule, not an fmt convention: fmt is
+    /// token-preserving and cannot reorder an author's clauses. `what`
+    /// names the clause the parser was reading; `before` names the
+    /// already-declared clause `what` needed to precede.
+    ContractClauseOrder {
+        what: &'static str,
+        before: &'static str,
+    },
+    /// A second `writes` or `never writes` clause on one signature tape
     /// parameter. `what` names the repeated keyword.
     DuplicateContractClause { what: &'static str },
+    /// An `enters { … }` or `leaves { … }` clause with no elements. Unlike
+    /// `writes {}`/`never writes {}` — a legal, meaningful empty SET ("writes
+    /// nothing" / "excludes nothing") — a head-position clause states
+    /// where the head is at a moment in time, and there is no such thing
+    /// as arriving or departing on no symbol at all.
+    EmptyHeadClause,
 
     // -- resolution / flatten / world checks (this task) -------------------
     /// An alphabet with no elements — a world needs at least one symbol
@@ -126,18 +145,65 @@ pub enum CompileErrorKind {
     /// caps at 127; the multi-byte symbol family is a recorded deviation —
     /// named as not-yet-implemented rather than silently selected.
     AlphabetTooLarge(usize),
-    /// A glyph range (`'a'..'c'`) whose endpoint is not a single Unicode
-    /// scalar — char ranges walk scalar succession and need scalar ends.
+    /// A glyph range (`'a'..'c'`) in an alphabet or set body whose endpoint
+    /// is not a single Unicode scalar — a body range walks scalar succession
+    /// and needs scalar ends. (A pattern-cell or clause range walks the
+    /// declared order instead, where any glyph is an endpoint.)
     RangeEndpointNotScalar,
-    /// A range whose low endpoint exceeds its high endpoint. Ranges are
-    /// inclusive both ends and ascending; there is no descending form.
+    /// A range in an alphabet or set body whose low endpoint exceeds its
+    /// high endpoint. Ranges are inclusive both ends and ascending; there is
+    /// no descending form. (A pattern-cell or clause range written against
+    /// the declared order is `RangeOutsideAlphabet`.)
     RangeDescending,
+    /// A pattern cell's single symbol is not a symbol of the alphabet of the
+    /// tape the cell reads — a rule that could never match it. In this
+    /// variant and the next two, a symbol field holds its source SPELLING
+    /// (`patterns::written_spelling`): a number bare, a glyph quoted.
+    SymbolOutsideAlphabet { glyph: String, alphabet: String },
+    /// A member of the glyph set a pattern cell names is not a symbol of the
+    /// alphabet of the tape the cell reads (spelled bare when its label
+    /// names a number, the way a header prints a set member).
+    SetOutsideAlphabet {
+        glyph: String,
+        set: String,
+        alphabet: String,
+    },
+    /// A range in a pattern cell or a contract clause walks the declared
+    /// order of the alphabet it is written against, and this one has no
+    /// walk there: `missing` names an endpoint the alphabet lacks (a cell
+    /// only — a clause reports that under `contract-symbol-unknown`), and
+    /// `None` means both are symbols but `hi` comes first.
+    RangeOutsideAlphabet {
+        lo: String,
+        hi: String,
+        alphabet: String,
+        missing: Option<String>,
+    },
+    /// A pattern cell names a glyph set with no members — a rule that could
+    /// never match anything.
+    EmptySetInPattern(String),
     /// Two entities (alphabet / routine / graph / namespace) share one name
     /// in one scope. `what` names the EXISTING entity's kind.
     DuplicateName { name: String, what: &'static str },
+    /// Two declarations of one qualified name disagree (docs/tmt/language.md
+    /// (declarations)). `first`/`second` describe the two origins — "this
+    /// unit", a quoted path, ``library `NAME` ``, or "the standard library".
+    ConflictingDeclaration {
+        name: String,
+        first: String,
+        second: String,
+    },
     /// Two imports bind one bare name in one scope (post-alias). The same
     /// binding in different scopes is legal (inner shadows outer).
     DuplicateBinding(String),
+    /// One rule's pattern binds a name twice (docs/tmt/language.md (pattern
+    /// cells)). Cells are counted from 1, in pattern order.
+    DuplicatePatternBinding {
+        name: String,
+        first: usize,
+        second: usize,
+        state: String,
+    },
     /// A world declares more than 16 tapes (a `machine` block's tape decls
     /// or a signature's tape params).
     TooManyTapes(usize),
@@ -166,15 +232,30 @@ pub enum CompileErrorKind {
     /// `goto`, a continuation, or a state argument naming a name that is not
     /// a state (or graft instance) in the world.
     UndefinedState(String),
-    /// A `call`/`graft`/`bind` target resolves to the wrong entity kind.
-    /// `expected` is the noun phrase for the required kind.
+    /// A `call`/`graft`/`bind` target, or a set reference, resolves to the
+    /// wrong entity kind. `expected` is the noun phrase for the required
+    /// kind.
     WrongTargetKind {
         name: String,
         expected: &'static str,
+        /// The noun phrase for the kind the name actually is.
+        found: &'static str,
     },
     /// A `graft` target names no graph in scope. A graft needs the graph's
     /// source, so an unresolved graft target is fatal (unlike a `call`).
     UndefinedGraph(GraphMiss),
+    /// A set reference — in an alphabet body, a set body, or a contract
+    /// clause — names nothing at all: the named-set analog of
+    /// [`AlphabetMiss`], split the same two ways. A name that resolves to
+    /// something OTHER than a set is [`CompileErrorKind::WrongTargetKind`]
+    /// instead.
+    UndefinedSet(SetMiss),
+    /// A set's body reaches the set itself, directly or through a chain of
+    /// other sets, so its members have no finite expansion. The payload is
+    /// the whole cycle, mangled, in reference order: from the set the
+    /// closing reference names, through each set it reaches, back to that
+    /// set again (`[a, b, a]`; a self-reference is `[a, a]`).
+    SetCycle(Vec<String>),
     /// A binding argument names a parameter the signature does not declare.
     UnknownArg(String),
     /// Two binding arguments share one parameter name.
@@ -203,7 +284,7 @@ pub enum CompileErrorKind {
     /// A `call` on a world-local bind name carries binding arguments. A bind
     /// is already fully bound at its declaration, so a call on it takes none.
     BindCallArgs(String),
-    /// A `writes`/`preserves` clause names a glyph the parameter's alphabet
+    /// A `writes`/`never writes` clause names a glyph the parameter's alphabet
     /// does not contain. A contract is stated in the tape's own frame, so
     /// every element must be a symbol of that alphabet. `clause` names which
     /// of the two clauses carried it.
@@ -213,8 +294,8 @@ pub enum CompileErrorKind {
         alphabet: String,
     },
     /// A world's inferred write footprint on one tape leaves the effective
-    /// set its contract declares (`writes` minus `preserves`, or everything
-    /// minus `preserves` when there is no `writes`). `glyphs` are the
+    /// set its contract declares (`writes` minus `never writes`, or everything
+    /// minus `never writes` when there is no `writes`). `glyphs` are the
     /// offending symbols, ascending. The inference OVER-approximates: a
     /// symbol outside the footprint provably never lands, while one inside it
     /// merely may — hence "may write".
@@ -222,6 +303,39 @@ pub enum CompileErrorKind {
         world: String,
         tape: String,
         glyphs: Vec<String>,
+    },
+    /// A declared `enters { … }` clause names a glyph the world's entry
+    /// state has no rule for: entering on that glyph traps rather than
+    /// being handled, so the clause promises a moment the body cannot
+    /// accept. `state` is the entry state, `tape` the parameter that
+    /// declared the clause; `glyph` is the first unaccepted symbol, in the
+    /// tape's own band order. Never raised when the entry state's own
+    /// coverage cannot be proven (an arity mismatch or an unresolvable
+    /// range cell) or when the entry is a graft instance, named or not, or
+    /// the world has no body (a bodiless routine read in declarations
+    /// mode) — none of those carries a state to examine ahead of
+    /// expansion.
+    EntersNotAccepted {
+        state: String,
+        tape: String,
+        glyph: String,
+    },
+    /// A declared `leaves { … }` clause is contradicted by an EXIT row whose
+    /// leaving glyph is statically known: a `return` row (a routine) or a
+    /// `goto` onto an exit parameter (a graph) that neither moves the
+    /// declaring tape nor writes it in a way that leaves more than one
+    /// glyph possible. The leaving glyph is known ONLY for a literal write,
+    /// or an unwritten (`Keep`) cell whose pattern matches exactly one
+    /// glyph of the tape's own alphabet — a wildcard or a multi-member
+    /// range leaves no single glyph to name, so it is left to the runtime
+    /// check exactly like a move or a `{expr}` substitution write. `state`
+    /// and `tape` name the offending row's state and the parameter that
+    /// declared the clause; `glyph` is the symbol; the span points at the
+    /// row itself.
+    LeavesOutsideContract {
+        state: String,
+        tape: String,
+        glyph: String,
     },
 
     // -- graft + range expansion -------------------------------------------
@@ -263,6 +377,12 @@ pub enum CompileErrorKind {
     /// glyph-for-glyph equal — an omitted map means identity, which requires
     /// matching alphabets.
     IdentityGlyphMismatch,
+    /// An open graft map whose graph state would decide whether a row matches
+    /// on a symbol the map leaves opaque — the single-row-cover law, refusing
+    /// rather than letting the opaque index decide at run time (`state` is the
+    /// graph state, `tape` the bound tape parameter;
+    /// docs/tmt/language.md (open grafts)).
+    OpenGraftUncovered { state: String, tape: String },
     /// A named map declaration (`map NAME: SRC -> DST { … }`) leaves a
     /// non-blank SOURCE symbol unmapped, on unequal-cardinality alphabets —
     /// the one declaration check with no inline-form analog (`name` is the
@@ -309,6 +429,12 @@ pub enum CompileErrorKind {
     /// A rule's pattern / write / move vector width does not equal the world's
     /// tape count (a signed-function width mismatch). `expected` is the arity.
     RowWidth { expected: usize, got: usize },
+    /// Two named cells of one rule vector name the same tape — one tape
+    /// appears at most once per vector. `name` is the tape, repeated.
+    DuplicateNamedCell { name: String },
+    /// One rule vector mixes named and positional cells — the first cell sets
+    /// the form and the span is the first cell that breaks it.
+    MixedCellForms,
 
     // -- IR-lowering scope limits -------------------------------------------
     /// A signature declares more `state` parameters than an exit count can
@@ -316,6 +442,11 @@ pub enum CompileErrorKind {
     /// (docs/formats.md (routine interfaces)), so 255 is the ceiling. The
     /// payload is the declared count.
     TooManyStateParams(usize),
+    /// A signature writes a `tape` parameter after a `state` parameter.
+    /// The tapes come first: an object's interface keeps the two kinds in
+    /// two lists (docs/formats.md (routine interfaces)), so a declaration
+    /// read back from it could not reproduce any other order.
+    TapeAfterStateParam { tape: String, state: String },
     /// A `call` supplies `state` arguments to a routine whose declarations
     /// this unit does not have. The exits vector travels POSITIONALLY and
     /// carries no parameter names, so without the callee's own signature
@@ -341,6 +472,20 @@ pub enum CompileErrorKind {
     /// [`crate::ir::validate_world`]. Never a user error — the message
     /// carries the underlying diagnostic. The `.pmc` compiler's `Internal`.
     Internal(String),
+
+    // -- rule guards --------------------------------------------------------
+    /// A guard's order/offset comparison whose operands have no one common
+    /// sequence (`left` and `right` name the two contexts — set or
+    /// alphabet names). The hint is the remedy: narrow both with `in`.
+    GuardOrderContext { left: String, right: String },
+    /// A guard name that is no pattern binding of its rule.
+    GuardUnknownBinding { name: String },
+    /// `in S` where `S` names symbols the binding's tape alphabet does not
+    /// carry (`set` as written, `alphabet` the tape's).
+    GuardSetOutsideAlphabet { set: String, alphabet: String },
+    /// A guard comparison with no binding operand: it varies with nothing a
+    /// rule could ever match differently.
+    GuardConstantComparison,
 }
 
 /// The two reasons a tape's alphabet reference can go unresolved
@@ -360,6 +505,14 @@ pub enum AlphabetMiss {
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
+    /// The name resolves to one of this unit's own declarations of another
+    /// kind — a glyph set, a named map, a routine or a graph. `found` is
+    /// that kind's noun phrase.
+    NotAnAlphabet { name: String, found: &'static str },
+    /// Reached through `use` or a qualified path, and a declarations module
+    /// given to this compile DOES declare the name — as another kind
+    /// (`found`, a noun phrase).
+    WrongKind { name: String, found: &'static str },
 }
 
 /// [`AlphabetMiss`]'s named-map analog (`CompileErrorKind::UndefinedMap`) —
@@ -372,6 +525,28 @@ pub enum MapMiss {
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
+    /// Reached through `use` or a qualified path, and a declarations module
+    /// given to this compile DOES declare the name — as another kind
+    /// (`found`, a noun phrase).
+    WrongKind { name: String, found: &'static str },
+}
+
+/// [`AlphabetMiss`]'s named-set analog (`CompileErrorKind::UndefinedSet`) —
+/// same two readings, same split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetMiss {
+    /// Nothing in scope resolves the name and nothing declares it anywhere
+    /// reachable.
+    NoSuchSet(String),
+    /// Reached through `use` or a qualified path, but no declarations
+    /// module given to this compile declares it.
+    DeclarationsNotGiven(String),
+    /// Reached through `use` or a qualified path, and a declarations module
+    /// given to this compile DOES declare the name — as another kind
+    /// (`found`, a noun phrase). A local name of another kind is
+    /// [`CompileErrorKind::WrongTargetKind`] instead; this reading keeps the
+    /// cross-unit code while saying what the name actually is.
+    WrongKind { name: String, found: &'static str },
 }
 
 /// [`AlphabetMiss`]'s graft-target analog (`CompileErrorKind::UndefinedGraph`)
@@ -387,6 +562,10 @@ pub enum GraphMiss {
     /// Reached through `use` or a qualified path, but no declarations
     /// module given to this compile declares it.
     DeclarationsNotGiven(String),
+    /// Reached through `use` or a qualified path, and a declarations module
+    /// given to this compile DOES declare the name — as another kind
+    /// (`found`, a noun phrase).
+    WrongKind { name: String, found: &'static str },
 }
 
 /// Binds each [`CompileErrorKind`] variant to its stable code exactly
@@ -417,6 +596,46 @@ macro_rules! code_registry {
     };
 }
 
+/// Every code a compile WARNING can carry, with its one-line meaning — the
+/// front end's counterpart of [`CompileErrorKind::CODES`]. The CLI brackets
+/// the code onto every rendered warning, `--allow` and `lint.allow` accept
+/// it (`crate::lint::validate_allow`), and the published table in
+/// docs/tmt/cli.md (compile warnings) is set-compared against this list
+/// both ways. An emitter pushing a code missing from it fails the
+/// crate's emitter-vs-registry scan. `unused-import` and `unused-routine`
+/// are also lint rules of the same name (docs/tmt/lint.md).
+pub const WARNING_CODES: &[(&str, &str)] = &[
+    (
+        "empty-expansion",
+        "A rule of a grafted graph maps no host symbol to one of its match cells at this splice, so it expands to zero rows there and can never fire in this instance.",
+    ),
+    (
+        "expansion-threshold",
+        "A rule's ranges and sets expand to more rows than the compiler's cost threshold.",
+    ),
+    (
+        "shadowed-rule",
+        "A rule whose pattern, after range and set expansion, is identical to an earlier rule's in the same state and carries a wildcard: the later row can never fire. One warning per pair of rules, naming the earlier rule's position and the first coinciding row.",
+    ),
+    (
+        "undeclared-external",
+        "A reference to a name defined outside this unit that no `use` declares.",
+    ),
+    (
+        "unreachable-rule",
+        "A second all-wildcard rule in one state: the first — named by position — already matches every input, so the compiler drops this one.",
+    ),
+    (
+        "unreachable-state",
+        "A state no path from its world's entry reaches.",
+    ),
+    ("unused-import", "A `use` import nothing in the unit names."),
+    (
+        "unused-routine",
+        "A routine that is not exported and that no `call` or `bind` targets.",
+    ),
+];
+
 impl CompileErrorKind {
     code_registry! {
         CompileErrorKind::Lex(_) => "lex-error",
@@ -436,15 +655,22 @@ impl CompileErrorKind {
         CompileErrorKind::DocLineOrder => "doc-line-order",
         CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
         CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
-        CompileErrorKind::ContractClauseOrder => "contract-clause-order",
+        CompileErrorKind::ContractClauseOrder { .. } => "contract-clause-order",
         CompileErrorKind::DuplicateContractClause { .. } => "duplicate-contract-clause",
+        CompileErrorKind::EmptyHeadClause => "empty-head-clause",
         CompileErrorKind::EmptyAlphabet => "empty-alphabet",
         CompileErrorKind::DuplicateGlyph(_) => "duplicate-glyph",
         CompileErrorKind::AlphabetTooLarge(_) => "alphabet-too-large",
         CompileErrorKind::RangeEndpointNotScalar => "range-endpoint-not-scalar",
         CompileErrorKind::RangeDescending => "range-descending",
+        CompileErrorKind::SymbolOutsideAlphabet { .. } => "symbol-outside-alphabet",
+        CompileErrorKind::SetOutsideAlphabet { .. } => "set-outside-alphabet",
+        CompileErrorKind::RangeOutsideAlphabet { .. } => "range-outside-alphabet",
+        CompileErrorKind::EmptySetInPattern(_) => "empty-set-in-pattern",
         CompileErrorKind::DuplicateName { .. } => "duplicate-name",
+        CompileErrorKind::ConflictingDeclaration { .. } => "conflicting-declaration",
         CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
+        CompileErrorKind::DuplicatePatternBinding { .. } => "duplicate-pattern-binding",
         CompileErrorKind::TooManyTapes(_) => "too-many-tapes",
         CompileErrorKind::UnresolvedAlphabet(_) => "unresolved-alphabet",
         CompileErrorKind::DuplicateTape(_) => "duplicate-tape",
@@ -457,6 +683,8 @@ impl CompileErrorKind {
         CompileErrorKind::UndefinedState(_) => "undefined-state",
         CompileErrorKind::WrongTargetKind { .. } => "wrong-target-kind",
         CompileErrorKind::UndefinedGraph(_) => "undefined-graph",
+        CompileErrorKind::UndefinedSet(_) => "undefined-set",
+        CompileErrorKind::SetCycle(_) => "set-cycle",
         CompileErrorKind::UnknownArg(_) => "unknown-arg",
         CompileErrorKind::DuplicateArg(_) => "duplicate-arg",
         CompileErrorKind::MissingArg(_) => "missing-arg",
@@ -466,6 +694,8 @@ impl CompileErrorKind {
         CompileErrorKind::BindCallArgs(_) => "bind-call-args",
         CompileErrorKind::ContractSymbolUnknown { .. } => "contract-symbol-unknown",
         CompileErrorKind::WritesOutsideContract { .. } => "writes-outside-contract",
+        CompileErrorKind::EntersNotAccepted { .. } => "enters-not-accepted",
+        CompileErrorKind::LeavesOutsideContract { .. } => "leaves-outside-contract",
         CompileErrorKind::GraftCycle(_) => "graft-cycle",
         CompileErrorKind::GraftCallUnsupported(_) => "graft-call-unsupported",
         CompileErrorKind::MapSymbolNotInAlphabet(_) => "map-symbol-not-in-alphabet",
@@ -473,6 +703,7 @@ impl CompileErrorKind {
         CompileErrorKind::MapConflict { .. } => "map-conflict",
         CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
         CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
+        CompileErrorKind::OpenGraftUncovered { .. } => "open-graft-uncovered",
         CompileErrorKind::MapNotClosed(_) => "map-not-closed",
         CompileErrorKind::NamedMapSourceMismatch { .. } => "named-map-source-mismatch",
         CompileErrorKind::NamedMapTargetMismatch { .. } => "named-map-target-mismatch",
@@ -483,11 +714,18 @@ impl CompileErrorKind {
         CompileErrorKind::FoldOverflow => "fold-overflow",
         CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
         CompileErrorKind::RowWidth { .. } => "row-width",
+        CompileErrorKind::DuplicateNamedCell { .. } => "duplicate-named-cell",
+        CompileErrorKind::MixedCellForms => "mixed-cell-forms",
         CompileErrorKind::TooManyStateParams(_) => "too-many-state-params",
+        CompileErrorKind::TapeAfterStateParam { .. } => "tape-after-state-param",
         CompileErrorKind::StateArgsNeedDeclarations(_) => "state-args-need-declarations",
         CompileErrorKind::NoreturnViolated(_) => "noreturn-violated",
         CompileErrorKind::ThenRequired(_) => "then-required",
         CompileErrorKind::Internal(_) => "internal-error",
+        CompileErrorKind::GuardOrderContext { .. } => "guard-order-context",
+        CompileErrorKind::GuardUnknownBinding { .. } => "guard-unknown-binding",
+        CompileErrorKind::GuardSetOutsideAlphabet { .. } => "guard-set-outside-alphabet",
+        CompileErrorKind::GuardConstantComparison => "guard-constant-comparison",
     }
 }
 
@@ -556,7 +794,7 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::RangeKindMismatch => {
                 write!(
                     f,
-                    "a range must be `glyph..glyph` or `number..number` — mixed endpoints and the count form (`'a'..3`) are not supported"
+                    "a range in an alphabet or set body must be `glyph..glyph` or `number..number` — mixed endpoints and the count form (`'a'..3`) are not supported there"
                 )
             }
             CompileErrorKind::CharArithmetic => {
@@ -595,11 +833,17 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::DuplicateAttribute => {
                 write!(f, "duplicate `[deprecated]` attribute in the same run")
             }
-            CompileErrorKind::ContractClauseOrder => {
-                write!(f, "`writes` must come before `preserves`")
+            CompileErrorKind::ContractClauseOrder { what, before } => {
+                write!(
+                    f,
+                    "`{what}` must come before `{before}` (canonical order: `writes` < `never writes` < `enters` < `leaves`)"
+                )
             }
             CompileErrorKind::DuplicateContractClause { what } => {
                 write!(f, "duplicate `{what}` clause")
+            }
+            CompileErrorKind::EmptyHeadClause => {
+                write!(f, "an `enters`/`leaves` clause needs at least one symbol")
             }
             CompileErrorKind::EmptyAlphabet => {
                 write!(f, "an alphabet needs at least one symbol")
@@ -625,10 +869,64 @@ impl std::fmt::Display for CompileErrorKind {
                     "a range must ascend — its low endpoint cannot exceed its high endpoint"
                 )
             }
+            CompileErrorKind::SymbolOutsideAlphabet { glyph, alphabet } => {
+                write!(
+                    f,
+                    "{glyph} in this pattern cell is not a symbol of alphabet `{alphabet}`"
+                )
+            }
+            CompileErrorKind::SetOutsideAlphabet {
+                glyph,
+                set,
+                alphabet,
+            } => {
+                write!(
+                    f,
+                    "{glyph}, a member of set `{set}`, is not a symbol of alphabet `{alphabet}`"
+                )
+            }
+            CompileErrorKind::RangeOutsideAlphabet {
+                lo,
+                hi,
+                alphabet,
+                missing: Some(glyph),
+            } => {
+                write!(
+                    f,
+                    "{glyph}, an endpoint of the range {lo}..{hi}, is not a symbol of alphabet `{alphabet}`"
+                )
+            }
+            CompileErrorKind::RangeOutsideAlphabet {
+                lo,
+                hi,
+                alphabet,
+                missing: None,
+            } => {
+                write!(
+                    f,
+                    "{hi} comes before {lo} in alphabet `{alphabet}` — a range here walks the alphabet's declared order, so write it {hi}..{lo}"
+                )
+            }
+            CompileErrorKind::EmptySetInPattern(set) => {
+                write!(
+                    f,
+                    "set `{set}` has no members, so a pattern cell naming it can never match"
+                )
+            }
             CompileErrorKind::DuplicateName { name, what } => {
                 write!(
                     f,
                     "duplicate name `{name}` — already used by {what} in this scope"
+                )
+            }
+            CompileErrorKind::ConflictingDeclaration {
+                name,
+                first,
+                second,
+            } => {
+                write!(
+                    f,
+                    "`{name}` is declared differently by {first} and by {second}"
                 )
             }
             CompileErrorKind::DuplicateBinding(n) => {
@@ -637,11 +935,28 @@ impl std::fmt::Display for CompileErrorKind {
                     "`{n}` is bound twice — qualify the reference (`ns::{n}`) or disambiguate with `as`"
                 )
             }
+            CompileErrorKind::DuplicatePatternBinding {
+                name,
+                first,
+                second,
+                state,
+            } => {
+                write!(
+                    f,
+                    "`{name}` is bound by cell {first} and again by cell {second} of one rule in state `{state}` — each binding in a pattern needs its own name"
+                )
+            }
             CompileErrorKind::TooManyTapes(n) => {
                 write!(f, "{n} tapes — a world has at most 16")
             }
             CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NoSuchAlphabet(n)) => {
                 write!(f, "unknown alphabet `{n}`")
+            }
+            CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NotAnAlphabet { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found}, not an alphabet — a tape's type must be an alphabet"
+                )
             }
             CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::DeclarationsNotGiven(n)) => {
                 write!(
@@ -650,6 +965,13 @@ impl std::fmt::Display for CompileErrorKind {
                      but its declarations were not given — declare it locally, or supply its \
                      declarations to this compile (an `--extern` file, a sibling source, or a \
                      library, whichever this command reads)"
+                )
+            }
+            CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::WrongKind { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found} in the declarations given to this compile, not an \
+                     alphabet — a tape's type must be an alphabet"
                 )
             }
             CompileErrorKind::DuplicateTape(n) => {
@@ -692,8 +1014,12 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::UndefinedState(n) => {
                 write!(f, "`{n}` is not a state in this world")
             }
-            CompileErrorKind::WrongTargetKind { name, expected } => {
-                write!(f, "`{name}` is not {expected}")
+            CompileErrorKind::WrongTargetKind {
+                name,
+                expected,
+                found,
+            } => {
+                write!(f, "`{name}` is {found}, not {expected}")
             }
             CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph(n)) => {
                 write!(f, "unknown graph `{n}` — a graft needs the graph's source")
@@ -705,6 +1031,44 @@ impl std::fmt::Display for CompileErrorKind {
                      but its declarations were not given — declare it locally, or supply its \
                      declarations to this compile (an `--extern` file, a sibling source, or a \
                      library, whichever this command reads)"
+                )
+            }
+            CompileErrorKind::UndefinedGraph(GraphMiss::WrongKind { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found} in the declarations given to this compile, not a \
+                     graph — a graft needs a graph's source"
+                )
+            }
+            CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet(n)) => {
+                write!(f, "unknown glyph set `{n}`")
+            }
+            CompileErrorKind::UndefinedSet(SetMiss::WrongKind { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found} in the declarations given to this compile, \
+                     not a glyph set"
+                )
+            }
+            CompileErrorKind::UndefinedSet(SetMiss::DeclarationsNotGiven(n)) => {
+                write!(
+                    f,
+                    "glyph set `{n}` is declared by `use` (or named by a qualified path), \
+                     but its declarations were not given — declare it locally, or supply its \
+                     declarations to this compile (an `--extern` file, a sibling source, or a \
+                     library, whichever this command reads)"
+                )
+            }
+            CompileErrorKind::SetCycle(chain) => {
+                let chain = chain
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
+                write!(
+                    f,
+                    "glyph sets form a cycle: {chain} — a set built from sets must bottom out \
+                     in literals and ranges"
                 )
             }
             CompileErrorKind::UnknownArg(n) => {
@@ -764,6 +1128,18 @@ impl std::fmt::Display for CompileErrorKind {
                     "`{world}` may write {named} on tape `{tape}`, which its contract forbids"
                 )
             }
+            CompileErrorKind::EntersNotAccepted { state, tape, glyph } => {
+                write!(
+                    f,
+                    "entry state `{state}` has no rule for '{glyph}' on tape `{tape}`, which its `enters` clause declares"
+                )
+            }
+            CompileErrorKind::LeavesOutsideContract { state, tape, glyph } => {
+                write!(
+                    f,
+                    "this exit row in state `{state}` may leave '{glyph}' on tape `{tape}`, which its `leaves` clause forbids"
+                )
+            }
             CompileErrorKind::GraftCycle(n) => {
                 write!(
                     f,
@@ -803,6 +1179,15 @@ impl std::fmt::Display for CompileErrorKind {
                     "an omitted graft map means identity, which requires the two tapes to have glyph-for-glyph equal alphabets"
                 )
             }
+            CompileErrorKind::OpenGraftUncovered { state, tape } => {
+                write!(
+                    f,
+                    "state `{state}` would decide whether a row matches on a \
+                     symbol this graft's open map leaves opaque on tape `{tape}` \
+                     — give the state a row whose `{tape}` cell is `*`, or name \
+                     every symbol of the map so nothing is left opaque"
+                )
+            }
             CompileErrorKind::MapNotClosed(g) => {
                 write!(
                     f,
@@ -834,6 +1219,13 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::UndefinedMap(MapMiss::NoSuchMap(n)) => {
                 write!(f, "unknown map `{n}`")
+            }
+            CompileErrorKind::UndefinedMap(MapMiss::WrongKind { name, found }) => {
+                write!(
+                    f,
+                    "`{name}` is {found} in the declarations given to this compile, not a \
+                     named map"
+                )
             }
             CompileErrorKind::UndefinedMap(MapMiss::DeclarationsNotGiven(n)) => {
                 write!(
@@ -874,8 +1266,26 @@ impl std::fmt::Display for CompileErrorKind {
                     "a rule vector has {got} elements but the world has {expected} tapes"
                 )
             }
+            CompileErrorKind::DuplicateNamedCell { name } => {
+                write!(
+                    f,
+                    "`{name}` names one tape twice in one vector — write each tape at most once per vector"
+                )
+            }
+            CompileErrorKind::MixedCellForms => {
+                write!(
+                    f,
+                    "a vector mixes named and positional cells — spell every cell with `name:`, or none"
+                )
+            }
             CompileErrorKind::TooManyStateParams(n) => {
                 write!(f, "{n} `state` parameters — a signature has at most 255")
+            }
+            CompileErrorKind::TapeAfterStateParam { tape, state } => {
+                write!(
+                    f,
+                    "tape parameter `{tape}` follows state parameter `{state}` — a signature lists its tapes first, then its `state` parameters"
+                )
             }
             CompileErrorKind::StateArgsNeedDeclarations(name) => {
                 write!(
@@ -896,6 +1306,21 @@ impl std::fmt::Display for CompileErrorKind {
                 )
             }
             CompileErrorKind::Internal(m) => write!(f, "internal compiler error: {m}"),
+            CompileErrorKind::GuardOrderContext { left, right } => write!(
+                f,
+                "`{left}` and `{right}` have no one common sequence to compare positions in — narrow both to one set with `in`, or stay on identity (`==`/`!=`)"
+            ),
+            CompileErrorKind::GuardUnknownBinding { name } => {
+                write!(f, "`{name}` is no pattern binding of this rule")
+            }
+            CompileErrorKind::GuardSetOutsideAlphabet { set, alphabet } => write!(
+                f,
+                "set `{set}` names symbols outside the tape's alphabet `{alphabet}`"
+            ),
+            CompileErrorKind::GuardConstantComparison => write!(
+                f,
+                "a guard comparison with no binding varies with nothing — write it as rows"
+            ),
         }
     }
 }
@@ -917,6 +1342,10 @@ pub(crate) struct ResolvedAlphabet {
     pub name_span: Span,
     /// Glyph labels in position order; `glyphs[0]` is the blank.
     pub glyphs: Vec<String>,
+    /// Whether this unit declares the alphabet with `export`. An alphabet
+    /// copied in from another unit's declarations (a tape's cross-unit
+    /// reference) is `false`: it is published by its own unit, never twice.
+    pub exported: bool,
 }
 
 impl ResolvedAlphabet {
@@ -946,19 +1375,335 @@ pub(crate) struct ResolvedMapDecl {
     pub span: Span,
 }
 
+/// A resolved named glyph set (`set NAME { … }`): its members, fully
+/// expanded — literals, ranges and every set it names, in declaration
+/// order, a repeat absorbed at its first occurrence. A set is
+/// data for the two element-list sites that name it, never a tape type, so
+/// nothing past resolution sees a set name: an alphabet body and a
+/// contract clause both receive these labels in its place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedSet {
+    /// Mangled name; a key into `Resolved.sets`.
+    pub name: String,
+    pub name_span: Span,
+    pub exported: bool,
+    /// Member labels in declaration order, each once. A label that names a
+    /// number (`patterns::label_number`) is a member fold arithmetic may
+    /// read and a header or completion spells bare, whatever quotes the
+    /// declaration gave it.
+    pub glyphs: Vec<String>,
+}
+
+/// Where a set reference resolves: to one of this unit's own sets (by its
+/// mangled name), or to a set a declarations module carries.
+enum SetTarget<'e> {
+    Local(String),
+    External(String, &'e ResolvedSet),
+}
+
+/// Resolve one set reference as written, from namespace `ns`, the same
+/// local/cross-unit split [`resolve_tape_alphabet`] gives an alphabet
+/// reference: a local [`DefKind::Set`] answers by its mangled name; a name
+/// reached only through `use` or an absolute path is looked up among the
+/// declarations modules; a name resolving to another kind of declaration
+/// is `wrong-target-kind`; nothing at all is `undefined-set`.
+fn resolve_set_ref<'e>(
+    name: &str,
+    span: Span,
+    ns: &[String],
+    scopes: &Scopes,
+    externals: &[&'e Resolved],
+) -> Result<SetTarget<'e>, CompileError> {
+    match scopes.resolve(name, ns) {
+        Some(r) if r.kind == Some(DefKind::Set) => Ok(SetTarget::Local(r.full)),
+        Some(r) if r.kind.is_some() => Err(CompileError {
+            span,
+            kind: CompileErrorKind::WrongTargetKind {
+                name: name.to_string(),
+                expected: "a set",
+                found: r.kind.map_or("something else", DefKind::noun),
+            },
+        }),
+        Some(r) => match external_decls(externals, &r.full)
+            .into_iter()
+            .find_map(|d| match d {
+                ExternalDecl::Set(set) => Some(set),
+                _ => None,
+            }) {
+            Some(set) => Ok(SetTarget::External(r.full, set)),
+            None => Err(CompileError {
+                span,
+                kind: CompileErrorKind::UndefinedSet(match external_kind(externals, &r.full) {
+                    Some(found) => SetMiss::WrongKind {
+                        name: r.full,
+                        found: found.noun(),
+                    },
+                    None => SetMiss::DeclarationsNotGiven(r.full),
+                }),
+            }),
+        },
+        None => Err(CompileError {
+            span,
+            kind: CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet(name.to_string())),
+        }),
+    }
+}
+
+/// One declaration of a name in the declarations table.
+pub(crate) enum ExternalDecl<'a> {
+    Alphabet(&'a ResolvedAlphabet),
+    Set(&'a ResolvedSet),
+    Map(&'a ResolvedMapDecl),
+    World(&'a Resolved, &'a ResolvedWorld),
+}
+
+impl ExternalDecl<'_> {
+    /// The kind this declaration is.
+    pub(crate) fn kind(&self) -> DefKind {
+        match self {
+            ExternalDecl::Alphabet(_) => DefKind::Alphabet,
+            ExternalDecl::Set(_) => DefKind::Set,
+            ExternalDecl::Map(_) => DefKind::Map,
+            ExternalDecl::World(_, w) => match w.kind {
+                WorldKind::Graph => DefKind::Graph,
+                _ => DefKind::Routine,
+            },
+        }
+    }
+}
+
+/// Every declaration of the mangled `name` in the table, module by module
+/// in table order, and within a module alphabet, set, map, then its
+/// routine or graph world (a machine is never a declaration). The ONE
+/// walk every cross-unit lookup reads: a per-kind lookup takes the first
+/// of its kind, and a miss asks the first of any kind what the name is.
+pub(crate) fn external_decls<'a>(externals: &[&'a Resolved], name: &str) -> Vec<ExternalDecl<'a>> {
+    let mut out = Vec::new();
+    for &m in externals {
+        if let Some(a) = m.alphabets.get(name) {
+            out.push(ExternalDecl::Alphabet(a));
+        }
+        if let Some(set) = m.sets.get(name) {
+            out.push(ExternalDecl::Set(set));
+        }
+        if let Some(map) = m.maps.get(name) {
+            out.push(ExternalDecl::Map(map));
+        }
+        for w in &m.worlds {
+            if w.name == name && w.kind != WorldKind::Machine {
+                out.push(ExternalDecl::World(m, w));
+            }
+        }
+    }
+    out
+}
+
+/// The kind a declarations module given to this compile declares the
+/// mangled `name` as, first module first — `None` when none declares it
+/// as an alphabet, a set, a map or a world. What lets a cross-unit miss
+/// say what a name IS instead of claiming its declarations were not given.
+pub(crate) fn external_kind(externals: &[&Resolved], name: &str) -> Option<DefKind> {
+    external_decls(externals, name)
+        .first()
+        .map(ExternalDecl::kind)
+}
+
+/// The miss a cross-unit name that no per-kind lookup answered becomes:
+/// the kind the declarations give it when they declare it at all.
+fn wrong_kind_or<T>(
+    externals: &[&Resolved],
+    full: String,
+    wrong_kind: impl FnOnce(String, &'static str) -> T,
+    not_given: impl FnOnce(String) -> T,
+) -> T {
+    match external_kind(externals, &full) {
+        Some(k) => wrong_kind(full, k.noun()),
+        None => not_given(full),
+    }
+}
+
+/// Everything a set reference resolves against once every set of this
+/// unit is resolved: the scope substrate, the unit's own sets, and the
+/// declarations modules. [`SetScope::members`] is the one entry an
+/// element-list site calls to consume a set name
+/// (docs/tmt/language.md (glyph sets)).
+pub(crate) struct SetScope<'a> {
+    pub scopes: &'a Scopes,
+    pub sets: &'a HashMap<String, ResolvedSet>,
+    pub externals: &'a [&'a Resolved],
+}
+
+impl<'a> SetScope<'a> {
+    /// The set a reference written as `name` from namespace `ns` names —
+    /// and the one place an EXPANSION records such a reference as consumed:
+    /// its mangled name joins `refs` (`Resolved.set_refs`) before the set
+    /// is handed back.
+    pub(crate) fn members(
+        &self,
+        name: &str,
+        span: Span,
+        ns: &[String],
+        refs: &mut HashSet<String>,
+    ) -> Result<&'a ResolvedSet, CompileError> {
+        let (full, set) = self.lookup(name, span, ns)?;
+        refs.insert(full);
+        Ok(set)
+    }
+
+    /// [`Self::members`] without the recording: the set a reference names
+    /// and its mangled name, for a reader that re-derives a clause's
+    /// members after resolution (a lint rule) rather than expanding one.
+    pub(crate) fn lookup(
+        &self,
+        name: &str,
+        span: Span,
+        ns: &[String],
+    ) -> Result<(String, &'a ResolvedSet), CompileError> {
+        Ok(
+            match resolve_set_ref(name, span, ns, self.scopes, self.externals)? {
+                SetTarget::Local(full) => {
+                    let set = self
+                        .sets
+                        .get(&full)
+                        .expect("every local set is resolved before any element list reads one");
+                    (full, set)
+                }
+                SetTarget::External(full, set) => (full, set),
+            },
+        )
+    }
+}
+
+/// One set body in progress on [`resolve_all_sets`]' explicit stack.
+struct SetFrame<'p> {
+    full: String,
+    decl: &'p SetDecl,
+    next: usize,
+    glyphs: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl SetFrame<'_> {
+    fn push(&mut self, label: String) {
+        if self.seen.insert(label.clone()) {
+            self.glyphs.push(label);
+        }
+    }
+}
+
+/// Resolve every set this unit declares, keyed by mangled name
+/// (docs/tmt/language.md (glyph sets)). A set's
+/// body may name other sets, local or imported, declared before or after
+/// it; the walk is depth-first over an EXPLICIT stack — never recursion,
+/// so a long chain of sets cannot overflow the thread's stack — and a
+/// reference to a set already on that stack is a [`CompileErrorKind::
+/// SetCycle`] at the reference, rather than a walk that never ends. Every
+/// set is resolved whether or not anything names it, the way every
+/// alphabet is. Each set reference a body consumes is recorded in `refs`.
+fn resolve_all_sets(
+    program: &Program,
+    scopes: &Scopes,
+    externals: &[&Resolved],
+    refs: &mut HashSet<String>,
+) -> Result<HashMap<String, ResolvedSet>, CompileError> {
+    let decls: HashMap<String, &SetDecl> = program
+        .sets
+        .iter()
+        .map(|s| (full_name(&s.ns, &s.name), s))
+        .collect();
+    let frame = |full: String, decl| SetFrame {
+        full,
+        decl,
+        next: 0,
+        glyphs: Vec::new(),
+        seen: HashSet::new(),
+    };
+    let mut out: HashMap<String, ResolvedSet> = HashMap::new();
+    for root in &program.sets {
+        let root_full = full_name(&root.ns, &root.name);
+        if out.contains_key(&root_full) {
+            continue;
+        }
+        let mut stack: Vec<SetFrame> = vec![frame(root_full, root)];
+        while let Some(top) = stack.last_mut() {
+            let decl: &SetDecl = top.decl;
+            let Some(elem) = decl.elems.get(top.next) else {
+                let done = stack.pop().expect("the loop holds a top frame");
+                out.insert(
+                    done.full.clone(),
+                    ResolvedSet {
+                        name: done.full,
+                        name_span: done.decl.name_span,
+                        exported: done.decl.exported,
+                        glyphs: done.glyphs,
+                    },
+                );
+                continue;
+            };
+            match elem {
+                AlphabetElem::Single(s) => {
+                    top.push(glyph_label(s));
+                    top.next += 1;
+                }
+                AlphabetElem::Range { lo, hi, span } => {
+                    for label in expand_range(lo, hi, *span)? {
+                        top.push(label);
+                    }
+                    top.next += 1;
+                }
+                AlphabetElem::SetRef { name, span } => {
+                    let (full, set) =
+                        match resolve_set_ref(name, *span, &decl.ns, scopes, externals)? {
+                            SetTarget::External(full, set) => (full, set.clone()),
+                            SetTarget::Local(full) => match out.get(&full) {
+                                Some(set) => (full, set.clone()),
+                                None => {
+                                    if let Some(first) = stack.iter().position(|f| f.full == full) {
+                                        // The cycle is the stack from the
+                                        // set this reference names, in
+                                        // order, back to that set again.
+                                        let mut chain: Vec<String> =
+                                            stack[first..].iter().map(|f| f.full.clone()).collect();
+                                        chain.push(full);
+                                        return Err(CompileError {
+                                            span: *span,
+                                            kind: CompileErrorKind::SetCycle(chain),
+                                        });
+                                    }
+                                    let named = decls[&full];
+                                    // The reference is re-read once the named
+                                    // set is resolved: `next` does not advance.
+                                    stack.push(frame(full, named));
+                                    continue;
+                                }
+                            },
+                        };
+                    let top = stack.last_mut().expect("the loop holds a top frame");
+                    for label in &set.glyphs {
+                        top.push(label.clone());
+                    }
+                    top.next += 1;
+                    refs.insert(full);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Resolve one alphabet's elements into its glyph vector, or fail with the
 /// first offending element's span. Char ranges expand by scalar succession
 /// (single-scalar endpoints required); numeric ranges mint decimal-string
-/// glyphs of each value; glyphs are unique; blank is position 0 by
-/// construction (the first element); an empty alphabet or one resolving to
-/// more than 127 symbols is rejected.
-fn resolve_alphabet_glyphs(a: &Alphabet) -> Result<Vec<String>, CompileError> {
-    if a.elems.is_empty() {
-        return Err(CompileError {
-            span: a.name_span,
-            kind: CompileErrorKind::EmptyAlphabet,
-        });
-    }
+/// glyphs of each value; a set reference contributes the set's members in
+/// order; glyphs are unique; blank is position 0 by construction (the first
+/// element); an empty alphabet or one resolving to more than 127 symbols is
+/// rejected. Emptiness is judged on the EXPANSION, not the written
+/// elements: a body naming only an empty set is as empty as `{ }`.
+fn resolve_alphabet_glyphs(
+    a: &Alphabet,
+    sets: &SetScope,
+    refs: &mut HashSet<String>,
+) -> Result<Vec<String>, CompileError> {
     let mut glyphs: Vec<String> = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
     for elem in &a.elems {
@@ -971,7 +1716,18 @@ fn resolve_alphabet_glyphs(a: &Alphabet) -> Result<Vec<String>, CompileError> {
                     push_glyph(&mut glyphs, &mut seen, label, *span)?;
                 }
             }
+            AlphabetElem::SetRef { name, span } => {
+                for label in &sets.members(name, *span, &a.ns, refs)?.glyphs {
+                    push_glyph(&mut glyphs, &mut seen, label.clone(), *span)?;
+                }
+            }
         }
+    }
+    if glyphs.is_empty() {
+        return Err(CompileError {
+            span: a.name_span,
+            kind: CompileErrorKind::EmptyAlphabet,
+        });
     }
     if glyphs.len() > 127 {
         return Err(CompileError {
@@ -1031,11 +1787,12 @@ pub(crate) fn expand_range(
                 .map(|c| c.to_string())
                 .collect())
         }
-        // Mixed-kind endpoints are a parse-time `RangeKindMismatch`; this arm
-        // is unreachable from parsed input.
+        // A body range walks succession, which needs one kind at both ends.
+        // (A cell or clause range looks endpoints up by label and takes a
+        // mixed pair; it never comes here.)
         _ => Err(CompileError {
             span,
-            kind: CompileErrorKind::RangeEndpointNotScalar,
+            kind: CompileErrorKind::RangeKindMismatch,
         }),
     }
 }
@@ -1083,6 +1840,17 @@ fn push_glyph(
 pub(crate) struct Resolved {
     /// Resolved alphabets, keyed by mangled name → glyph vector.
     pub alphabets: HashMap<String, ResolvedAlphabet>,
+    /// This unit's OWN named glyph sets, keyed by mangled name, each with
+    /// its declaration's `name_span`. Unlike `alphabets`, a set reached from
+    /// a declarations module is never copied in here: this table is exactly
+    /// what the unit declares.
+    pub sets: HashMap<String, ResolvedSet>,
+    /// The mangled name of every set some element list consumed — a set
+    /// body, an alphabet body, or a contract clause — recorded by
+    /// [`SetScope::members`] (and, for a set body, by `resolve_all_sets`)
+    /// at the one point each expansion reads a set name. A set of this
+    /// unit absent from here is named by nothing.
+    pub set_refs: HashSet<String>,
     /// Resolved named map declarations, keyed by mangled name — the four
     /// declaration checks already passed by the time a `Resolved` exists.
     pub maps: HashMap<String, ResolvedMapDecl>,
@@ -1115,6 +1883,12 @@ pub(crate) struct ResolvedWorld {
     /// State-parameter names (routine/graph), in signature order — valid
     /// goto / continuation targets inside the body.
     pub state_params: Vec<String>,
+    /// The kind of every signature parameter, in signature order — how
+    /// `tapes` and `state_params` interleave, which neither list keeps on
+    /// its own. Empty for a `machine`. What lets a world known only through
+    /// its declarations be checked against its signature in the order it
+    /// was written ([`SigInfo::declared`]).
+    pub(crate) param_kinds: Vec<ParamKind>,
     /// `state_params.len()` as the one-byte count a signature publishes
     /// (docs/formats.md (routine interfaces)) — narrowed HERE, where the
     /// signature is resolved, so a world that is only DECLARED (a header
@@ -1128,7 +1902,11 @@ pub(crate) struct ResolvedWorld {
     /// checked against the body's own inferred fact (`ir::lower_world`) for
     /// a bodied routine; the only source of truth for a BODILESS one (a
     /// header carries no body to infer from — docs/tmt/language.md
-    /// (routines)).
+    /// (routines)). A world read LENIENTLY for its declarations (a sibling
+    /// `.tmc`, `header::read_extern`) carries the INFERRED fact here
+    /// instead, exactly as `tmt interface` would print it — the clause's
+    /// span when one was written, the routine's `name_span` when only the
+    /// body proves it.
     pub declared_noreturn: Option<Span>,
     /// States, rules in SOURCE form.
     pub states: Vec<State>,
@@ -1181,9 +1959,19 @@ pub(crate) struct ResolvedTape {
     /// Always `None` on a machine tape — only a signature parameter takes a
     /// contract.
     pub writes: Option<SymSet>,
-    /// The declared `preserves { … }` clause, same frame and same `None`
+    /// The declared `never writes { … }` clause, same frame and same `None`
     /// meaning: nothing is declared off-limits.
-    pub preserves: Option<SymSet>,
+    pub never_writes: Option<SymSet>,
+    /// The declared `enters { … }` clause — the symbols the head may be
+    /// sitting on when a call transfers control into this parameter's
+    /// tape — same frame and `None` meaning as `writes`/`never writes`: no
+    /// clause declares no restriction, never an empty one (the parser
+    /// rejects `enters {}`). Always `None` on a machine tape.
+    pub enters: Option<SymSet>,
+    /// The declared `leaves { … }` clause: the symbols the head may be
+    /// sitting on when control returns. Same frame and `None` meaning as
+    /// `enters`.
+    pub leaves: Option<SymSet>,
 }
 
 /// A resolved graft declaration: the mangled graph target plus the raw
@@ -1329,10 +2117,44 @@ pub(crate) fn analyze_with_mode(
     externals: &Declarations,
     mode: ReadMode,
 ) -> Result<Analysis, CompileError> {
+    analyze_reading(source, externals, mode, PeerChecks::Enforced)
+}
+
+/// Whether an analysis runs the checks whose verdict depends on what the
+/// OTHER declaration sources currently publish: the table's own
+/// one-declaration check, the write-contract check (a callee's published
+/// write set bounds the caller's footprint) and the own-definition check.
+/// None of the three changes the [`Resolved`] an analysis produces, so a
+/// reading taken with them [`Deferred`](PeerChecks::Deferred) is the same
+/// reading an enforced one yields whenever the enforced one succeeds.
+/// Deferring is for the one caller that reads sources against a set of
+/// peers still being settled (`header::resolve_declarations`,
+/// docs/tmt/project.md (Declaration derivation)): there such a refusal is
+/// provisional, and only the settled set decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerChecks {
+    Enforced,
+    Deferred,
+}
+
+/// The diagnostic codes the peer-dependent checks report — the refusals a
+/// read against a not-yet-settled set of peers must treat as provisional
+/// ([`PeerChecks`]).
+pub(crate) const PEER_CHECK_CODES: [&str; 2] =
+    ["conflicting-declaration", "writes-outside-contract"];
+
+/// [`analyze_with_mode`] with an explicit [`PeerChecks`] — the
+/// declarations reader's entry point.
+pub(crate) fn analyze_reading(
+    source: &str,
+    externals: &Declarations,
+    mode: ReadMode,
+    checks: PeerChecks,
+) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(Rc::clone(&green)), source);
-    let (resolved, diagnostics) = resolve_program(&program, externals, mode)?;
+    let (resolved, diagnostics) = resolve_program(&program, externals, mode, checks)?;
     Ok(Analysis {
         resolved,
         diagnostics,
@@ -1356,14 +2178,28 @@ fn resolve_program(
     program: &Program,
     externals: &Declarations,
     mode: ReadMode,
+    checks: PeerChecks,
 ) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
+    let enforced = checks == PeerChecks::Enforced;
+    if enforced {
+        externals.check_conflicts()?;
+    }
     check_declarations_shape(program, mode)?;
     check_duplicate_bindings(program)?;
     let scopes = Scopes::build(program)?;
-    let alphabets = resolve_all_alphabets(program, &scopes)?;
-    let mut resolved = resolve_module(program, &scopes, alphabets, externals)?;
+    let ext_modules = externals.modules();
+    let mut set_refs: HashSet<String> = HashSet::new();
+    let sets = resolve_all_sets(program, &scopes, &ext_modules, &mut set_refs)?;
+    let set_scope = SetScope {
+        scopes: &scopes,
+        sets: &sets,
+        externals: &ext_modules,
+    };
+    let alphabets = resolve_all_alphabets(program, &set_scope, &mut set_refs)?;
+    let mut resolved = resolve_module(program, &scopes, alphabets, sets, set_refs, externals)?;
     let mut ctx = WorldCtx {
         scopes: &scopes,
+        externals: &ext_modules,
         imports_used: vec![false; program.imports.len()],
         warned_undeclared: HashSet::new(),
         diagnostics: Vec::new(),
@@ -1379,7 +2215,13 @@ fn resolve_program(
     // (`crate::footprint` walks `BindingValue::Named::map::pairs`), so this
     // must run first.
     expand_named_maps(&mut resolved, &scopes, externals)?;
-    check_contracts(&resolved, externals)?;
+    if enforced {
+        check_contracts(&resolved, externals)?;
+    }
+    check_head_contracts(&resolved)?;
+    if enforced {
+        crate::published::check_own_against_table(program, &resolved, externals, mode)?;
+    }
     let WorldCtx {
         imports_used,
         mut diagnostics,
@@ -1433,7 +2275,12 @@ fn resolve_map_ref(
             }
             return Err(CompileError {
                 span,
-                kind: CompileErrorKind::UndefinedMap(MapMiss::DeclarationsNotGiven(r.full)),
+                kind: CompileErrorKind::UndefinedMap(wrong_kind_or(
+                    ext_modules,
+                    r.full,
+                    |name, found| MapMiss::WrongKind { name, found },
+                    MapMiss::DeclarationsNotGiven,
+                )),
             });
         }
     }
@@ -1475,12 +2322,17 @@ fn expand_named_maps_in_args(
     ns: &[String],
 ) -> Result<(), CompileError> {
     let callee_sig: Option<Vec<(String, String)>> = if external {
-        externals.routine(callee_name).map(|w| {
-            w.tapes
-                .iter()
-                .map(|t| (t.name.clone(), t.alphabet.clone()))
-                .collect()
-        })
+        // Any declared world: a graft's target is a graph, a call's or
+        // bind's a routine, and both carry the parameter alphabets site
+        // check 2 reads.
+        crate::declarations::first_reading(&externals.modules(), |w| w.name == callee_name).map(
+            |(_, w)| {
+                w.tapes
+                    .iter()
+                    .map(|t| (t.name.clone(), t.alphabet.clone()))
+                    .collect()
+            },
+        )
     } else {
         callee_tapes.get(callee_name).cloned()
     };
@@ -1687,17 +2539,17 @@ fn check_declarations_shape(program: &Program, mode: ReadMode) -> Result<(), Com
 
 /// A tape parameter's declared EFFECTIVE set (docs/tmt/language.md (contract
 /// clauses)): `writes` — the whole alphabet when there is no `writes` clause —
-/// minus `preserves`. A tape with neither clause therefore answers the whole
+/// minus `never writes`. A tape with neither clause therefore answers the whole
 /// alphabet, which is also what an external callee with no contract
 /// contributes to its callers.
 pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
     let declared = tape
         .writes
         .unwrap_or_else(|| SymSet::full(tape.cardinality as u32));
-    let preserved = tape.preserves.unwrap_or_else(SymSet::empty);
+    let excluded = tape.never_writes.unwrap_or_else(SymSet::empty);
     let mut allowed = SymSet::empty();
     for index in declared.iter() {
-        if !preserved.contains(index) {
+        if !excluded.contains(index) {
             allowed.insert(index);
         }
     }
@@ -1707,7 +2559,7 @@ pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
 /// The write set a routine's tape PUBLISHES — to `IrTape::writes` (which
 /// becomes the compiled object's `RoutineInterface::writes`) and, on the
 /// source arm, to a `tmt interface` header. The declared EFFECTIVE set
-/// (`declared_effective`) when the tape declares `writes` or `preserves`;
+/// (`declared_effective`) when the tape declares `writes` or `never writes`;
 /// otherwise the tape's INFERRED write set, never the whole alphabet as a
 /// stand-in for "no restriction declared" — the wire has no way to spell
 /// that (an absent `writes=` decodes as "writes nothing" —
@@ -1722,20 +2574,47 @@ pub(crate) fn declared_effective(tape: &ResolvedTape) -> SymSet {
 /// `tmt interface` promises (docs/tmt/cli.md (interface)) depends on both
 /// going through here rather than each re-deriving the rule.
 pub(crate) fn published_writes(tape: &ResolvedTape, inferred: Option<SymSet>) -> SymSet {
-    if tape.writes.is_some() || tape.preserves.is_some() {
+    if tape.writes.is_some() || tape.never_writes.is_some() {
         declared_effective(tape)
     } else {
         inferred.unwrap_or_else(SymSet::empty)
     }
 }
 
+/// A resolved symbol set, in THIS tape's alphabet frame, to glyph labels in
+/// band order — the ONE index-to-label step every published per-tape fact
+/// goes through: `ir::lower` and `header::sig_param_text` both call this
+/// directly to publish a tape's `writes` set (the result of
+/// `published_writes`, itself always present when a tape publishes
+/// anything), and `clause_glyphs` below calls it for `enters`/`leaves`.
+/// `pub(crate)` rather than folded into `clause_glyphs`, because `writes`
+/// has no `Option` to unwrap at this step — `published_writes` already
+/// collapsed "no restriction declared" down to a concrete `SymSet` before
+/// this function ever sees it.
+pub(crate) fn symset_glyphs(set: SymSet, glyphs: &[String]) -> Vec<String> {
+    set.iter()
+        .filter_map(|index| glyphs.get(index as usize).cloned())
+        .collect()
+}
+
+/// A resolved head-position clause (`ResolvedTape::enters`/`::leaves`),
+/// through the same [`symset_glyphs`] step `writes` uses, for a clause that
+/// carries no `writes`/`never writes`-style effective-set arithmetic of its
+/// own: an `enters`/`leaves` clause is either declared exactly as written
+/// or not declared at all. `None` in, `None` out; a present clause is
+/// never empty (the parser rejects `enters {}`/`leaves {}`), so this never
+/// produces `Some(vec![])` either.
+pub(crate) fn clause_glyphs(clause: Option<SymSet>, glyphs: &[String]) -> Option<Vec<String>> {
+    clause.map(|set| symset_glyphs(set, glyphs))
+}
+
 /// Check every declared write contract against the inferred write footprint.
 ///
 /// A contract states what a world's body — and everything it calls or grafts —
 /// may put on one of its tapes. The effective permission is `writes` (or, with
-/// no `writes` clause, the whole alphabet) MINUS `preserves`; a symbol in both
+/// no `writes` clause, the whole alphabet) MINUS `never writes`; a symbol in both
 /// clauses is redundancy rather than an error, and the subtraction settles it
-/// in `preserves`' favour. A footprint reaching outside that set is fatal at
+/// in `never writes`' favour. A footprint reaching outside that set is fatal at
 /// the parameter that declared the contract.
 ///
 /// The inference OVER-approximates (`crate::footprint`'s soundness contract):
@@ -1749,7 +2628,7 @@ fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), 
     let contracted = resolved.worlds.iter().any(|w| {
         w.tapes
             .iter()
-            .any(|t| t.writes.is_some() || t.preserves.is_some())
+            .any(|t| t.writes.is_some() || t.never_writes.is_some())
     });
     if !contracted {
         return Ok(());
@@ -1775,7 +2654,7 @@ fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), 
             continue;
         };
         for (k, tape) in world.tapes.iter().enumerate() {
-            if tape.writes.is_none() && tape.preserves.is_none() {
+            if tape.writes.is_none() && tape.never_writes.is_none() {
                 continue;
             }
             let allowed = declared_effective(tape);
@@ -1808,6 +2687,196 @@ fn check_contracts(resolved: &Resolved, externals: &Declarations) -> Result<(), 
     Ok(())
 }
 
+/// Check every declared `enters`/`leaves` head-position clause against what a
+/// world's own body can PROVE, never against what it merely fails to
+/// disprove — the sibling of `check_contracts` for the other kind of
+/// promise a signature tape parameter can make (docs/tmt/language.md (head-
+/// position clauses)). Unlike `writes`/`never writes`, neither check walks a
+/// call graph or a footprint fixpoint: both read one world's own rules only.
+///
+/// `enters` is checked against the world's ENTRY state — the glyphs its own
+/// rules accept on that tape, via [`accepted_glyphs`] (the same coverage
+/// primitive `state-may-trap` and `dead-rule` read off pattern cells). A
+/// declared element that state has no rule for is fatal; a state whose
+/// coverage cannot be proven (an arity mismatch, or an unresolvable range
+/// cell) is left unchecked, and so is a world whose entry is an unnamed
+/// graft instance — there is no state to examine ahead of expansion.
+///
+/// `leaves` is checked against the world's EXIT rows — a ROUTINE leaves
+/// through `return`, a GRAPH through a `goto` onto one of its own exit
+/// (`state`) parameters; the two never overlap, since a graph carries no
+/// `return` and this check never follows a routine's own exit parameters
+/// (docs/tmt/language.md ("state" parameters)). An exit row's leaving
+/// glyph is known ONLY in two shapes: a literal write, or an unwritten
+/// (`Keep`) cell whose pattern matches exactly one glyph of the tape's own
+/// alphabet. A move on the declaring tape, a `{expr}` substitution write,
+/// a wildcard `Keep` cell, and a multi-member range `Keep` cell are all
+/// left to the runtime check instead of being guessed at — none of them
+/// pins the leaving glyph down to one symbol.
+fn check_head_contracts(resolved: &Resolved) -> Result<(), CompileError> {
+    for world in &resolved.worlds {
+        if world
+            .tapes
+            .iter()
+            .all(|t| t.enters.is_none() && t.leaves.is_none())
+        {
+            continue;
+        }
+        let Some(tape_glyphs) = world
+            .tapes
+            .iter()
+            .map(|t| {
+                resolved
+                    .alphabets
+                    .get(&t.alphabet)
+                    .map(|a| a.glyphs.as_slice())
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        for (k, tape) in world.tapes.iter().enumerate() {
+            if let Some(enters) = tape.enters {
+                check_enters(world, k, tape, enters, &tape_glyphs)?;
+            }
+            if let Some(leaves) = tape.leaves {
+                check_leaves(world, k, tape, leaves, &tape_glyphs)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `enters` half of [`check_head_contracts`]: every glyph tape `k`'s
+/// declared `enters` clause names must be among what the world's entry
+/// state accepts at that same position.
+fn check_enters(
+    world: &ResolvedWorld,
+    k: usize,
+    tape: &ResolvedTape,
+    enters: SymSet,
+    tape_glyphs: &[&[String]],
+) -> Result<(), CompileError> {
+    let Some(entry_state) = world.states.iter().find(|s| s.entry) else {
+        // The entry is a graft instance — named or not — or the world has
+        // no body (a bodiless routine read in declarations mode): no state
+        // to examine ahead of expansion, either way.
+        return Ok(());
+    };
+    let Some(accepted) = accepted_glyphs(&entry_state.rules, tape_glyphs) else {
+        // The entry state's own coverage cannot be proven.
+        return Ok(());
+    };
+    for glyph in symset_glyphs(enters, tape_glyphs[k]) {
+        if !accepted[k].contains(&glyph) {
+            return Err(CompileError {
+                span: tape.span,
+                kind: CompileErrorKind::EntersNotAccepted {
+                    state: entry_state.name.clone(),
+                    tape: tape.name.clone(),
+                    glyph,
+                },
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The `leaves` half of [`check_head_contracts`]: every EXIT row's leaving
+/// glyph on tape `k`, where that glyph is statically known, must be among
+/// what the declared `leaves` clause lists.
+fn check_leaves(
+    world: &ResolvedWorld,
+    k: usize,
+    tape: &ResolvedTape,
+    leaves: SymSet,
+    tape_glyphs: &[&[String]],
+) -> Result<(), CompileError> {
+    let declared: HashSet<String> = symset_glyphs(leaves, tape_glyphs[k]).into_iter().collect();
+    for state in &world.states {
+        for rule in &state.rules {
+            if !is_exit_row(world, rule) {
+                continue;
+            }
+            let Some(glyph) = exit_glyph(rule, k, tape_glyphs) else {
+                continue; // the leaving glyph is not statically known
+            };
+            if !declared.contains(&glyph) {
+                return Err(CompileError {
+                    span: rule.span,
+                    kind: CompileErrorKind::LeavesOutsideContract {
+                        state: state.name.clone(),
+                        tape: tape.name.clone(),
+                        glyph,
+                    },
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `rule` leaves `world` at all — a ROUTINE only through `return`,
+/// a GRAPH only through a `goto` onto one of its own `state` (exit)
+/// parameters, matched by name. A routine's own exit parameters (it may
+/// have some too) are deliberately not exit rows here: a routine's
+/// `leaves` clause is checked against `return` alone, since an exit
+/// parameter is not the moment control returns.
+fn is_exit_row(world: &ResolvedWorld, rule: &Rule) -> bool {
+    match world.kind {
+        WorldKind::Routine => matches!(rule.transition, Transition::Return { .. }),
+        WorldKind::Graph => matches!(
+            &rule.transition,
+            Transition::Goto { name, .. } if world.state_params.iter().any(|p| p == name)
+        ),
+        WorldKind::Machine => false,
+    }
+}
+
+/// The one glyph tape `k` holds when `rule` fires, or `None` when that is
+/// not statically known: a move on tape `k`; a `{expr}` substitution write
+/// there; a row whose pattern cell on this tape is DEAD — names no glyph
+/// the tape's own alphabet actually carries, so the row can never fire at
+/// all (the same "drop it, no valid index to lower" a `Single`/degenerate
+/// `Range` cell gets at expansion, `expand.rs::cell_options` — a row with
+/// no leaving glyph is not a fact this check may state, live or written);
+/// or — on the unwritten/`Keep` path specifically — a matched pattern cell
+/// that does not resolve to exactly one glyph. A wildcard or a
+/// multi-member range names a SET, not a single symbol, so neither pins
+/// the leaving glyph down ([`cell_labels`] of either may answer several
+/// labels). A literal write is the one glyph it names, PROVIDED the row is
+/// live; a live check on the pattern is not optional for this arm either —
+/// a dead row's write never runs regardless of what it names.
+fn exit_glyph(rule: &Rule, k: usize, tape_glyphs: &[&[String]]) -> Option<String> {
+    let stayed = match &rule.mov {
+        None => true,
+        Some(mv) => !matches!(mv.cells.get(k), Some(c) if c.dir != MoveDir::Stay),
+    };
+    if !stayed {
+        return None;
+    }
+    let matched = cell_labels(rule.pattern.cells.get(k)?, tape_glyphs[k])?;
+    let live = matched.iter().any(|g| tape_glyphs[k].contains(g));
+    match rule.write.as_ref().and_then(|w| w.cells.get(k)) {
+        None
+        | Some(WriteCell {
+            kind: WriteCellKind::Keep,
+            ..
+        }) => match matched.as_slice() {
+            [one] if live => Some(one.clone()),
+            _ => None,
+        },
+        Some(WriteCell {
+            kind: WriteCellKind::Lit(lit),
+            ..
+        }) => live.then(|| glyph_label(lit)),
+        Some(WriteCell {
+            kind: WriteCellKind::Subst { .. },
+            ..
+        }) => None,
+    }
+}
+
 /// True when every match cell of a rule's pattern is a wildcard (`[*, …]`) —
 /// an all-wildcard catch-all that matches every input.
 fn is_all_wildcard_rule(rule: &Rule) -> bool {
@@ -1838,19 +2907,22 @@ fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnos
         let mut kept_calls: Vec<ResolvedCall> = Vec::new();
         let mut call_ix = 0usize; // running index into `old_calls` (source order)
         for state in &mut world.states {
-            let mut seen_catch_all = false;
+            // The first catch-all's span, which every later one names.
+            let mut seen_catch_all: Option<Span> = None;
             let old_rules = std::mem::take(&mut state.rules);
             let mut new_rules: Vec<Rule> = Vec::with_capacity(old_rules.len());
             for rule in old_rules {
                 let is_call = matches!(rule.transition, Transition::Call { .. });
                 let is_catch_all = is_all_wildcard_rule(&rule);
-                if is_catch_all && seen_catch_all {
+                if let (true, Some(first)) = (is_catch_all, seen_catch_all) {
                     diagnostics.push(Diagnostic {
                         code: "unreachable-rule",
                         span: rule.span,
-                        message: "this rule can never fire — an earlier all-wildcard rule in \
-                                  this state already matches every input"
-                            .to_string(),
+                        message: format!(
+                            "this rule can never fire — an earlier all-wildcard rule at {}:{} \
+                             already matches every input",
+                            first.start.line, first.start.col
+                        ),
                         fix: None,
                     });
                     if is_call {
@@ -1858,7 +2930,9 @@ fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnos
                     }
                     continue;
                 }
-                seen_catch_all |= is_catch_all;
+                if is_catch_all && seen_catch_all.is_none() {
+                    seen_catch_all = Some(rule.span);
+                }
                 if is_call {
                     kept_calls.push(old_calls[call_ix].clone());
                     call_ix += 1;
@@ -1940,6 +3014,18 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
 /// [`analyze_staged`] with an explicit choice of the external modules whose
 /// declared write contracts the footprint inference believes.
 pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> TmcStagedAnalysis {
+    analyze_staged_in_mode(source, externals, ReadMode::Program)
+}
+
+/// [`analyze_staged_with`] with the reading mode chosen by the caller:
+/// [`ReadMode::DeclarationsOnly`] is how the language service reads a
+/// `.tmh` header, the same strict reading `tmt lint` and `tmt interface`
+/// give one (docs/tmt/language.md (headers)).
+pub(crate) fn analyze_staged_in_mode(
+    source: &str,
+    externals: &Declarations,
+    mode: ReadMode,
+) -> TmcStagedAnalysis {
     let tokens = match lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
         Err(fatal) => {
@@ -1979,7 +3065,7 @@ pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> Tmc
     };
     let green_retained = Some(Rc::clone(&green));
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
-    match resolve_program(&program, externals, ReadMode::Program) {
+    match resolve_program(&program, externals, mode, PeerChecks::Enforced) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
@@ -2062,17 +3148,19 @@ fn has_body(program: &Program, world: &ResolvedWorld) -> bool {
 
 /// The kind of a top-level referenceable entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DefKind {
+pub(crate) enum DefKind {
     Alphabet,
+    Set,
     Map,
     Routine,
     Graph,
 }
 
 impl DefKind {
-    fn noun(self) -> &'static str {
+    pub(crate) fn noun(self) -> &'static str {
         match self {
             DefKind::Alphabet => "an alphabet",
+            DefKind::Set => "a glyph set",
             DefKind::Map => "a named map",
             DefKind::Routine => "a routine",
             DefKind::Graph => "a graph",
@@ -2082,14 +3170,231 @@ impl DefKind {
 
 /// A signature parameter's kind, for binding-argument checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParamKind {
+pub(crate) enum ParamKind {
     Tape,
     State,
 }
 
-struct SigInfo {
+#[derive(Clone)]
+pub(crate) struct SigInfo {
     /// Parameters in signature order: `(name, kind)`.
     params: Vec<(String, ParamKind)>,
+}
+
+impl SigInfo {
+    /// The signature of a resolved world — how a graph another unit
+    /// exports is checked, since only its resolved form is at hand. The
+    /// tape and state parameters are zipped back into signature order
+    /// through [`ResolvedWorld::param_kinds`], so the check walks them
+    /// exactly as it walks a local signature.
+    pub(crate) fn declared(world: &ResolvedWorld) -> SigInfo {
+        let mut tapes = world.tapes.iter();
+        let mut states = world.state_params.iter();
+        SigInfo {
+            params: world
+                .param_kinds
+                .iter()
+                .map(|kind| {
+                    let name = match kind {
+                        ParamKind::Tape => &tapes.next().expect("one tape per tape kind").name,
+                        ParamKind::State => states.next().expect("one state per state kind"),
+                    };
+                    (name.clone(), *kind)
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A world's state-name space for goto / continuation / state-argument
+/// resolution: its state parameters, its states and its graft instances'
+/// names.
+pub(crate) fn state_targets(world: &ResolvedWorld) -> HashSet<&str> {
+    let mut set: HashSet<&str> = HashSet::new();
+    for p in &world.state_params {
+        set.insert(p);
+    }
+    for s in &world.states {
+        set.insert(&s.name);
+    }
+    for g in &world.grafts {
+        if let Some(name) = &g.as_name {
+            set.insert(name);
+        }
+    }
+    set
+}
+
+/// A `return` terminator in an argument list is legal only when the list
+/// is written in a routine (docs/tmt/language.md (`state` parameters)):
+/// it binds the callee's exit to the host routine's own return. Checked
+/// by the host's kind alone, before any signature is consulted, so it
+/// holds for a callee whose declarations were never given.
+pub(crate) fn refuse_return_outside_routine(
+    args: &[BindingArg],
+    host: WorldKind,
+) -> Result<(), CompileError> {
+    if host == WorldKind::Routine {
+        return Ok(());
+    }
+    for a in args {
+        if let BindingValue::Terminator {
+            kind: TermKind::Return,
+            span,
+        } = &a.value
+        {
+            return Err(CompileError {
+                span: *span,
+                kind: CompileErrorKind::ReturnOutsideRoutine,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A graft's argument list checked against the graph it is about to
+/// splice, in the host world it is written in — the check a graft's world
+/// checks already ran ([`check_binding_list`]), repeated at the splice so
+/// it holds of the very graph spliced, whichever declarations table found
+/// it.
+pub(crate) fn check_graft_args(
+    graft: &ResolvedGraft,
+    host: &ResolvedWorld,
+    graph: &ResolvedWorld,
+) -> Result<(), CompileError> {
+    refuse_return_outside_routine(&graft.args, host.kind)?;
+    let tapes: HashSet<&str> = host.tapes.iter().map(|t| t.name.as_str()).collect();
+    check_binding_list(
+        &SigInfo::declared(graph),
+        &graft.args,
+        &state_targets(host),
+        &tapes,
+        graft.target_span,
+    )
+}
+
+/// Arity + argument-KIND checks of one argument list against a signature.
+/// Tape params take tape targets (`tapes`, the host world's); state params
+/// take state names (`states`, the host world's) or terminators. Map
+/// LEGALITY (glyph sets, etc.) is the graft/range expander's — this only
+/// checks the kind.
+///
+/// Also the aliasing check (docs/tmt/language.md (reuse)): within ONE
+/// argument list no two TAPE parameters may name the same caller tape.
+/// One physical head cannot serve two callee tapes read and written
+/// through two independent maps, and the lowering mechanisms disagree
+/// about what it would mean. State parameters are exempt — two
+/// continuations legitimately share one target state.
+///
+/// `fallback_span` is where a `missing-arg` points when the list is empty:
+/// the call/graft/bind site itself (there is no first arg to blame).
+fn check_binding_list(
+    sig: &SigInfo,
+    args: &[BindingArg],
+    states: &HashSet<&str>,
+    tapes: &HashSet<&str>,
+    fallback_span: Span,
+) -> Result<(), CompileError> {
+    // arg name -> param kind, with duplicate + unknown detection.
+    let mut arg_seen: HashSet<&str> = HashSet::new();
+    // Caller tape target -> the argument that claimed it. Scoped to this
+    // one argument list: the same tape in two DIFFERENT calls is legal.
+    let mut tape_seen: HashMap<&str, &str> = HashMap::new();
+    for a in args {
+        if !arg_seen.insert(&a.name) {
+            return Err(CompileError {
+                span: a.name_span,
+                kind: CompileErrorKind::DuplicateArg(a.name.clone()),
+            });
+        }
+        let Some((_, kind)) = sig.params.iter().find(|(n, _)| *n == a.name) else {
+            return Err(CompileError {
+                span: a.name_span,
+                kind: CompileErrorKind::UnknownArg(a.name.clone()),
+            });
+        };
+        // Kind first: a target that is not a tape at all is that error,
+        // not an alias.
+        check_arg_kind(a, *kind, states, tapes)?;
+        if *kind == ParamKind::Tape
+            && let BindingValue::Named { target, .. } = &a.value
+            && let Some(first) = tape_seen.insert(target.as_str(), a.name.as_str())
+        {
+            return Err(CompileError {
+                span: a.span,
+                kind: CompileErrorKind::DuplicateTapeTarget {
+                    first: first.to_string(),
+                    second: a.name.clone(),
+                    target: target.clone(),
+                },
+            });
+        }
+    }
+    // Every parameter must be bound.
+    for (pname, _) in &sig.params {
+        if !arg_seen.contains(pname.as_str()) {
+            // Point at the first arg, or the call/graft/bind site when
+            // there are none to blame.
+            let span = args.first().map(|a| a.span).unwrap_or(fallback_span);
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::MissingArg(pname.clone()),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn check_arg_kind(
+    arg: &BindingArg,
+    kind: ParamKind,
+    states: &HashSet<&str>,
+    tapes: &HashSet<&str>,
+) -> Result<(), CompileError> {
+    match kind {
+        ParamKind::Tape => match &arg.value {
+            BindingValue::Named { target, .. } => {
+                if tapes.contains(target.as_str()) {
+                    Ok(())
+                } else {
+                    Err(CompileError {
+                        span: arg.span,
+                        kind: CompileErrorKind::UnresolvedTapeTarget(target.clone()),
+                    })
+                }
+            }
+            BindingValue::Terminator { .. } => Err(CompileError {
+                span: arg.span,
+                kind: CompileErrorKind::WrongArgKind {
+                    name: arg.name.clone(),
+                    expected: "a tape target",
+                },
+            }),
+        },
+        ParamKind::State => match &arg.value {
+            // A `with map` makes it definitively a tape target — wrong.
+            BindingValue::Named {
+                target, map: None, ..
+            } => {
+                if states.contains(target.as_str()) {
+                    Ok(())
+                } else {
+                    Err(CompileError {
+                        span: arg.span,
+                        kind: CompileErrorKind::UndefinedState(target.clone()),
+                    })
+                }
+            }
+            BindingValue::Named { .. } => Err(CompileError {
+                span: arg.span,
+                kind: CompileErrorKind::WrongArgKind {
+                    name: arg.name.clone(),
+                    expected: "a state or terminator",
+                },
+            }),
+            BindingValue::Terminator { .. } => Ok(()),
+        },
+    }
 }
 
 /// Per-scope definition + import maps, the mangled-name index, and the
@@ -2136,6 +3441,14 @@ impl Scopes {
                 name: &a.name,
                 kind: DefKind::Alphabet,
                 name_span: a.name_span,
+            });
+        }
+        for s in &program.sets {
+            ents.push(Ent {
+                ns: &s.ns,
+                name: &s.name,
+                kind: DefKind::Set,
+                name_span: s.name_span,
             });
         }
         for m in &program.maps {
@@ -2358,14 +3671,16 @@ impl Scopes {
     }
 }
 
-/// Resolve every alphabet's glyph vector, keyed by mangled name.
+/// Resolve every alphabet's glyph vector, keyed by mangled name. Runs after
+/// every set is resolved, since an alphabet body may name one.
 fn resolve_all_alphabets(
     program: &Program,
-    _scopes: &Scopes,
+    sets: &SetScope,
+    set_refs: &mut HashSet<String>,
 ) -> Result<HashMap<String, ResolvedAlphabet>, CompileError> {
     let mut out = HashMap::new();
     for a in &program.alphabets {
-        let glyphs = resolve_alphabet_glyphs(a)?;
+        let glyphs = resolve_alphabet_glyphs(a, sets, set_refs)?;
         let full = full_name(&a.ns, &a.name);
         out.insert(
             full.clone(),
@@ -2373,6 +3688,7 @@ fn resolve_all_alphabets(
                 name: full,
                 name_span: a.name_span,
                 glyphs,
+                exported: a.exported,
             },
         );
     }
@@ -2385,12 +3701,25 @@ fn resolve_module(
     program: &Program,
     scopes: &Scopes,
     mut alphabets: HashMap<String, ResolvedAlphabet>,
+    sets: HashMap<String, ResolvedSet>,
+    mut set_refs: HashSet<String>,
     externals: &Declarations,
 ) -> Result<Resolved, CompileError> {
+    let ext_modules = externals.modules();
+    let set_scope = SetScope {
+        scopes,
+        sets: &sets,
+        externals: &ext_modules,
+    };
     let mut docs: HashMap<String, Doc> = HashMap::new();
     for a in &program.alphabets {
         if let Some(d) = &a.doc {
             docs.insert(full_name(&a.ns, &a.name), d.clone());
+        }
+    }
+    for s in &program.sets {
+        if let Some(d) = &s.doc {
+            docs.insert(full_name(&s.ns, &s.name), d.clone());
         }
     }
     let maps = resolve_all_maps(program, scopes, &mut alphabets, externals, &mut docs)?;
@@ -2420,6 +3749,8 @@ fn resolve_module(
             &r.binds,
             scopes,
             &mut alphabets,
+            &set_scope,
+            &mut set_refs,
             externals,
         )?);
     }
@@ -2439,17 +3770,28 @@ fn resolve_module(
             &g.binds,
             scopes,
             &mut alphabets,
+            &set_scope,
+            &mut set_refs,
             externals,
         )?);
     }
     let mut entry_world = None;
     if let Some(m) = &program.machine {
         entry_world = Some(worlds.len());
-        worlds.push(resolve_machine_world(m, scopes, &mut alphabets, externals)?);
+        worlds.push(resolve_machine_world(
+            m,
+            scopes,
+            &mut alphabets,
+            &set_scope,
+            &mut set_refs,
+            externals,
+        )?);
     }
 
     Ok(Resolved {
         alphabets,
+        sets,
+        set_refs,
         maps,
         worlds,
         entry_world,
@@ -2514,18 +3856,41 @@ fn resolve_world(
     binds: &[Bind],
     scopes: &Scopes,
     alphabets: &mut HashMap<String, ResolvedAlphabet>,
+    sets: &SetScope,
+    set_refs: &mut HashSet<String>,
     externals: &Declarations,
 ) -> Result<ResolvedWorld, CompileError> {
     // Tapes: from the signature's tape params (routine/graph).
     let mut tapes: Vec<ResolvedTape> = Vec::new();
     let mut state_params: Vec<String> = Vec::new();
-    for p in &sig.params {
+    let mut param_kinds: Vec<ParamKind> = Vec::with_capacity(sig.params.len());
+    for (k, p) in sig.params.iter().enumerate() {
+        // Tapes first (docs/tmt/language.md (`state` parameters)).
+        if matches!(p.kind, SigParamKind::Tape { .. })
+            && let Some(earlier) = sig.params[..k]
+                .iter()
+                .find(|q| matches!(q.kind, SigParamKind::State))
+        {
+            return Err(CompileError {
+                span: p.name_span,
+                kind: CompileErrorKind::TapeAfterStateParam {
+                    tape: p.name.clone(),
+                    state: earlier.name.clone(),
+                },
+            });
+        }
+        param_kinds.push(match p.kind {
+            SigParamKind::Tape { .. } => ParamKind::Tape,
+            SigParamKind::State => ParamKind::State,
+        });
         match &p.kind {
             SigParamKind::Tape {
                 alphabet,
                 volatile,
                 writes,
-                preserves,
+                never_writes,
+                enters,
+                leaves,
                 ..
             } => {
                 let (full, card) =
@@ -2534,6 +3899,25 @@ fn resolve_world(
                     .get(&full)
                     .map(|a| a.glyphs.as_slice())
                     .expect("a resolved tape alphabet is in the table");
+                // `enters`/`leaves` take the same membership check as
+                // `writes`/`never writes` — every element must be a symbol of
+                // the parameter's own alphabet — and, like them, the
+                // resolved set is carried on `ResolvedTape` for `ir::lower`
+                // and the source arm of `tmt interface` to read.
+                let mut clause = |c: Option<&ContractClause>, which: &'static str| {
+                    let frame = ClauseFrame {
+                        which,
+                        glyphs,
+                        alphabet: &full,
+                        ns,
+                        sets,
+                    };
+                    resolve_contract_clause(c, &frame, set_refs)
+                };
+                let enters = clause(enters.as_deref(), "enters")?;
+                let leaves = clause(leaves.as_deref(), "leaves")?;
+                let writes = clause(writes.as_deref(), "writes")?;
+                let never_writes = clause(never_writes.as_deref(), "never writes")?;
                 tapes.push(ResolvedTape {
                     name: p.name.clone(),
                     name_span: p.name_span,
@@ -2541,13 +3925,10 @@ fn resolve_world(
                     cardinality: card,
                     span: p.span,
                     volatile: *volatile,
-                    writes: resolve_contract_clause(writes.as_ref(), "writes", glyphs, &full)?,
-                    preserves: resolve_contract_clause(
-                        preserves.as_ref(),
-                        "preserves",
-                        glyphs,
-                        &full,
-                    )?,
+                    writes,
+                    never_writes,
+                    enters,
+                    leaves,
                 });
             }
             SigParamKind::State => state_params.push(p.name.clone()),
@@ -2572,8 +3953,15 @@ fn resolve_world(
             kind: CompileErrorKind::TooManyStateParams(state_params.len()),
         }
     })?;
-    let (grafts, binds, entry) = resolve_world_reuse(grafts, binds, states, ns, scopes, externals)?;
-    let calls = resolve_world_calls(states, &binds, ns, scopes);
+    let mut states = resolve_pattern_sets(states, ns, sets, set_refs)?;
+    position_named_cells(
+        &mut states,
+        &tapes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+    )?;
+    check_world_guards(&mut states, &tapes, alphabets, sets, ns, set_refs)?;
+    let (grafts, binds, entry) =
+        resolve_world_reuse(grafts, binds, &states, ns, scopes, externals)?;
+    let calls = resolve_world_calls(&states, &binds, ns, scopes);
     Ok(ResolvedWorld {
         kind,
         name,
@@ -2582,15 +3970,315 @@ fn resolve_world(
         local: !exported,
         tapes,
         state_params,
+        param_kinds,
         exits,
         declared_noreturn,
-        states: states.to_vec(),
+        states,
         grafts,
         binds,
         entry,
         calls,
         digest: None,
     })
+}
+
+/// Fold one world's rule vectors from their written spelling into the
+/// positional form (docs/tmt/language.md (named vector cells)): every named
+/// cell lands on its tape's position in `tape_names`, every position no name
+/// landed on takes its default (`*` / `-` / `.`), and the names go away. A
+/// fully positional vector is left exactly as written — its width is the
+/// `row-width` check's business, later — so a named vector is width-correct
+/// by construction, however few cells it writes.
+///
+/// The named surface carries three refusals, all here: a name that is no
+/// tape of this world (`unresolved-tape-target` — a `state` parameter is
+/// not a tape either), one tape named twice in one vector
+/// (`duplicate-named-cell`, at the second name), and named mixed with
+/// positional cells (`mixed-cell-forms`, at the first cell that breaks the
+/// form its first cell set).
+///
+/// Everything downstream of resolution sees only the filled positional
+/// form, which is what lets `expand`, the lints and the IR keep their
+/// positional assumptions; `Program` keeps the written spelling, which is
+/// what lets fmt print the form the author wrote and the header print its
+/// own canonical one.
+pub(crate) fn position_named_cells(
+    states: &mut [State],
+    tape_names: &[&str],
+) -> Result<(), CompileError> {
+    for st in states.iter_mut() {
+        for rule in &mut st.rules {
+            position_pattern_cells(&mut rule.pattern, tape_names)?;
+            if let Some(w) = &mut rule.write {
+                position_write_cells(w, tape_names)?;
+            }
+            if let Some(m) = &mut rule.mov {
+                position_move_cells(m, tape_names)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The tape position a cell's name stands for, or the refusal: the name must
+/// name a tape of this world, exactly once per vector.
+fn named_cell_position(
+    name: &crate::parser::CellName,
+    tape_names: &[&str],
+    seen: &mut HashSet<usize>,
+) -> Result<usize, CompileError> {
+    let pos = tape_names
+        .iter()
+        .position(|t| *t == name.name)
+        .ok_or(CompileError {
+            span: name.span,
+            kind: CompileErrorKind::UnresolvedTapeTarget(name.name.clone()),
+        })?;
+    if !seen.insert(pos) {
+        return Err(CompileError {
+            span: name.span,
+            kind: CompileErrorKind::DuplicateNamedCell {
+                name: name.name.clone(),
+            },
+        });
+    }
+    Ok(pos)
+}
+
+/// Each of the three folds shares the shape — form check and name resolution
+/// first, then the positional fill — but not the cell type, so each spells
+/// its own default.
+fn position_pattern_cells(p: &mut Pattern, tape_names: &[&str]) -> Result<(), CompileError> {
+    if p.cells.iter().all(|c| c.name.is_none()) {
+        return Ok(());
+    }
+    let named_form = p.cells[0].name.is_some();
+    // Form and names are checked BEFORE anything is destructured, so a
+    // refusal leaves the vector exactly as written.
+    let mut seen = HashSet::new();
+    let mut spots = Vec::with_capacity(p.cells.len());
+    for c in &p.cells {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if let Some(n) = &c.name {
+            spots.push(named_cell_position(n, tape_names, &mut seen)?);
+        }
+    }
+    if !named_form {
+        // Unreachable past the early return and the form agreement, kept so
+        // the destructuring fill below is total for whatever it moves.
+        return Ok(());
+    }
+    let mut out = vec![
+        PatternCell {
+            name: None,
+            kind: PatternCellKind::Wildcard,
+            binding: None,
+            span: p.span,
+        };
+        tape_names.len()
+    ];
+    for (mut c, n) in std::mem::take(&mut p.cells).into_iter().zip(spots) {
+        c.name = None;
+        out[n] = c;
+    }
+    p.cells = out;
+    Ok(())
+}
+
+fn position_write_cells(w: &mut WriteVec, tape_names: &[&str]) -> Result<(), CompileError> {
+    if w.cells.iter().all(|c| c.name.is_none()) {
+        return Ok(());
+    }
+    let named_form = w.cells[0].name.is_some();
+    // Form and names are checked BEFORE anything is destructured, so a
+    // refusal leaves the vector exactly as written.
+    let mut seen = HashSet::new();
+    let mut spots = Vec::with_capacity(w.cells.len());
+    for c in &w.cells {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if let Some(n) = &c.name {
+            spots.push(named_cell_position(n, tape_names, &mut seen)?);
+        }
+    }
+    if !named_form {
+        // Unreachable past the early return and the form agreement, kept so
+        // the destructuring fill below is total for whatever it moves.
+        return Ok(());
+    }
+    let mut out = vec![
+        WriteCell {
+            name: None,
+            kind: WriteCellKind::Keep,
+            span: w.span,
+        };
+        tape_names.len()
+    ];
+    for (mut c, n) in std::mem::take(&mut w.cells).into_iter().zip(spots) {
+        c.name = None;
+        out[n] = c;
+    }
+    w.cells = out;
+    Ok(())
+}
+
+fn position_move_cells(m: &mut MoveVec, tape_names: &[&str]) -> Result<(), CompileError> {
+    if m.cells.iter().all(|c| c.name.is_none()) {
+        return Ok(());
+    }
+    let named_form = m.cells[0].name.is_some();
+    // Form and names are checked BEFORE anything is destructured, so a
+    // refusal leaves the vector exactly as written.
+    let mut seen = HashSet::new();
+    let mut spots = Vec::with_capacity(m.cells.len());
+    for c in &m.cells {
+        if c.name.is_some() != named_form {
+            return Err(CompileError {
+                span: c.span,
+                kind: CompileErrorKind::MixedCellForms,
+            });
+        }
+        if let Some(n) = &c.name {
+            spots.push(named_cell_position(n, tape_names, &mut seen)?);
+        }
+    }
+    if !named_form {
+        // Unreachable past the early return and the form agreement, kept so
+        // the destructuring fill below is total for whatever it moves.
+        return Ok(());
+    }
+    let mut out = vec![
+        MoveCell {
+            name: None,
+            dir: MoveDir::Stay,
+            span: m.span,
+        };
+        tape_names.len()
+    ];
+    for (mut c, n) in std::mem::take(&mut m.cells).into_iter().zip(spots) {
+        c.name = None;
+        out[n] = c;
+    }
+    m.cells = out;
+    Ok(())
+}
+
+/// A world's states with every set-naming pattern cell resolved: the name
+/// looked up from the world's namespace `ns` through [`SetScope::members`]
+/// — so the reference is recorded as consumed — and the set's members
+/// stored on the cell, in the set's own order. Everything downstream reads
+/// a set cell through those members; nothing past here resolves a set
+/// name again, which is also what lets a graph body grafted into another
+/// unit carry its sets with it.
+///
+/// A binding on a set cell may take fold arithmetic only when every
+/// member's label names a number (`patterns::label_number` — how the set
+/// quoted it does not matter), so a fold over a set-bound name with any
+/// other member is the same `char-arithmetic` refusal the parser gives a
+/// single symbol whose label names none (docs/tmt/language.md
+/// (substitution)).
+fn resolve_pattern_sets(
+    states: &[State],
+    ns: &[String],
+    sets: &SetScope,
+    set_refs: &mut HashSet<String>,
+) -> Result<Vec<State>, CompileError> {
+    let mut out = states.to_vec();
+    for state in &mut out {
+        for rule in &mut state.rules {
+            let mut glyph_bound: Vec<String> = Vec::new();
+            for cell in &mut rule.pattern.cells {
+                let PatternCellKind::SetRef {
+                    name,
+                    name_span,
+                    resolved,
+                } = &mut cell.kind
+                else {
+                    continue;
+                };
+                let set = sets.members(name, *name_span, ns, set_refs)?;
+                let members: Vec<SetMember> = set
+                    .glyphs
+                    .iter()
+                    .map(|label| SetMember {
+                        label: label.clone(),
+                    })
+                    .collect();
+                if let Some(b) = &cell.binding
+                    && members.iter().any(|m| label_number(&m.label).is_none())
+                {
+                    glyph_bound.push(b.name.clone());
+                }
+                *resolved = Some(SetCellMembers {
+                    set: set.name.clone(),
+                    members,
+                });
+            }
+            let bound: Vec<&str> = glyph_bound.iter().map(String::as_str).collect();
+            if let Some(span) = crate::parser::char_arithmetic_span(rule.write.as_ref(), &bound) {
+                return Err(CompileError {
+                    span,
+                    kind: CompileErrorKind::CharArithmetic,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Type-check each rule's `where { … }` guard and resolve its `in` sets —
+/// run after `resolve_pattern_sets` and the named-cell fill, so a vector's
+/// form and a set reference keep their error priority over guard typing,
+/// and every pattern cell is positional (cells[i] speaks of tapes[i]).
+/// Set names resolve through the same [`SetScope`] call pattern-set cells
+/// use, references included.
+fn check_world_guards(
+    states: &mut [State],
+    tapes: &[ResolvedTape],
+    alphabets: &HashMap<String, ResolvedAlphabet>,
+    sets: &SetScope,
+    ns: &[String],
+    set_refs: &mut HashSet<String>,
+) -> Result<(), CompileError> {
+    let ctx = crate::guard::GuardContext {
+        tape_labels: tapes
+            .iter()
+            .map(|t| {
+                alphabets
+                    .get(&t.alphabet)
+                    .map(|a| a.glyphs.clone())
+                    .expect("a resolved tape alphabet is in the table")
+            })
+            .collect(),
+        tape_alphabets: tapes.iter().map(|t| t.alphabet.clone()).collect(),
+    };
+    for state in states.iter_mut() {
+        for rule in &mut state.rules {
+            crate::guard::check_rule_guard(rule, &ctx, |name, span| {
+                let set = sets.members(name, span, ns, set_refs)?;
+                Ok(SetCellMembers {
+                    set: set.name.clone(),
+                    members: set
+                        .glyphs
+                        .iter()
+                        .map(|label| SetMember {
+                            label: label.clone(),
+                        })
+                        .collect(),
+                })
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Resolve every `call` transition in a world's rules to a [`ResolvedCall`]
@@ -2645,6 +4333,8 @@ fn resolve_machine_world(
     m: &Machine,
     scopes: &Scopes,
     alphabets: &mut HashMap<String, ResolvedAlphabet>,
+    sets: &SetScope,
+    set_refs: &mut HashSet<String>,
     externals: &Declarations,
 ) -> Result<ResolvedWorld, CompileError> {
     let mut tapes: Vec<ResolvedTape> = Vec::new();
@@ -2667,12 +4357,20 @@ fn resolve_machine_world(
             // A machine tape declaration has no contract grammar: the clauses
             // live on signature parameters, where a caller can read them.
             writes: None,
-            preserves: None,
+            never_writes: None,
+            enters: None,
+            leaves: None,
         });
     }
+    let mut states = resolve_pattern_sets(&m.states, &[], sets, set_refs)?;
+    position_named_cells(
+        &mut states,
+        &tapes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+    )?;
+    check_world_guards(&mut states, &tapes, alphabets, sets, &[], set_refs)?;
     let (grafts, binds, entry) =
-        resolve_world_reuse(&m.grafts, &m.binds, &m.states, &[], scopes, externals)?;
-    let calls = resolve_world_calls(&m.states, &binds, &[], scopes);
+        resolve_world_reuse(&m.grafts, &m.binds, &states, &[], scopes, externals)?;
+    let calls = resolve_world_calls(&states, &binds, &[], scopes);
     Ok(ResolvedWorld {
         kind: WorldKind::Machine,
         name: "main".to_string(),
@@ -2682,10 +4380,11 @@ fn resolve_machine_world(
         tapes,
         // A `machine` block has no signature, so it declares no exits.
         state_params: Vec::new(),
+        param_kinds: Vec::new(),
         exits: 0,
         // A `machine` block has no `noreturn` grammar slot at all.
         declared_noreturn: None,
-        states: m.states.to_vec(),
+        states,
         grafts,
         binds,
         entry,
@@ -2737,14 +4436,27 @@ fn resolve_tape_alphabet(
                         name: r.full.clone(),
                         name_span: span,
                         glyphs: glyphs.to_vec(),
+                        exported: false,
                     });
                 return Ok((r.full, card));
             }
             return Err(CompileError {
                 span,
-                kind: CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::DeclarationsNotGiven(
+                kind: CompileErrorKind::UnresolvedAlphabet(wrong_kind_or(
+                    &externals.modules(),
                     r.full,
+                    |name, found| AlphabetMiss::WrongKind { name, found },
+                    AlphabetMiss::DeclarationsNotGiven,
                 )),
+            });
+        }
+        if let Some(kind) = r.kind {
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NotAnAlphabet {
+                    name: alphabet.to_string(),
+                    found: kind.noun(),
+                }),
             });
         }
     }
@@ -2766,28 +4478,45 @@ pub(crate) fn find_external_alphabet<'a>(
     externals: &[&'a Resolved],
     name: &str,
 ) -> Option<&'a [String]> {
-    externals
-        .iter()
-        .find_map(|module| module.alphabets.get(name).map(|a| a.glyphs.as_slice()))
+    external_decls(externals, name)
+        .into_iter()
+        .find_map(|d| match d {
+            ExternalDecl::Alphabet(a) => Some(a.glyphs.as_slice()),
+            _ => None,
+        })
 }
 
 /// First-match lookup of a mangled MAP name among external declarations
 /// modules, in table order — [`find_external_alphabet`]'s named-map twin,
 /// over `Resolved::maps`.
 fn find_external_map<'a>(externals: &[&'a Resolved], name: &str) -> Option<&'a ResolvedMapDecl> {
-    externals.iter().find_map(|module| module.maps.get(name))
+    external_decls(externals, name)
+        .into_iter()
+        .find_map(|d| match d {
+            ExternalDecl::Map(m) => Some(m),
+            _ => None,
+        })
 }
 
 /// First-match lookup of a mangled GRAPH name among external declarations
 /// modules, in table order — [`find_external_alphabet`]'s graft-target twin,
 /// over `Resolved::worlds` (kind [`WorldKind::Graph`] only, no `exported`
 /// filter — the same no-filter precedent [`Declarations::routine`] sets: a
-/// `.tmh` never carries a non-exported graph at all, since only an exported
-/// graph's body is ever printed, so the filter would be redundant for that
-/// reader and would wrongly refuse a private graph read leniently from a
-/// `--extern .tmc`). `pub(crate)`: both `resolve_world_reuse` (does the
+/// header prints a non-exported graph only where an exported body nests
+/// it, and a filter would wrongly refuse a private graph read leniently
+/// from a `--extern .tmc`). `pub(crate)`: both `resolve_world_reuse` (does the
 /// declarations table carry this target at all) and `expand.rs` (the
 /// splice itself, and its recursive nested grafts) call it.
+///
+/// For a name ANY module publishes, every other module's declaration of
+/// it — exported or not, of any kind — must have the same form, or the
+/// compile was refused before this lookup ran (docs/tmt/language.md
+/// (declarations)); so a private graph is never returned in place of
+/// another module's published graph or routine, and this graph-only
+/// lookup and `footprint::find_external` agree on what a published name
+/// is. What the table's order still decides is a graph NO module
+/// publishes but two carry privately: the first is returned (and a
+/// compile that would splice both bodies is refused at the splice).
 ///
 /// Returns the OWNING module alongside the world, mirroring
 /// `footprint::find_external`'s own shape — `expand.rs` needs it: a spliced
@@ -2799,35 +4528,59 @@ pub(crate) fn find_external_graph<'a>(
     externals: &[&'a Resolved],
     name: &str,
 ) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
-    externals.iter().find_map(|module| {
-        module
-            .worlds
-            .iter()
-            .find(|w| w.kind == WorldKind::Graph && w.name == name)
-            .map(|w| (*module, w))
+    external_decls(externals, name)
+        .into_iter()
+        .find_map(|d| match d {
+            ExternalDecl::World(m, w) if w.kind == WorldKind::Graph => Some((m, w)),
+            _ => None,
+        })
+}
+
+/// The routine world `name` names in the declarations table, first module
+/// first, text readings before an object reading
+/// ([`crate::declarations::first_reading`]) — the same reading
+/// `Declarations::routine` returns, whatever its export status. Returns
+/// the owning module alongside the world, mirroring
+/// [`find_external_graph`].
+pub(crate) fn find_external_routine<'a>(
+    externals: &[&'a Resolved],
+    name: &str,
+) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
+    crate::declarations::first_reading(externals, |w| {
+        w.kind == WorldKind::Routine && w.name == name
     })
 }
 
-/// Resolve one `writes`/`preserves` clause into a symbol-index set in its
+/// Resolve one `writes`/`never writes` clause into a symbol-index set in its
 /// tape's own alphabet frame. `None` in, `None` out — an absent clause is not
 /// an empty one: it declares nothing, where `writes {}` declares that nothing
 /// is written.
 ///
-/// A clause body is the alphabet-body element grammar, so it resolves the same
-/// way: a range expands by [`expand_range`] (inheriting its ascending and
-/// single-scalar-endpoint rules) and every resulting label must name a symbol
-/// of the alphabet. A repeat is harmless — a set absorbs it.
+/// A clause body is the alphabet-body element grammar, but it is written
+/// against an alphabet that already exists, so a range walks THAT
+/// alphabet's declared order ([`declared_range`], the walk a pattern cell's
+/// range takes) rather than Unicode succession: an endpoint the alphabet
+/// lacks is `contract-symbol-unknown` like any other clause symbol, and a
+/// pair written against the declared order is `range-outside-alphabet`
+/// (docs/tmt/language.md (pattern ranges)). Every other label must name a symbol
+/// of the alphabet. A repeat is harmless — a set absorbs it. A named glyph
+/// set expands in place to its members,
+/// each held to the same membership rule at the reference's own span, so a
+/// set name never reaches the resolved clause — only its members' indices.
+///
+/// An `enters`/`leaves` clause states a head position, which an empty set
+/// does not: the parser refuses one written empty, and this refuses one
+/// whose set references expand to nothing, under the same code.
 fn resolve_contract_clause(
     clause: Option<&ContractClause>,
-    which: &'static str,
-    glyphs: &[String],
-    alphabet: &str,
+    frame: &ClauseFrame,
+    set_refs: &mut HashSet<String>,
 ) -> Result<Option<SymSet>, CompileError> {
     let Some(clause) = clause else {
         return Ok(None);
     };
     let mut set = SymSet::empty();
-    let mut take = |label: String, span: Span| match glyphs.iter().position(|g| *g == label) {
+    let mut take = |label: String, span: Span| match frame.glyphs.iter().position(|g| *g == label) {
         Some(index) => {
             set.insert(index as u32);
             Ok(())
@@ -2836,22 +4589,61 @@ fn resolve_contract_clause(
             span,
             kind: CompileErrorKind::ContractSymbolUnknown {
                 glyph: label,
-                clause: which,
-                alphabet: alphabet.to_string(),
+                clause: frame.which,
+                alphabet: frame.alphabet.to_string(),
             },
         }),
     };
     for elem in &clause.elems {
         match elem {
             AlphabetElem::Single(s) => take(glyph_label(s), s.span())?,
-            AlphabetElem::Range { lo, hi, span } => {
-                for label in expand_range(lo, hi, *span)? {
-                    take(label, *span)?;
+            AlphabetElem::Range { lo, hi, span } => match declared_range(lo, hi, frame.glyphs) {
+                Ok(members) => {
+                    for label in members {
+                        take(label.clone(), *span)?;
+                    }
+                }
+                // An endpoint the alphabet lacks is a clause symbol the
+                // alphabet lacks — the clause's own code.
+                Err(DeclaredRangeMiss::Endpoint(glyph)) => take(glyph, *span)?,
+                Err(DeclaredRangeMiss::Reversed) => {
+                    return Err(CompileError {
+                        span: *span,
+                        kind: CompileErrorKind::RangeOutsideAlphabet {
+                            lo: crate::patterns::written_spelling(lo),
+                            hi: crate::patterns::written_spelling(hi),
+                            alphabet: frame.alphabet.to_string(),
+                            missing: None,
+                        },
+                    });
+                }
+            },
+            AlphabetElem::SetRef { name, span } => {
+                for label in &frame.sets.members(name, *span, frame.ns, set_refs)?.glyphs {
+                    take(label.clone(), *span)?;
                 }
             }
         }
     }
+    if matches!(frame.which, "enters" | "leaves") && set == SymSet::empty() {
+        return Err(CompileError {
+            span: clause.span,
+            kind: CompileErrorKind::EmptyHeadClause,
+        });
+    }
     Ok(Some(set))
+}
+
+/// What one contract clause resolves against: which clause it is (for the
+/// diagnostics), its tape's alphabet (the frame every element must name a
+/// symbol of), and the declaring namespace plus the set scope a set
+/// reference inside it resolves through.
+struct ClauseFrame<'a> {
+    which: &'static str,
+    glyphs: &'a [String],
+    alphabet: &'a str,
+    ns: &'a [String],
+    sets: &'a SetScope<'a>,
 }
 
 /// Resolve a world's graft targets (to mangled graph names) and bind targets
@@ -2887,6 +4679,7 @@ fn resolve_world_reuse(
                     kind: CompileErrorKind::WrongTargetKind {
                         name: joined,
                         expected: "a graph",
+                        found: r.kind.map_or("something else", DefKind::noun),
                     },
                 });
             }
@@ -2901,8 +4694,11 @@ fn resolve_world_reuse(
                 } else {
                     return Err(CompileError {
                         span: g.target.span,
-                        kind: CompileErrorKind::UndefinedGraph(GraphMiss::DeclarationsNotGiven(
+                        kind: CompileErrorKind::UndefinedGraph(wrong_kind_or(
+                            &ext_modules,
                             r.full,
+                            |name, found| GraphMiss::WrongKind { name, found },
+                            GraphMiss::DeclarationsNotGiven,
                         )),
                     });
                 }
@@ -2999,6 +4795,13 @@ pub struct CompileOptions {
     /// `--strip-debugger`: drop `brk` at codegen. The optimizer runs BEFORE
     /// stripping, so the `brk` barrier always holds.
     pub strip_debugger: bool,
+    /// `--strip-asserts`: drop the compiler-planted contract checks. A
+    /// compiler decision, so it never reaches
+    /// [`crate::codegen::CodegenOptions`] the way `strip_debugger` does —
+    /// the check states are simply never built (`crate::contracts::head`),
+    /// so a stripped build's own IR carries none and codegen has nothing
+    /// to filter.
+    pub strip_asserts: bool,
     /// `-O0` (default) or `-O1` (runs the optimizer pass pipeline).
     pub opt_level: OptLevel,
     /// Pass names to disable (`--fno-<pass>`).
@@ -3033,6 +4836,7 @@ impl Default for CompileOptions {
             externals: Declarations::stdlib(),
             debug_info: false,
             strip_debugger: false,
+            strip_asserts: false,
             opt_level: OptLevel::default(),
             disabled_passes: Vec::new(),
             capture_ir: false,
@@ -3128,6 +4932,18 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     let expanded = crate::expand::expand(&analysis.resolved, &options.externals)?;
     let (mut ir, ir_warnings) = lower(&expanded, &analysis.resolved, &options.externals)?;
 
+    // A debug build plants the head-position checks the static analysis
+    // could neither prove nor disprove (docs/tmt/language.md (head-position
+    // clauses)). Gated HERE rather than later in the pipeline: stripping is
+    // a compiler decision, so a stripped build never builds the states at
+    // all and its IR carries no trace of them — nothing downstream filters
+    // anything out. Before `validate_ir`, so the planted states are held to
+    // the same invariants every other world is, and before the optimizer,
+    // so they are ordinary states every pass sees.
+    if !options.strip_asserts {
+        crate::contracts::head::synthesize(&mut ir);
+    }
+
     // Validate every compiler-produced world before codegen relies on the
     // invariants (dense ids, in-bounds indices, arity-wide rows, traps only on
     // synthesized rows). A failure here is an internal error.
@@ -3169,11 +4985,13 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     let ext_modules = options.externals.modules();
     let footprint = crate::footprint::infer_resolved_with(&analysis.resolved, &ext_modules);
     let exported_graphs =
-        crate::header::exported_graph_digests(&analysis.program, &analysis.resolved, &footprint);
+        crate::header::interface_graph_digests(&analysis.program, &analysis.resolved, &footprint);
     // Every DISTINCT library graph this unit spliced anywhere (a direct
     // graft, or one reached through another library graph's own nested
-    // grafts) — `expand::expand` records the name at the point its target
-    // missed the local graph map; the digest itself was stamped onto that
+    // grafts) — `expand::expand` records each at the splice, with the digest
+    // stamped onto the body actually spliced (its owning module's copy), never
+    // looked up by name here: two modules may carry different graphs under
+    // one name. The digest was stamped onto that
     // graph's `ResolvedWorld` when its declarations module was read, since
     // this unit has no AST of its own to recompute it from. Every producer
     // of a `Declarations` table stamps every graph world it carries
@@ -3184,16 +5002,42 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     // reachable from ordinary source.
     let mut spliced_grafts: Vec<GraftProvenance> =
         Vec::with_capacity(expanded.spliced_external_graphs.len());
-    for name in &expanded.spliced_external_graphs {
-        let digest = find_external_graph(&ext_modules, name)
-            .and_then(|(_, w)| w.digest)
-            .ok_or_else(|| CompileError {
-                span: Span::point(0, 0),
-                kind: CompileErrorKind::Internal(format!(
-                    "graph `{name}` was reached through the declarations table but carries \
-                     no stamped digest"
-                )),
-            })?;
+    let mut spliced_grafts_origins: Vec<(String, usize)> = Vec::new();
+    for spliced in &expanded.spliced_external_graphs {
+        let name = &spliced.name;
+        // One name, one body: a unit that splices two DIFFERENT graphs under
+        // one qualified name is refused, naming the origin of the body
+        // spliced first and of the one that conflicts with it
+        // (docs/tmt/language.md (grafting a graph from another unit)).
+        if let Some(earlier) = spliced_grafts_origins
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, m)| *m)
+        {
+            let describe = |m: usize| {
+                options
+                    .externals
+                    .origin_of(ext_modules[m])
+                    .map(|o| o.describe())
+                    .unwrap_or_else(|| "a declarations module".to_string())
+            };
+            return Err(CompileError {
+                span: spliced.span,
+                kind: CompileErrorKind::ConflictingDeclaration {
+                    name: name.clone(),
+                    first: describe(earlier),
+                    second: describe(spliced.module),
+                },
+            });
+        }
+        let digest = spliced.digest.ok_or_else(|| CompileError {
+            span: Span::point(0, 0),
+            kind: CompileErrorKind::Internal(format!(
+                "graph `{name}` was reached through the declarations table but carries \
+                 no stamped digest"
+            )),
+        })?;
+        spliced_grafts_origins.push((name.clone(), spliced.module));
         spliced_grafts.push(GraftProvenance {
             graph: name.clone(),
             digest,
@@ -3335,6 +5179,10 @@ fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
 /// The mutable context threaded through the world-boundary checks.
 struct WorldCtx<'a> {
     scopes: &'a Scopes,
+    /// The declarations modules, in table order — the same list
+    /// `resolve_world_reuse` resolved every graft target against, so a
+    /// graft's argument check and its target resolution read one table.
+    externals: &'a [&'a Resolved],
     imports_used: Vec<bool>,
     warned_undeclared: HashSet<String>,
     diagnostics: Vec<Diagnostic>,
@@ -3405,6 +5253,13 @@ impl WorldCtx<'_> {
             }
             for s in states {
                 for rule in &s.rules {
+                    // A pattern cell naming a set is a set reference like
+                    // one in an element list.
+                    for cell in &rule.pattern.cells {
+                        if let PatternCellKind::SetRef { name, .. } = &cell.kind {
+                            mark(name, ns, ctx);
+                        }
+                    }
                     if let Transition::Call { target, args, .. } = &rule.transition {
                         mark(&target.joined(), ns, ctx);
                         mark_args(args, ns, ctx);
@@ -3428,13 +5283,55 @@ impl WorldCtx<'_> {
             mark(&m.src, &m.ns, self);
             mark(&m.dst, &m.ns, self);
         }
+        // A set reference is a reference like any other, wherever an
+        // element list can carry one: a set body, an alphabet body, and
+        // the four contract clauses of a signature tape parameter. An
+        // import whose sole use is one of them is load-bearing (deleting
+        // it is `undefined-set`).
+        let mark_elems = |elems: &[AlphabetElem], ns: &[String], ctx: &mut Self| {
+            for e in elems {
+                if let AlphabetElem::SetRef { name, .. } = e {
+                    mark(name, ns, ctx);
+                }
+            }
+        };
+        let mark_clauses = |sig: &crate::parser::Signature, ns: &[String], ctx: &mut Self| {
+            for p in &sig.params {
+                if let SigParamKind::Tape {
+                    writes,
+                    never_writes,
+                    enters,
+                    leaves,
+                    ..
+                } = &p.kind
+                {
+                    let clauses = [
+                        writes.as_deref(),
+                        never_writes.as_deref(),
+                        enters.as_deref(),
+                        leaves.as_deref(),
+                    ];
+                    for c in clauses.into_iter().flatten() {
+                        mark_elems(&c.elems, ns, ctx);
+                    }
+                }
+            }
+        };
+        for s in &program.sets {
+            mark_elems(&s.elems, &s.ns, self);
+        }
+        for a in &program.alphabets {
+            mark_elems(&a.elems, &a.ns, self);
+        }
         for r in &program.routines {
             let alphas: Vec<&str> = tape_alphabet_refs(&r.sig);
             mark_world(&alphas, &r.states, &r.grafts, &r.binds, &r.ns, self);
+            mark_clauses(&r.sig, &r.ns, self);
         }
         for g in &program.graphs {
             let alphas: Vec<&str> = tape_alphabet_refs(&g.sig);
             mark_world(&alphas, &g.states, &g.grafts, &g.binds, &g.ns, self);
+            mark_clauses(&g.sig, &g.ns, self);
         }
         if let Some(m) = &program.machine {
             let alphas: Vec<&str> = m.tapes.iter().map(|t| t.alphabet.as_str()).collect();
@@ -3576,24 +5473,6 @@ impl WorldCtx<'_> {
         })
     }
 
-    /// The world's state-name space for goto / continuation / state-arg
-    /// resolution: state params, local states, and graft instances.
-    fn state_targets<'w>(&self, world: &'w ResolvedWorld) -> HashSet<&'w str> {
-        let mut set: HashSet<&str> = HashSet::new();
-        for p in &world.state_params {
-            set.insert(p);
-        }
-        for s in &world.states {
-            set.insert(&s.name);
-        }
-        for g in &world.grafts {
-            if let Some(name) = &g.as_name {
-                set.insert(name);
-            }
-        }
-        set
-    }
-
     fn bind_names<'w>(&self, world: &'w ResolvedWorld) -> HashSet<&'w str> {
         world.binds.iter().map(|b| b.name.as_str()).collect()
     }
@@ -3602,11 +5481,29 @@ impl WorldCtx<'_> {
     /// resolution (same world only; `return` context), and `call` target +
     /// argument checks.
     fn check_rules(&mut self, world: &ResolvedWorld, is_routine: bool) -> Result<(), CompileError> {
-        let states = self.state_targets(world);
+        let states = state_targets(world);
         let binds = self.bind_names(world);
         let ns = self.world_ns(world);
         for s in &world.states {
             for rule in &s.rules {
+                let mut bound: HashMap<&str, usize> = HashMap::new();
+                for (i, cell) in rule.pattern.cells.iter().enumerate() {
+                    let Some(binding) = &cell.binding else {
+                        continue;
+                    };
+                    if let Some(&first) = bound.get(binding.name.as_str()) {
+                        return Err(CompileError {
+                            span: binding.span,
+                            kind: CompileErrorKind::DuplicatePatternBinding {
+                                name: binding.name.clone(),
+                                first,
+                                second: i + 1,
+                                state: s.name.clone(),
+                            },
+                        });
+                    }
+                    bound.insert(binding.name.as_str(), i + 1);
+                }
                 match &rule.transition {
                     Transition::Goto { name, span, .. } => {
                         self.check_state_target(name, *span, &states, &binds, &ns)?;
@@ -3703,7 +5600,7 @@ impl WorldCtx<'_> {
     /// targets. `call`s live inside rule transitions; grafts/binds are
     /// declarations.
     fn check_reuse_targets(&mut self, world: &ResolvedWorld) -> Result<(), CompileError> {
-        let states = self.state_targets(world);
+        let states = state_targets(world);
         let binds = self.bind_names(world);
         let tapes: HashSet<&str> = world.tapes.iter().map(|t| t.name.as_str()).collect();
         let ns = self.world_ns(world);
@@ -3715,6 +5612,7 @@ impl WorldCtx<'_> {
                     target, args, span, ..
                 } = &rule.transition
                 {
+                    refuse_return_outside_routine(args, world.kind)?;
                     let joined = target.joined();
                     // A single-segment target naming a world-local bind is a
                     // bind-call (the bind carries the binding).
@@ -3744,9 +5642,12 @@ impl WorldCtx<'_> {
             }
         }
 
-        // graft declarations — the graph target is already resolved to a
-        // local graph (`resolve_world_reuse`); check its binding args.
+        // graft declarations — the graph target is already resolved
+        // (`resolve_world_reuse`), to a local graph or to one the
+        // declarations carry; either way its binding args are checked here,
+        // before anything splices it.
         for g in &world.grafts {
+            refuse_return_outside_routine(&g.args, world.kind)?;
             self.check_binding_args(
                 &g.target,
                 &g.target,
@@ -3760,8 +5661,33 @@ impl WorldCtx<'_> {
 
         // bind declarations
         for b in &world.binds {
+            refuse_return_outside_routine(&b.args, world.kind)?;
             if b.external {
+                if find_external_routine(self.externals, &b.target).is_none()
+                    && let Some(k) = external_kind(self.externals, &b.target)
+                {
+                    return Err(CompileError {
+                        span: b.target_span,
+                        kind: CompileErrorKind::WrongTargetKind {
+                            name: b.target.clone(),
+                            expected: "a routine",
+                            found: k.noun(),
+                        },
+                    });
+                }
                 self.warn_undeclared_if_bare(&b.target, b.target_span, b.external);
+                if !b.args.is_empty()
+                    && let Some((_, callee)) = find_external_routine(self.externals, &b.target)
+                {
+                    check_binding_list(
+                        &SigInfo::declared(callee),
+                        &b.args,
+                        &states,
+                        &tapes,
+                        // Unreachable: the list is non-empty here.
+                        b.target_span,
+                    )?;
+                }
                 continue;
             }
             self.check_target_kind(&b.target, b.target_span, DefKind::Routine, "a routine")?;
@@ -3802,16 +5728,40 @@ impl WorldCtx<'_> {
                 kind: CompileErrorKind::WrongTargetKind {
                     name: joined.to_string(),
                     expected: expected_noun,
+                    found: r.kind.map_or("something else", DefKind::noun),
                 },
             }),
-            Some(_) => {
-                // Absolute-external, or imported-to-external routine —
-                // allowed; no arg check HERE (no local signature). Its own
-                // arg-list check, against a DECLARED signature when one is
-                // known, runs later in `ir::resolve_binding`
-                // (docs/formats.md (bound calls)); with no declarations at
-                // all it defers to the linker.
-                Ok(())
+            Some(r) => {
+                // A name another unit declares as a different kind (a
+                // graph is grafted, never called) says so, before the
+                // argument-less exemption or any signature is consulted.
+                if find_external_routine(self.externals, &r.full).is_none()
+                    && let Some(k) = external_kind(self.externals, &r.full)
+                {
+                    return Err(CompileError {
+                        span: target.span,
+                        kind: CompileErrorKind::WrongTargetKind {
+                            name: joined.to_string(),
+                            expected: expected_noun,
+                            found: k.noun(),
+                        },
+                    });
+                }
+                // Absolute-external, or imported-to-external routine. An
+                // argument-less call is the transparent form: tapes bind by
+                // position, nothing to check by name
+                // (docs/tmt/language.md (calls across units)).
+                if args.is_empty() {
+                    return Ok(());
+                }
+                match find_external_routine(self.externals, &r.full) {
+                    Some((_, callee)) => {
+                        check_binding_list(&SigInfo::declared(callee), args, states, tapes, span)
+                    }
+                    // No declarations: the linker checks the list against
+                    // the object (docs/formats.md (bound calls)).
+                    None => Ok(()),
+                }
             }
             None => {
                 // Bare undeclared external: warn once, stays external.
@@ -3830,34 +5780,29 @@ impl WorldCtx<'_> {
     ) -> Result<(), CompileError> {
         match self.scopes.by_full.get(full) {
             Some(k) if *k == want => Ok(()),
-            Some(_) => Err(CompileError {
+            Some(found) => Err(CompileError {
                 span,
                 kind: CompileErrorKind::WrongTargetKind {
                     name: full.to_string(),
                     expected: expected_noun,
+                    found: found.noun(),
                 },
             }),
             None => Ok(()),
         }
     }
 
-    /// Arity + argument-KIND checks against a locally-defined signature. Tape
-    /// params take tape targets (world tapes); state params take state names
-    /// (same-world states) or terminators. Map LEGALITY (glyph sets, etc.) is
-    /// the graft/range expander's — this only checks the kind.
-    ///
-    /// Also the aliasing check (docs/tmt/language.md (reuse)): within ONE
-    /// argument list no two TAPE parameters may name the same caller tape.
-    /// One physical head cannot serve two callee tapes read and written
-    /// through two independent maps, and the lowering mechanisms disagree
-    /// about what it would mean. State parameters are exempt — two
-    /// continuations legitimately share one target state. Every `call`,
+    /// [`check_binding_list`] against the target's signature — a
+    /// locally-defined one, or, for a graft of a graph another unit exports,
+    /// the one its declarations carry ([`Self::signature`]). Every `call`,
     /// `graft`, and `bind` funnels through here, so one check covers all
-    /// three; a `.tmc` bound call always has a local signature to check
-    /// against here — an out-of-unit callee's own arg-list check runs
-    /// against its DECLARED signature instead, in `ir::resolve_binding`
-    /// (docs/formats.md (bound calls)), which is also where a call with no
-    /// declarations for its callee at all defers the check to the linker.
+    /// three. A graft splices its graph before IR exists, so a graft of
+    /// another unit's graph is checked here too, against the declared
+    /// signature, and again at the splice ([`check_graft_args`]). An
+    /// out-of-unit `call`/`bind` callee is checked by the same
+    /// [`check_binding_list`], against its DECLARED signature, at the call
+    /// and bind sites themselves; with no declarations for it the check
+    /// defers to the linker (docs/formats.md (bound calls)).
     #[allow(clippy::too_many_arguments)]
     fn check_binding_args(
         &self,
@@ -3871,111 +5816,28 @@ impl WorldCtx<'_> {
         // call/graft/bind site itself (there is no first arg to blame).
         fallback_span: Span,
     ) -> Result<(), CompileError> {
-        let _ = want;
-        let Some(sig) = self.scopes.sigs.get(sig_key) else {
-            return Ok(());
-        };
-        // arg name -> param kind, with duplicate + unknown detection.
-        let mut arg_seen: HashSet<&str> = HashSet::new();
-        // Caller tape target -> the argument that claimed it. Scoped to this
-        // one argument list: the same tape in two DIFFERENT calls is legal.
-        let mut tape_seen: HashMap<&str, &str> = HashMap::new();
-        for a in args {
-            if !arg_seen.insert(&a.name) {
-                return Err(CompileError {
-                    span: a.name_span,
-                    kind: CompileErrorKind::DuplicateArg(a.name.clone()),
-                });
-            }
-            let Some((_, kind)) = sig.params.iter().find(|(n, _)| *n == a.name) else {
-                return Err(CompileError {
-                    span: a.name_span,
-                    kind: CompileErrorKind::UnknownArg(a.name.clone()),
-                });
-            };
-            // Kind first: a target that is not a tape at all is that error,
-            // not an alias.
-            self.check_arg_kind(a, *kind, states, tapes)?;
-            if *kind == ParamKind::Tape
-                && let BindingValue::Named { target, .. } = &a.value
-                && let Some(first) = tape_seen.insert(target.as_str(), a.name.as_str())
-            {
-                return Err(CompileError {
-                    span: a.span,
-                    kind: CompileErrorKind::DuplicateTapeTarget {
-                        first: first.to_string(),
-                        second: a.name.clone(),
-                        target: target.clone(),
-                    },
-                });
-            }
+        match self.signature(sig_key, want) {
+            Some(sig) => check_binding_list(&sig, args, states, tapes, fallback_span),
+            None => Ok(()),
         }
-        // Every parameter must be bound.
-        for (pname, _) in &sig.params {
-            if !arg_seen.contains(pname.as_str()) {
-                // Point at the first arg, or the call/graft/bind site when
-                // there are none to blame.
-                let span = args.first().map(|a| a.span).unwrap_or(fallback_span);
-                return Err(CompileError {
-                    span,
-                    kind: CompileErrorKind::MissingArg(pname.clone()),
-                });
-            }
-        }
-        Ok(())
     }
 
-    fn check_arg_kind(
-        &self,
-        arg: &BindingArg,
-        kind: ParamKind,
-        states: &HashSet<&str>,
-        tapes: &HashSet<&str>,
-    ) -> Result<(), CompileError> {
-        match kind {
-            ParamKind::Tape => match &arg.value {
-                BindingValue::Named { target, .. } => {
-                    if tapes.contains(target.as_str()) {
-                        Ok(())
-                    } else {
-                        Err(CompileError {
-                            span: arg.span,
-                            kind: CompileErrorKind::UnresolvedTapeTarget(target.clone()),
-                        })
-                    }
-                }
-                BindingValue::Terminator { .. } => Err(CompileError {
-                    span: arg.span,
-                    kind: CompileErrorKind::WrongArgKind {
-                        name: arg.name.clone(),
-                        expected: "a tape target",
-                    },
-                }),
-            },
-            ParamKind::State => match &arg.value {
-                // A `with map` makes it definitively a tape target — wrong.
-                BindingValue::Named {
-                    target, map: None, ..
-                } => {
-                    if states.contains(target.as_str()) {
-                        Ok(())
-                    } else {
-                        Err(CompileError {
-                            span: arg.span,
-                            kind: CompileErrorKind::UndefinedState(target.clone()),
-                        })
-                    }
-                }
-                BindingValue::Named { .. } => Err(CompileError {
-                    span: arg.span,
-                    kind: CompileErrorKind::WrongArgKind {
-                        name: arg.name.clone(),
-                        expected: "a state or terminator",
-                    },
-                }),
-                BindingValue::Terminator { .. } => Ok(()),
-            },
+    /// The signature a binding-argument list is checked against: this
+    /// unit's own definition of `sig_key` when it has one, otherwise — for
+    /// a graph only — the declared graph the declarations table carries
+    /// under that name, the same first-match lookup that resolved the graft
+    /// target. `None` leaves the list unchecked here, which only an
+    /// out-of-unit routine reaches; its declared signature is read by the
+    /// call and bind sites directly ([`find_external_routine`]).
+    fn signature(&self, sig_key: &str, want: DefKind) -> Option<Cow<'_, SigInfo>> {
+        if let Some(sig) = self.scopes.sigs.get(sig_key) {
+            return Some(Cow::Borrowed(sig));
         }
+        if want != DefKind::Graph {
+            return None;
+        }
+        find_external_graph(self.externals, sig_key)
+            .map(|(_, world)| Cow::Owned(SigInfo::declared(world)))
     }
 
     fn warn_undeclared(&mut self, name: &str, span: Span) {
@@ -4077,18 +5939,49 @@ mod tests {
             CompileErrorKind::DocLineOrder,
             CompileErrorKind::UnknownAttribute("x".into()),
             CompileErrorKind::DuplicateAttribute,
-            CompileErrorKind::ContractClauseOrder,
+            CompileErrorKind::ContractClauseOrder {
+                what: "writes",
+                before: "never writes",
+            },
             CompileErrorKind::DuplicateContractClause { what: "writes" },
+            CompileErrorKind::EmptyHeadClause,
             CompileErrorKind::EmptyAlphabet,
             CompileErrorKind::DuplicateGlyph("x".into()),
             CompileErrorKind::AlphabetTooLarge(200),
             CompileErrorKind::RangeEndpointNotScalar,
             CompileErrorKind::RangeDescending,
+            CompileErrorKind::SymbolOutsideAlphabet {
+                glyph: "x".into(),
+                alphabet: "a".into(),
+            },
+            CompileErrorKind::SetOutsideAlphabet {
+                glyph: "x".into(),
+                set: "s".into(),
+                alphabet: "a".into(),
+            },
+            CompileErrorKind::RangeOutsideAlphabet {
+                lo: "x".into(),
+                hi: "y".into(),
+                alphabet: "a".into(),
+                missing: None,
+            },
+            CompileErrorKind::EmptySetInPattern("s".into()),
             CompileErrorKind::DuplicateName {
                 name: "x".into(),
                 what: "an alphabet",
             },
+            CompileErrorKind::ConflictingDeclaration {
+                name: "x".into(),
+                first: "a".into(),
+                second: "b".into(),
+            },
             CompileErrorKind::DuplicateBinding("x".into()),
+            CompileErrorKind::DuplicatePatternBinding {
+                name: "x".into(),
+                first: 1,
+                second: 2,
+                state: "s".into(),
+            },
             CompileErrorKind::TooManyTapes(17),
             CompileErrorKind::UnresolvedAlphabet(AlphabetMiss::NoSuchAlphabet("x".into())),
             CompileErrorKind::DuplicateTape("x".into()),
@@ -4102,8 +5995,11 @@ mod tests {
             CompileErrorKind::WrongTargetKind {
                 name: "x".into(),
                 expected: "a routine",
+                found: "a graph",
             },
             CompileErrorKind::UndefinedGraph(GraphMiss::NoSuchGraph("x".into())),
+            CompileErrorKind::UndefinedSet(SetMiss::NoSuchSet("x".into())),
+            CompileErrorKind::SetCycle(vec!["x".into(), "x".into()]),
             CompileErrorKind::UnknownArg("x".into()),
             CompileErrorKind::DuplicateArg("x".into()),
             CompileErrorKind::MissingArg("x".into()),
@@ -4128,6 +6024,16 @@ mod tests {
                 tape: "t".into(),
                 glyphs: vec!["x".into()],
             },
+            CompileErrorKind::EntersNotAccepted {
+                state: "s".into(),
+                tape: "t".into(),
+                glyph: "x".into(),
+            },
+            CompileErrorKind::LeavesOutsideContract {
+                state: "s".into(),
+                tape: "t".into(),
+                glyph: "x".into(),
+            },
             CompileErrorKind::GraftCycle("x".into()),
             CompileErrorKind::GraftCallUnsupported("x".into()),
             CompileErrorKind::MapSymbolNotInAlphabet("x".into()),
@@ -4135,6 +6041,10 @@ mod tests {
             CompileErrorKind::MapConflict { symbol: "x".into() },
             CompileErrorKind::MapNotInjective { symbol: "x".into() },
             CompileErrorKind::IdentityGlyphMismatch,
+            CompileErrorKind::OpenGraftUncovered {
+                state: "s".into(),
+                tape: "t".into(),
+            },
             CompileErrorKind::MapNotClosed("x".into()),
             CompileErrorKind::NamedMapSourceMismatch {
                 map: "m".into(),
@@ -4159,11 +6069,27 @@ mod tests {
                 expected: 2,
                 got: 3,
             },
+            CompileErrorKind::DuplicateNamedCell { name: "x".into() },
+            CompileErrorKind::MixedCellForms,
             CompileErrorKind::TooManyStateParams(256),
+            CompileErrorKind::TapeAfterStateParam {
+                tape: "x".into(),
+                state: "y".into(),
+            },
             CompileErrorKind::StateArgsNeedDeclarations("x".into()),
             CompileErrorKind::NoreturnViolated("x".into()),
             CompileErrorKind::ThenRequired("x".into()),
             CompileErrorKind::Internal("x".into()),
+            CompileErrorKind::GuardOrderContext {
+                left: "x".into(),
+                right: "y".into(),
+            },
+            CompileErrorKind::GuardUnknownBinding { name: "x".into() },
+            CompileErrorKind::GuardSetOutsideAlphabet {
+                set: "s".into(),
+                alphabet: "a".into(),
+            },
+            CompileErrorKind::GuardConstantComparison,
         ];
         let witnessed: Vec<&str> = all.iter().map(|k| k.code()).collect();
         assert_eq!(
@@ -4857,7 +6783,7 @@ machine {
     fn contract_clauses_resolve_to_index_sets_in_the_tapes_own_frame() {
         let a = ok("\
 alphabet bits { '_', '0', '1' }
-routine r(tape t: bits writes {'0'..'1'} preserves {'_'}) {
+routine r(tape t: bits writes {'0'..'1'} never writes {'_'}) {
   entry state s { [*] -> return; }
 }
 ");
@@ -4870,7 +6796,10 @@ routine r(tape t: bits writes {'0'..'1'} preserves {'_'}) {
             vec![1, 2],
             "`'0'..'1'` is positions 1 and 2 of `{{'_', '0', '1'}}`"
         );
-        assert_eq!(tape.preserves.unwrap().iter().collect::<Vec<_>>(), vec![0]);
+        assert_eq!(
+            tape.never_writes.unwrap().iter().collect::<Vec<_>>(),
+            vec![0]
+        );
     }
 
     #[test]
@@ -4882,12 +6811,12 @@ machine { tape m: bits; entry state s { [*] -> stop; } }
 ");
         let routine = a.resolved.worlds.iter().find(|w| w.name == "r").unwrap();
         assert!(routine.tapes[0].writes.is_none());
-        assert!(routine.tapes[0].preserves.is_none());
+        assert!(routine.tapes[0].never_writes.is_none());
         // A machine tape declaration has no clause grammar at all, so the
         // machine world's tapes are unconditionally uncontracted.
         let machine = a.resolved.worlds.iter().find(|w| w.name == "main").unwrap();
         assert!(machine.tapes[0].writes.is_none());
-        assert!(machine.tapes[0].preserves.is_none());
+        assert!(machine.tapes[0].never_writes.is_none());
     }
 
     #[test]
@@ -4935,10 +6864,10 @@ routine setZero(tape n: bin writes { '$' }) {
     }
 
     #[test]
-    fn a_violated_preserves_contract_errors() {
+    fn a_violated_never_writes_contract_errors() {
         let e = err("\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits preserves {'1'}) {
+routine mark(tape t: bits never writes {'1'}) {
   entry state s { [*] -> write ['1'] return; }
 }
 ");
@@ -4950,12 +6879,12 @@ routine mark(tape t: bits preserves {'1'}) {
     }
 
     #[test]
-    fn preserves_subtracts_from_writes_where_the_two_overlap() {
-        // `'1'` in BOTH clauses is redundancy, not an error — and `preserves`
+    fn never_writes_subtracts_from_writes_where_the_two_overlap() {
+        // `'1'` in BOTH clauses is redundancy, not an error — and `never writes`
         // wins the subtraction, so a body writing it violates the contract.
         let overlapping = "\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0','1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0','1'} never writes {'1'}) {
   entry state s { [*] -> write ['1'] return; }
 }
 ";
@@ -4963,7 +6892,7 @@ routine mark(tape t: bits writes {'0','1'} preserves {'1'}) {
         // The same declaration over a body writing only `'0'` is satisfied.
         ok("\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0','1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0','1'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ");
@@ -5022,14 +6951,14 @@ routine mark(tape t: bits writes {'x'}) {
         );
         let e = err("\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits preserves {'x'}) {
+routine mark(tape t: bits never writes {'x'}) {
   entry state s { [*] -> return; }
 }
 ");
         assert_eq!(e.kind.code(), "contract-symbol-unknown");
         assert_eq!(
             e.kind.to_string(),
-            "'x' in the `preserves` clause is not a symbol of alphabet `bits`"
+            "'x' in the `never writes` clause is not a symbol of alphabet `bits`"
         );
     }
 
@@ -5112,6 +7041,288 @@ routine outer(tape t: bits writes {'0'}) {
         assert_eq!(
             e.kind.to_string(),
             "`outer` may write '1' on tape `t`, which its contract forbids"
+        );
+    }
+
+    // -- head-position contracts: `enters`/`leaves` -------------------------
+
+    /// (1) `enters { 'x' }` on a routine whose entry state has no rule
+    /// matching `'x'` — the entry state traps on the very glyph the
+    /// signature promises a caller may hand it.
+    #[test]
+    fn an_enters_glyph_the_entry_state_does_not_accept_is_rejected() {
+        let e = err("\
+alphabet bits { '_', '0', 'x' }
+routine r(tape t: bits enters { 'x' }) {
+  entry state s { ['0'] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "enters-not-accepted");
+        assert_eq!(
+            e.kind.to_string(),
+            "entry state `s` has no rule for 'x' on tape `t`, which its `enters` clause declares"
+        );
+    }
+
+    /// (2) The near miss: the same clause and entry state, now with a `[*]`
+    /// catch-all — every glyph is accepted, `'x'` included, so the same
+    /// declared `enters` clause is satisfied.
+    #[test]
+    fn a_catch_all_entry_state_accepts_every_declared_enters_glyph() {
+        ok("\
+alphabet bits { '_', '0', 'x' }
+routine r(tape t: bits enters { 'x' }) {
+  entry state s { ['0'] -> return; [*] -> return; }
+}
+");
+    }
+
+    /// (3) `leaves { '$' }` on a routine whose `return` row writes a
+    /// literal `'0'` and does not move: the leaving glyph is statically
+    /// `'0'`, which the clause does not list.
+    #[test]
+    fn a_return_row_writing_outside_the_declared_leaves_set_is_rejected() {
+        let e = err("\
+alphabet bits { '_', '0', '$' }
+routine r(tape t: bits leaves { '$' }) {
+  entry state s { [*] -> write ['0'] return; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "this exit row in state `s` may leave '0' on tape `t`, which its `leaves` clause forbids"
+        );
+    }
+
+    /// (4) The near miss: the same row now moves this tape — the leaving
+    /// glyph is no longer statically known, so the check does not fire.
+    /// **Mutation caught:** treating a moved row's post-glyph as the
+    /// written glyph would flag this row too, which is exactly the
+    /// over-approximation the check must not make.
+    #[test]
+    fn a_moved_exit_row_is_not_statically_known_and_stays_clean() {
+        ok("\
+alphabet bits { '_', '0', '$' }
+routine r(tape t: bits leaves { '$' }) {
+  entry state s { [*] -> write ['0'] move [>] return; }
+}
+");
+    }
+
+    /// (5) A world with NEITHER clause is never checked — the absence of a
+    /// promise is not itself a promise. A body that would fail both checks
+    /// above, were either clause declared, still compiles clean.
+    #[test]
+    fn a_world_with_no_head_clause_is_never_checked() {
+        ok("\
+alphabet bits { '_', '0', 'x' }
+routine r(tape t: bits) {
+  entry state s { ['0'] -> write ['0'] return; }
+}
+");
+    }
+
+    /// `leaves` on a GRAPH is checked against its own exit-parameter `goto`
+    /// rows, never `return` (a graph carries none): the matched `'x'` is
+    /// kept (no write, no move) and the clause accepts it.
+    #[test]
+    fn a_graphs_leaves_clause_is_checked_against_its_exit_parameter_rows() {
+        ok("\
+alphabet bits { '_', '0', 'x' }
+graph g(tape t: bits leaves { 'x' }, state done) {
+  entry state s { ['x'] -> done; [*] -> move [>] goto s; }
+}
+");
+        let e = err("\
+alphabet bits { '_', '0', 'x' }
+graph g(tape t: bits leaves { '0' }, state done) {
+  entry state s { ['x'] -> done; [*] -> move [>] goto s; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+    }
+
+    /// `enters` on a GRAPH is checked against its own entry state exactly
+    /// as a routine's is.
+    #[test]
+    fn a_graphs_enters_clause_is_checked_against_its_entry_state() {
+        let e = err("\
+alphabet bits { '_', '0', 'x' }
+graph g(tape t: bits enters { 'x' }, state done) {
+  entry state s { ['0'] -> done; }
+}
+");
+        assert_eq!(e.kind.code(), "enters-not-accepted");
+        assert_eq!(
+            e.kind.to_string(),
+            "entry state `s` has no rule for 'x' on tape `t`, which its `enters` clause declares"
+        );
+    }
+
+    /// A routine's OWN exit (`state`) parameters are deliberately not
+    /// `leaves` exit rows: only `return` is. A row that leaves through an
+    /// exit parameter, writing a glyph the clause forbids, stays clean
+    /// because it is never examined.
+    #[test]
+    fn a_routines_own_exit_parameter_rows_are_not_leaves_exit_rows() {
+        ok("\
+alphabet bits { '_', '0', '$' }
+routine r(tape t: bits leaves { '$' }, state done) {
+  entry state s { [*] -> write ['0'] goto done; }
+}
+");
+    }
+
+    /// A `Keep` exit row whose pattern cell is a WILDCARD names a SET, not
+    /// one glyph: the row never writes and never moves, but the leaving
+    /// glyph could be ANY member of the tape's alphabet, so a narrow
+    /// `leaves` clause is left unchecked rather than compared against that
+    /// whole set.
+    /// **Mutation caught:** comparing the whole matched-cell set — instead
+    /// of requiring it to name exactly one glyph — turns this near miss
+    /// into a false refusal (see `a_single_glyph_keep_exit_row_leaving_
+    /// outside_the_set_is_rejected` below for the case that must still
+    /// fire).
+    #[test]
+    fn a_wildcard_keep_exit_row_is_not_statically_known_and_stays_clean() {
+        ok("\
+alphabet bits { '_', '0', '1', '$' }
+routine r(tape t: bits leaves { '$' }) {
+  entry state s { [*] -> return; }
+}
+");
+    }
+
+    /// The same near miss over a RANGE pattern cell: several glyphs are
+    /// still several glyphs, not one, regardless of how narrow the
+    /// declared `leaves` clause is.
+    /// **Mutation caught:** same as the wildcard case above.
+    #[test]
+    fn a_range_keep_exit_row_is_not_statically_known_and_stays_clean() {
+        ok("\
+alphabet digits { '_', '0'..'9' }
+routine r(tape t: digits leaves { '0' }) {
+  entry state s { ['0'..'9'] -> return; }
+}
+");
+    }
+
+    /// The two near misses above do not blunt the check: a SINGLE-glyph
+    /// pattern cell on a `Keep` exit row is exactly as exact as a literal
+    /// write (fixture 3), and still fires.
+    #[test]
+    fn a_single_glyph_keep_exit_row_leaving_outside_the_set_is_rejected() {
+        let e = err("\
+alphabet bits { '_', '0', '$' }
+routine r(tape t: bits leaves { '$' }) {
+  entry state s { ['0'] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+    }
+
+    /// A single-glyph pattern cell naming a glyph the tape's own alphabet
+    /// does not carry can never actually match — expansion drops such a
+    /// row outright (`expand.rs::cell_options`) — so it must not be named
+    /// as a leaving glyph either, even though the cell resolves to exactly
+    /// one label.
+    /// **Mutation caught:** dropping the alphabet-membership check (keeping
+    /// only "exactly one label") would report this row's dead glyph as if
+    /// the row could really leave on it.
+    #[test]
+    fn a_single_glyph_keep_row_naming_a_glyph_outside_the_alphabet_is_declined() {
+        ok("\
+alphabet bits { '_', '0', '1' }
+routine r(tape t: bits leaves { '_' }) {
+  entry state s { ['2'] -> return; }
+}
+");
+    }
+
+    /// The membership refinement above is not limited to the `Keep` arm: a
+    /// LITERAL write on a DEAD row is exactly as unreachable, so it must
+    /// not be named as a leaving glyph either. This near-dead-row shape
+    /// compiles with only a `never fires` warning when the clause is
+    /// removed — the clause must not turn a merely-inert row into a
+    /// compile error.
+    /// **Mutation caught:** dropping the pattern-liveness check on the
+    /// `Lit` arm would report this row's dead glyph as if the row could
+    /// really leave on it.
+    #[test]
+    fn a_literal_write_on_a_dead_row_is_declined() {
+        ok("\
+alphabet marks { '_', 'x' }
+routine r(tape t: marks leaves { '_' }) {
+  entry state s { ['z'] -> write ['x'] return; }
+}
+");
+    }
+
+    /// The near miss to the dead-row decline above: the same shape, but the
+    /// pattern cell IS live (a member of the tape's alphabet), so the
+    /// literal write's glyph is exactly as exact as ever and still fires.
+    #[test]
+    fn a_literal_write_on_a_live_row_leaving_outside_the_set_still_fires() {
+        let e = err("\
+alphabet marks { '_', 'x', 'y' }
+routine r(tape t: marks leaves { 'x' }) {
+  entry state s { ['x'] -> write ['y'] return; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+    }
+
+    /// A `{expr}` substitution write's possible outputs are never evaluated
+    /// by this check — left to the runtime check exactly like a move or a
+    /// wildcard/range `Keep` cell, never guessed at from the expression's
+    /// text.
+    /// **Mutation caught:** treating the substitution as though it named
+    /// its own matched cell (rather than declining) turns this near miss
+    /// into a false refusal.
+    #[test]
+    fn a_substitution_write_on_an_exit_row_is_not_statically_known_and_stays_clean() {
+        ok("\
+alphabet digits { 0..5 }
+routine r(tape t: digits leaves { 0 }) {
+  entry state s { [1 as d] -> write [{d}] return; }
+}
+");
+    }
+
+    /// A declared clause names the TAPE it belongs to, not just the state
+    /// and the glyph — a multi-tape world's diagnostic must point at the
+    /// parameter whose promise the row actually breaks, not merely at
+    /// whichever tape happens to come first.
+    #[test]
+    fn the_leaves_message_names_the_tape_that_actually_broke_it() {
+        let e = err("\
+alphabet bits { '_', '0', '$' }
+routine r(tape a: bits leaves { '_' }, tape b: bits leaves { '$' }) {
+  entry state s { [*, *] -> write [-, '0'] return; }
+}
+");
+        assert_eq!(e.kind.code(), "leaves-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "this exit row in state `s` may leave '0' on tape `b`, which its `leaves` clause forbids"
+        );
+    }
+
+    /// The `enters` half of the same property: the declared clause names
+    /// the TAPE it belongs to, not just the entry state and the glyph.
+    #[test]
+    fn the_enters_message_names_the_tape_that_actually_broke_it() {
+        let e = err("\
+alphabet bits { '_', '0', 'x' }
+routine r(tape a: bits enters { '0' }, tape b: bits enters { 'x' }) {
+  entry state s { ['0', '0'] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "enters-not-accepted");
+        assert_eq!(
+            e.kind.to_string(),
+            "entry state `s` has no rule for 'x' on tape `b`, which its `enters` clause declares"
         );
     }
 
@@ -5713,7 +7924,7 @@ namespace mylib {
   ? widens the bare alphabet onto the richer one
   export map widen: bits -> wide { '_' => '_', '0' => 'a', '1' -> 'b' }
 
-  export graph walk(tape t: wide writes {}, state found) {
+  export graph walk(tape t: wide writes {} enters { 'a' } leaves { '_' }, state found) {
     entry state s {
       ['_'] -> goto found;
       [*]   -> move [>] goto s;
@@ -5928,5 +8139,42 @@ machine {
             let src = frags.join(" ");
             let _ = analyze_staged(&src);
         }
+    }
+
+    /// Every cross-unit lookup reads one walk of the declarations table:
+    /// with module 1 declaring `n::x` as a set and module 2 as a graph, the
+    /// graph lookup answers module 2's graph while the kind query answers
+    /// from the first module, `Set`. A real compile would refuse this table
+    /// first (`conflicting-declaration`), so the test drives the lookups
+    /// directly rather than `analyze_with`.
+    /// Mutation: re-growing an independent first-module loop in
+    /// `find_external_graph` that stops at module 1 — `None` instead of
+    /// module 2's graph.
+    #[test]
+    fn the_per_kind_lookups_and_the_kind_query_walk_one_list() {
+        let read = |text: &str| {
+            crate::header::read_extern(
+                std::path::Path::new("m.tmh"),
+                text,
+                &crate::declarations::Declarations::none(),
+            )
+            .expect("reads")
+        };
+        let m1 = read("namespace n { export alphabet ab { '_', 'a' } export set x { 'a' } }");
+        let m2 = read(
+            "namespace n { export alphabet ab { '_', 'a' } export graph x(tape t: ab, state d) { entry state s { [*] -> goto d; } } }",
+        );
+        let mods = [&m1, &m2];
+        let (owner, world) = find_external_graph(&mods, "n::x").expect("module 2's graph");
+        assert!(std::ptr::eq(owner, &m2));
+        assert_eq!(world.kind, WorldKind::Graph);
+        assert_eq!(external_kind(&mods, "n::x"), Some(DefKind::Set));
+        let kinds: Vec<DefKind> = external_decls(&mods, "n::x")
+            .iter()
+            .map(ExternalDecl::kind)
+            .collect();
+        assert_eq!(kinds, [DefKind::Set, DefKind::Graph]);
+        assert!(find_external_routine(&mods, "n::x").is_none());
+        assert_eq!(external_kind(&mods, "n::absent"), None);
     }
 }

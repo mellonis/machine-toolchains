@@ -6,7 +6,7 @@
 //! convention), so core stays provably arch-agnostic.
 
 use mtc_core::asm::{ArchSyntax, AsmCaps, Flow, RelaxPair, SyntaxEntry, assemble};
-use mtc_core::formats::object::ObjectFile;
+use mtc_core::formats::object::{ObjectFile, SymbolDef};
 use mtc_core::linker::{CallMech, LinkError, LinkOptions, LinkOutput, link};
 use mtc_core::vm::OperandKind;
 
@@ -138,6 +138,29 @@ fn asm(src: &str) -> ObjectFile {
     assemble(&fake_syntax(), ARCH, src, false).expect("assembles")
 }
 
+/// Assemble `src`, then set `routine`'s declared exit count to `exits` in
+/// the object's interface — the one way a body returning through an
+/// undeclared exit reaches the linker now that the assembler refuses it.
+fn declaring_exits(src: &str, routine: &str, exits: u8) -> ObjectFile {
+    let mut obj = asm(src);
+    let blob = obj
+        .symbols
+        .iter()
+        .find_map(|s| match s.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } if s.name == routine => {
+                Some(blob)
+            }
+            _ => None,
+        })
+        .expect("the routine is defined");
+    obj.interface
+        .as_mut()
+        .expect("the object has an interface")
+        .routines[blob as usize]
+        .exits = (0..exits).map(|k| format!("e{k}")).collect();
+    obj
+}
+
 const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid];
 
 fn opts(mech: CallMech) -> LinkOptions {
@@ -232,7 +255,7 @@ const TWO_EXITS: &str = "\
 .param t, ('_', '0', '1')
 .routine mid, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=2
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -254,7 +277,7 @@ lost:   wr      [2]
 const WRONG_COUNT: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=2
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -272,7 +295,7 @@ won:    wr      [1]
 const ZERO_EXITS: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=2
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -292,7 +315,7 @@ const TWO_SITES_SAME_COMPOSITE: &str = "\
 .param t, ('_', '0', '1')
 .routine mid, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -317,7 +340,7 @@ b:      wr      [2]
 const RET_ONLY_CALLEE: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -342,7 +365,7 @@ const MIXED_WITH_EXITS: &str = "\
 .param t, ('_', '0', '1')
 .routine narrow, tapes=1, alpha=(2)
 .param m, ('_', '0')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -367,7 +390,7 @@ const NESTED_WITH_EXITS: &str = "\
 .param t, ('_', '0', '1')
 .routine outer, tapes=1, alpha=(3)
 .param o, ('_', '0', '1')
-.routine inner, tapes=1, alpha=(3), exits=1
+.routine inner, tapes=1, alpha=(3), exits=(e0)
 .param i, ('_', '0', '1')
 .section code
 .func main
@@ -393,9 +416,9 @@ k:      wr      [1]
 const NESTED_UNDER_EXIT_BEARING: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine mid, tapes=1, alpha=(3), exits=1
+.routine mid, tapes=1, alpha=(3), exits=(e0)
 .param m, ('_', '0', '1')
-.routine big, tapes=1, alpha=(3), exits=1
+.routine big, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -415,7 +438,7 @@ r:      retx    #0
 const IDENTITY_WITH_EXITS: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -433,7 +456,7 @@ won:    wr      [1]
 const TWO_SITES: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -455,7 +478,7 @@ b:      wr      [2]
 const TWO_SITES_SAME_EXIT: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -486,7 +509,7 @@ const ORPHANS: &str = "\
 .param d, ('_', '0', '1')
 .routine mid, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -513,7 +536,7 @@ const MIXED_SPLICE_AND_FRAME: &str = "\
 .param t, ('_', 'a', 'b', 'c', 'd')
 .routine holey, tapes=1, alpha=(3)
 .param m, ('_', 'a', 'b')
-.routine pick, tapes=1, alpha=(5), exits=1
+.routine pick, tapes=1, alpha=(5), exits=(e0)
 .param n, ('_', 'a', 'b', 'c', 'd')
 .section code
 .func main
@@ -538,7 +561,7 @@ const NESTED_PASSTHROUGH_WITH_EXITS: &str = "\
 .param t, ('_', '0', '1')
 .routine outer, tapes=1, alpha=(3)
 .param o, ('_', '0', '1')
-.routine inner, tapes=1, alpha=(3), exits=1
+.routine inner, tapes=1, alpha=(3), exits=(e0)
 .param i, ('_', '0', '1')
 .section code
 .func main
@@ -553,14 +576,16 @@ k:      wr      [1]
         retx    #0
 ";
 
-/// A callee whose BODY disagrees with its own declared exit count: it
-/// declares `exits=1` and returns through `retx #1`. Ruling 19 pins the
-/// site's vector to the declaration, so the splice is the only place this
-/// can surface — nothing validates a routine's body against its interface.
+/// A callee whose BODY disagrees with its own declared exit count. The
+/// text declares `exits=2` so that `retx #1` assembles at all; the test
+/// then lowers the interface to ONE exit (`declaring_exits`), which is
+/// what the call site's one-label vector binds. A site's vector is pinned
+/// to the declaration, and the linker validates every reached body
+/// against its interface before any site is lowered.
 const BODY_OVERRUNS_ITS_EXITS: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -579,7 +604,7 @@ won:    wr      [1]
 const RET_THEN_STP: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -605,7 +630,7 @@ const TWO_CALLERS: &str = "\
 .param p, ('_', '0', '1')
 .routine b, tapes=1, alpha=(3)
 .param q, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -638,7 +663,7 @@ const NESTED_SHIFTED: &str = "\
 .param u, ('_', '0', '1')
 .routine outer, tapes=1, alpha=(3)
 .param o, ('_', '0', '1')
-.routine inner, tapes=1, alpha=(3), exits=1
+.routine inner, tapes=1, alpha=(3), exits=(e0)
 .param i, ('_', '0', '1')
 .section code
 .func main
@@ -662,7 +687,7 @@ const BOTH_EXITS: &str = "\
 .param t, ('_', '0', '1')
 .routine mid, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=2
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -689,7 +714,7 @@ const TAIL_POSITION: &str = "\
 .param t, ('_', '0', '1')
 .routine mid, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -711,7 +736,7 @@ const TAIL_POSITION_NORETURN: &str = "\
 .param t, ('_', '0', '1')
 .routine mid, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1, noreturn
+.routine sub, tapes=1, alpha=(3), exits=(e0), noreturn
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -733,7 +758,7 @@ const TAIL_POSITION_LYING_NORETURN: &str = "\
 .param t, ('_', '0', '1')
 .routine mid, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1, noreturn
+.routine sub, tapes=1, alpha=(3), exits=(e0), noreturn
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -759,7 +784,7 @@ const TAIL_POSITION_IN_STAMP: &str = "\
 .param t, ('_', '0', '1')
 .routine outer, tapes=1, alpha=(3)
 .param o, ('_', '0', '1')
-.routine inner, tapes=1, alpha=(3), exits=1, noreturn
+.routine inner, tapes=1, alpha=(3), exits=(e0), noreturn
 .param i, ('_', '0', '1')
 .section code
 .func main
@@ -943,29 +968,31 @@ fn an_exit_vector_links_under_mono_and_hybrid() {
 }
 
 /// A body that returns through an exit its own interface does not declare
-/// is refused where the splice would have to resolve it. The site's vector
-/// is already pinned to the declared count by name resolution, so this is
-/// the one place the disagreement can be seen at all.
+/// is refused under every mechanism, before any site is lowered. The
+/// splice-level refusal in the copy path (`s.exits.get(k)`) is now only a
+/// defensive second line: for a routine with an interface it cannot be
+/// reached.
 ///
-/// Mutation it catches: index `s.exits` directly instead of taking the
-/// `get(k)` refusal and the splice jumps to whatever follows the vector —
-/// or panics — rather than naming the disagreement.
+/// Mutation it catches: drop `stamp::check_declared_exits` from `link` —
+/// mono and hybrid then report the splice's `BadBinding` and frames links.
 #[test]
 fn a_body_returning_through_an_undeclared_exit_is_refused() {
-    for mech in [CallMech::Mono, CallMech::Hybrid] {
+    for mech in MECHS {
         let err = link(
             &fake_syntax(),
-            &[asm(BODY_OVERRUNS_ITS_EXITS)],
+            &[declaring_exits(BODY_OVERRUNS_ITS_EXITS, "sub", 1)],
             &[],
             opts(mech),
         )
         .expect_err("a body overrunning its exit vector must be refused");
-        assert!(
-            matches!(&err, LinkError::BadBinding { callee, message }
-                if callee == "sub"
-                    && message.contains("the body returns through exit 1, but the call site \
-                                         supplies 1 exit(s)")),
-            "under {mech}: {err:?}"
+        assert_eq!(
+            err,
+            LinkError::UndeclaredExit {
+                routine: "sub".into(),
+                exit: 1,
+                declared: 1
+            },
+            "under {mech}"
         );
     }
 }
@@ -1679,7 +1706,7 @@ fn the_frames_descriptor_exits_are_the_exact_absolute_addresses() {
 const THREE_SITES_BIG_BODY: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine big, tapes=1, alpha=(3), exits=1
+.routine big, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -1844,7 +1871,7 @@ fn closure_fold() -> String {
 .param t, ('_', 'x', 'y', 'z')
 .routine outer, tapes=1, alpha=(4)
 .param u, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .section code
 .func main
@@ -1992,7 +2019,7 @@ fn closure_only_fold() -> String {
 .param t, ('_', 'x', 'y', 'z')
 .routine outer, tapes=1, alpha=(4)
 .param u, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .section code
 .func main
@@ -2098,9 +2125,9 @@ fn two_groups_one_table() -> String {
         "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine zed, tapes=1, alpha=(3), exits=1
+.routine zed, tapes=1, alpha=(3), exits=(e0)
 .param v, ('_', '0', '1')
-.routine abe, tapes=1, alpha=(3), exits=1
+.routine abe, tapes=1, alpha=(3), exits=(e0)
 .param w, ('_', '0', '1')
 .section tables
 T0: .row [1]
@@ -2200,7 +2227,7 @@ fn recursive_exit_bearing(body: usize) -> String {
 .param t, ('_', '0', '1')
 .routine outer, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine a, tapes=1, alpha=(3), exits=1
+.routine a, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section code
 .func main
@@ -2234,7 +2261,7 @@ const BROKEN_CYCLE: &str = "\
 .param t, ('_', '0', '1')
 .routine outer, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine b, tapes=1, alpha=(3), exits=1
+.routine b, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .routine c, tapes=1, alpha=(3)
 .param m, ('_', '0', '1')
@@ -2296,9 +2323,9 @@ const RECURSIVE_THROUGH_A_THIRD: &str = "\
 .param t, ('_', '0', '1')
 .routine outer, tapes=1, alpha=(3)
 .param u, ('_', '0', '1')
-.routine a, tapes=1, alpha=(3), exits=1
+.routine a, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
-.routine b, tapes=1, alpha=(3), exits=1
+.routine b, tapes=1, alpha=(3), exits=(e0)
 .param m, ('_', '0', '1')
 .section code
 .func main

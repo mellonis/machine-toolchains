@@ -43,8 +43,8 @@ use std::fmt;
 
 use crate::compiler::{Resolved, ResolvedCallTarget, ResolvedWorld};
 use crate::ir::{IrMapDst, IrMapPair, IrProgram, IrTapeBinding, IrTransition, IrWorld, IrWrite};
-use crate::lint::patterns::glyph_label;
 use crate::parser::{BindingArg, BindingValue, MapArrow, SymLit, SymMap, WriteCellKind};
+use crate::patterns::glyph_label;
 
 /// One past the highest symbol index a [`SymSet`] can hold. The alphabet
 /// ceiling is 127 glyphs (docs/tmt/language.md (alphabets)), so this bound is
@@ -186,13 +186,23 @@ pub(crate) struct FootprintTable {
 /// * unequal cardinalities close the map: an unlisted non-blank callee symbol
 ///   is a hole, and writing it takes the unmapped-write trap instead of
 ///   landing on the caller's tape, so it contributes nothing.
-fn project_write_back(
+///
+/// `open` — the site's `*` marker — closes the map in this direction
+/// WHATEVER the cardinalities: the opaque index an open binding mints is
+/// read-only (an image equal to the physical cardinality names no cell of
+/// the caller's band), so the linker holes an unlisted callee symbol on
+/// the write side even where the two alphabets are the same size and a
+/// closed map would have identity-completed (docs/formats.md (bound
+/// calls)). Opening a binding therefore never WIDENS what a callee may
+/// write back; it can only narrow it.
+pub(crate) fn project_write_back(
     callee: SymSet,
     pairs: &[IrMapPair],
     caller_card: u32,
     callee_card: u32,
+    open: bool,
 ) -> SymSet {
-    let identity_completes = caller_card == callee_card;
+    let identity_completes = caller_card == callee_card && !open;
     let mut out = SymSet::empty();
     for symbol in callee.iter() {
         let mut listed = false;
@@ -216,6 +226,84 @@ fn project_write_back(
         }
     }
     out
+}
+
+/// Project one host tape's glyph set FORWARD into the callee's alphabet —
+/// the READ direction of the very binding [`project_write_back`] walks in
+/// the write direction, over the same sparse pair list, so the two
+/// directions of one map can never be read from two different tables.
+///
+/// The completion rules are the write direction's, mirrored
+/// (docs/tmt/language.md (symbol maps)):
+///
+/// * every pair maps its `src` to its `dst` on a read — `=>` is one-way in
+///   the WRITE direction only, and `->` reads exactly the same way, which is
+///   why `one_way` is not consulted here;
+/// * the blank (index 0) is pinned in both directions and always reads as
+///   the blank;
+/// * equal cardinalities identity-complete: an unlisted host symbol reads as
+///   the same index;
+/// * unequal cardinalities close the map: an unlisted non-blank host symbol
+///   is a HOLE, and reading it takes the unmapped-read trap rather than
+///   delivering a symbol to the callee, so it contributes nothing.
+///
+/// `open` — the site's `*` marker — replaces BOTH completion rules in this
+/// direction: an unlisted non-blank host symbol is neither a hole nor an
+/// identity image, it reads as the callee's OPAQUE index, the index equal
+/// to the callee's cardinality. That index is outside the frame a `SymSet`
+/// over `callee_card` symbols can hold, so it is simply absent from the
+/// set this returns — [`escapes_opaque`] is the companion that answers
+/// whether any symbol went there, and a caller reasoning about what the
+/// callee's head may hold must ask BOTH (docs/formats.md (bound calls)).
+///
+/// A `Label` dst is minted only for a callee whose alphabet this compile
+/// cannot see; [`source_pairs`], the one producer feeding this function,
+/// resolves both sides against real glyph tables and so only ever yields an
+/// `Index`. A `Label` would simply not match, falling through to the
+/// completion rules like any unlisted symbol.
+pub(crate) fn project_forward(
+    host: SymSet,
+    pairs: &[IrMapPair],
+    host_card: u32,
+    callee_card: u32,
+    open: bool,
+) -> SymSet {
+    let identity_completes = host_card == callee_card && !open;
+    let mut out = SymSet::empty();
+    for symbol in host.iter() {
+        let mut listed = false;
+        for pair in pairs {
+            if pair.src == symbol
+                && let IrMapDst::Index(dst) = pair.dst
+            {
+                // A repeat with a different image is a link-time conflict;
+                // taking every image keeps the answer on the safe side.
+                out.insert(dst);
+                listed = true;
+            }
+        }
+        if !listed && (symbol == 0 || identity_completes) {
+            out.insert(symbol);
+        }
+    }
+    out.intersect(SymSet::full(callee_card))
+}
+
+/// Whether any symbol of `host` reaches the callee as the OPAQUE index —
+/// true exactly when the site's map is open and some non-blank host symbol
+/// in the set is unlisted. The blank is pinned in both directions and
+/// never goes opaque, so it never counts.
+///
+/// This is the half of an open map's read direction that
+/// [`project_forward`] cannot express: the opaque index lies outside the
+/// callee's alphabet, so no `SymSet` over that alphabet can name it. What
+/// it means for a caller is that the callee's head may hold a symbol its
+/// OWN alphabet does not spell — which is therefore in no declared
+/// `enters` clause, since a clause lists that alphabet's glyphs.
+pub(crate) fn escapes_opaque(host: SymSet, pairs: &[IrMapPair], open: bool) -> bool {
+    open && host
+        .iter()
+        .any(|symbol| symbol != 0 && !pairs.iter().any(|p| p.src == symbol))
 }
 
 /// Every caller tape's whole alphabet — the conservative answer whenever a
@@ -293,6 +381,7 @@ fn call_contribution(
             &tb.pairs,
             caller_tape.cardinality,
             callee_tape.cardinality,
+            tb.open,
         );
         out[tape].union_with(projected);
     }
@@ -373,7 +462,8 @@ pub(crate) fn infer_ir(program: &IrProgram) -> FootprintTable {
                         | IrTransition::Stop
                         | IrTransition::Halt
                         | IrTransition::TrapRead
-                        | IrTransition::TrapWrite => continue,
+                        | IrTransition::TrapWrite
+                        | IrTransition::TrapContract => continue,
                     };
                     let contribution =
                         call_contribution(program, &by_name, &sets, wi, target, binding);
@@ -420,7 +510,7 @@ fn full_alphabets_src(host: &ResolvedWorld) -> Vec<SymSet> {
 /// A symbol literal's position in a glyph vector — the source-frame analog of
 /// an already-lowered symbol index. `None` when the alphabet does not carry
 /// the glyph, which resolution rejects downstream.
-fn glyph_index(glyphs: &[String], lit: &SymLit) -> Option<u32> {
+pub(crate) fn glyph_index(glyphs: &[String], lit: &SymLit) -> Option<u32> {
     let label = glyph_label(lit);
     glyphs.iter().position(|g| *g == label).map(|i| i as u32)
 }
@@ -447,49 +537,81 @@ fn source_pairs(
         .collect()
 }
 
-/// What one binding site — a `call`, a bind-call, or a `graft` — contributes
-/// to its host, per host tape.
+/// One callee tape's link to a host tape at a binding site.
+pub(crate) struct TapeLink {
+    /// Which host tape backs it, by position in the host's tape vector.
+    pub(crate) host: usize,
+    /// The binding map resolved into the same sparse pair list the IR
+    /// lowering records — empty for an omitted map, whose whole projection
+    /// the completion rules decide. `None` when the map cannot be READ at
+    /// all (a glyph outside its alphabet, an alphabet resolution never
+    /// produced), and then nothing about this tape can be ruled out in
+    /// either direction.
+    pub(crate) pairs: Option<Vec<IrMapPair>>,
+    /// Whether the site left this tape's map OPEN with `*`. It changes
+    /// both directions: unlisted host symbols read as the callee's opaque
+    /// index instead of holing or identity-completing, and the write half
+    /// closes whatever the cardinalities ([`project_forward`],
+    /// [`project_write_back`], [`escapes_opaque`]).
+    pub(crate) open: bool,
+}
+
+/// How a binding site places a callee's tapes onto its host's — the one walk
+/// over a site's args, read in the write direction by the footprint
+/// inference below and in the read direction by the head-position analysis
+/// (`crate::head_flow`).
+pub(crate) enum SitePlacement {
+    /// No named args at all: the identity placement, callee tape `k` onto
+    /// host tape `k`, symbols unchanged.
+    ///
+    /// Reached only for a callee with NO tape parameters — a bindless call
+    /// into a tape-bearing one is rejected as a missing binding argument
+    /// long before this — so it is untested by construction and its
+    /// per-tape arms below never run. It exists because the walk this was
+    /// extracted from had it, and keeping it preserves that behaviour
+    /// exactly.
+    Identity,
+    /// One entry per callee tape, in callee tape order.
+    Bound(Vec<TapeLink>),
+    /// The site cannot be projected: a callee tape no arg binds, or an arg
+    /// naming no host tape. Every callee tape is bound and every target
+    /// resolves, or the program does not compile — answering conservatively
+    /// beats projecting half a binding.
+    Opaque,
+}
+
+/// Resolve one binding site — a `call`, a bind-call, or a `graft` — into its
+/// per-callee-tape placement.
 ///
-/// Calls and grafts share this one projection because they share one algebra:
+/// Calls and grafts share this one walk because they share one algebra:
 /// `ir.rs`'s call lowering and `expand.rs`'s graft composite resolve `src`
 /// against the host alphabet and `dst` against the callee's, then hand the
 /// result to the same completion rule (docs/tmt/language.md (symbol maps)).
 /// The two differ only in strictness about an OMITTED map — a graft demands
 /// glyph-for-glyph equal alphabets where a call binds by index — and that
 /// difference rejects programs rather than changing what a legal one writes.
-fn binding_contribution(
+pub(crate) fn site_placement(
     resolved: &Resolved,
     callee_module: &Resolved,
     host: &ResolvedWorld,
     callee: &ResolvedWorld,
-    callee_sets: &[SymSet],
     args: &[BindingArg],
-) -> Vec<SymSet> {
+) -> SitePlacement {
     // A bare name is a tape target or a state continuation; only the callee's
     // tape signature tells them apart, so the named args are filtered by it
-    // below. A site with no named args at all carries no binding: it rides the
-    // identity placement, callee tape `k` onto host tape `k`.
+    // below. A site with no named args at all carries no binding.
     let named: Vec<&BindingArg> = args
         .iter()
         .filter(|a| matches!(a.value, BindingValue::Named { .. }))
         .collect();
     if named.is_empty() {
-        if callee.tapes.len() > host.tapes.len() {
-            return full_alphabets_src(host);
-        }
-        let mut out = vec![SymSet::empty(); host.tapes.len()];
-        for (k, s) in callee_sets.iter().enumerate() {
-            out[k].union_with(*s);
-        }
-        return out;
+        return SitePlacement::Identity;
     }
 
-    let mut out = vec![SymSet::empty(); host.tapes.len()];
-    for (k, ct) in callee.tapes.iter().enumerate() {
-        // Every callee tape is bound and every target resolves, or the program
-        // does not compile; answering full beats projecting half a binding.
+    let mut links = Vec::with_capacity(callee.tapes.len());
+    for ct in &callee.tapes {
         let Some(arg) = named.iter().find(|a| a.name == ct.name) else {
-            return full_alphabets_src(host);
+            return SitePlacement::Opaque;
         };
         let BindingValue::Named {
             target: host_name,
@@ -500,46 +622,76 @@ fn binding_contribution(
             unreachable!("the named args are Named by construction");
         };
         let Some(phys) = host.tapes.iter().position(|t| t.name == *host_name) else {
-            return full_alphabets_src(host);
+            return SitePlacement::Opaque;
         };
-        let host_tape = &host.tapes[phys];
-        let host_card = host_tape.cardinality as u32;
-        let Some(callee_set) = callee_sets.get(k) else {
-            return full_alphabets_src(host);
-        };
-
         let pairs = match map {
-            // An omitted map is no pairs at all: the completion rule below
-            // decides the whole projection from the two cardinalities.
-            None => Vec::new(),
-            Some(m) => {
-                // Host glyphs resolve in this module; callee glyphs in the
-                // callee's own module — the same one for a local callee, the
-                // external module for a callee it vouches for.
-                let glyphs = resolved
-                    .alphabets
-                    .get(&host_tape.alphabet)
-                    .zip(callee_module.alphabets.get(&ct.alphabet));
-                match glyphs.and_then(|(h, c)| source_pairs(m, &h.glyphs, &c.glyphs)) {
-                    Some(pairs) => pairs,
-                    // A glyph outside its alphabet, or an alphabet resolution
-                    // never produced: the map cannot be read, so nothing about
-                    // this tape can be ruled out.
-                    None => {
-                        out[phys].union_with(SymSet::full(host_card));
-                        continue;
-                    }
-                }
-            }
+            // An omitted map is no pairs at all: the completion rules decide
+            // the whole projection from the two cardinalities.
+            None => Some(Vec::new()),
+            // Host glyphs resolve in this module; callee glyphs in the
+            // callee's own module — the same one for a local callee, the
+            // external module for a callee it vouches for.
+            Some(m) => resolved
+                .alphabets
+                .get(&host.tapes[phys].alphabet)
+                .zip(callee_module.alphabets.get(&ct.alphabet))
+                .and_then(|(h, c)| source_pairs(m, &h.glyphs, &c.glyphs)),
         };
-        out[phys].union_with(project_write_back(
-            *callee_set,
-            &pairs,
-            host_card,
-            ct.cardinality as u32,
-        ));
+        links.push(TapeLink {
+            host: phys,
+            pairs,
+            open: map.as_ref().is_some_and(|m| m.open.is_some()),
+        });
     }
-    out
+    SitePlacement::Bound(links)
+}
+
+/// What one binding site contributes to its host, per host tape — the WRITE
+/// direction of [`site_placement`]'s links.
+fn binding_contribution(
+    resolved: &Resolved,
+    callee_module: &Resolved,
+    host: &ResolvedWorld,
+    callee: &ResolvedWorld,
+    callee_sets: &[SymSet],
+    args: &[BindingArg],
+) -> Vec<SymSet> {
+    match site_placement(resolved, callee_module, host, callee, args) {
+        SitePlacement::Identity => {
+            if callee.tapes.len() > host.tapes.len() {
+                return full_alphabets_src(host);
+            }
+            let mut out = vec![SymSet::empty(); host.tapes.len()];
+            for (k, s) in callee_sets.iter().enumerate() {
+                out[k].union_with(*s);
+            }
+            out
+        }
+        SitePlacement::Opaque => full_alphabets_src(host),
+        SitePlacement::Bound(links) => {
+            let mut out = vec![SymSet::empty(); host.tapes.len()];
+            for (k, link) in links.iter().enumerate() {
+                let (Some(ct), Some(callee_set)) = (callee.tapes.get(k), callee_sets.get(k)) else {
+                    return full_alphabets_src(host);
+                };
+                let host_card = host.tapes[link.host].cardinality as u32;
+                let add = match &link.pairs {
+                    // The map cannot be read, so nothing about this tape can
+                    // be ruled out.
+                    None => SymSet::full(host_card),
+                    Some(pairs) => project_write_back(
+                        *callee_set,
+                        pairs,
+                        host_card,
+                        ct.cardinality as u32,
+                        link.open,
+                    ),
+                };
+                out[link.host].union_with(add);
+            }
+            out
+        }
+    }
 }
 
 /// The host tapes an unresolvable callee may write: the ones its args
@@ -668,15 +820,20 @@ fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
 /// An external callee found in one of the external modules by its full
 /// path: the module (for its alphabets) and the world.
 ///
-/// **FIRST-MATCH over `externals`, in the exact order `Declarations::modules()`
-/// returns it** — `--extern` files in command-line order, then the embedded
-/// standard library last (docs/tmt/cli.md (compile)): a user's own `--extern
-/// std.tmh` shadows the built-in `std` when both are given, mirroring the
-/// linker's own first-wins rule for a name declared in more than one
-/// object (`crates/core/src/linker/resolve.rs`) — a compiler that resolved
-/// a name differently from the linker would diagnose a program the linker
-/// then builds differently.
-fn find_external<'a>(
+/// First match over `externals`, in the order `Declarations::modules()`
+/// returns it, of any kind and whatever its export status — a private
+/// declaration a module carries is returned like a published one. For a
+/// name ANY module publishes the order decides nothing: every other
+/// module's declaration of it, exported or not, must have the same form,
+/// or the compile is refused `conflicting-declaration` before any lookup
+/// runs (docs/tmt/language.md (declarations)). That also rules out one
+/// module carrying such a name as a routine here and another as a graph
+/// for `compiler::find_external_graph`: this lookup matches any kind,
+/// that one only graphs, and they cannot disagree on a published name.
+/// What the order still decides is a name NO module publishes but two
+/// carry privately: the first one is returned, and those two are never
+/// compared.
+pub(crate) fn find_external<'a>(
     externals: &[&'a Resolved],
     path: &str,
 ) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
@@ -874,6 +1031,9 @@ mod tests {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }
     }
 
@@ -919,7 +1079,7 @@ mod tests {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }
     }
@@ -954,6 +1114,7 @@ mod tests {
                 .collect(),
             param: None,
             map_written: !pairs.is_empty(),
+            open: false,
         }]
     }
 
@@ -1118,6 +1279,43 @@ mod tests {
             set(&[1, 3]),
             "callee 2 writes back through the pair; unlisted callee 3 \
              identity-completes across equal-size alphabets"
+        );
+    }
+
+    /// The twin of the test above with the site's map left OPEN: the same
+    /// pair, the same equal-size alphabets, but the unlisted callee symbol
+    /// 3 no longer identity-completes — an opaque symbol is read-only, so
+    /// the write half closes whatever the cardinalities and writing 3
+    /// takes the unmapped-write trap instead of landing on the caller.
+    ///
+    /// Mutation it catches: ignore the binding's `open` bit on the IR-side
+    /// write-back (`call_contribution`) — 3 comes back and the caller's
+    /// set is `{1, 3}` again.
+    #[test]
+    fn an_open_map_closes_its_write_half_on_equal_cardinality() {
+        let mut binding = bind1(0, &[(1, 2, false)]);
+        binding[0].open = true;
+        let p = program(vec![
+            world(
+                "caller",
+                vec![tape("host", 4)],
+                vec![rule(1, None, call("callee", binding))],
+            ),
+            world(
+                "callee",
+                vec![tape("v", 4)],
+                vec![
+                    rule(1, wr(&[Some(2)]), IrTransition::Return),
+                    rule(1, wr(&[Some(3)]), IrTransition::Return),
+                ],
+            ),
+        ]);
+
+        assert_eq!(
+            tapes_of(&infer_ir(&p), "caller")[0],
+            set(&[1]),
+            "callee 2 writes back through the pair; unlisted callee 3 is a \
+             hole under an open map even across equal-size alphabets"
         );
     }
 
@@ -1605,7 +1803,7 @@ routine setZero(tape n: bin) {
     #[test]
     fn every_stdlib_export_declares_an_exact_contract() {
         // `docs/tmt/stdlib.md (roster)` promises two things of the embedded
-        // library: every exported world declares a `writes`/`preserves`
+        // library: every exported world declares a `writes`/`never writes`
         // clause on every signature tape, and each clause is exact — its
         // effective set is precisely what the world's own transitions
         // write, so a caller believing it (`infer_resolved`) learns the
@@ -1617,7 +1815,7 @@ routine setZero(tape n: bin) {
         for world in std.worlds.iter().filter(|world| world.exported) {
             for (k, tape) in world.tapes.iter().enumerate() {
                 assert!(
-                    tape.writes.is_some() || tape.preserves.is_some(),
+                    tape.writes.is_some() || tape.never_writes.is_some(),
                     "std export {} declares no contract clause on tape {}",
                     world.name,
                     tape.name
@@ -1742,7 +1940,7 @@ machine {{
             "a target that names no host tape identifies no tape either"
         );
         assert_eq!(
-            site("done = return"),
+            site("done = stop"),
             argless,
             "a terminator arg binds no tape at all — it is a continuation"
         );
@@ -1813,8 +2011,19 @@ machine {
     fn the_stdlib_source_walk_covers_the_ir_walk() {
         let resolved = resolve(crate::stdlib::SOURCE);
         let source = infer_resolved(&resolved);
-        let out =
-            compile(crate::stdlib::SOURCE, CompileOptions::default()).expect("the stdlib compiles");
+        let out = compile(
+            crate::stdlib::SOURCE,
+            CompileOptions {
+                // The source-level walk has no notion of a synthesized
+                // contract-check state at all, so once one exists it must
+                // not appear in the IR walk either, or this source-covers-
+                // IR relation would go false for a reason unrelated to the
+                // footprint inference this test is actually about.
+                strip_asserts: true,
+                ..Default::default()
+            },
+        )
+        .expect("the stdlib compiles");
         let ir = infer_ir(&out.ir);
 
         assert!(ir.worlds.len() >= 10, "the stdlib has many worlds");

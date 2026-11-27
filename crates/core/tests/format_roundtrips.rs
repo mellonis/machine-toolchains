@@ -203,11 +203,11 @@ proptest! {
                     enters: (0..arity).map(|k| (k == 0).then(|| vec!["$".to_string()])).collect(),
                     leaves: (0..arity).map(|k| (k == 0).then(|| vec![glyphs[0][1].clone()])).collect(),
                     opaque: (0..arity).map(|k| k == 0).collect(),
-                    exits: 1,
+                    exits: (0..arity % 4).map(|k| format!("x{k}")).collect(),
                     returns: false,
                 }],
                 alphabets: vec![ExportedAlphabet { name: "ab".into(), glyphs: glyphs[0].clone() }],
-                graphs: vec![ExportedGraph { name: "g".into(), digest }],
+                graphs: vec![ExportedGraph { name: "g".into(), digest, exported: digest % 2 == 0 }],
                 // A fresh name and glyphs that appear nowhere else in the
                 // object, so a missed intern in the pool pass (as opposed
                 // to reusing `glyphs[0]`, which the export/routine passes

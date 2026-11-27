@@ -67,14 +67,50 @@ fn apply_fix(src: &str, edits: &[Edit]) -> String {
 /// clobbered mid-write) by another process's lint run walking the same
 /// path. A bare per-test-name subdirectory is not unique across processes,
 /// only across call sites within one process.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("lint-{name}-{}-{n}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -114,6 +150,14 @@ fn a_dirty_tmc_file_reports_and_exits_one() {
         "{}",
         out.stdout
     );
+    // A finding names its rule, so the line itself says what `--allow`
+    // and `lint.allow` take. Mutation: print the message alone.
+    let finding = out
+        .stdout
+        .lines()
+        .find(|l| l.contains("lint: leftover 'debugger' marker"))
+        .expect("the finding's line");
+    assert!(finding.ends_with(" [leftover-debugger]"), "{finding}");
 }
 
 #[test]
@@ -735,13 +779,13 @@ fn no_golden_tmc_carries_a_dead_map_pair() {
 
 // -- contract-clause-overlap ---------------------------------------------
 
-/// A `writes`/`preserves` clause pair sharing the glyph `'1'` — `preserves`
+/// A `writes`/`never writes` clause pair sharing the glyph `'1'` — `never writes`
 /// wins the effective-set subtraction, so the `writes` entry naming `'1'` is
 /// inert. The body writes only `'0'`, so the contract itself is satisfied and
 /// the file compiles; only the redundancy fires.
 const CONTRACT_OVERLAP: &str = "\
 alphabet bits { '_', '0', '1' }
-routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
+routine mark(tape t: bits writes {'0', '1'} never writes {'1'}) {
   entry state s { [*] -> write ['0'] return; }
 }
 ";
@@ -754,7 +798,7 @@ fn a_contract_clause_overlap_file_reports_and_exits_one() {
     assert_eq!(out.code, 1);
     assert!(
         out.stdout.contains(
-            "lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+            "lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert"
         ),
         "{}",
         out.stdout
@@ -824,5 +868,79 @@ fn the_flagship_brainfuck_utm_lints_free_of_false_unused_labels() {
         unused.is_empty(),
         "{} false unused-label finding(s): {unused:#?}",
         unused.len()
+    );
+}
+
+// -- `.tmh` headers ---------------------------------------------------------
+
+/// A header (docs/tmt/language.md (headers)) carrying one header-rule
+/// finding — the `use` names nothing the header references. The bodiless
+/// routine is load-bearing: a `.tmh` routed through the PROGRAM read would
+/// fatal on it (a routine with no entry state) instead of reporting the
+/// import, so a header that reaches `tmt lint` under the wrong read mode
+/// fails these tests too.
+const HEADER_UNUSED_IMPORT: &str = "\
+use lib::helper;
+
+alphabet bit { '_', '1' }
+
+export routine clear(tape t: bit writes { '_' });
+";
+
+/// A header lints the same whether it is named on the command line or
+/// found by a directory scan. Mutation it catches: giving the per-file
+/// extension arm a `tmh` case but leaving `collect_sources`' directory
+/// filter at `.tmc`/`.tma` — the explicit form reports the finding, the
+/// scan form silently reports nothing (and with neither edit, the explicit
+/// form is refused by extension).
+#[test]
+fn a_header_lints_identically_named_or_found_by_a_directory_scan() {
+    let dir = scratch("tmh-scan");
+    let f = write(&dir, "lib.tmh", HEADER_UNUSED_IMPORT);
+    let explicit = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
+    assert_eq!(
+        explicit.code, 1,
+        "stdout: {} stderr: {}",
+        explicit.stdout, explicit.stderr
+    );
+    assert!(explicit.stderr.is_empty(), "stderr: {}", explicit.stderr);
+    assert!(
+        explicit.stdout.contains("lib.tmh:1:") && explicit.stdout.contains("helper"),
+        "stdout: {}",
+        explicit.stdout
+    );
+    let scanned = execute(&args(&["lint", dir.to_str().unwrap()])).unwrap();
+    assert_eq!(
+        (scanned.code, &scanned.stdout, &scanned.stderr),
+        (explicit.code, &explicit.stdout, &explicit.stderr),
+        "the scan form must report exactly what the explicit form reports"
+    );
+}
+
+/// The strict declarations-only read's own diagnostics surface through the
+/// per-file fatal channel `.tmc` sources use. Mutation it catches: routing
+/// a `.tmh` through the PROGRAM read, which accepts a `machine` block and
+/// reports this header clean.
+#[test]
+fn a_header_with_a_machine_block_reports_the_strict_read_fatal() {
+    let dir = scratch("tmh-machine");
+    let f = write(
+        &dir,
+        "lib.tmh",
+        "\
+alphabet bit { '_', '1' }
+machine {
+  tape t: bit;
+  entry state s { [*] -> stop; }
+}
+",
+    );
+    let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+    assert!(
+        out.stderr.contains("lib.tmh:2:") && out.stderr.contains("[machine-in-declarations]"),
+        "stderr: {}",
+        out.stderr
     );
 }

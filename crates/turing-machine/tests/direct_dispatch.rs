@@ -103,6 +103,7 @@ fn trap_kind(t: Trap) -> &'static str {
         Trap::UnmappedWrite { .. } => "unmapped-write",
         Trap::ExitOutOfRange { .. } => "exit-out-of-range",
         Trap::ProfileViolation { .. } => "profile-violation",
+        Trap::Contract { .. } => "contract",
     }
 }
 

@@ -23,8 +23,8 @@
 //!   dropped under `--strip-debugger`;
 //! * transitions: `goto` → `jmp <label>` (or fall-through), `call … then` →
 //!   `call <name>[ [<binding>]]` then the resume, `return`/`stop`/`halt` →
-//!   `ret`/`stp`/`hlt`, and the synthesized graft-hole traps → `trap #0` /
-//!   `trap #1`.
+//!   `ret`/`stp`/`hlt`, the synthesized graft-hole traps → `trap #0` /
+//!   `trap #1`, and the synthesized contract trap → `trap #2`.
 //!
 //! **Match-table discipline** (docs/tmt/isa.md (match and dispatch)):
 //! the exact rows (every cell concrete) are sorted lexicographically and their
@@ -41,7 +41,7 @@
 //! and fall-through is selected instead.
 //!
 //! Object-level, before any world's `.routine`: `.graph <name>, <digest>` for
-//! every graph this unit exports and `.grafted <name>, <digest>` for every
+//! every graph this unit's header prints and `.grafted <name>, <digest>` for every
 //! library graph it spliced (docs/formats.md (routine interfaces)) —
 //! [`emit_program`]'s own two extra arguments, computed by the compiler
 //! rather than by anything IR-level, since a graph is consumed by grafting
@@ -109,11 +109,12 @@ enum Term {
     /// label printer needs the names, since a state reached only through an
     /// exits operand has no other reference to print its label for.
     /// `then: None` is TAIL POSITION — the callee is known `noreturn`
-    /// (docs/tmt/language.md (reuse)) — and prints a synthesized `trap #0`
+    /// (docs/tmt/language.md (reuse)) — and prints a synthesized `trap #2`
     /// rather than nothing: an honest program never reaches it (the callee
     /// never returns), but a LYING one — a declared-`noreturn` header whose
     /// linked definition actually returns — turns what would otherwise be
-    /// silent fall-through into a controlled stop (docs/tmt/isa.md
+    /// silent fall-through into a controlled stop, and the contract kind
+    /// names the broken declaration for what it is (docs/tmt/isa.md
     /// (explicit traps)).
     Call {
         operand: String,
@@ -137,6 +138,7 @@ enum Term {
     JumpIfMatch(String),
     TrapRead,
     TrapWrite,
+    TrapContract,
 }
 
 /// A `call … then` resume point — one instruction after the call, except
@@ -218,10 +220,12 @@ pub fn emit_program(
     }
 
     // Object-level interface digests, before the first `.func` (docs/formats.md
-    // (routine interfaces)): every exported graph, then every spliced library
+    // (routine interfaces)): every graph the header prints (`, private` for
+    // one it prints without exporting), then every spliced library
     // graph, each in this unit's own accumulation order.
     for g in graphs {
-        e.push(format!(".graph {}, {}", g.name, g.digest), 0);
+        let private = if g.exported { "" } else { ", private" };
+        e.push(format!(".graph {}, {}{private}", g.name, g.digest), 0);
     }
     for g in grafts {
         e.push(format!(".grafted {}, {}", g.graph, g.digest), 0);
@@ -706,6 +710,7 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
         IrTransition::TailCall { target } => Term::TailCall(target.clone()),
         IrTransition::TrapRead => Term::TrapRead,
         IrTransition::TrapWrite => Term::TrapWrite,
+        IrTransition::TrapContract => Term::TrapContract,
         IrTransition::ReturnExit { exit } => Term::RetExit(*exit),
     }
 }
@@ -737,7 +742,13 @@ fn render_binding(binding: &[IrTapeBinding]) -> String {
                 None => b.caller_tape.to_string(),
             };
             if b.pairs.is_empty() {
-                if b.map_written {
+                if b.open {
+                    // `with map { * }` — the marker alone. It is still a
+                    // written map, so the braces print either way; what
+                    // makes this arm its own is that the marker must not
+                    // be lost to the empty-pair-list shortcut.
+                    format!("{prefix}{{*}}")
+                } else if b.map_written {
                     format!("{prefix}{{}}")
                 } else {
                     prefix
@@ -766,7 +777,13 @@ fn render_binding(binding: &[IrTapeBinding]) -> String {
                         format!("{}{}{}", p.src, arrow, dst)
                     })
                     .collect();
-                format!("{}{{{}}}", prefix, pairs.join(", "))
+                let mut entries = pairs.join(", ");
+                if b.open {
+                    // The marker prints LAST, the one position the
+                    // grammar allows it (docs/formats.md (bound calls)).
+                    entries.push_str(", *");
+                }
+                format!("{}{{{}}}", prefix, entries)
             }
         })
         .collect();
@@ -847,7 +864,7 @@ pub(crate) fn render_glyph_element(glyph: &str) -> String {
 /// a bare number there as an INDEX, not a label — so a label headed for
 /// that slot is always quoted through this function instead, never through
 /// `render_glyph_element` (`render_binding`, below).
-fn quote_glyph(glyph: &str) -> String {
+pub(crate) fn quote_glyph(glyph: &str) -> String {
     let mut out = String::with_capacity(glyph.len() + 2);
     out.push('\'');
     for c in glyph.chars() {
@@ -883,8 +900,14 @@ pub(crate) fn render_glyph_list(glyphs: &[String]) -> String {
 /// when it carries something — an absent clause (`None`) and a
 /// written-but-empty one both decode to "no suffix" on the wire, so the
 /// shorter spelling is canonical either way and `writes=()` is never
-/// printed. `enters=`, `leaves=` and `opaque` are not emitted here: the
-/// IR carries no head contract or opacity fact yet.
+/// printed. `enters=`/`leaves=` print exactly when the signature
+/// parameter declared the matching clause (`IrTape.enters`/`::leaves`,
+/// filled through the same declared-clause resolution `writes` already
+/// goes through) — a present clause is never empty, so unlike `writes=`
+/// there is no emptiness guard to apply. `opaque` prints LAST, after all
+/// three lists and without a value of its own, exactly when the inferred
+/// bit is set (`IrTape::opaque`) — the wire's fixed suffix order
+/// (docs/formats.md (routine interfaces)).
 fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
     for t in tapes {
         let mut code = format!(".param {}, ({})", t.name, render_glyph_list(&t.glyphs));
@@ -892,6 +915,17 @@ fn emit_params(tapes: &[IrTape], e: &mut Emitter) {
             && !writes.is_empty()
         {
             code.push_str(&format!(", writes=({})", render_glyph_list(writes)));
+        }
+        if let Some(enters) = &t.enters {
+            debug_assert!(!enters.is_empty(), "an enters clause is never empty");
+            code.push_str(&format!(", enters=({})", render_glyph_list(enters)));
+        }
+        if let Some(leaves) = &t.leaves {
+            debug_assert!(!leaves.is_empty(), "a leaves clause is never empty");
+            code.push_str(&format!(", leaves=({})", render_glyph_list(leaves)));
+        }
+        if t.opaque {
+            code.push_str(", opaque");
         }
         e.push(code, 0);
     }
@@ -904,8 +938,8 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
     // `exits=` prints only for a routine that declares one, so a world
     // without `state` parameters emits the signature it always did
     // (docs/formats.md (routine interfaces)).
-    let exits = if w.exits > 0 {
-        format!(", exits={}", w.exits)
+    let exits = if !w.exits.is_empty() {
+        format!(", exits=({})", w.exits.join(", "))
     } else {
         String::new()
     };
@@ -1014,21 +1048,18 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                 // a callee KNOWN to be `noreturn`. Control is never meant to
                 // come back here, but a LYING declaration (a header that
                 // claims `noreturn` while the linked definition returns
-                // anyway, or a first-wins shadowed definition) would let a
-                // stray `ret` fall through into whatever the linker placed
-                // next and run silently on. `trap #0` closes that hole: on
+                // anyway) would let a stray `ret` fall through into
+                // whatever the linker placed
+                // next and run silently on. `trap #2` closes that hole: on
                 // an honest program it never fires (nothing reaches it), and
                 // on a lying one it turns silent fall-through into a
                 // controlled stop instead of arbitrary execution
-                // (docs/tmt/isa.md (explicit traps)). Kind 0 (unmapped-read)
-                // rather than 1: the ONLY two kinds the dialect's `trap`
-                // instruction can name are the map-hole pair, neither a
-                // literal fit for "control reached code the program declared
-                // unreachable" — `#0` is chosen for the same reason
-                // `zero_row`'s own synthesized stop is (below): the failure
-                // is on the read/match side, nothing the head reads here
-                // leads anywhere. `synthesized` marks it exactly like that
-                // other compiler-built trap row, never user-written.
+                // (docs/tmt/isa.md (explicit traps)). The contract kind
+                // says what actually went wrong — a declaration the source
+                // made about a callee turned out to be false — where the
+                // map-hole kinds would claim a read or write fault that
+                // never happened. `synthesized` marks the emission exactly
+                // like a compiler-built trap row, never user-written.
                 match then {
                     Some(Then::Goto(t)) => emit_goto(e, t),
                     Some(Then::Ret) => e.push(grid(None, "ret", ""), b.term_line),
@@ -1037,7 +1068,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
                     }
                     Some(Then::Stop) => e.push(grid(None, "stp", ""), b.term_line),
                     Some(Then::Halt) => e.push(grid(None, "hlt", ""), b.term_line),
-                    None => e.push(grid(None, "trap", "#0"), b.term_line),
+                    None => e.push(grid(None, "trap", "#2"), b.term_line),
                 }
             }
             Term::Ret => e.push(grid(None, "ret", ""), b.term_line),
@@ -1053,6 +1084,7 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
             Term::JumpIfMatch(t) => e.push(grid(None, "jm", t), b.term_line),
             Term::TrapRead => e.push(grid(None, "trap", "#0"), b.term_line),
             Term::TrapWrite => e.push(grid(None, "trap", "#1"), b.term_line),
+            Term::TrapContract => e.push(grid(None, "trap", "#2"), b.term_line),
         }
     }
 }
@@ -1293,11 +1325,15 @@ copy__2:
         // The cross-alphabet call renders the binding-call operand
         // `call mylib::plusOne [1{3->1, 4->2}]` (host tape 1 = data; wide '0'
         // = idx 3 → bits '0' = idx 1, wide '1' = idx 4 → bits '1' = idx 2).
-        // `num` declares neither `writes` nor `preserves`, so its `.param`
+        // `num` declares neither `writes` nor `never writes`, so its `.param`
         // publishes the INFERRED write set — the tape actually writes '0'
         // and '1' — rather than omitting `writes=` (docs/formats.md
         // (routine interfaces): an absent `writes=` decodes as "writes
-        // nothing", which would be false here).
+        // nothing", which would be false here). It also publishes
+        // `opaque`: `inc` is the routine's only state and its rows are
+        // `[2]` and `[*]`, so the wildcard row means no glyph is ever
+        // rejected for being unlisted — the exact precondition a caller's
+        // open binding needs.
         let expected = "\
 .section tables
 T0:     .row    [2]
@@ -1308,7 +1344,7 @@ T1:     .row    [2, *]
 D1:     .targets main__0, main__1
 .section code
 .routine mylib::plusOne, tapes=1, alpha=(3)
-.param num, ('_', '0', '1'), writes=('0', '1')
+.param num, ('_', '0', '1'), writes=('0', '1'), opaque
 .func mylib::plusOne
 inc:
         rd

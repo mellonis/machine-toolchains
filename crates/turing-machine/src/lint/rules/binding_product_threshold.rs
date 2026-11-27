@@ -2,7 +2,7 @@
 //! cartesian product of match rows. The compiler already raises this during
 //! range expansion; this rule RE-EXPOSES it on the lint channel under allow
 //! control, computing the product source-level (a wildcard and a single each
-//! contribute one row; a range contributes one per member present in the
+//! contribute one row; a range or a set contributes one per member present in the
 //! tape's alphabet) rather than running expansion. Shares the compiler's
 //! cutoff so the two agree.
 
@@ -10,19 +10,31 @@ use mtc_core::diagnostics::Diagnostic;
 
 use crate::expand::PRODUCT_THRESHOLD;
 use crate::lint::LintContext;
-use crate::lint::patterns::{glyph_label, range_labels};
 use crate::parser::{PatternCell, PatternCellKind};
+use crate::patterns::{declared_range, glyph_label};
 
 /// How many match rows one cell contributes, mirroring the expander's per-cell
 /// option count: a wildcard stays one row, a concrete single is one (zero when
-/// it is not on the tape — a dead cell), a range is one per in-alphabet member.
+/// it is not on the tape — a dead cell), a range or a set is one per in-alphabet
+/// member.
 fn factor(cell: &PatternCell, tape_glyphs: &[String]) -> usize {
     match &cell.kind {
         PatternCellKind::Wildcard => 1,
         PatternCellKind::Single(s) => usize::from(tape_glyphs.contains(&glyph_label(s))),
-        PatternCellKind::Range { lo, hi } => match range_labels(lo, hi) {
-            Some(labels) => labels.iter().filter(|l| tape_glyphs.contains(l)).count(),
-            // An unresolvable range: under-count to one, never over-report.
+        // A range is the declared run between its endpoints, every member on
+        // the tape by construction.
+        PatternCellKind::Range { lo, hi } => match declared_range(lo, hi, tape_glyphs) {
+            Ok(members) => members.len(),
+            // A range with no walk: under-count to one, never over-report.
+            Err(_) => 1,
+        },
+        // A set is one row per member the tape carries, as a range is.
+        PatternCellKind::SetRef { resolved, .. } => match resolved {
+            Some(r) => r
+                .members
+                .iter()
+                .filter(|m| tape_glyphs.contains(&m.label))
+                .count(),
             None => 1,
         },
     }

@@ -7,6 +7,263 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
+## [0.6.0] - 2026-11-28
+
+The language release for TM-1. A `.tmc` program stops being one file:
+a unit publishes its declarations, a header carries them, and a routine,
+an alphabet, a glyph set, a named map or a graph in one unit is callable,
+nameable or graftable from another, checked at compile time and
+re-checked at link. A signature says more — where a head enters and
+leaves, that a routine never returns, which states it hands control to —
+and a rule says more with less: guards, named cells, glyph sets, open
+maps.
+
+The other half is strictness. A good deal of what 0.5.0 accepted
+silently is now an error with a name: a symbol outside its alphabet, a
+binding name used twice, two inputs defining one name, a return through
+an exit nobody declared. The section after the version block lists what
+a 0.5.0 program can meet.
+
+Around that: prebuilt binaries for five platforms, bash and fish
+completions and manual pages, an IR graph that stays readable on a wide
+machine, and editor plugins that know headers and the named form.
+
+| Version space | This release | Previous |
+|---|---|---|
+| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.6.0** | 0.5.0 |
+| `mtc-wasm` crate / JavaScript API | **0.6.0** | 0.5.0 |
+| `.pmc` language | 0.4 — unchanged | 0.4 |
+| PM-1 `.pma` dialect | 0.3 — unchanged | 0.3 |
+| `.tmc` language | **0.2** | 0.1 |
+| TM-1 `.tma` dialect | **0.4** | 0.3 |
+| PM IR encoding (JSON) | 4 — unchanged | 4 |
+| TM IR encoding (JSON) | **4** | 3 |
+| Container formats (MO / MX / MT) | **4** / 2 / 2 — MO moved | 3 / 2 / 2 |
+| `pmt.json` project-manifest schema | 0.2 — unchanged | 0.2 |
+| `tmt.json` project-manifest schema | **0.3** | 0.2 |
+| VS Code extensions (PM-1, TM-1) | **0.2.1** | 0.2.0 |
+| JetBrains plugins (PM-1, TM-1) | **0.2.2** | 0.2.1 |
+| Tested-binary floor, PM-1 plugins | 0.4.0 — unchanged | 0.4.0 |
+| Tested-binary floor, TM-1 plugins | **0.6.0** | 0.4.0 |
+
+A version space moves once between two releases, by the minimal bump;
+work landing later in a cycle folds into that step. Each number above is
+therefore one step from its predecessor, however many rounds fed it.
+An object, an executable or a tape block written by 0.5.0 still loads.
+An object or an IR document written by an earlier build of this
+development line may not, and is rebuilt.
+
+### What a 0.5.0 program can meet
+
+PM-1 sources, objects and tapes are untouched with one exception, the
+first item. Everything else concerns `.tmc`, `.tma` and their link.
+
+- **A library definition can no longer be shadowed — both toolchains.**
+  A name two link inputs define is an error once the program reaches
+  it, naming both definers; two user objects defining one name are
+  refused reached or not. A program that overrode a standard-library
+  routine by defining `std::…` itself now fails to link: link with
+  `--nostdlib` and supply the set, or rename.
+- **`preserves { … }` is spelled `never writes { … }`.** Same symbols,
+  same arithmetic, same diagnostics; the old word is a parse error that
+  names the new one, and is an ordinary identifier again.
+- **Six words are reserved:** `noreturn`, `enters`, `leaves`, `set`,
+  `never`, `where`. A tape, state, world, namespace, alias, binding or
+  graft instance carrying one of those names no longer compiles. `in` is
+  reserved only inside a guard.
+- **A pattern cell naming a symbol its tape's alphabet lacks is an
+  error** — `symbol-outside-alphabet`, `range-outside-alphabet` — where
+  it dropped the alternative silently.
+- **A range walks the alphabet's declared order**, not Unicode
+  succession. Over an alphabet listed in Unicode order nothing changes;
+  over any other, `'a'..'z'` names the declared run between its
+  endpoints, and a range written backwards is refused.
+- **One binding name on two cells of a pattern is an error**,
+  `duplicate-pattern-binding`; the rightmost used to win.
+- **`main` names the entry world in a library too.**
+- **A hand-written `.tma`:** a `retx #k` past the exits its `.routine`
+  line declares does not assemble (`undeclared-exit`), and the same
+  return is refused at link under every call mechanism.
+- **`tmt lint` and `pmt lint` print the rule's name** at the end of each
+  finding. A script matching a finding's line to its end has to admit
+  the ` [code]` suffix.
+- **`--release` on `tmt` also strips contract asserts**: it is
+  `-O1 --strip-debugger --strip-asserts`.
+
+### Units, declarations and headers
+
+- **A unit can be read for its declarations alone.** A routine or graph
+  signature may end in `;` instead of a body, and a `.tmh` header is
+  `.tmc` text held to that reading: a `machine` block or a bodied
+  routine in one is an error, a graph still carries its body.
+- **`tmt interface`** prints a unit's header — from a source or from a
+  compiled object — and `--check` reports a committed header that has
+  gone stale. A generated header is canonical under `tmt fmt` and is
+  parsed again before it is written. The standard library ships one.
+- **`tmt compile --extern FILE`** reads external declarations; **`tmt
+  build`** derives them from a target's siblings, its libraries and the
+  embedded standard library. The sources are read to a fixed point, so
+  neither the order of `--extern` files nor the depth of a dependency
+  chain decides whether a program is accepted.
+- **With a callee's declarations in hand**, a `call` or `bind` into
+  another unit binds its tapes by name and is checked exactly as a local
+  one is; an alphabet, a glyph set, a named map and a graph can be named
+  across a unit boundary; and a graph from another unit can be grafted.
+- **One declaration per qualified name.** Two sources publishing a name
+  differently — or a unit defining a name its declarations publish
+  differently, exported or not — are `conflicting-declaration`, naming
+  both origins. Identical declarations merge, a unit's source beside its
+  own header or object included.
+- **Every compiled object describes its interface:** each routine's
+  tapes with their names, glyphs, write sets and head contracts, its
+  exits by name, whether it returns, and the alphabets and graphs the
+  unit exports or relies on. The linker re-checks what the compiler
+  assumed: an alphabet or a spliced graph that drifted from what a
+  consumer compiled against is refused, naming both sides.
+
+### Signatures
+
+- **`state` parameters.** A routine declares exits beside its tapes —
+  named ways out other than `return`, wired by each call site to a state
+  of the caller. An exit may be forwarded to an inner call, returned
+  through, or ended at a site. A signature lists its tapes first; at
+  most 255 exits.
+- **`noreturn`.** Whether a routine can return is inferred from its
+  body, may be declared, and is published; a call into a routine that
+  cannot return needs no `then`, and is followed by a trap.
+- **Head contracts.** `enters { … }` and `leaves { … }` on a tape
+  parameter state the glyphs the head may stand on at entry and at exit.
+  A contract the body cannot keep is a compile error; a call that may
+  break one is the `enters-unmet` lint; and a debug build checks it at
+  run time, trapping as a broken contract. `--strip-asserts` removes the
+  checks, alone or as part of `--release`.
+- **The standard library declares where its heads leave**, on every
+  tape parameter, and four passages of its documentation that described
+  the head on exit more narrowly than the bodies behave are corrected.
+
+### Rules, sets and maps
+
+- **Rule guards.** `where { … }` between a pattern and its arrow removes
+  rows from the pattern's cartesian expansion: glyph identity, sequence
+  position with constant offsets, and `in`-set narrowing, under `&&` and
+  `||`. Nothing downstream of the expander sees a guard. An order
+  comparison needs both operands on one sequence, written out; a guard
+  keeping no rows warns, and an `in` that narrows nothing is the
+  `redundant-guard-narrowing` audit.
+- **Named vector cells.** `[king: '♔', file: '0'..'7' as f]` names the
+  tapes a rule speaks of and leaves the rest at their defaults. Pure
+  spelling: both forms of a rule compile to the same rows. A vector
+  takes one form.
+- **Glyph sets.** `set NAME { … }` declares a set once; an alphabet
+  body, another set, a contract clause or a pattern cell names it.
+- **Named maps.** `map NAME: SRC -> DST { … }` declares a symbol map
+  once; a call, bind or graft uses it with `with map NAME`.
+- **Open maps.** A map may end in `*`: the unlisted symbols become an
+  opaque class, never aliased onto a glyph of the callee and matched
+  only by its `*` rows — on a call, a bind and a graft alike. A graft
+  whose graph would decide a row on the opaque class is refused at
+  compile time.
+- **Folds follow a symbol's label, not its quotes:** `['0'..'8' as d] ->
+  write [{d+1}]` folds as `[0..8 as d]` does.
+
+### The linker
+
+- **Exit-bearing calls lower under every mechanism.** Frames carries the
+  exit vector in the site's descriptor, mono splices a per-site copy,
+  and hybrid shares a body among the sites reaching it only when sharing
+  pays in bytes. Shapes the copying path cannot carry are refused with
+  the mechanism that can.
+- **Symbolic binding sites.** A bound call may name the callee's
+  parameters, label a pair's destination by glyph, write an empty map,
+  or leave a map open; the link stage resolves each against the callee's
+  recorded interface.
+- **Link warnings**, with a code each, `--allow` and `-Werror` on
+  `tmt link` and `tmt build`: a site binding by index into an alphabet
+  that spells its symbols differently or is narrower, and a call with no
+  continuation into a callee that can return.
+- **A link error names the inputs it comes from** — a unit by its path,
+  a library by name, the standard library as itself.
+- **A graph's digest covers what its body names** — the members of each
+  glyph set and the pairs of each named map — so a library edited only
+  there is drift at link, not a silent difference.
+- **Fixed:** a well-formed link refused because a table offset's low
+  byte happened to look like an opcode; a nested exit-bearing frames
+  site composed in the wrong row.
+
+### Assembly and the object format
+
+- **The interface surface in `.tma`:** `.param`, `.graph`, `.grafted`,
+  the `exits=(<name>, …)` and `noreturn` fields on `.routine`, quoted
+  glyph literals of any non-empty content, and the binding-call
+  operand's named entries, glyph labels, written-empty and open maps and
+  `exits=(…)` vector. Everything the compiler emits is writable by
+  hand, held by disassemble-then-assemble byte identity.
+- **Container MO 4** adds the interface section, graft provenance and
+  symbolic bound sites with exits. An interface names each state
+  parameter, so a declaration read back from an object offers exactly
+  what the source declared.
+- **TM IR 4** carries glyphs, contracts, exits by name and symbolic
+  binding entries.
+- **A third trap kind**, the broken contract, beside the two a row can
+  already raise.
+
+### Diagnostics and lint
+
+- **A compile warning prints its code** and can be allowed: `--allow` on
+  `tmt compile` and `tmt build`, and a manifest's `lint.allow`.
+- **A lint finding prints its rule's name**, on both toolchains.
+- **New `.tmc` rules:** `enters-unmet`, `unused-set`,
+  `duplicate-graft-instance`, `unused-tape-parameter`,
+  `unused-fold-variable`, `inert-never-writes`,
+  `redundant-guard-narrowing`.
+- **An exported alphabet, map or set is never reported unused**, and a
+  transparent call into another unit counts as touching every tape.
+- **A shadowed rule warns once**, naming the rule that shadows it.
+- **`tmt fmt` and `tmt lint` accept a header**; a header lints by its
+  own rule subset.
+
+### Command line and tooling
+
+- **Prebuilt binaries.** A release carries `pmt` and `tmt` for Linux
+  (x86_64, aarch64), macOS (Apple silicon, Intel) and Windows (x86_64):
+  one archive per tool per platform with a `.sha256` beside it, built by
+  the release workflow from the tagged commit with the pinned compiler.
+- **Completions for bash and fish** beside zsh, and **`pmt man` /
+  `tmt man`**, a manual page rendered from the same description of the
+  command line the completions use.
+- **`ir graph` stays readable.** Rows differing in one read cell merge
+  into one arrow by default; `--shape` draws one arrow per pair of
+  states with a count, `--raw` one per row. On `pmt` the same three
+  views apply to a function's control-flow graph.
+- **The browser binding exposes the compiler IR and its graph.**
+- **`tmt.json`** gains the `strip-asserts` profile key.
+
+### Editors
+
+- **Headers in the editor.** `tmt lsp` serves a `.tmh`, read
+  declarations-only as the command line reads it; the TM-1 plugins
+  register the extension, and the VS Code one offers no `compile` task
+  for a header.
+- **Cell labels.** At the start of a rule-vector cell the service offers
+  the world's tapes as labels, and after a label the symbols of that
+  tape's alphabet; go-to-definition and hover on a label reach the tape.
+- **Both JetBrains plugins build against LSP4IJ 0.30.1** where they
+  pinned 0.20.1; releases of it from 0.21.0 on can reach the debugger's
+  Disassembly view on a 2026.x IDE.
+- **Both VS Code extensions** ship the next major of the language client
+  they bundle, and declare their type definitions at the editor version
+  they support.
+
+### Documentation
+
+- The reference pages follow every item above: `docs/tmt/language.md`
+  (declarations and headers, `state` parameters, head-position clauses,
+  glyph sets, named and open maps, rule guards, named vector cells),
+  `docs/formats.md` (routine interfaces, bound calls), `docs/core.md`
+  (call mechanisms, symbolic resolution), `docs/tmt/lint.md`,
+  `docs/tmt/cli.md`, `docs/tmt/project.md` and `docs/lsp.md`.
+- `README.md` gains an install section.
+
 ## [0.5.0] - 2026-09-02
 
 Two release candidates preceded this cut on the same day: the first so

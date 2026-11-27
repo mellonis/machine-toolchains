@@ -101,6 +101,17 @@ pub struct ArchSyntax {
     pub caps: AsmCaps,
 }
 
+impl SyntaxEntry {
+    /// A multi-exit return: an `Imm8` operand naming the exit, with `Stop`
+    /// flow — the flow is what tells it from a trap carrying the same
+    /// operand kind (docs/core.md (linking)). The assembler's
+    /// `undeclared-exit` check, the linker's, and the copy path's rewrite
+    /// all read this one predicate.
+    pub fn is_exit_return(&self) -> bool {
+        self.operand == OperandKind::Imm8 && self.flow == Flow::Stop
+    }
+}
+
 impl ArchSyntax {
     pub fn by_mnemonic(&self, m: &str) -> Option<&SyntaxEntry> {
         self.entries.iter().find(|e| e.mnemonic == m)

@@ -64,8 +64,9 @@ FLAGS:
   -g                 record debug info (labels + .tmc lines)
   -O0 | -O1          optimization level (default -O0)
   --strip-debugger   drop `brk` at codegen
+  --strip-asserts    drop contract-check states
   --debug            preset: -g -O0
-  --release          preset: -O1 --strip-debugger
+  --release          preset: -O1 --strip-debugger --strip-asserts
   -S                 emit the generated .tma instead of an object
   --stamped-asm      emit raw stamped .tma (skip .rept re-detection)
   --emit-ir[=STAGE]  write the world-graph IR JSON next to the output
@@ -76,6 +77,7 @@ FLAGS:
   --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
                      repeatable, in command-line order)
   --nostdlib         do not read the embedded standard library's declarations
+  --allow CODE       suppress a compile warning code (repeatable)
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
 ```
@@ -95,21 +97,33 @@ implies it — the debug line map is keyed to the stamped physical lines and
 cannot survive the rewrite — so a `-g` build always carries the stamped text.
 
 `--debug` and `--release` are presets applied *before* the individual flags,
-so `-O0` / `-O1` / `-g` / `--strip-debugger` can still override one piece of
-a preset on the same command line. The default build (no flags) is `-O0`
-with no debug info.
+so `-O0` / `-O1` / `-g` / `--strip-debugger` / `--strip-asserts` can still
+override one piece of a preset on the same command line. The default build
+(no flags) is `-O0` with no debug info.
 
 `-g` records the label/line debug section, which the linker carries into the
 `.tmx.map` sidecar and `dis` / `run --trace` read back as real names.
 `--strip-debugger` drops `brk` at codegen; note that `brk` is also an
 observability barrier the optimizer will not move code across, so stripping
 it and optimizing are related choices rather than independent ones
-(`docs/tmt/isa.md`).
+(`docs/tmt/isa.md`). `--strip-asserts` drops contract-check states the same
+way, independently of `--strip-debugger` — the two flags strip unrelated
+things and either may be passed without the other. The states it drops
+are the run-time checks of routines' `enters`/`leaves` clauses
+(`docs/tmt/language.md (head-position clauses)`); the clauses themselves
+stay in the object's published signature, and the trap after a `call`
+written without `then` stays too, since it checks a declaration no
+clause states. `--release` includes `--strip-asserts`, so a release
+build carries no head-contract check; for a program with no clause it
+changes nothing.
 
-Compile warnings always print to stderr as `FILE:LINE:COL: warning: MESSAGE`.
-`-v` additionally renders the optimizer's report — the number of fixpoint
-rounds and, per round, each pass's change count per world. `-Werror` turns
-every warning into a compile failure.
+Compile warnings always print to stderr as
+`FILE:LINE:COL: warning: MESSAGE [CODE]`, the bracketed code one of the
+"Compile warnings" catalog below. `--allow CODE` suppresses a warning by
+its code (repeatable; an unknown code is refused up front, as on `tmt
+lint`). `-v` additionally renders the optimizer's report — the number of
+fixpoint rounds and, per round, each pass's change count per world.
+`-Werror` turns every warning `--allow` leaves into a compile failure.
 
 ### `-O0` and `-O1`
 
@@ -188,12 +202,31 @@ contributes the whole alphabet. `FILE`'s extension decides how it is read,
 never a second front end: a `.tmh` is read STRICTLY, the same shape `tmt
 interface` enforces on a header (a routine body or a `machine` block is an
 error); anything else — a `.tmc` — is read LENIENTLY as a full program,
-where any body and any `machine` block are simply unused. The flag is
-repeatable, and order is meaningful: modules are consulted in command-line
-order, with the embedded standard library consulted last — so a `--extern
-std.tmh` of the user's own shadows the built-in `std` when both are
-present. This mirrors the linker's own first-wins rule for a name declared
-in more than one object.
+where any `machine` block is unused and a routine's body contributes its
+`noreturn` and its uncontracted tapes' write sets, inferred exactly as
+`tmt interface` infers them. The flag is
+repeatable, and the files are read together to a fixed point — each
+against the declarations of the others, again whenever one of them
+changes what it publishes — so one `--extern` file may depend on another
+and the order of the flags decides nothing about what they publish
+through a published name (`docs/tmt/project.md (Declaration derivation)`);
+a name two files carry only privately, in different forms, is taken from
+the first of them in flag order. Two files declaring one
+name must declare it identically — a
+unit's source and its header, one library given twice — or the compile
+fails `conflicting-declaration`; the same holds against the embedded
+standard library, which is read last, and against the unit's own
+definitions, exported or not. A name one file carries without exporting
+it — a private graph a header prints, a private routine of a `.tmc` — is
+held to the same rule beside another file's published declaration of
+that name, in either order of the two flags; two files' private
+declarations of one name are not compared
+(`docs/tmt/language.md (declarations)`). To fix the error, keep
+one declaration per name: after changing a unit, regenerate its header
+with `tmt interface` (a stale header beside its unit is the usual cause),
+or drop the file that declares the name differently. A declaration read
+from a compiled object is compared the same way, state-parameter names
+included.
 
 `--nostdlib` drops the embedded standard library from that lookup —
 `std::…` names then behave like any other external, contributing the
@@ -207,15 +240,16 @@ does not, by itself, resolve a call target or an alphabet reached through
 `use` — an unresolved `use`-imported name fails exactly as it does without
 `--extern`.
 
-A declarations reading believes DECLARED facts only, so which of the two
-forms of a unit you point `--extern` at changes what compiles: a routine
-declaring no `writes` clause is read as able to write its whole
-alphabet, and one not saying `noreturn` as able to return. `tmt
-interface` is where inference becomes a declared fact — it writes the
-inferred write set and `noreturn` down — so a unit given as its own
-generated `.tmh` supports strictly more than the same unit given as a
-`.tmc` sibling (`docs/tmt/project.md (Declaration derivation)`). Declare
-the clauses in the source, or point `--extern` at the generated header.
+A unit given to `--extern` as its `.tmc` and as the header `tmt
+interface` generates from it against the same `--extern` files publish
+the same thing, in every order of the flags: each tape's declared write
+set where it declares one, the write set inferred from the body
+otherwise, and the same `noreturn` — unless the units call each other in
+a cycle through `with map` bindings that shift glyphs. `tmt interface`
+reads its unit once against its peers and cannot reach the settled set
+there, so the header can be wider than the `.tmc`. State the `writes`
+clause on the routine, covering what it can write, and both forms
+publish it.
 
 `--extern` takes declaration **source** text. A compiled container given
 to it — an object, an executable, a tape block — is refused on its magic,
@@ -259,44 +293,55 @@ subsection.
 | `routine-body-in-declarations` | A routine carries a body in a declarations-only reading — a header states its signature only. |
 | `naked-pattern` | A rule pattern written without its enclosing `[ … ]` — bare single-tape patterns are not supported. |
 | `wildcard-binding` | `* as v` — a wildcard cannot bind; write the range explicitly so the expansion cost is visible. |
-| `range-kind-mismatch` | A range whose endpoints are not the same kind (`'a'..3`) — `glyph..glyph` or `number..number` only. |
-| `char-arithmetic` | Arithmetic on a glyph-bound substitution (`{c+1}`) — only numeric bindings fold. |
+| `range-kind-mismatch` | A range in an alphabet or set body whose endpoints are not the same kind (`'a'..3`) — a body range is `glyph..glyph` or `number..number` only. |
+| `char-arithmetic` | Arithmetic on a substitution bound to a symbol whose label is not a number (`{c+1}` where `c` bound `'a'`, or `'07'`) — only a binding every one of whose symbols is labelled with a number's canonical decimal folds, whatever its quotes (`'7'` and `7` fold alike). A range whose declared run, or a set whose members, include one such symbol is refused the same way. |
 | `graft-needs-name` | A non-`entry` `graft` with no `as name` — an unreferenced unnamed instance would be dead. |
 | `state-redirect` | The `state name;` redirect form — a state always has a `{ … }` body. |
 | `dangling-doc-run` | A doc/attention run not immediately followed by a declaration that accepts documentation. |
 | `doc-line-order` | A `?` doc line appears after the run has already entered its `!` block. |
 | `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
 | `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
-| `contract-clause-order` | A `writes { … }` clause on a signature tape parameter written after that parameter's `preserves` clause — the fixed order is `writes` then `preserves`. |
-| `duplicate-contract-clause` | A second `writes` or `preserves` clause on one signature tape parameter. |
+| `contract-clause-order` | A signature tape parameter's contract clauses written out of the fixed canonical order — `writes` then `never writes` then `enters` then `leaves`. |
+| `duplicate-contract-clause` | A second clause of one kind — `writes`, `never writes`, `enters` or `leaves` — on one signature tape parameter. |
+| `empty-head-clause` | An `enters { … }` or `leaves { … }` clause with no elements — unlike `writes {}`/`never writes {}` (a meaningful empty set), a head-position clause states no moment at all. |
 | `empty-alphabet` | An alphabet with no elements — a world needs at least one symbol. |
 | `duplicate-glyph` | The same glyph appears twice in one alphabet. |
 | `alphabet-too-large` | An alphabet resolves to more than 127 symbols. |
-| `range-endpoint-not-scalar` | A glyph range endpoint that is not a single Unicode scalar. |
-| `range-descending` | A range whose low endpoint exceeds its high endpoint — ranges are inclusive and ascending. |
+| `range-endpoint-not-scalar` | A glyph range endpoint in an alphabet or set body that is not a single Unicode scalar (a cell or clause range may name any glyph of its alphabet). |
+| `range-descending` | A range in an alphabet or set body whose low endpoint exceeds its high endpoint — a body range is inclusive and ascending. A cell or clause range whose endpoints come in the wrong order is `range-outside-alphabet`. |
+| `symbol-outside-alphabet` | A pattern cell's single symbol is not a symbol of the alphabet of the tape the cell reads. |
+| `set-outside-alphabet` | A member of the glyph set a pattern cell names is not a symbol of the alphabet of the tape the cell reads. |
+| `range-outside-alphabet` | A range in a pattern cell or a contract clause has no walk over the alphabet it is written against, which it walks in declared order: a cell range's endpoint is not a symbol of the alphabet, or the second endpoint comes first in it. |
+| `empty-set-in-pattern` | A pattern cell names a glyph set with no members, so the rule can never match. |
 | `duplicate-name` | Two entities (alphabet, map, routine, graph, or namespace) share one name in one scope — including a top-level `main`, which is reserved for the entry world in every unit, library or program (`docs/tmt/language.md (program structure)`). |
+| `conflicting-declaration` | Two declarations of one qualified name disagree: two declaration sources publish it differently, or one publishes it and another carries it privately in another form, or this unit defines a name its declarations declare differently (either side publishing it), or this unit would splice two different graphs under one name (the message names both origins). Identical declarations — a unit's source and its up-to-date header, one library reached twice — are one declaration. |
 | `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
+| `duplicate-pattern-binding` | One rule's pattern binds a name twice (`[0..7 as x, 0..7 as x]`) — the message names both cells and the state; give each binding its own name. |
 | `too-many-tapes` | A world declares more than 16 tapes. |
-| `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). |
+| `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). A name that resolves to one of this unit's own declarations of another kind (a glyph set, a map, a routine or a graph) is this code too; the message names the kind found. A CROSS-UNIT name that the declarations given to this compile declare as another kind is this code too; the message names the kind found. |
 | `duplicate-tape` | Two tapes share one name in one world. |
 | `duplicate-state` | Two states (or a state and a graft instance) share one name in one world. |
 | `duplicate-param` | Two signature parameters share one name. |
 | `entry-count` | A world's `entry` count is not exactly one. |
-| `return-outside-routine` | A `return` transition, continuation, or `state` argument outside a routine body. |
+| `return-outside-routine` | A `return` transition, continuation, or argument of a `call`, `graft` or `bind` outside a routine body. |
 | `goto-into-bind` | `goto` targeting a bind name — a bind is a call target, never a state. |
 | `goto-not-a-state` | `goto` targeting a routine or graph — a reuse target, not a state. |
 | `undefined-state` | `goto`, a continuation, or a state argument names no state (or graft instance) in the world. |
-| `wrong-target-kind` | A `call`/`graft`/`bind` target resolves to the wrong entity kind. |
-| `undefined-graph` | A `graft` target names no graph — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose unit's declarations were not given (declare it locally, or supply its declarations to this compile). |
+| `wrong-target-kind` | A `call`/`graft`/`bind` target resolves to the wrong entity kind — a local one, or a `call`/`bind` naming a graph the declarations given to this compile declare; the message names the kind found. So does a LOCAL set reference in an alphabet body, a set body, a contract clause or a pattern cell that resolves to the wrong entity kind. A set reference reached across units — through `use` or a qualified path — that names a declaration of another kind is `undefined-set` instead, even when that unit's declarations were supplied; see that row. |
+| `undefined-graph` | A `graft` target names no graph — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose unit's declarations were not given (declare it locally, or supply its declarations to this compile). A CROSS-UNIT name that the declarations given to this compile declare as another kind is this code too; the message names the kind found. |
+| `undefined-set` | A set reference — in an alphabet body, a set body, a contract clause, or a pattern cell — names no glyph set: either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). A LOCAL name that resolves to something other than a set is `wrong-target-kind` instead. A CROSS-UNIT name that the declarations given to this compile declare as another kind (an alphabet, say) is this code too; the message then names the kind found rather than claiming the declarations were not given. |
+| `set-cycle` | A glyph set's body reaches the set itself, directly or through other sets, so it has no finite expansion. |
 | `unknown-arg` | A binding argument names a parameter the signature does not declare. |
 | `duplicate-arg` | Two binding arguments share one parameter name. |
 | `missing-arg` | A signature parameter has no binding argument. |
 | `wrong-arg-kind` | A binding argument is the wrong kind for its parameter. |
-| `unresolved-tape-target` | A tape-parameter argument names a target that is not a tape in the enclosing world. |
+| `unresolved-tape-target` | A tape-parameter argument — or a named rule-vector cell — names a target that is not a tape in the enclosing world. |
 | `duplicate-tape-target` | Two tape-parameter arguments of one `call`, `graft`, or `bind` name the same caller tape — one caller tape cannot back two callee tapes. |
 | `bind-call-args` | A `call` on a world-local bind name carries binding arguments — a bind is already fully bound at its declaration. |
-| `contract-symbol-unknown` | A `writes`/`preserves` clause names a glyph that is not a symbol of the parameter's alphabet. |
-| `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `preserves`). |
+| `contract-symbol-unknown` | A contract clause — `writes`, `never writes`, `enters` or `leaves` — names a glyph that is not a symbol of the parameter's alphabet, alone, as a range endpoint, or as a member of a named set. |
+| `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `never writes`). |
+| `enters-not-accepted` | A declared `enters { … }` clause names a glyph the world's entry state has no rule for. |
+| `leaves-outside-contract` | A declared `leaves { … }` clause is contradicted by an exit row whose leaving glyph is statically known. |
 | `graft-cycle` | A graph definition graft-depends on itself, directly or through a cycle of definitions. |
 | `graft-call-unsupported` | A grafted graph's body contains a `call` — a call-bearing graph is not spliced; write it as a routine, with `state` parameters if it needs several exits. |
 | `map-symbol-not-in-alphabet` | A symbol map (a graft binding's, or a named map declaration's own pairs) references a glyph that is not in the alphabet it maps. |
@@ -304,21 +349,69 @@ subsection.
 | `map-conflict` | A symbol map maps one symbol to two different images in one direction. |
 | `map-not-injective` | A symbol map on equal-size alphabets is not injective — identity completion collides. |
 | `identity-glyph-mismatch` | An omitted symbol map on tapes whose alphabets are not glyph-for-glyph equal — an omitted map means identity. |
-| `map-not-closed` | A named map declaration's two alphabets differ in size and it leaves a non-blank source symbol unmapped — unlike a graft's inline map (which silently holes an unnamed source), a declaration reused at many sites must name every one explicitly. |
+| `open-graft-uncovered` | A graft site's open map, on a graph state whose rows would let the opaque class decide whether one of them matches. Refused instead of trapping later: give the state a row whose bound-tape cell is `*`, or name the symbols in the map. The state and the tape parameter are named — the first state in source order that leaves an open tape uncovered, and that state's first uncovered tape whose map is open and leaves an opaque symbol (a closed map, or a map naming every symbol, is passed over). |
+| `map-not-closed` | A named map declaration's two alphabets differ in size and it leaves a non-blank source symbol unmapped — unlike a graft's own closed inline map (which silently holes an unnamed source), a declaration reused at many sites must name every one explicitly. |
 | `named-map-source-mismatch` | A `with map NAME` site's caller tape alphabet is not the named map's own declared source alphabet. |
 | `named-map-target-mismatch` | A `with map NAME` site's callee parameter alphabet is not the named map's own declared target alphabet. |
-| `undefined-map` | A `with map NAME` site names no map in scope — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). An unresolvable `use` import with no site naming it is a separate, non-fatal finding (`unused-import`), not this code. |
+| `undefined-map` | A `with map NAME` site names no map in scope — either nothing declares it anywhere, or it is reached through `use` or a qualified path whose declarations were not given (declare it locally, or supply its declarations to this compile). A CROSS-UNIT name that the declarations given to this compile declare as another kind is this code too; the message names the kind found. An unresolvable `use` import with no site naming it is a separate, non-fatal finding (`unused-import`), not this code. |
 | `fold-out-of-alphabet` | A write substitution folds to a value with no glyph in the tape's alphabet. |
 | `zero-modulus` | A `%` in a write-cell fold has a zero modulus. |
 | `negative-remainder` | A `%` fold produces a negative remainder — reachable only when subtraction takes the left operand negative. |
 | `fold-overflow` | A write-cell fold overflows `i64` during evaluation. |
 | `exact-row-conflict` | Two rules in one state match the same concrete tuple with neither carrying a wildcard. |
 | `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
+| `duplicate-named-cell` | Two named cells of one rule vector name the same tape — write each tape at most once per vector. The second name is the one reported. |
+| `mixed-cell-forms` | One rule vector mixes named and positional cells — spell every cell with `name:`, or none. The first cell sets the vector's form; the first cell that breaks it is the one reported. |
+| `guard-order-context` | A guard's order comparison — or one carrying a constant offset — has operands with no one common sequence to count positions in. Either both are narrowed in their `&&` cone to one set with `in`, or both sit on one alphabet; anything else, stay on identity (`==`/`!=`). The message names the two contexts. |
+| `guard-unknown-binding` | A guard names an identifier that is no pattern binding of its rule. |
+| `guard-set-outside-alphabet` | `in S` on a guard whose set `S` names a symbol the binding's own tape alphabet cannot hold. The set name as written and the alphabet are the ones reported. |
+| `guard-constant-comparison` | A guard comparison with no binding operand — nothing a rule could ever match differently varies with it. Write it as rows. |
 | `too-many-state-params` | A signature declares more than 255 `state` parameters — the published exit count is one byte wide. |
+| `tape-after-state-param` | A `routine` or `graph` signature writes a `tape` parameter after a `state` parameter. The tapes come first, then the `state` parameters. |
 | `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (declare it locally, or supply its declarations to this compile). |
 | `noreturn-violated` | A routine's signature declares `noreturn`, but its body has a way to return — a `return` transition, a `then return`, or `return` handed to a callee as a `state` argument, counted conservatively over the whole body. |
 | `then-required` | A `call`/bind site omits `then`, but its callee is not known (declared to this unit) to be `noreturn` — `then` stays mandatory against an unknown callee or one that can return, since the linker never checks it either way. |
 | `internal-error` | The compiler broke its own invariant — generated assembly failed to assemble, or a compiler-built IR world failed validation. A compiler bug, not a source error; please report it. |
+
+### Compile warnings
+
+A compile warning never stops the compile. It renders as
+`FILE:LINE:COL: warning: MESSAGE [CODE]`, on `tmt compile` and on `tmt
+build`'s compile stage alike:
+
+```
+shadow.tmc:8:5: warning: this rule is unreachable — the rule at 7:5 already matches [K, *] [shadowed-rule]
+```
+
+A `shadowed-rule` warning is one per pair of source rules — the later
+rule, located, and the earlier one it names by position — however many
+of their expanded rows coincide, and however many grafts splice the
+pair into one world. It quotes the first coinciding row and counts the
+rest; a range rule written twice reads:
+
+```
+range.tmc:8:5: warning: this rule is unreachable — the rule at 7:5 already matches [a, *] and 3 more rows [shadowed-rule]
+```
+
+The codes join the one allow namespace `tmt lint` uses
+(`docs/tmt/lint.md (the allow namespace)`): `--allow CODE` on `tmt
+compile` or `tmt build` suppresses one, and in manifest mode so does
+`lint.allow` in `tmt.json`. `-Werror` counts only the warnings that
+survive the allow list. Allowing a warning only silences it — the rule
+`unreachable-rule` names is still dropped. Two codes are also lint rules
+of the same name, `unused-import` and `unused-routine`
+(`docs/tmt/lint.md`), and one allow entry covers both channels.
+
+| Code | Meaning |
+|---|---|
+| `empty-expansion` | A rule of a grafted graph maps no host symbol to one of its match cells at this splice, so it expands to zero rows there and can never fire in this instance (`docs/tmt/language.md (pattern ranges)`). |
+| `expansion-threshold` | A rule's ranges and sets expand to more rows than the compiler's cost threshold. |
+| `shadowed-rule` | A rule whose pattern, after range and set expansion, is identical to an earlier rule's in the same state and carries a wildcard: the later row can never fire. One warning per pair of rules, naming the earlier rule's position and the first coinciding row (`docs/tmt/language.md (which rule fires)`). |
+| `undeclared-external` | A reference to a name defined outside this unit that no `use` declares; `tmt build` drops it where the build defines the name (see `tmt build`, below). |
+| `unreachable-rule` | A second all-wildcard rule in one state: the first — named by position — already matches every input, so the compiler drops this one. |
+| `unreachable-state` | A state no path from its world's entry reaches. |
+| `unused-import` | A `use` import nothing in the unit names — see the lint rule of the same name. |
+| `unused-routine` | A routine that is not exported and that no `call` or `bind` targets — see the lint rule of the same name. |
 
 ## `tmt asm`
 
@@ -377,6 +470,14 @@ follows per hybrid exit-bearing fold decision — the callee, its site count,
 body and descriptor bytes, and whether the group was shared under frames or
 spliced as mono seeds — so a link with no such site prints none.
 
+A routine the program reaches that returns through an exit its `.routine`
+line does not declare is a link error under every mechanism, whether or
+not the entry carries a signature (the assembler refuses the same body in
+a `.tma`, so only an object built another way can carry one).
+`undeclared-exit` is an error, not a link-warning code: `--allow
+undeclared-exit` and a `lint.allow` entry naming it are unknown-code
+errors (`docs/core.md (linking)`).
+
 ### `--call-mech`
 
 Selects how declarative binding calls are lowered. The three values are
@@ -417,9 +518,10 @@ Linking always appends the embedded standard library as an implicit last
 library unless `--nostdlib` is given (`docs/tmt/stdlib.md`). It is linked
 *lazily*, through the same reachability pass as everything else, so a
 program that calls nothing from it pays nothing — the stdlib's routines
-simply appear in the dropped list under `-v`. Libraries are first-wins, so
-command-line objects and explicit `-l` libraries shadow a stdlib definition
-of the same name.
+simply appear in the dropped list under `-v`. A command-line object or an
+explicit `-l` library defining a name the stdlib also defines is a
+duplicate-symbol error once the program reaches it; `--nostdlib` is the way
+to replace the library.
 
 Explicit `-l NAME` resolves `NAME.tmo` against the `-L` directories in the
 order given, and errors if it is not found on any of them. There is no
@@ -438,9 +540,11 @@ a header-only library is a `tmt build` concept only.
 
 A link warning names a site the linker can see is suspect but will not
 refuse — a callee whose alphabet is narrower than the caller's band, one
-whose glyphs differ at the same width, or a call with no continuation
-into a callee that can return. It prints always, in the same format a
-compile warning does, and carries a bracketed code:
+whose glyphs differ at the same width or a call with no continuation
+into a callee that can return. It prints always and, like a compile
+warning, carries a bracketed code — located by function and offset, or
+by source line when the objects carry debug data, since a link diagnostic
+has no file or column:
 
 ```
 main+0x0001: warning: `sub` reads a 3-symbol alphabet where `main`'s tape 0 is 5 wide [narrow-alphabet]
@@ -452,7 +556,8 @@ suppresses one here and `lint.allow` in `tmt.json` suppresses it for
 Errors are outside the namespace and cannot be suppressed — a callee
 wider than the caller or declaring exits the site does not supply, a
 binding naming a parameter or a glyph the callee does not declare, an
-open binding into a tape the callee does not declare opaque, a graft or
+open binding into a tape the callee's signature does not publish as
+opaque (`docs/tmt/language.md (symbol maps)`), a graft or
 an imported alphabet whose digest drifted, and the copy path's own
 refusals (`docs/core.md (call mechanisms)`).
 
@@ -500,6 +605,7 @@ COMPILE FLAGS (argv mode; manifest mode: override the profile):
   -O0 | -O1             optimization level
   -g                    record debug info
   --strip-debugger      drop `brk` at codegen
+  --strip-asserts       drop contract-check states
   --fno-<pass>          disable one optimizer pass (repeatable)
   --foutline            enable the default-off `outline` pass
   -Werror               treat (post-refinement) warnings as errors
@@ -511,7 +617,7 @@ LINK FLAGS (argv mode only; the manifest declares these):
   -o OUT.tmx            output path
 
 COMMON:
-  --allow CODE          suppress a link warning code (repeatable)
+  --allow CODE          suppress a compile or link warning code (repeatable)
   --no-relax            keep every symbol site in far form
   --call-mech MECH      bound-call lowering: mono | frames | hybrid
   --keep-objects        write each intermediate .tmo next to its source
@@ -537,13 +643,14 @@ a build is either fully argv-driven or fully manifest-driven.
 **Flag table**, split by which mode reads which flag:
 
 - **Compile-side** (`--debug`/`--release`, `-O0`/`-O1`, `-g`,
-  `--strip-debugger`, `--fno-<pass>`, `--foutline`, `-Werror`) apply in
-  argv mode directly; in manifest mode they **override** the
-  corresponding key of the selected profile for this invocation only —
-  the manifest itself is never rewritten. Two of them have no such key
-  to override: `--fno-<pass>` and `--foutline` are **flag-only axes**.
-  A profile carries `opt`, `debug-info`, `strip-debugger`, and `werror`
-  and nothing else, so pass selection cannot be committed to the
+  `--strip-debugger`, `--strip-asserts`, `--fno-<pass>`, `--foutline`,
+  `-Werror`) apply in argv mode directly; in manifest mode they
+  **override** the corresponding key of the selected profile for this
+  invocation only — the manifest itself is never rewritten. Two of them
+  have no such key to override: `--fno-<pass>` and `--foutline` are
+  **flag-only axes**. A profile carries `opt`, `debug-info`,
+  `strip-debugger`, `strip-asserts`, and `werror` and nothing else, so
+  pass selection cannot be committed to the
   manifest at all — those two always come from the command line,
   layered on top of whichever profile is in force. `-S`, `--emit-ir`,
   and `--stamped-asm` are deliberately absent from `tmt build`:
@@ -580,10 +687,12 @@ a build is either fully argv-driven or fully manifest-driven.
   rejected: argv mode reads it alone, and manifest mode unions it with
   the manifest's own `lint.allow` — `--allow` on the command line can
   only suppress more, never fewer, of what the manifest already
-  suppresses. `-Werror` covers both stages in both modes: compile
-  warnings (refined against the declared name set first) and, since the
-  link stage now diagnoses too, link warnings — see
-  "### Link warnings" under `tmt link`.
+  suppresses. That one list governs both stages: it names compile-warning
+  codes and link-warning codes alike. `-Werror` covers both stages in
+  both modes, counting what the allow list leaves: compile warnings
+  (refined against the declared name set first) and link warnings — see
+  "### Compile warnings" under `tmt compile` and "### Link warnings"
+  under `tmt link`.
 - **Manifest mode only** (`--run`, `--list-targets`): argv mode has no
   notion of a target or a declared run block for either flag to act on.
 
@@ -687,7 +796,7 @@ address column remains an exact index of where each instruction starts.
 ## `tmt interface`
 
 ```
-USAGE: tmt interface INPUT [-o OUT.tmh] [FLAGS]
+USAGE: tmt interface INPUT [-o OUT.tmh | --check FILE] [FLAGS]
 
 INPUT is told apart by its container magic, never by its extension: a
 .tmc source or a compiled .tmo object. A .tmh extension (case-insensitive)
@@ -702,6 +811,12 @@ full and every `?` doc line. From an object it carries signatures and
 alphabets only — no graph body, no map, no doc line, since none of those
 exist on the wire. Without -o the header goes to stdout.
 
+FLAGS:
+  --check FILE       compare FILE, byte for byte, against this render;
+                     exit 1 naming the first differing line on a
+                     mismatch, and write nothing (exclusive with -o)
+  -v                 with --check, also list the differing lines
+
 FLAGS (text INPUT only — rejected on a .tmo object, which carries no
 external references of its own left to resolve):
   --extern FILE      read FILE's declarations (.tmh strict, .tmc lenient;
@@ -711,9 +826,45 @@ external references of its own left to resolve):
 
 Renders a unit's exported declarations as one canonical, deterministic
 text — the same shape a header file carries (docs/tmt/language.md
-(headers)). Like `dis`, `INPUT` is told apart by its container magic
+(headers)). The canonical layout is `tmt fmt`'s own: the printer's last
+step, on either arm, is the `.tmc` formatter, so a signature past 80
+columns wraps one parameter per line, a long map's pairs print one per
+line, and a graph body's rules sit on the state-block grid. A header
+`tmt interface` wrote therefore passes `tmt fmt --check` unchanged, and a
+directory walk may format it along with everything else. A unit with
+nothing to export prints a single newline, the canonical form of an
+empty file. Like `dis`, `INPUT` is told apart by its container magic
 rather than its extension (`docs/formats.md`): a `.tmc` renamed to
 `.tmo`, or the reverse, still runs the arm its bytes actually are.
+
+**`--check` is a CI/pre-commit guard against a stale committed header.**
+Nothing regenerates or checks a committed `.tmh` on its own (docs/tmt/project.md
+(Declaration derivation)), so a project that commits `tmt interface`'s
+output can drift silently once the source or object it was taken from
+changes — the linker never reports a wider-than-real alphabet list such
+drift can produce. `--check FILE` renders `INPUT` exactly as a bare `tmt
+interface INPUT` would — same arm, same `--extern`/`--nostdlib` — and
+compares the result against `FILE`'s bytes, byte for byte, instead of
+writing anywhere; it is a usage error alongside `-o`, the same "mutually
+exclusive" refusal `tape-block set`'s `-o`/`--in-place` pair already
+uses. A match is exit 0 with no output. A mismatch is exit 1, naming
+`FILE`, `INPUT` and the 1-based line of the first difference, comparing
+lines together with their own terminator: `FILE` differing only in its
+own final newline, or only in carrying `\r\n` where the render carries
+`\n`, is a difference on that shared line rather than a phantom extra or
+missing one; a genuinely extra or missing whole line reports at the
+first line the two sides disagree on. `-v` additionally lists every
+differing line as a `-`/`+` pair (a positional listing, not a minimal
+diff). Line endings are part of the comparison: a missing final newline,
+or `\r\n` where the render carries `\n`, is a difference. A leading run of
+`//` comment lines in `FILE` is skipped, so a "generated, do not edit"
+notice stamped above the header does not count. Blank lines are skipped
+only after such a notice line, and never when the header itself begins
+with one (an export-less unit's header is a single newline); the reported
+line number still counts those lines, and a comment anywhere else is an
+ordinary difference, since the printed header carries none. `FILE` missing or unreadable is
+a distinct failure, reported as such rather than folded into "differs",
+so a CI gate cannot mistake an absent header for a stale one.
 
 **`--extern`/`--nostdlib` take exactly `tmt compile`'s own meaning**
 (above): a library whose exported routine, graph or map itself reaches
@@ -740,17 +891,21 @@ symbol map, and no doc line to read back (docs/formats.md (routine
 interfaces)), so those never appear on that arm. Both arms render the
 IDENTICAL signature line for the same routine: a contract clause always
 prints the tape's PUBLISHED write set (`writes { … }`) — the declared
-EFFECTIVE set (`writes` minus `preserves`) when the tape declares either
+EFFECTIVE set (`writes` minus `never writes`) when the tape declares either
 clause, or the compiler's own INFERRED write set for that tape when
 neither clause was written — rather than the author's own spelling, and
 never the whole alphabet as a stand-in for "no restriction declared" (the
-wire has no way to spell that). `preserves` itself never appears on
+wire has no way to spell that). `never writes` itself never appears on
 either arm: it has no representation on the wire and an object-arm render
-could not reproduce it. `volatile` is dropped from both arms
-for the same reason: the modifier is compile-time-only and leaves no
-trace in the generated assembly (docs/tmt/language.md (volatile tapes)),
-and it is never checked at a call site either, so it is not part of what
-a caller may rely on. **Both arms print, ahead of each namespace's own
+could not reproduce it. A declared `enters { … }`/`leaves { … }` clause
+prints identically on both arms too, right after `writes { … }`, and
+prints on NEITHER arm when the parameter declared none — unlike `writes`,
+these two have no inferred stand-in to fall back to. `volatile` is
+dropped from both arms for the same reason: the modifier is
+compile-time-only and leaves no trace in the generated assembly
+(docs/tmt/language.md (volatile tapes)), and it is never checked at a
+call site either, so it is not part of what a caller may rely on.
+**Both arms print, ahead of each namespace's own
 declarations, the `use` lines that namespace's printed content needs** —
 though the two decide "needs" from different data. The source arm keeps
 a `use` when its bound name is referenced AND EITHER the header prints
@@ -822,6 +977,27 @@ thing a header carries whole. Both follow the same `use` rule alphabets
 do. The object arm prints no map at all: the wire records none, a named
 map having expanded to its pairs long before codegen
 (docs/tmt/language.md (named maps)).
+
+**Glyph sets print on the source arm only.** Every EXPORTED `set`
+prints, as `export set`, with its members spelled out rather than the
+author's ranges and set references — and a member whose label is a
+number prints bare, so a fold over it reads back as a fold. A private
+set prints, as a plain `set`, when a printed graph body names it in a
+pattern cell, the same transitive closure named maps follow. The object
+arm prints no set: the wire records none, a set having expanded to its
+members before anything past the front end saw it (docs/tmt/language.md
+(glyph sets)).
+
+**The printed header is parsed again before it is written.** The
+formatting step on either arm is a full `.tmc` parse of the printed
+text, so a header that would not parse is an error rather than a file —
+for example, one from an object whose parameter is named after a `.tmc`
+keyword, which a hand-written `.tma` can do:
+
+```
+$ tmt interface kw.tmo
+tmt: kw.tmo: the generated header does not re-read at 2:26: `set` is a reserved keyword and cannot be used as a tape parameter name
+```
 
 **A `.tmh` extension selects declarations-only reading of a text INPUT**
 (docs/tmt/language.md (headers)): the identical `.tmc` grammar, read in a
@@ -915,6 +1091,35 @@ Because budget exhaustion is a trap, exit `3` does not by itself mean the
 program is wrong — it may only mean it needed a longer leash. Read the
 outcome line before concluding. `docs/tmt/isa.md` covers trap kinds at the
 machine level.
+
+A **contract** trap — a debug build's head-contract check failing, or a
+call written without `then` whose callee returned after all
+(`docs/tmt/language.md (head-position clauses)`) — gets an outcome line
+of its own, which says as much as the image's debug information allows.
+Built with `-g`, it names the routine, the tape and the clause, and maps
+the stop to the line of the routine's signature:
+
+```
+$ tmt build -O0 -g walk.tmc -o walk.tmx
+$ tmt run walk.tmx --tape-block leaves.tmt
+outcome: contract broken at 0x00000026 in `walk`: tape `num` broke its `leaves` clause (walk.tmc:3)
+```
+
+The tape and clause come from the check's own label in the `.tmx.map`
+sidecar. At `-O1`, `inline` may splice a small routine's check into its
+caller, where it is lowered without that label: the line then names the
+function now holding the check — the caller — and the signature's line,
+with the tape and clause left out. Built without `-g`, the sidecar holds
+no labels or lines, and the line names the kind, the address and the
+routine alone:
+
+```
+outcome: contract broken at 0x0000001d in `main` (walk.tmc:3)
+outcome: contract broken at 0x00000026 in `walk`
+```
+
+Neither form names the offending glyph: the tape's own final contents,
+printed below the outcome line, show the cell the head is on.
 
 ## `tmt tape-block`
 
@@ -1153,10 +1358,13 @@ unbounded tape, not the whole of it.
 ## `tmt ir`
 
 ```
-USAGE: tmt ir graph FILE.ir.json [--function NAME]
+USAGE: tmt ir graph FILE.ir.json [--function NAME] [--raw|--shape]
        tmt ir footprints FILE.ir.json [--function NAME]
 
 `graph` renders --emit-ir output as a Mermaid flowchart (one per world).
+By default rows that differ in a single read cell are merged into one
+arrow; --raw draws one arrow per row, --shape one arrow per pair of
+states, labelled with the number of rows it stands for.
 `footprints` renders each world's inferred write footprint: per tape, the
 symbol indices its body may ever write, out of the tape's cardinality. Both
 share the `--function` flag (pmt's flag name, for cross-tool muscle memory);
@@ -1165,10 +1373,41 @@ world name.
 ```
 
 Reads a `--emit-ir` JSON file and renders each world's state graph as a
-Mermaid `flowchart TD`. `--function NAME` restricts output to one world;
-naming a world the file does not contain is an error. As with `tape`,
-`graph --help` renders the same usage block shown above, same as bare
-`tmt ir`.
+Mermaid `flowchart TD`, each preceded by a `%% NAME` comment line.
+`--function NAME` restricts output to one world; naming a world the file
+does not contain is an error. As with `tape`, `graph --help` renders the
+same usage block shown above, same as bare `tmt ir`.
+
+The graph comes in three views, one at a time:
+
+- **merged** (the default) folds parallel rows into one arrow. Rows of a
+  state merge only when they share the target, the write and move
+  vectors, the `debugger` flag and the whole transition, and differ in
+  exactly one read cell — so the merge is lossless: expanding a merged
+  arrow gives back exactly the rows it replaced. Labels use a compact
+  notation: `1–16` for a run of indices, `{1,3}` for any other set,
+  `*×13` for thirteen identical cells. The rule and the notation, with
+  worked cases, are in `docs/formats.md (graph label notation)`.
+- **`--raw`** draws one arrow per expanded IR row, in the IR's own row
+  order — the view the optimizer walkthroughs use
+  (`docs/tmt/optimizer.md (reading the examples)`). It is not the `-S`
+  listing's shape: that listing folds repeated rows with `.rept` and
+  sorts each state's rows into dispatch bands.
+- **`--shape`** draws one arrow per pair of states (or state and
+  terminal node), labelled with the number of rows behind it. A call
+  row that reaches a state through both its `then` and one of its exits
+  counts once.
+
+On `docs/examples/rpnwide/rpnwide.tmc` (compiled `-O0`) the raw view draws
+4,711 arrows, the merged view 4,603 and the shape view 86. `main` drops
+from 139 arrows to 46 — its sixteen `call pushTok` rows on one state
+become one arrow labelled `[1–16,*×13] call pushTok` — while the two
+512-row arithmetic routines stay at 2,049 arrows each. Their writes
+depend on the digits they read, so two rows that write the same digit
+differ in at least two read cells (in `addInto`'s state `digitA`,
+`[1,*,*,*,3,*,*,*,2]` and `[1,*,*,*,4,*,*,*,1]` write the same), and a
+per-cell union of those would describe reads that write something else. The
+shape view (five arrows each) is the readable one there.
 
 ### `tmt ir footprints`
 
@@ -1228,14 +1467,16 @@ tmt: duplicate world `main` in dup.ir.json
 ```
 USAGE: tmt lint PATH... [--exclude PATH]... [--allow CODE]... [--warn CODE]... [--no-config]
 
-PATH is a .tmc or .tma file, or a directory; directories are walked
-recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). Omitting PATH uses the nearest manifest's declared
-source set (docs/tmt/project.md (the declared source set)); requires a
-`tmt.json` project and is incompatible with --no-config. .tmc sources
-lint through the .tmc rule table; .tma sources through the five
-arch-agnostic asm rules plus the TM-1 additions (shadowed rows, retx
-exit bounds, unused rept vars, duplicate map source).
+PATH is a .tmc, .tmh or .tma file, or a directory; directories are
+walked recursively for *.tmc, *.tmh and *.tma (sorted order, symlinks
+not followed, dot-entries skipped). Omitting PATH uses the nearest
+manifest's declared source set (docs/tmt/project.md (the declared source
+set)); requires a `tmt.json` project and is incompatible with
+--no-config. .tmc sources lint through the .tmc rule table; .tmh
+headers through that table's header subset (docs/tmt/lint.md (linting
+a header)); .tma sources through the five arch-agnostic asm rules plus
+the TM-1 additions (shadowed rows, retx exit bounds, unused rept vars,
+duplicate map source).
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -1248,28 +1489,28 @@ FLAGS:
   --no-config     ignore tmt.json project files
 ```
 
-PATH is a `.tmc` or `.tma` file, or a directory. Directories are walked
-recursively for `*.tmc` and `*.tma` in sorted order; symlinks are never
-followed and dot-entries (`.git`, editor scratch) are skipped. A PATH that
-yields no `.tmc` / `.tma` files is an error. `--exclude PATH` (repeatable)
+PATH is a `.tmc`, `.tmh` or `.tma` file, or a directory. Directories are
+walked recursively for `*.tmc`, `*.tmh` and `*.tma` in sorted order;
+symlinks are never followed and dot-entries (`.git`, editor scratch) are
+skipped. A PATH that yields no `.tmc` / `.tmh` / `.tma` files is an error. `--exclude PATH` (repeatable)
 skips a file or prunes a subtree; paths are compared as spelled, with no
 globs — the shell covers the include side — and exclusion wins even over an
 explicitly listed file.
 
-Each file's extension picks its rule table, and the two tables share one
-allow namespace, so a single allow-list works across a batch mixing both
+Each file's extension picks its rule table, and the tables share one
+allow namespace, so a single allow-list works across a batch mixing
 languages. The rule catalog is `docs/tmt/lint.md`. An explicitly listed file
-with neither extension is a per-file error and the batch continues; the
-directory walk itself never collects any other extension, so this only fires
-for a file named directly on the command line.
+with none of the three extensions is a per-file error
+(`error: unknown source extension (expected .tmc, .tmh or .tma)`) and the
+batch continues; the directory walk itself never collects any other
+extension, so this only fires for a file named directly on the command line.
 
-**A `.tmh` header is one of those files.** `tmt lint` and `tmt fmt` both
-refuse it — `error: unknown source extension (expected .tmc or .tma)`,
-exit 1 — and that is deliberate rather than an oversight. A header is
-*produced* by `tmt interface` and *consumed* by `tmt compile --extern`
-and `tmt build`; it is not a file the other tools open, since linting one
-would need every rule to say whether it applies to a bodiless declaration
-and formatting one would compete with the generator that writes it.
+**A `.tmh` header lints as a header**, whether named directly or found by
+the directory walk. It is read the way `tmt compile --extern` reads it —
+declarations only — so a `machine` block or a routine with a body is a
+per-file fatal, and only the rules that mean something on bodiless
+declarations run over it; `docs/tmt/lint.md (linting a header)` lists
+them.
 
 Files lint independently: one that fails to parse is reported on stderr as a
 fatal error line with its bracketed code, and the batch keeps going.
@@ -1290,7 +1531,7 @@ the flag applies to the entire run rather than to one input.
 ```
 $ tmt lint prog.tmc
 $ tmt lint prog.tmc --warn state-may-trap
-prog.tmc:4:15: lint: state `s` may trap — its rules do not cover every input and there is no catch-all
+prog.tmc:4:15: lint: state `s` may trap — its rules do not cover every input and there is no catch-all [state-may-trap]
 ```
 
 ### Project configuration
@@ -1317,16 +1558,18 @@ where a fix exists it surfaces through the editor's code actions
 USAGE: tmt fmt PATH... [--exclude PATH]... [--check]
        tmt fmt - [--check] [--lang tmc|tma]
 
-PATH is a .tmc or .tma file, or a directory; directories are walked
-recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). Omitting PATH uses the nearest manifest's declared
-source set (docs/tmt/project.md (the declared source set)); requires a
-`tmt.json` project. `-` reads one source from stdin and writes the
-result to stdout; it cannot be combined with PATH arguments.
+PATH is a .tmc, .tmh or .tma file, or a directory; directories are
+walked recursively for *.tmc, *.tmh and *.tma (sorted order, symlinks
+not followed, dot-entries skipped). Omitting PATH uses the nearest
+manifest's declared source set (docs/tmt/project.md (the declared source
+set)); requires a `tmt.json` project. `-` reads one source from stdin
+and writes the result to stdout; it cannot be combined with PATH
+arguments.
 
 .tma sources format through the canonical assembly grid; .tmc sources
-through the language's own canonical form (the state-block grid, the
-80-column argument-list threshold). Both rewrites are whitespace-only.
+and .tmh headers through the language's own canonical form (the
+state-block grid, the 80-column argument-list threshold). Both rewrites
+are whitespace-only.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -1366,17 +1609,12 @@ Exit codes follow `tmt lint`'s convention: 0 = success (every input already
 canonical, or rewritten in place); 1 = under `--check` at least one input
 would change, or a lex/parse error occurred anywhere in the batch.
 
-**A `.tmh` header is refused by extension**, exactly as `tmt lint`
-refuses one — `error: unknown source extension (expected .tmc or .tma)`,
-exit 1 — and for the reason stated there: a header is written by `tmt
-interface` and read by `tmt compile --extern` and `tmt build`, not
-edited by hand. A consequence worth stating plainly, since a header is
-`.tmc` syntax and could be fed to stdin: **what `tmt interface` prints
-is canonical for the header printer, not for `tmt fmt`.** The two are
-separate printers, and a generated header run through `tmt fmt - --lang
-tmc --check` can report that it would change. That is not a defect in
-either one — neither output is ever read by the other — but it does mean
-a `.tmh` must not be put into a formatted source set.
+**A `.tmh` header formats through the `.tmc` printer** — a header is
+`.tmc` syntax — whether named directly or found by the directory walk;
+on stdin it is `--lang tmc`. A header `tmt interface` generated is
+already canonical: that command's last step is this same printer
+(`tmt interface`, below), so `tmt fmt --check` passes over it unchanged
+and a directory holding generated headers needs no `--exclude` for them.
 
 Unlike `tmt lint`, `tmt fmt` takes no **configuration** from `tmt.json` —
 formatting has no configurable surface for a project file to set, and there

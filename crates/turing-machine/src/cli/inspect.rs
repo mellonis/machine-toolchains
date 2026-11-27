@@ -16,6 +16,7 @@ use mtc_core::linker::MapFile;
 use mtc_core::vm::LoadError;
 
 use crate::ir::IrProgram;
+use crate::ir_graph::GraphView;
 
 use super::{Args, CliOutput, Delimit, parse_keyed, render_tape};
 
@@ -636,10 +637,13 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
 }
 
 pub(super) const IR_USAGE: &str = "\
-USAGE: tmt ir graph FILE.ir.json [--function NAME]
+USAGE: tmt ir graph FILE.ir.json [--function NAME] [--raw|--shape]
        tmt ir footprints FILE.ir.json [--function NAME]
 
 `graph` renders --emit-ir output as a Mermaid flowchart (one per world).
+By default rows that differ in a single read cell are merged into one
+arrow; --raw draws one arrow per row, --shape one arrow per pair of
+states, labelled with the number of rows it stands for.
 `footprints` renders each world's inferred write footprint: per tape, the
 symbol indices its body may ever write, out of the tape's cardinality. Both
 share the `--function` flag (pmt's flag name, for cross-tool muscle memory);
@@ -659,12 +663,26 @@ pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
     }
 }
 
+/// `--raw` / `--shape`, mutually exclusive; neither is the merged default
+/// (docs/tmt/cli.md (tmt ir)).
+fn take_graph_view(args: &mut Args) -> Result<GraphView, String> {
+    match (args.flag("--raw"), args.flag("--shape")) {
+        (true, true) => Err(format!(
+            "--raw and --shape are mutually exclusive\n\n{IR_USAGE}"
+        )),
+        (true, false) => Ok(GraphView::Raw),
+        (false, true) => Ok(GraphView::Shape),
+        (false, false) => Ok(GraphView::Merged),
+    }
+}
+
 fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     if args.help() {
         return Ok(CliOutput::ok(IR_USAGE.into(), String::new()));
     }
     let filter = args.value("--function")?;
+    let view = take_graph_view(&mut args)?;
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
         return Err(format!("ir graph takes exactly one file\n\n{IR_USAGE}"));
@@ -676,7 +694,11 @@ fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
         if filter.as_deref().is_some_and(|f| f != world.name) {
             continue;
         }
-        out.push_str(&format!("%% {}\n{}\n", world.name, world.to_mermaid()));
+        out.push_str(&format!(
+            "%% {}\n{}\n",
+            world.name,
+            world.to_mermaid_view(view)
+        ));
     }
     if out.is_empty() {
         return Err(match filter {

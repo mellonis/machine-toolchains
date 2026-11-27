@@ -35,11 +35,48 @@ fn rendered_script() -> String {
 /// `CARGO_TARGET_TMPDIR` is shared across the workspace's crates, so the
 /// directory carries the crate and the PID: a file test lists what it
 /// finds, and must not find the sibling crate's fixtures.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("tmt_{name}_{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Candidates `_tmt` produces for `line` (the command line up to the
@@ -227,14 +264,26 @@ fn positionals_offer_matching_files_and_directories() {
     fs::write(dir.join("b.tma"), "").unwrap();
     fs::write(dir.join("c.txt"), "").unwrap();
     fs::write(dir.join("d.tmx"), "").unwrap();
+    fs::write(dir.join("e.tmh"), "").unwrap();
     fs::create_dir_all(dir.join("sub")).unwrap();
     assert_eq!(candidates(&dir, "tmt compile "), vec!["a.tmc", "sub"]);
-    assert_eq!(candidates(&dir, "tmt lint "), vec!["a.tmc", "b.tma", "sub"]);
+    // A header is a `lint`/`fmt` source too — red if the registry's
+    // `source_or_dir` extension list drops `tmh`.
+    assert_eq!(
+        candidates(&dir, "tmt lint "),
+        vec!["a.tmc", "b.tma", "e.tmh", "sub"]
+    );
+    assert_eq!(
+        candidates(&dir, "tmt fmt "),
+        vec!["a.tmc", "b.tma", "e.tmh", "sub"]
+    );
     assert_eq!(candidates(&dir, "tmt run "), vec!["d.tmx", "sub"]);
     // `-o` takes any path.
     assert_eq!(
         candidates(&dir, "tmt compile -o "),
-        vec!["a.tmc", "b.tma", "c.txt", "d.tmx", "sub", "tmt.bash"]
+        vec![
+            "a.tmc", "b.tma", "c.txt", "d.tmx", "e.tmh", "sub", "tmt.bash"
+        ]
     );
     // `-L` takes directories only.
     assert_eq!(candidates(&dir, "tmt link -L "), vec!["sub"]);

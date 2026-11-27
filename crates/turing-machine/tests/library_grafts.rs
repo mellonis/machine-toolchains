@@ -34,13 +34,50 @@ use mtc_turing_machine::stdlib;
 /// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
 /// uniquely by process id + an atomic counter — copied verbatim from
 /// `tests/mode_equivalence.rs::scratch`.
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> ScratchDir {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("{name}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    ScratchDir::fresh(dir)
+}
+
+/// A scratch directory this test owns. Its name can repeat across
+/// processes — a later test process may reuse a pid, restarting the
+/// counter — so `fresh` removes whatever an earlier run left under the
+/// name before creating it, and `Drop` removes it again once the test
+/// ends, passing or panicking.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn fresh(dir: std::path::PathBuf) -> Self {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        ScratchDir(dir)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
@@ -273,6 +310,44 @@ namespace lib {
 
   export graph callish(tape t: marks, state done) {
     entry state s { [*] -> call helper(t = t) then done; }
+  }
+}
+";
+
+/// `LIB_TMC`'s `walker` over a PRIVATE `lib::marks`: the header prints the
+/// alphabet but does not publish it, so a consumer's own `lib::marks` is no
+/// second declaration of a published name.
+const ALPHA_COLLISION_LIB_TMC: &str = "\
+namespace lib {
+  alphabet marks { '_', 'x', 'y' }
+  export map flip: marks -> marks { 'x' -> 'y', 'y' -> 'x' }
+
+  export graph walker(tape t: marks, state done) {
+    entry state w {
+      ['x'] -> write ['y'] goto done;
+      [*]   -> goto done;
+    }
+  }
+}
+";
+
+/// `LIB_TMC`'s `relay` nesting a PRIVATE `walker`: printed by the header,
+/// not published, so a consumer's own `lib::walker` is no second
+/// declaration of a published name.
+const MEMO_LIB_TMC: &str = "\
+namespace lib {
+  export alphabet marks { '_', 'x', 'y' }
+  export map flip: marks -> marks { 'x' -> 'y', 'y' -> 'x' }
+
+  graph walker(tape t: marks, state done) {
+    entry state w {
+      ['x'] -> write ['y'] goto done;
+      [*]   -> goto done;
+    }
+  }
+
+  export graph relay(tape a: marks, state done) {
+    entry graft walker(t = a with map flip, done = done) as inner;
   }
 }
 ";
@@ -1056,7 +1131,7 @@ fn a_mismatched_with_map_is_refused_on_a_header_grafted_target() {
 #[test]
 fn a_colliding_local_alphabet_is_diagnosed_not_silently_captured() {
     let dir = scratch("lib_graft_name_capture");
-    let lib_src = write_file(&dir, "lib.tmc", LIB_TMC);
+    let lib_src = write_file(&dir, "lib.tmc", ALPHA_COLLISION_LIB_TMC);
     let header = interface(&dir, &lib_src, "lib.tmh");
 
     let err = compile_extern_err(
@@ -1081,7 +1156,7 @@ fn a_colliding_local_alphabet_is_diagnosed_not_silently_captured() {
 #[test]
 fn an_unrelated_colliding_local_alphabet_does_not_refuse_a_valid_graft() {
     let dir = scratch("lib_graft_name_capture_wider");
-    let lib_src = write_file(&dir, "lib.tmc", LIB_TMC);
+    let lib_src = write_file(&dir, "lib.tmc", ALPHA_COLLISION_LIB_TMC);
     let header = interface(&dir, &lib_src, "lib.tmh");
 
     let _ = compile_extern(
@@ -1188,7 +1263,7 @@ machine {
 #[test]
 fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
     let dir = scratch("lib_graft_memo_local_first");
-    let lib_src = write_file(&dir, "lib.tmc", LIB_TMC);
+    let lib_src = write_file(&dir, "lib.tmc", MEMO_LIB_TMC);
     let header = interface(&dir, &lib_src, "lib.tmh");
 
     let text = compile_extern_text(
@@ -1216,12 +1291,18 @@ fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
         CONSUMER_MEMO_COLLISION_LOCAL_FIRST,
         &header,
     );
-    let lib = compile_alone(LIB_TMC);
+    let lib = compile_alone(MEMO_LIB_TMC);
+    let recorded: Vec<&str> = consumer.grafts.iter().map(|g| g.graph.as_str()).collect();
     assert_eq!(
-        consumer.grafts.len(),
-        1,
-        "the purely local `lib::walker` must not be recorded: {:?}",
+        recorded,
+        ["lib::relay", "lib::walker"],
+        "{:?}",
         consumer.grafts
+    );
+    assert_eq!(
+        graft_digest_of(&consumer, "lib::walker"),
+        graph_digest_of(&lib, "lib::walker"),
+        "`lib::walker` is recorded with the library's digest, not the consumer's own"
     );
     assert_eq!(
         graft_digest_of(&consumer, "lib::relay"),
@@ -1234,11 +1315,14 @@ fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
     link(&[consumer.clone(), lib], &[], LinkOptions::default())
         .unwrap_or_else(|e| panic!("the matching library must link: {e}"));
 
-    let drifted_lib_tmc = LIB_TMC.replace(
+    let drifted_lib_tmc = MEMO_LIB_TMC.replace(
         "['x'] -> write ['y'] goto done;\n      [*]   -> goto done;",
         "[*] -> goto done;",
     );
-    assert_ne!(drifted_lib_tmc, LIB_TMC, "the replacement did not fire");
+    assert_ne!(
+        drifted_lib_tmc, MEMO_LIB_TMC,
+        "the replacement did not fire"
+    );
     let drifted_lib = compile_alone(&drifted_lib_tmc);
     let err = link(&[consumer, drifted_lib], &[], LinkOptions::default())
         .expect_err("a drifted library must still be refused");
@@ -1255,7 +1339,7 @@ fn a_consumers_own_graph_does_not_leak_into_a_librarys_nested_graft() {
 #[test]
 fn a_librarys_nested_graft_does_not_leak_into_a_consumers_own_graph() {
     let dir = scratch("lib_graft_memo_library_first");
-    let lib_src = write_file(&dir, "lib.tmc", LIB_TMC);
+    let lib_src = write_file(&dir, "lib.tmc", MEMO_LIB_TMC);
     let header = interface(&dir, &lib_src, "lib.tmh");
 
     let text = compile_extern_text(
@@ -1279,13 +1363,19 @@ fn a_librarys_nested_graft_does_not_leak_into_a_consumers_own_graph() {
         CONSUMER_MEMO_COLLISION_LIBRARY_FIRST,
         &header,
     );
+    let lib = compile_alone(MEMO_LIB_TMC);
+    let recorded: Vec<&str> = consumer.grafts.iter().map(|g| g.graph.as_str()).collect();
     assert_eq!(
-        consumer.grafts.len(),
-        1,
-        "the purely local `lib::walker` must not be recorded: {:?}",
+        recorded,
+        ["lib::relay", "lib::walker"],
+        "{:?}",
         consumer.grafts
     );
-    assert_eq!(consumer.grafts[0].graph, "lib::relay");
+    assert_eq!(
+        graft_digest_of(&consumer, "lib::walker"),
+        graph_digest_of(&lib, "lib::walker"),
+        "`lib::walker` is recorded with the library's digest, not the consumer's own"
+    );
 }
 
 /// A declared graph's own NESTED graft target can resolve fine when its
@@ -1412,15 +1502,16 @@ fn a_diamond_shaped_shared_target_is_not_a_cycle() {
     let lib_src = write_file(&dir, "diamond.tmc", DIAMOND_LIB_TMC);
     let header = interface(&dir, &lib_src, "diamond.tmh");
     let consumer = compile_extern(&dir, "diamond_app", CONSUMER_DIAMOND, &header);
+    // Every library graph the splice pulled in is recorded, once each, in
+    // first-encountered order: `diamond_d`, reached through both `diamond_b`
+    // and `diamond_c`, appears a single time.
+    let recorded: Vec<&str> = consumer.grafts.iter().map(|g| g.graph.as_str()).collect();
     assert_eq!(
-        consumer.grafts.len(),
-        1,
-        "only the direct `diamond_a` graft is recorded on the consumer's \
-         own object — diamond_b/c/d are folded into diamond_a's own \
-         canonical body, not separate top-level splices: {:?}",
+        recorded,
+        ["diamond_a", "diamond_b", "diamond_d", "diamond_c"],
+        "{:?}",
         consumer.grafts
     );
-    assert_eq!(consumer.grafts[0].graph, "diamond_a");
 }
 
 // ── the write footprint across a library graft ───────────────────────────
@@ -1538,19 +1629,20 @@ fn a_library_grafts_declared_write_set_is_believed() {
 }
 
 /// A module declaring a ROUTINE under the mangled name a LATER module
-/// declares its GRAPH under. The splice's own lookup matches a graph and
-/// skips the routine; the write footprint must read the clause from that
-/// SAME module, or it believes a contract belonging to a body nothing
-/// splices. Both `--extern` orders must therefore agree, and both must
-/// refuse: the grafted graph writes outside the host's `writes {}`.
+/// declares its GRAPH under. A name of another kind is another declaration
+/// (docs/tmt/language.md (declarations)), so the two modules cannot share
+/// a table: the second one read is refused as `conflicting-declaration`,
+/// in either `--extern` order, before any graft could meet the ambiguity.
+/// This also makes the old ambiguity unreachable by construction: a graft's
+/// footprint can no longer meet two modules carrying one name as a routine
+/// and as a graph, because a module DEFINING the name in any kind (private
+/// included) is compared against what the table publishes under it.
 ///
-/// Mutation: give a graft edge the kind-agnostic external lookup a
-/// call uses (`footprint::find_external` in place of
-/// `compiler::find_external_graph`) — the routine-first order then reads
-/// `lib::seek`'s ROUTINE clause, `writes {}`, and the host wrongly
-/// compiles while the graph-first order still refuses.
+/// Mutation: let forms of different kinds agree in
+/// `PublishedForm::agrees` — the table is then accepted and the host is
+/// refused for `writes-outside-contract` instead.
 #[test]
-fn a_graft_reads_its_clause_from_the_module_the_body_comes_from() {
+fn a_routine_and_a_graph_published_under_one_name_conflict() {
     const ROUTINE_MODULE: &str = "\
 namespace lib {
   export alphabet bits { '_', '0', '1' }
@@ -1598,10 +1690,15 @@ export routine facade(tape t: bits writes {}, state out) {
             out.to_str().unwrap(),
         ]))
         .expect_err(&format!("{label}: the host must be refused"));
-        assert!(err.contains("[writes-outside-contract]"), "{label}: {err}");
-        // The set named is the GRAPH's declared one — the routine module's
-        // `writes {}` would name nothing at all.
-        assert!(err.contains("may write '0', '1'"), "{label}: {err}");
+        assert!(err.contains("[conflicting-declaration]"), "{label}: {err}");
+        assert!(
+            err.contains("`lib::seek` is declared differently"),
+            "{label}: {err}"
+        );
+        assert!(
+            err.contains(&format!("`{}`", first.display())),
+            "{label}: {err}"
+        );
     }
 }
 
@@ -1626,5 +1723,1227 @@ fn a_library_graft_wider_than_the_hosts_clause_is_still_refused() {
     assert!(
         err.contains("may write '0' on tape `t`"),
         "the diagnostic did not name the declared set minus the contract: {err}"
+    );
+}
+
+// ── a library graft's argument list ──────────────────────────────────────
+//
+// A graft of a graph from another unit is checked against the graph's
+// DECLARED signature exactly as a local graft is checked against its local
+// one (docs/tmt/language.md (grafting a graph from another unit)): the same
+// codes, the same positions, the same messages. Each shape below compiles
+// one consumer against `glib`'s header AND the same consumer against a
+// local copy of the same graph, laid out so the graft sits on line 6 in
+// both, and demands the two diagnostics be identical once the file path is
+// masked. Before the check existed, every shape either aborted the
+// compiler inside the splice or was silently accepted.
+
+/// `glib::g` — two tape parameters and one state parameter, in that order,
+/// so the one-missing-parameter shapes below name the same parameter
+/// whichever order a signature is walked in.
+const GLIB_TMC: &str = "\
+namespace glib {
+  export alphabet bits { '_', '0', '1' }
+  export graph g(tape a: bits, tape b: bits, state done) {
+    entry state s { [*, *] -> goto done; }
+  }
+}
+";
+
+/// The consumer grafting `glib::g` with `ARGS` spliced in; the graft is on
+/// line 6 and its argument list opens at column 16, so the first argument
+/// starts at column 17.
+const GLIB_CONSUMER: &str = "\
+use glib::bits;
+use glib::g;
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry graft g(ARGS) as gg;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// [`GLIB_CONSUMER`]'s in-unit twin: the same graph written locally, the
+/// graft on the same line and column.
+const GLIB_LOCAL: &str = "\
+alphabet bits { '_', '0', '1' }
+graph g(tape a: bits, tape b: bits, state done) { entry state s { [*, *] -> goto done; } }
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry graft g(ARGS) as gg;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// Compile `glib::g(args)` against `glib`'s generated header, expecting a
+/// fatal, and compile the same argument list against the local twin; both
+/// diagnostics come back with their file path masked as `<src>`, and are
+/// asserted identical here — the library graft reports exactly what the
+/// local one does.
+fn library_graft_err(tag: &str, graft_args: &str) -> String {
+    let dir = scratch(tag);
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let header = interface(&dir, &lib_src, "glib.tmh");
+    let consumer = GLIB_CONSUMER.replace("ARGS", graft_args);
+    let ext = compile_extern_err(&dir, "ext.tmc", &consumer, &header);
+    let ext_path = dir.join("ext.tmc");
+    let ext = ext.replace(ext_path.to_str().unwrap(), "<src>");
+
+    let local_src = write_file(&dir, "loc.tmc", &GLIB_LOCAL.replace("ARGS", graft_args));
+    let out = dir.join("loc.tmo");
+    let local = execute(&args(&[
+        "compile",
+        local_src.to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("the local twin must fail too");
+    let local = local.replace(local_src.to_str().unwrap(), "<src>");
+    assert_eq!(
+        ext, local,
+        "the library graft and the local graft disagree for `g({graft_args})`"
+    );
+    ext
+}
+
+/// A repeated argument name is `duplicate-arg`, at the repeat's name.
+/// Mutation: drop the declared-signature lookup in front of the binding-
+/// argument check (a graph found only in the declarations gets no check) —
+/// the compile then aborts in the splice (`panicked at … expand.rs`).
+#[test]
+fn a_library_graft_with_a_duplicate_argument_is_duplicate_arg() {
+    let err = library_graft_err("lib_graft_dup_arg", "a = x, a = y, done = fin");
+    assert!(err.contains("<src>:6:24: error:"), "{err}");
+    assert!(err.contains("duplicate binding argument `a`"), "{err}");
+    assert!(err.contains("[duplicate-arg]"), "{err}");
+}
+
+/// An unbound tape parameter is `missing-arg`, naming it, at the first
+/// argument. Mutation: the same dropped lookup — the splice aborts on the
+/// unbound tape instead.
+#[test]
+fn a_library_graft_missing_a_tape_argument_is_missing_arg() {
+    let err = library_graft_err("lib_graft_missing_tape", "a = x, done = fin");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `b`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// An unbound STATE parameter is `missing-arg` too. Mutation: the dropped
+/// lookup — the splice aborts on the unbound continuation instead.
+#[test]
+fn a_library_graft_missing_its_state_argument_is_missing_arg() {
+    let err = library_graft_err("lib_graft_missing_state", "a = x, b = y");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `done`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// An empty argument list has no argument to blame, so `missing-arg`
+/// points at the graft target itself. Mutation: the dropped lookup — the
+/// splice aborts.
+#[test]
+fn a_library_graft_with_an_empty_argument_list_is_missing_arg_at_the_target() {
+    let err = library_graft_err("lib_graft_empty_args", "");
+    assert!(err.contains("<src>:6:15: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `a`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// A tape argument naming no tape of the host is `unresolved-tape-target`.
+/// Mutation: the dropped lookup — the splice aborts looking the tape up.
+#[test]
+fn a_library_graft_naming_no_host_tape_is_unresolved_tape_target() {
+    let err = library_graft_err("lib_graft_nosuch_tape", "a = nosuch, b = y, done = fin");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(
+        err.contains("`nosuch` is not a tape in this world"),
+        "{err}"
+    );
+    assert!(err.contains("[unresolved-tape-target]"), "{err}");
+}
+
+/// A tape argument naming one of the host's STATES is still no tape:
+/// `unresolved-tape-target`. Mutation: the dropped lookup — the splice
+/// aborts looking the tape up.
+#[test]
+fn a_library_graft_giving_a_tape_parameter_a_state_is_unresolved_tape_target() {
+    let err = library_graft_err("lib_graft_tape_is_state", "a = fin, b = y, done = fin");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(err.contains("`fin` is not a tape in this world"), "{err}");
+    assert!(err.contains("[unresolved-tape-target]"), "{err}");
+}
+
+/// A terminator handed to a tape parameter is `wrong-arg-kind`. Mutation:
+/// the dropped lookup — the splice aborts on the terminator.
+#[test]
+fn a_library_graft_giving_a_tape_parameter_a_terminator_is_wrong_arg_kind() {
+    let err = library_graft_err("lib_graft_tape_is_stop", "a = stop, b = y, done = fin");
+    assert!(err.contains("<src>:6:17: error:"), "{err}");
+    assert!(
+        err.contains("binding argument `a` must be a tape target"),
+        "{err}"
+    );
+    assert!(err.contains("[wrong-arg-kind]"), "{err}");
+}
+
+/// An argument naming no parameter of the graph is `unknown-arg`.
+/// Mutation: the dropped lookup — the stray argument is silently ignored
+/// and the compile succeeds.
+#[test]
+fn a_library_graft_with_an_unknown_argument_is_unknown_arg() {
+    let err = library_graft_err("lib_graft_unknown_arg", "a = x, b = y, zz = x, done = fin");
+    assert!(err.contains("<src>:6:31: error:"), "{err}");
+    assert!(
+        err.contains("`zz` is not a parameter of this signature"),
+        "{err}"
+    );
+    assert!(err.contains("[unknown-arg]"), "{err}");
+}
+
+/// Two tape arguments naming one host tape are `duplicate-tape-target`,
+/// blamed on the second. Mutation: the dropped lookup — the aliased graft
+/// compiles, and links.
+#[test]
+fn a_library_graft_binding_one_host_tape_twice_is_duplicate_tape_target() {
+    let err = library_graft_err("lib_graft_dup_tape", "a = x, b = x, done = fin");
+    assert!(err.contains("<src>:6:24: error:"), "{err}");
+    assert!(
+        err.contains("binding arguments `a` and `b` both bind tape `x`"),
+        "{err}"
+    );
+    assert!(err.contains("[duplicate-tape-target]"), "{err}");
+}
+
+/// A state argument carrying a `with map` is `wrong-arg-kind` — a map
+/// makes it a tape binding. Mutation: the dropped lookup — the map is
+/// silently ignored and the compile succeeds.
+#[test]
+fn a_library_graft_mapping_a_state_argument_is_wrong_arg_kind() {
+    let err = library_graft_err(
+        "lib_graft_state_map",
+        "a = x, b = y, done = fin with map { '0' -> '1' }",
+    );
+    assert!(err.contains("<src>:6:31: error:"), "{err}");
+    assert!(
+        err.contains("binding argument `done` must be a state or terminator"),
+        "{err}"
+    );
+    assert!(err.contains("[wrong-arg-kind]"), "{err}");
+}
+
+/// A state argument naming one of the host's TAPES is `undefined-state`
+/// AT THE ARGUMENT. Without the check the error still surfaced, but from
+/// inside the spliced library body, at the LIBRARY's line and column.
+/// Mutation: the dropped lookup — the position becomes the header's
+/// (`:4:…`), not the consumer's `6:31`.
+#[test]
+fn a_library_graft_giving_a_state_parameter_a_tape_is_undefined_state_at_the_argument() {
+    let err = library_graft_err("lib_graft_state_is_tape", "a = x, b = y, done = x");
+    assert!(err.contains("<src>:6:31: error:"), "{err}");
+    assert!(err.contains("`x` is not a state in this world"), "{err}");
+    assert!(err.contains("[undefined-state]"), "{err}");
+}
+
+/// The control: a well-formed library graft still compiles against the
+/// header and links against the library's own object. Mutation: a check
+/// that refuses every declared graph (say, one treating the declared
+/// signature as parameterless) — this compile then fails `unknown-arg`.
+#[test]
+fn a_well_formed_library_graft_still_compiles_and_links() {
+    let dir = scratch("lib_graft_args_control");
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let header = interface(&dir, &lib_src, "glib.tmh");
+    let consumer = compile_extern(
+        &dir,
+        "ok.tmc",
+        &GLIB_CONSUMER.replace("ARGS", "a = x, b = y, done = fin"),
+        &header,
+    );
+    let lib = compile_alone(GLIB_TMC);
+    link(&[consumer, lib], &[], LinkOptions::default())
+        .unwrap_or_else(|e| panic!("the well-formed library graft must link: {e}"));
+}
+
+/// The lenient route: the same library read from its SOURCE (`--extern
+/// glib.tmc`) rather than its header checks the same way. Mutation: the
+/// dropped lookup — the splice aborts.
+#[test]
+fn a_library_graft_read_from_a_source_checks_its_arguments_too() {
+    let dir = scratch("lib_graft_args_source");
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let err = compile_extern_err(
+        &dir,
+        "ext.tmc",
+        &GLIB_CONSUMER.replace("ARGS", "a = x, a = y, done = fin"),
+        &lib_src,
+    );
+    assert!(err.contains("ext.tmc:6:24: error:"), "{err}");
+    assert!(err.contains("[duplicate-arg]"), "{err}");
+}
+
+/// A library graft inside a ROUTINE body is checked like one in the
+/// machine block. Mutation: the dropped lookup — the splice aborts.
+#[test]
+fn a_library_graft_inside_a_routine_checks_its_arguments() {
+    let dir = scratch("lib_graft_args_routine");
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let header = interface(&dir, &lib_src, "glib.tmh");
+    let src = "\
+use glib::bits;
+use glib::g;
+routine r(tape t: bits) {
+  entry graft g(a = t, a = t, done = return) as gg;
+}
+machine {
+  tape x: bits;
+  entry state s { [*] -> call r(t = x) then fin; }
+  state fin { [*] -> stop; }
+}
+";
+    let err = compile_extern_err(&dir, "inr.tmc", src, &header);
+    assert!(err.contains("inr.tmc:4:24: error:"), "{err}");
+    assert!(err.contains("[duplicate-arg]"), "{err}");
+}
+
+/// A library graft inside a GRAPH body is checked where it is written, not
+/// only once that graph is itself spliced. Mutation: the dropped lookup —
+/// the splice of `h` recurses into the ill-formed graft and aborts.
+#[test]
+fn a_library_graft_inside_a_graph_checks_its_arguments() {
+    let dir = scratch("lib_graft_args_graph");
+    let lib_src = write_file(&dir, "glib.tmc", GLIB_TMC);
+    let header = interface(&dir, &lib_src, "glib.tmh");
+    let src = "\
+use glib::bits;
+use glib::g;
+graph h(tape t: bits, state out) {
+  entry graft g(a = t, done = out) as gg;
+}
+machine {
+  tape x: bits;
+  entry graft h(t = x, out = fin) as hh;
+  state fin { [*] -> stop; }
+}
+";
+    let err = compile_extern_err(&dir, "ing.tmc", src, &header);
+    assert!(err.contains("ing.tmc:4:17: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `b`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// A library whose own graph mis-grafts a STANDARD LIBRARY graph, read
+/// leniently from its source by a consumer that grafts it: the ill-formed
+/// nested graft is refused as `missing-arg` while the library is read, not
+/// discovered by the splice. Mutation: the dropped lookup — the consumer's
+/// splice recurses into the nested graft and aborts.
+#[test]
+fn a_library_graphs_own_ill_formed_stdlib_graft_is_refused_when_read() {
+    let dir = scratch("lib_graft_args_nested");
+    let lib_src = write_file(
+        &dir,
+        "nlib.tmc",
+        "\
+namespace nlib {
+  export graph w(tape t: std::binaryNumbers::symbols, state out) {
+    entry graft std::binaryNumbers::goToNumberGraph(done = out) as inner;
+  }
+}
+",
+    );
+    let consumer = write_file(
+        &dir,
+        "ncons.tmc",
+        "\
+use std::binaryNumbers::symbols;
+use nlib::w;
+machine {
+  tape x: symbols;
+  entry graft w(t = x, out = fin) as ww;
+  state fin { [*] -> stop; }
+}
+",
+    );
+    let out = dir.join("ncons.tmo");
+    let err = execute(&args(&[
+        "compile",
+        consumer.to_str().unwrap(),
+        "--extern",
+        lib_src.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("an ill-formed nested graft must be refused");
+    // The library's own line and column; which file a declaration's
+    // diagnostic is rendered under is not what this test pins.
+    assert!(err.contains(":3:53: error:"), "{err}");
+    assert!(
+        err.contains("missing binding argument for parameter `num`"),
+        "{err}"
+    );
+    assert!(err.contains("[missing-arg]"), "{err}");
+}
+
+/// A standard-library graph grafted with its tape argument forgotten,
+/// through the REAL `tmt` binary, for both `tmt compile` and `tmt lint`:
+/// a coded `missing-arg` at the argument, an ordinary failing exit (never
+/// the 101 of a panic), and no panic text. Mutation: the dropped lookup —
+/// both commands abort in the splice, exit 101, "panicked" on stderr.
+#[test]
+fn a_stdlib_graft_missing_its_tape_argument_is_a_coded_error_for_compile_and_lint() {
+    let dir = scratch("stdlib_graft_missing_tape");
+    let src = write_file(
+        &dir,
+        "app.tmc",
+        "\
+use std::binaryNumbers::symbols;
+machine {
+  tape t: symbols;
+  entry graft std::binaryNumbers::goToNumberGraph(done = fin) as gg;
+  state fin { [*] -> stop; }
+}
+",
+    );
+    let out_path = dir.join("app.tmo");
+    for argv in [
+        vec![
+            "compile",
+            src.to_str().unwrap(),
+            "-o",
+            out_path.to_str().unwrap(),
+        ],
+        vec!["lint", "--no-config", src.to_str().unwrap()],
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_tmt"))
+            .args(&argv)
+            .output()
+            .expect("tmt runs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let code = out.status.code();
+        assert!(!text.contains("panicked"), "{argv:?}: {text}");
+        assert_ne!(code, Some(101), "{argv:?}: {text}");
+        assert_ne!(code, Some(0), "{argv:?} must fail: {text}");
+        assert!(text.contains("app.tmc:4:51:"), "{argv:?}: {text}");
+        assert!(
+            text.contains("missing binding argument for parameter `num`"),
+            "{argv:?}: {text}"
+        );
+        assert!(text.contains("[missing-arg]"), "{argv:?}: {text}");
+    }
+}
+
+/// A library graph taking two tapes and two exits.
+const TWO_KIND_LIB_TMC: &str = "\
+namespace il {
+  export alphabet bits { '_', '0', '1' }
+  export graph g(tape a: bits, tape b: bits, state s1, state s2) {
+    entry state s { ['0', *] -> goto s1; [*, *] -> goto s2; }
+  }
+}
+";
+
+/// Grafts `il::g` leaving BOTH `b` (a tape) and `s1` (a state) unbound.
+const TWO_KIND_CONSUMER: &str = "\
+use il::bits;
+use il::g;
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry graft g(a = x, s2 = fin) as gg;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// [`TWO_KIND_CONSUMER`]'s in-unit twin, the graft on the same line and
+/// column.
+const TWO_KIND_LOCAL: &str = "\
+alphabet bits { '_', '0', '1' }
+graph g(tape a: bits, tape b: bits, state s1, state s2) { entry state s { ['0', *] -> goto s1; [*, *] -> goto s2; } }
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry graft g(a = x, s2 = fin) as gg;
+  state fin { [*, *] -> stop; }
+}
+";
+
+/// With parameters of both kinds unbound, `missing-arg` names the first one
+/// in SIGNATURE order — the tape `b`, written before the state `s1` — for
+/// a graph read from its header and from its source alike, exactly as the
+/// local graft does: same position AND same message. Mutation: walk the
+/// declared signature's state parameters before its tapes — the library
+/// graft then names `s1` and the message differs.
+#[test]
+fn a_library_graft_names_the_first_unbound_parameter_in_signature_order() {
+    let dir = scratch("lib_graft_two_kinds");
+    let lib_src = write_file(&dir, "il.tmc", TWO_KIND_LIB_TMC);
+    let header = interface(&dir, &lib_src, "il.tmh");
+
+    let local_src = write_file(&dir, "loc.tmc", TWO_KIND_LOCAL);
+    let out = dir.join("loc.tmo");
+    let local = execute(&args(&[
+        "compile",
+        local_src.to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .expect_err("the local twin must fail");
+    let local = local.replace(local_src.to_str().unwrap(), "<src>");
+    assert!(local.contains("<src>:6:17: error:"), "{local}");
+    assert!(
+        local.contains("missing binding argument for parameter `b`"),
+        "{local}"
+    );
+
+    for (route, decls) in [("header", &header), ("source", &lib_src)] {
+        let name = format!("ext_{route}.tmc");
+        let err = compile_extern_err(&dir, &name, TWO_KIND_CONSUMER, decls);
+        let err = err.replace(dir.join(&name).to_str().unwrap(), "<src>");
+        assert_eq!(
+            err, local,
+            "{route}: the library graft names another parameter"
+        );
+    }
+}
+
+/// A library graph `nlib::w` whose body grafts
+/// `std::binaryNumbers::goToNumberGraph(num = t, done = out)` — well formed
+/// against the embedded standard library, which is what `nlib` was checked
+/// against when it was read.
+const SHADOW_NLIB_TMC: &str = "\
+namespace nlib {
+  export graph w(tape t: std::binaryNumbers::symbols, state out) {
+    entry graft std::binaryNumbers::goToNumberGraph(num = t, done = out) as inner;
+  }
+}
+";
+
+const SHADOW_CONSUMER: &str = "\
+use nlib::w;
+machine {
+  tape x: std::binaryNumbers::symbols;
+  entry graft w(t = x, out = fin) as ww;
+  state fin { [*] -> stop; }
+}
+";
+
+/// A user source re-declaring `std::binaryNumbers::goToNumberGraph` with
+/// one more tape parameter, `PARAMS` spliced in. Given to the consumer's
+/// compile by `--extern`, it is the graph the consumer's table finds for
+/// `nlib::w`'s nested graft — not the one `nlib` was checked against.
+const SHADOW_FAKESTD: &str = "\
+namespace std {
+  namespace binaryNumbers {
+    export alphabet symbols { '_', '0', '1', '$', '^' }
+    export graph goToNumberGraph(PARAMS) {
+      entry state s { [*, *] -> goto done; }
+    }
+  }
+}
+";
+
+/// Run the real `tmt compile` on [`SHADOW_CONSUMER`] with `nlib` given by
+/// its source and by its header, each alongside a shadowing standard
+/// library whose graph takes `params`; return each route's exit code and
+/// combined output.
+///
+/// With `nostdlib` the fake is the only `std::binaryNumbers` in the compile;
+/// without it the fake sits beside the embedded one, and the two disagree.
+fn shadowed_nested_graft(tag: &str, params: &str, nostdlib: bool) -> Vec<(Option<i32>, String)> {
+    let dir = scratch(tag);
+    let nlib = write_file(&dir, "nlib.tmc", SHADOW_NLIB_TMC);
+    let header = interface(&dir, &nlib, "nlib.tmh");
+    let fake = write_file(
+        &dir,
+        "fakestd.tmc",
+        &SHADOW_FAKESTD.replace("PARAMS", params),
+    );
+    let cons = write_file(&dir, "cons.tmc", SHADOW_CONSUMER);
+    let out = dir.join("cons.tmo");
+    [&nlib, &header]
+        .into_iter()
+        .map(|lib| {
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_tmt"));
+            command.args(["compile", cons.to_str().unwrap()]);
+            if nostdlib {
+                command.arg("--nostdlib");
+            }
+            let run = command
+                .args([
+                    "--extern",
+                    lib.to_str().unwrap(),
+                    "--extern",
+                    fake.to_str().unwrap(),
+                    "-o",
+                    out.to_str().unwrap(),
+                ])
+                .output()
+                .expect("tmt runs");
+            (
+                run.status.code(),
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&run.stdout),
+                    String::from_utf8_lossy(&run.stderr)
+                ),
+            )
+        })
+        .collect()
+}
+
+/// A nested graft inside a library graph is checked against the graph the
+/// splice actually uses. Here that graph (a user `--extern` shadowing the
+/// standard library's) takes a tape parameter `extra` BEFORE `num` that the
+/// nested graft never binds: a coded `missing-arg`, through the source and
+/// the header route alike — never a panic. Mutation: drop the graft-argument
+/// check of a declarations read (`WorldCtx::check_reuse_targets`' graft
+/// arm) — the read of `nlib` then goes on to its contract check and fails
+/// there instead, with a misleading `writes-outside-contract` on `nlib::w`;
+/// the splice-time check (`check_graft_args`) is never reached.
+#[test]
+fn a_nested_library_graft_is_checked_against_the_graph_it_splices() {
+    for (code, text) in shadowed_nested_graft(
+        "lib_graft_shadowed_nested",
+        "tape extra: symbols, tape num: symbols, state done",
+        true,
+    ) {
+        assert!(!text.contains("panicked"), "{text}");
+        assert_ne!(code, Some(101), "{text}");
+        assert_eq!(code, Some(1), "{text}");
+        assert!(
+            text.contains("missing binding argument for parameter `extra`"),
+            "{text}"
+        );
+        assert!(text.contains("[missing-arg]"), "{text}");
+    }
+}
+
+/// The companion shape: the shadowing graph's unbound `extra` comes AFTER
+/// `num`. Without the splice-time check the splice paired the arguments
+/// with the wrong graph's tapes and reported `identity-glyph-mismatch`,
+/// about glyphs; it is the same unbound parameter as above and now reads
+/// as one. Mutation: drop the graft-argument check of a declarations read
+/// (`WorldCtx::check_reuse_targets`' graft arm) — the read of `nlib` then
+/// fails at its contract check instead, with a misleading
+/// `writes-outside-contract` on `nlib::w`.
+#[test]
+fn a_nested_library_graft_missing_a_later_parameter_is_missing_arg() {
+    for (code, text) in shadowed_nested_graft(
+        "lib_graft_shadowed_nested_after",
+        "tape num: symbols, tape extra: symbols, state done",
+        true,
+    ) {
+        assert_eq!(code, Some(1), "{text}");
+        assert!(
+            text.contains("missing binding argument for parameter `extra`"),
+            "{text}"
+        );
+        assert!(text.contains("[missing-arg]"), "{text}");
+    }
+}
+
+/// A user source re-declaring a standard-library graph differently, beside
+/// the embedded standard library, is a conflict rather than a shadow. The
+/// GRAPH is the name reported: the fake's `symbols` (`'_','0','1','$','^'`)
+/// also differs from the stdlib's (`'_','^','$','0','1'`), and own names
+/// are checked in sorted order, `…goToNumberGraph` before `…symbols`.
+/// Mutation: leave the embedded standard library out of the table the
+/// own-definition check reads.
+#[test]
+fn a_user_std_graph_beside_the_embedded_one_conflicts() {
+    for (code, text) in shadowed_nested_graft(
+        "lib_graft_user_std_graph",
+        "tape extra: symbols, tape num: symbols, state done",
+        false,
+    ) {
+        assert_eq!(code, Some(1), "{text}");
+        assert!(text.contains("fakestd.tmc:4:18:"), "{text}");
+        assert!(
+            text.contains("`std::binaryNumbers::goToNumberGraph` is declared differently by this unit and by the standard library"),
+            "{text}"
+        );
+        assert!(text.contains("[conflicting-declaration]"), "{text}");
+    }
+}
+
+// ── what a graph's digest covers, and which graphs are recorded ──────────
+
+/// Exports `walker` (its cells name the non-exported set `hid` and the
+/// exported set `vis`) and `relay` (its body grafts `walker` through the
+/// non-exported named map `hmap`). `HID` and `HMAP` are substituted.
+const DIGEST_LIB: &str = "\
+export alphabet marks { '_', 'x', 'y', 'z' }
+set hid { HID }
+export set vis { 'z', '_' }
+map hmap: marks -> marks { HMAP }
+export graph walker(tape t: marks, state done) {
+  entry state w {
+    [hid] -> write ['z'] goto done;
+    [vis] -> goto done;
+    [*]   -> goto done;
+  }
+}
+export graph relay(tape a: marks, state done) {
+  entry graft walker(t = a with map hmap, done = done) as inner;
+}
+";
+
+const GRAFTS_WALKER: &str = "\
+use marks;
+use walker;
+machine {
+  tape t: marks;
+  entry graft walker(t = t, done = stop) as w;
+}
+";
+
+const GRAFTS_RELAY: &str = "\
+use marks;
+use relay;
+machine {
+  tape t: marks;
+  entry graft relay(a = t, done = stop) as r;
+}
+";
+
+const SWAP_MAP: &str = "'x' -> 'z', 'z' -> 'x'";
+const CYCLE_MAP: &str = "'x' -> 'z', 'z' -> 'y', 'y' -> 'x'";
+
+fn digest_lib(hid: &str, hmap: &str) -> String {
+    DIGEST_LIB.replace("HID", hid).replace("HMAP", hmap)
+}
+
+fn frames() -> LinkOptions {
+    LinkOptions {
+        call_mech: mtc_core::linker::CallMech::Frames,
+        ..Default::default()
+    }
+}
+
+/// The members of a glyph set a pattern cell names are part of the graph's
+/// digest. **Mutation:** `graph_digest` appending nothing — the two
+/// exporters digest `walker` identically again.
+#[test]
+fn a_set_member_change_moves_the_digest() {
+    let wide = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let wide_again = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let narrow = compile_alone(&digest_lib("'x'", SWAP_MAP));
+    assert_ne!(
+        graph_digest_of(&wide, "walker"),
+        graph_digest_of(&narrow, "walker")
+    );
+    // Near miss: the same members digest alike.
+    assert_eq!(
+        graph_digest_of(&wide, "walker"),
+        graph_digest_of(&wide_again, "walker")
+    );
+}
+
+/// The pairs of a named map an argument names are part of the digest of
+/// the graph whose body names it. **Mutation:** `graph_digest` appending
+/// only the sets (no maps) — the two `relay` digests are equal again.
+#[test]
+fn a_named_map_pair_change_moves_the_digest() {
+    let a = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let b = compile_alone(&digest_lib("'x', 'y'", CYCLE_MAP));
+    let c = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    assert_ne!(graph_digest_of(&a, "relay"), graph_digest_of(&b, "relay"));
+    assert_eq!(graph_digest_of(&a, "relay"), graph_digest_of(&c, "relay"));
+}
+
+/// A consumer built against the header of an exporter whose set had other
+/// members is refused at link; one built against the matching object links.
+/// **Mutation:** the exporter recording a digest the consumer's reading of
+/// the header does not reproduce (the exported digest xor 1) — the matching
+/// pair is refused too.
+#[test]
+fn a_consumer_built_against_an_older_set_is_refused_at_link() {
+    let dir = scratch("digest_set_link");
+    let lib = write_file(&dir, "lib.tmc", &digest_lib("'x', 'y'", SWAP_MAP));
+    let header = interface(&dir, &lib, "lib.tmh");
+    let consumer = compile_extern(&dir, "walker_app", GRAFTS_WALKER, &header);
+    let narrow = compile_alone(&digest_lib("'x'", SWAP_MAP));
+    let err =
+        link(&[consumer.clone(), narrow], &[], frames()).expect_err("a changed set must be drift");
+    assert!(
+        matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "walker"),
+        "{err}"
+    );
+    let wide = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    link(&[consumer, wide], &[], frames()).unwrap_or_else(|e| panic!("matching pair: {e}"));
+}
+
+/// A graph grafted inside another graph of the SAME library is spliced into
+/// the consumer too, so it is recorded with the digest the consumer read.
+/// **Mutation:** record a splice only when the target misses the current
+/// owner's graph map — `walker` disappears from the list.
+#[test]
+fn a_graph_nested_from_the_same_library_is_recorded() {
+    let dir = scratch("digest_nested_record");
+    let lib = write_file(&dir, "lib.tmc", &digest_lib("'x', 'y'", SWAP_MAP));
+    let header = interface(&dir, &lib, "lib.tmh");
+    let consumer = compile_extern(&dir, "relay_app", GRAFTS_RELAY, &header);
+    let names: Vec<&str> = consumer.grafts.iter().map(|g| g.graph.as_str()).collect();
+    assert_eq!(names, ["relay", "walker"]);
+    let exporter = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    for g in &consumer.grafts {
+        assert_eq!(
+            g.digest,
+            graph_digest_of(&exporter, &g.graph),
+            "{}",
+            g.graph
+        );
+    }
+}
+
+/// A set changed inside a graph that another graph of the library grafts is
+/// drift for the consumer of the outer graph. **Mutation:** the nested
+/// record missing from the consumer, or the exporter not recording
+/// `walker` — the link succeeds. Near miss: the unchanged exporter links.
+#[test]
+fn a_set_change_inside_a_nested_graph_is_refused_at_link() {
+    let dir = scratch("digest_nested_link");
+    let lib = write_file(&dir, "lib.tmc", &digest_lib("'x', 'y'", SWAP_MAP));
+    let header = interface(&dir, &lib, "lib.tmh");
+    let consumer = compile_extern(&dir, "relay_app", GRAFTS_RELAY, &header);
+    let narrow = compile_alone(&digest_lib("'x'", SWAP_MAP));
+    let err = link(&[consumer.clone(), narrow], &[], frames())
+        .expect_err("a changed nested set must be drift");
+    assert!(
+        matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "walker"),
+        "{err}"
+    );
+    let wide = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    link(&[consumer, wide], &[], frames()).unwrap_or_else(|e| panic!("matching pair: {e}"));
+}
+
+/// A graph the header prints but does not export is recorded by its
+/// exporter as a private record. **Mutation:** `interface_graph_digests`
+/// filtering by `exported`, or recording the graph as exported.
+#[test]
+fn a_printed_private_graph_is_recorded_by_its_exporter() {
+    let lib = compile_alone(MEMO_LIB_TMC);
+    let records = &lib.interface.as_ref().unwrap().graphs;
+    let walker = records
+        .iter()
+        .find(|g| g.name == "lib::walker")
+        .unwrap_or_else(|| panic!("no record for lib::walker in {records:?}"));
+    assert!(!walker.exported, "a non-exported graph is a private record");
+    let relay = records.iter().find(|g| g.name == "lib::relay").unwrap();
+    assert!(relay.exported);
+}
+
+const MEMO_CONSUMER: &str = "\
+use lib::marks;
+use lib::relay;
+machine {
+  tape t: marks;
+  entry graft relay(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+/// `MEMO_LIB_TMC` with one more row in its private `walker`: `walker`'s
+/// digest moves, `relay`'s does not (its inferred write set is unchanged).
+fn memo_lib_walker_edit() -> String {
+    MEMO_LIB_TMC.replace(
+        "['x'] -> write ['y'] goto done;\n      [*]   -> goto done;",
+        "['x'] -> write ['y'] goto done;\n      ['y'] -> goto done;\n      [*]   -> goto done;",
+    )
+}
+
+/// Another library with its OWN private `lib::walker` (a different body),
+/// reached only by its exported `lib::relay2`.
+const OTHER_PRIVATE_WALKER_LIB: &str = "\
+namespace lib {
+  alphabet marks { '_', 'x', 'y' }
+  map flip: marks -> marks { 'x' -> 'y', 'y' -> 'x' }
+
+  graph walker(tape t: marks, state done) {
+    entry state w {
+      ['y'] -> write ['x'] goto done;
+      [*]   -> goto done;
+    }
+  }
+
+  export graph relay2(tape a: marks, state done) {
+    entry graft walker(t = a with map flip, done = done) as inner;
+  }
+}
+";
+
+/// A change inside a graph the header prints but does not export is drift
+/// for the consumer of the exported graph reaching it. **Mutation:**
+/// `interface_graph_digests` recording only exported graphs — the private
+/// `lib::walker` has no record and the edit goes unnoticed.
+#[test]
+fn a_change_inside_a_private_nested_graph_is_refused_at_link() {
+    let dir = scratch("digest_private_link");
+    let lib_src = write_file(&dir, "lib.tmc", MEMO_LIB_TMC);
+    let header = interface(&dir, &lib_src, "lib.tmh");
+    let consumer = compile_extern(&dir, "memo_app", MEMO_CONSUMER, &header);
+    let lib = compile_alone(MEMO_LIB_TMC);
+    assert_eq!(
+        graph_digest_of(&lib, "lib::relay"),
+        graph_digest_of(&compile_alone(&memo_lib_walker_edit()), "lib::relay"),
+        "the edit must leave relay's own digest alone"
+    );
+    link(&[consumer.clone(), lib], &[], frames())
+        .unwrap_or_else(|e| panic!("the matching library must link: {e}"));
+    let edited = compile_alone(&memo_lib_walker_edit());
+    let err = link(&[consumer, edited], &[], frames()).expect_err("private drift");
+    assert!(
+        matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "lib::walker"),
+        "{err}"
+    );
+}
+
+/// Two libraries with differing private graphs under one name link
+/// together, and the consumer's record matches the provider it came from,
+/// in either library order. **Mutation:** `interface_graph_digests`
+/// recording the private graph as exported — the two `lib::walker` records
+/// then conflict at link.
+#[test]
+fn differing_private_graphs_of_two_libraries_link_and_match_their_provider() {
+    let dir = scratch("digest_private_two");
+    let lib_src = write_file(&dir, "lib.tmc", MEMO_LIB_TMC);
+    let header = interface(&dir, &lib_src, "lib.tmh");
+    let consumer = compile_extern(&dir, "memo_app", MEMO_CONSUMER, &header);
+    let memo = compile_alone(MEMO_LIB_TMC);
+    let other = compile_alone(OTHER_PRIVATE_WALKER_LIB);
+    link(
+        &[consumer.clone(), memo.clone(), other.clone()],
+        &[],
+        frames(),
+    )
+    .unwrap_or_else(|e| panic!("[memo, other]: {e}"));
+    link(&[consumer, other, memo], &[], frames()).unwrap_or_else(|e| panic!("[other, memo]: {e}"));
+}
+
+/// A private `.graph` record survives the emitted assembly text and
+/// reassembly byte-identically. **Mutation:** `codegen` printing the record
+/// without its `, private` word — the text no longer carries it and the
+/// reassembled object records the graph as exported.
+#[test]
+fn a_private_graph_record_reassembles_byte_identically() {
+    let out = compile(
+        OTHER_PRIVATE_WALKER_LIB,
+        CompileOptions {
+            externals: Declarations::none(),
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("compile: {e}"));
+    assert!(out.tma.contains(", private"), "{}", out.tma);
+    let reassembled = assemble(&out.tma, false).unwrap_or_else(|e| panic!("reassemble: {e}"));
+    assert_eq!(reassembled, out.object);
+}
+
+// ── one name, one spliced body ───────────────────────────────────────────
+
+/// Three libraries sharing the exported alphabet `lib::marks`. `PRIV_A`
+/// and `PRIV_B` carry DIFFERENT private `lib::walker` graphs; `PRIV_C`'s
+/// is identical to `PRIV_A`'s.
+fn private_walker_lib(export: &str, body_rule: &str, extra_row: &str) -> String {
+    format!(
+        "\
+namespace lib {{
+  export alphabet marks {{ '_', 'x', 'y' }}
+  graph walker(tape t: marks, state done) {{
+    entry state w {{
+      {body_rule}
+      {extra_row}
+      [*]   -> goto done;
+    }}
+  }}
+  export graph {export}(tape a: marks, state done) {{
+    entry graft walker(t = a, done = done) as inner;
+  }}
+}}
+"
+    )
+}
+
+const ROW_A: &str = "['x'] -> write ['y'] goto done;";
+const ROW_B: &str = "['y'] -> write ['x'] goto done;";
+
+fn lib_a() -> String {
+    private_walker_lib("outerA", ROW_A, "")
+}
+fn lib_b() -> String {
+    private_walker_lib("outerB", ROW_B, "")
+}
+fn lib_c() -> String {
+    private_walker_lib("outerC", ROW_A, "")
+}
+
+const GRAFTS_OUTER_A: &str = "\
+use lib::marks;
+use lib::outerA;
+machine {
+  tape t: marks;
+  entry graft outerA(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+const GRAFTS_OUTER_B: &str = "\
+use lib::marks;
+use lib::outerB;
+machine {
+  tape t: marks;
+  entry graft outerB(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+/// Grafts `outerA` then `OTHER`.
+fn grafts_both(other: &str) -> String {
+    format!(
+        "\
+use lib::marks;
+use lib::outerA;
+use lib::{other};
+machine {{
+  tape t: marks;
+  entry graft outerA(a = t, done = mid) as r;
+  state mid {{ [*] -> goto fin; }}
+  graft {other}(a = t, done = fin) as s;
+  state fin {{ [*] -> stop; }}
+}}
+"
+    )
+}
+
+/// `tmt compile SRC --nostdlib --extern H1 --extern H2 ...`, in the order
+/// given; `Ok(object)` or the compile fatal.
+fn compile_extern_many(
+    dir: &Path,
+    name: &str,
+    src: &str,
+    headers: &[&PathBuf],
+) -> Result<ObjectFile, String> {
+    let input = write_file(dir, name, src);
+    let out = dir.join(format!("{name}.tmo"));
+    let mut argv = vec![
+        "compile".to_string(),
+        input.to_str().unwrap().to_string(),
+        "--nostdlib".to_string(),
+    ];
+    for h in headers {
+        argv.push("--extern".to_string());
+        argv.push(h.to_str().unwrap().to_string());
+    }
+    argv.push("-o".to_string());
+    argv.push(out.to_str().unwrap().to_string());
+    let result = execute(&argv)?;
+    assert_eq!(result.code, 0, "{name}: {}", result.stderr);
+    Ok(ObjectFile::from_bytes(&std::fs::read(&out).unwrap()).unwrap())
+}
+
+/// A consumer of ONE export records the digest of the body it spliced —
+/// the owning library's private record — whichever order the headers are
+/// given in, and links with just that library. **Mutation:** `compile`
+/// looking the recorded digest up by name across the declarations (first
+/// match) instead of taking it from the module that owns the spliced body —
+/// the header order `[b, a]` records the other library's digest.
+#[test]
+fn a_nested_private_graph_is_recorded_with_its_owners_digest_in_either_header_order() {
+    let dir = scratch("digest_owner_order");
+    let a = write_file(&dir, "la.tmc", &lib_a());
+    let b = write_file(&dir, "lb.tmc", &lib_b());
+    let ha = interface(&dir, &a, "la.tmh");
+    let hb = interface(&dir, &b, "lb.tmh");
+    let obj_a = compile_alone(&lib_a());
+    let obj_b = compile_alone(&lib_b());
+    assert_ne!(
+        graph_digest_of(&obj_a, "lib::walker"),
+        graph_digest_of(&obj_b, "lib::walker"),
+        "the fixture needs two different private walkers"
+    );
+    for (tag, order) in [("ab", [&ha, &hb]), ("ba", [&hb, &ha])] {
+        let consumer =
+            compile_extern_many(&dir, &format!("app_{tag}"), GRAFTS_OUTER_A, &order).unwrap();
+        assert_eq!(
+            graft_digest_of(&consumer, "lib::walker"),
+            graph_digest_of(&obj_a, "lib::walker"),
+            "header order {tag}"
+        );
+        link(&[consumer.clone(), obj_a.clone()], &[], frames())
+            .unwrap_or_else(|e| panic!("header order {tag}: {e}"));
+        // Near miss: the same consumer also links with both libraries.
+        link(&[consumer, obj_a.clone(), obj_b.clone()], &[], frames())
+            .unwrap_or_else(|e| panic!("header order {tag}, both libraries: {e}"));
+    }
+}
+
+/// One compile that splices two DIFFERENT graphs under one qualified name
+/// is refused, naming both origins — the body spliced first first — in
+/// either header order. **Mutation:** no refusal (keep the first record) —
+/// the compile succeeds and the second body goes unrecorded.
+#[test]
+fn two_different_bodies_under_one_name_are_conflicting_declarations() {
+    let dir = scratch("digest_two_bodies");
+    let ha = interface(&dir, &write_file(&dir, "la.tmc", &lib_a()), "la.tmh");
+    let hb = interface(&dir, &write_file(&dir, "lb.tmc", &lib_b()), "lb.tmh");
+    for (tag, order) in [("ab", [&ha, &hb]), ("ba", [&hb, &ha])] {
+        let err = compile_extern_many(&dir, &format!("both_{tag}"), &grafts_both("outerB"), &order)
+            .expect_err("two bodies under one name must be refused");
+        assert!(err.contains("[conflicting-declaration]"), "{tag}: {err}");
+        assert!(err.contains("`lib::walker`"), "{tag}: {err}");
+        let first = err.find("la.tmh").unwrap_or_else(|| panic!("{tag}: {err}"));
+        let second = err.find("lb.tmh").unwrap_or_else(|| panic!("{tag}: {err}"));
+        assert!(
+            first < second,
+            "{tag}: the body spliced first is named first: {err}"
+        );
+    }
+}
+
+/// Near miss: two libraries whose private walkers are IDENTICAL, both
+/// exports grafted, compile to one `lib::walker` record and link with
+/// both libraries in either order.
+#[test]
+fn identical_bodies_under_one_name_are_one_record() {
+    let dir = scratch("digest_same_bodies");
+    let ha = interface(&dir, &write_file(&dir, "la.tmc", &lib_a()), "la.tmh");
+    let hc = interface(&dir, &write_file(&dir, "lc.tmc", &lib_c()), "lc.tmh");
+    let obj_a = compile_alone(&lib_a());
+    let obj_c = compile_alone(&lib_c());
+    for (tag, order) in [("ac", [&ha, &hc]), ("ca", [&hc, &ha])] {
+        let consumer =
+            compile_extern_many(&dir, &format!("same_{tag}"), &grafts_both("outerC"), &order)
+                .unwrap_or_else(|e| panic!("{tag}: {e}"));
+        let walkers = consumer
+            .grafts
+            .iter()
+            .filter(|g| g.graph == "lib::walker")
+            .count();
+        assert_eq!(walkers, 1, "{tag}: {:?}", consumer.grafts);
+        link(
+            &[consumer.clone(), obj_a.clone(), obj_c.clone()],
+            &[],
+            frames(),
+        )
+        .unwrap_or_else(|e| panic!("{tag}: {e}"));
+        link(&[consumer, obj_c.clone(), obj_a.clone()], &[], frames())
+            .unwrap_or_else(|e| panic!("{tag}, swapped: {e}"));
+    }
+}
+
+/// A change inside the OWNING library's private walker after the consumer
+/// was built is drift, for each of two libraries separately.
+/// **Mutation:** `compile` looking the recorded digest up by name — with
+/// the headers given `[b, a]` the consumer of `outerA` records `lb`'s
+/// digest, so the unedited link is a false drift and the edited one names
+/// the wrong library.
+#[test]
+fn a_change_in_the_owning_librarys_private_walker_is_drift_for_each_library() {
+    let dir = scratch("digest_owner_drift");
+    let ha = interface(&dir, &write_file(&dir, "la.tmc", &lib_a()), "la.tmh");
+    let hb = interface(&dir, &write_file(&dir, "lb.tmc", &lib_b()), "lb.tmh");
+    let edited_a = compile_alone(&private_walker_lib("outerA", ROW_A, "['y'] -> goto done;"));
+    let edited_b = compile_alone(&private_walker_lib("outerB", ROW_B, "['x'] -> goto done;"));
+    let cons_a = compile_extern_many(&dir, "drift_a", GRAFTS_OUTER_A, &[&hb, &ha]).unwrap();
+    let cons_b = compile_extern_many(&dir, "drift_b", GRAFTS_OUTER_B, &[&hb, &ha]).unwrap();
+    for (what, consumer, original, edited) in [
+        ("a", cons_a, compile_alone(&lib_a()), edited_a),
+        ("b", cons_b, compile_alone(&lib_b()), edited_b),
+    ] {
+        link(&[consumer.clone(), original], &[], frames())
+            .unwrap_or_else(|e| panic!("{what}: the unedited library must link: {e}"));
+        let err = link(&[consumer, edited], &[], frames())
+            .expect_err(&format!("an edited private walker of {what} must be drift"));
+        assert!(
+            matches!(err, LinkError::GraftDrift { ref graph, .. } if graph == "lib::walker"),
+            "{what}: {err}"
+        );
+    }
+}
+
+/// `GRAFTS_OUTER_A` over a LOCAL alphabet — an imported alphabet is the
+/// documented no-directive exception to reassembly.
+const LOCAL_ALPHABET_OUTER_A: &str = "\
+alphabet localMarks { '_', 'x', 'y' }
+use lib::outerA;
+machine {
+  tape t: localMarks;
+  entry graft outerA(a = t, done = fin) as r;
+  state fin { [*] -> stop; }
+}
+";
+
+/// A consumer's nested `.grafted` line survives the emitted assembly text
+/// and reassembly byte-identically. **Mutation:** record a splice only when
+/// the target misses the current owner's graph map — the nested line is
+/// absent from the text.
+#[test]
+fn a_consumer_with_nested_grafted_lines_reassembles_byte_identically() {
+    let dir = scratch("digest_nested_reassemble");
+    let ha = interface(&dir, &write_file(&dir, "la.tmc", &lib_a()), "la.tmh");
+    let input = write_file(&dir, "app.tmc", LOCAL_ALPHABET_OUTER_A);
+    let tma_path = dir.join("app.tma");
+    let result = execute(&args(&[
+        "compile",
+        input.to_str().unwrap(),
+        "--nostdlib",
+        "--extern",
+        ha.to_str().unwrap(),
+        "-S",
+        "-o",
+        tma_path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(result.code, 0, "{}", result.stderr);
+    let text = std::fs::read_to_string(&tma_path).unwrap();
+    assert!(text.contains(".grafted lib::walker"), "{text}");
+    let obj = compile_extern_many(&dir, "app_obj", LOCAL_ALPHABET_OUTER_A, &[&ha]).unwrap();
+    assert_eq!(assemble(&text, false).unwrap(), obj);
+}
+
+/// The digest follows the WRITTEN order of a glyph set's members and of a
+/// named map's pairs. **Mutation:** sorting the member list (sets) or the
+/// pair list (maps) before appending — the reordered variants digest alike.
+#[test]
+fn the_digest_follows_the_written_order_of_set_members_and_map_pairs() {
+    let base = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let same = compile_alone(&digest_lib("'x', 'y'", SWAP_MAP));
+    let reordered_set = compile_alone(&digest_lib("'y', 'x'", SWAP_MAP));
+    let reordered_map = compile_alone(&digest_lib("'x', 'y'", "'z' -> 'x', 'x' -> 'z'"));
+    assert_eq!(
+        graph_digest_of(&base, "walker"),
+        graph_digest_of(&same, "walker")
+    );
+    assert_ne!(
+        graph_digest_of(&base, "walker"),
+        graph_digest_of(&reordered_set, "walker")
+    );
+    assert_eq!(
+        graph_digest_of(&base, "relay"),
+        graph_digest_of(&same, "relay")
+    );
+    assert_ne!(
+        graph_digest_of(&base, "relay"),
+        graph_digest_of(&reordered_map, "relay")
     );
 }

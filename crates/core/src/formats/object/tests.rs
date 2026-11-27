@@ -505,7 +505,7 @@ fn v4_sample() -> ObjectFile {
             enters: vec![None],
             leaves: vec![None],
             opaque: vec![false],
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }],
         alphabets: vec![ExportedAlphabet {
@@ -515,10 +515,18 @@ fn v4_sample() -> ObjectFile {
             name: "bits".into(),
             glyphs: vec!["_".into(), "0".into(), "1".into(), "#".into()],
         }],
-        graphs: vec![ExportedGraph {
-            name: "lib::findA".into(),
-            digest: 0xDEAD_BEEF,
-        }],
+        graphs: vec![
+            ExportedGraph {
+                name: "lib::findA".into(),
+                digest: 0xDEAD_BEEF,
+                exported: true,
+            },
+            ExportedGraph {
+                name: "lib::step".into(),
+                digest: 7,
+                exported: false,
+            },
+        ],
         imports: Vec::new(),
     });
     obj.grafts = vec![GraftProvenance {
@@ -875,7 +883,7 @@ fn minimal_v4_interface() -> ObjectFile {
             enters: vec![Some(vec!["x".into()])],
             leaves: vec![None],
             opaque: vec![false],
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }],
         alphabets: Vec::new(),
@@ -883,6 +891,35 @@ fn minimal_v4_interface() -> ObjectFile {
         imports: Vec::new(),
     });
     obj
+}
+
+/// The routine record carries one name per state parameter, in
+/// declaration order (docs/formats.md (routine interfaces)).
+#[test]
+fn interface_exit_names_round_trip() {
+    let mut obj = minimal_v4_interface();
+    obj.interface.as_mut().unwrap().routines[0].exits = vec!["done".into(), "fail".into()];
+    let back = ObjectFile::from_bytes(&obj.to_bytes()).unwrap();
+    assert_eq!(
+        back.interface.unwrap().routines[0].exits,
+        ["done".to_string(), "fail".to_string()]
+    );
+}
+
+/// An exit name is a string-pool index: one past the pool is refused,
+/// never read.
+#[test]
+fn interface_exit_name_outside_the_pool_rejected() {
+    let mut obj = minimal_v4_interface();
+    obj.interface.as_mut().unwrap().routines[0].exits = vec!["done".into()];
+    let mut bytes = obj.to_bytes();
+    // Tail: … exit count, the exit's pool index (u32), the returns byte,
+    // then the four empty counts (16 bytes).
+    let pos = bytes.len() - 16 - 1 - 4;
+    assert_eq!(bytes[pos - 1], 1, "layout assumption: the exit count");
+    bytes[pos..pos + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+    assert!(ObjectFile::from_bytes(&bytes).is_err());
 }
 
 /// A present-but-empty head clause never leaves the writer (the source
@@ -1120,4 +1157,46 @@ fn v4_pair_reserved_flags_rejected() {
         ObjectFile::from_bytes(&bytes),
         Err(FormatError::Malformed("reserved map-pair flags"))
     ));
+}
+
+/// Index of the private graph record's exported byte in `v4_sample`'s
+/// encoding: the record's digest (7) is followed by that byte (0).
+fn private_graph_flag_index(bytes: &[u8]) -> usize {
+    let hits: Vec<usize> = bytes
+        .windows(5)
+        .enumerate()
+        .filter(|(_, w)| *w == [7, 0, 0, 0, 0])
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hits.len(), 1, "the digest pattern must be unique: {hits:?}");
+    hits[0] + 4
+}
+
+/// A graph record's exported byte is 0 or 1; anything else is malformed.
+/// Mutation it catches: accept any other value as exported (`_ => true`
+/// in the reader's flag match).
+#[test]
+fn a_graph_exported_byte_other_than_zero_or_one_is_rejected() {
+    let mut bytes = v4_sample().to_bytes();
+    let at = private_graph_flag_index(&bytes);
+    bytes[at] = 2;
+    crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+    assert!(matches!(
+        ObjectFile::from_bytes(&bytes),
+        Err(FormatError::Malformed("graph exported byte"))
+    ));
+}
+
+/// A buffer that ends where the exported byte should be is a typed error,
+/// never a panic. No single mutation of the reader reddens it: a reader
+/// that defaulted the missing byte would fail on the next read past the
+/// end instead, so what this pins is the outcome — an `Err`, whichever
+/// read reports it — and that truncation at this offset cannot panic.
+#[test]
+fn a_graph_record_truncated_before_its_exported_byte_is_rejected() {
+    let mut bytes = v4_sample().to_bytes();
+    let at = private_graph_flag_index(&bytes);
+    bytes.truncate(at);
+    crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+    assert!(ObjectFile::from_bytes(&bytes).is_err());
 }

@@ -18,8 +18,8 @@ use crate::optimizer::OptLevel;
 use crate::stdlib;
 
 use super::build::{
-    find_library, out_path, read_object, render_link_report, render_opt_report, render_warnings,
-    sidecar_path, take_disabled_passes,
+    find_library, link_labels, out_path, read_object, render_link_report, render_opt_report,
+    render_warnings, sidecar_path, take_disabled_passes,
 };
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
@@ -469,6 +469,11 @@ fn build_one_target(
         flags,
         &output,
         &unit_sources,
+        &link_labels(
+            &manifest.effective_sources(target),
+            &libs.link,
+            manifest.stdlib,
+        ),
     )
     .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
@@ -483,6 +488,7 @@ fn build_one_target(
 /// site (docs/pmt/cli.md (build)). Returns the (possibly empty) `-v`
 /// chunk; the caller owns concatenating it onto its own accumulated
 /// stderr.
+#[allow(clippy::too_many_arguments)]
 fn link_and_write(
     name: &str,
     target: &crate::project::Target,
@@ -491,6 +497,7 @@ fn link_and_write(
     flags: &Flags,
     output: &Path,
     unit_sources: &[Option<PathBuf>],
+    labels: &[Option<String>],
 ) -> Result<String, String> {
     // The sidecar path anchors the provenance strings, so it is resolved
     // BEFORE the link (docs/formats.md (map sidecar)).
@@ -504,6 +511,7 @@ fn link_and_write(
             relax: !flags.no_relax,
             entry: target.entry.clone(),
             sources: sidecar_sources(&map_path, unit_sources),
+            labels: labels.to_vec(),
             ..Default::default()
         },
     )
@@ -703,7 +711,7 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     // failure anywhere in it carries the warnings already rendered above
     // rather than dropping them on an early `?` return
     // (docs/pmt/cli.md (build)).
-    let tail = link_and_write_argv(&objects, &libraries, flags, &files[0], &unit_sources)
+    let tail = link_and_write_argv(&objects, &libraries, flags, files, &unit_sources)
         .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
     Ok(CliOutput::ok(String::new(), stderr))
@@ -718,10 +726,10 @@ fn link_and_write_argv(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
     flags: &Flags,
-    first_file: &str,
+    files: &[String],
     unit_sources: &[Option<PathBuf>],
 ) -> Result<String, String> {
-    let target = out_path(Path::new(first_file), flags.out.clone(), "pmx");
+    let target = out_path(Path::new(&files[0]), flags.out.clone(), "pmx");
     let map_path = sidecar_path(&target);
     // Argv mode links with the default entry symbol and call mechanism,
     // exactly as `pmt link` does; `sources` carries the units' sidecar
@@ -732,6 +740,7 @@ fn link_and_write_argv(
         LinkOptions {
             relax: !flags.no_relax,
             sources: sidecar_sources(&map_path, unit_sources),
+            labels: link_labels(files, &flags.lib_names, !flags.nostdlib),
             ..Default::default()
         },
     )
@@ -878,9 +887,9 @@ fn load_units(
 }
 
 /// Phase two: compile every `.pmc` unit with the settled column and
-/// collect the objects IN INPUT ORDER — the linker's namespace is
-/// first-wins, so the order an input was written in is part of the
-/// build's meaning and survives the two-phase split.
+/// collect the objects IN INPUT ORDER — the order an input was written in
+/// survives the two-phase split, so a link error names inputs in the order
+/// the user wrote them.
 fn compile_units(
     units: Vec<Unit>,
     options: &CompileOptions,
@@ -926,13 +935,12 @@ fn write_object(source: &Path, object: &ObjectFile) -> Result<(), String> {
 /// the bit would flip the columns of a program the linker then resolves
 /// as normal, and the two builds would emit different code.
 ///
-/// So: walk the inputs in the order the linker's namespace is built —
-/// the units first, then the libraries — take the first that defines
-/// `entry`, and read its bit alone. First-in-order matches first-wins,
-/// and a library only ever owns the entry when no unit does, exactly as
-/// `resolve` fills its namespace with `or_insert`. Two units defining
-/// `entry` is a duplicate-symbol link error whichever bit is chosen, so
-/// the tie is broken deterministically and not diagnosed here; nothing
+/// So: walk the inputs in the order the linker lists them — the units
+/// first, then the libraries — take the first that defines `entry`, and
+/// read its bit alone. Two inputs defining `entry` (two units, or a unit
+/// and a library) is a duplicate-symbol link error whichever bit is
+/// chosen, reported by the linker after this helper runs, so the tie is
+/// broken deterministically and not diagnosed here; nothing
 /// defining it at all is a `NoEntrySymbol` link error, and the column is
 /// moot — normal, which is also the linker's assumption.
 ///
@@ -1124,9 +1132,10 @@ mod tests {
             DEFAULT_ENTRY
         ));
 
-        // A unit that owns the entry outranks any library: the linker's
-        // namespace takes user objects first, and a library copy is
-        // silently shadowed.
+        // The helper answers "units first, then the first library" for
+        // the column choice. A unit AND a library both defining the entry
+        // is a duplicate-symbol link error the linker reports after this
+        // helper runs; these assertions are about the helper, not the link.
         let owning_units = vec![source("main() { @util(); }")];
         assert!(!entry_owner_is_volatile(
             &owning_units,
@@ -1134,8 +1143,8 @@ mod tests {
             DEFAULT_ENTRY
         ));
 
-        // Between libraries it is first-wins in link order, which is why
-        // the stdlib riding last can never displace a `-l` library.
+        // Between libraries the first in link order answers; two
+        // libraries defining the entry are likewise a link error.
         let both = vec![volatile_entry.clone(), plain_entry.clone()];
         assert!(entry_owner_is_volatile(&[], &both, DEFAULT_ENTRY));
         let reversed = vec![plain_entry, volatile_entry];
@@ -1165,7 +1174,7 @@ mod tests {
     /// module, not a `tests/*.rs` integration binary, so `CARGO_TARGET_TMPDIR`
     /// is not set here; mirrors `project.rs`'s own `unique_tmp_dir` for the
     /// same reason.
-    fn unique_tmp_dir(label: &str) -> PathBuf {
+    fn unique_tmp_dir(label: &str) -> ScratchDir {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1173,8 +1182,45 @@ mod tests {
             "pmt-driver-test-{label}-{}-{n}",
             std::process::id()
         ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        ScratchDir::fresh(dir)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// The negative control the forcing claim needs: without it, a test

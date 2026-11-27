@@ -6,9 +6,13 @@
 //! source, so the stdlib's [`Resolved`] is cloned in here rather than
 //! borrowed, keeping ONE type for both cases.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::compiler::{Resolved, ResolvedWorld};
+use mtc_core::diagnostics::Span;
+
+use crate::compiler::{CompileError, CompileErrorKind, Resolved, ResolvedWorld};
+use crate::published::{PublishedForm, readings_conflict, visible_forms};
 
 /// Where one declaration module came from. Read by the diagnostics that
 /// must tell "no such name" from "its declarations were not given"
@@ -26,6 +30,18 @@ pub enum Origin {
     Library(String),
 }
 
+impl Origin {
+    /// How a diagnostic names this origin: the standard library, a quoted
+    /// path, or a quoted library name.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Origin::Stdlib => "the standard library".to_string(),
+            Origin::Extern(p) | Origin::Sibling(p) => format!("`{}`", p.display()),
+            Origin::Library(n) => format!("library `{n}`"),
+        }
+    }
+}
+
 /// Everything the compiler knows about units other than its own
 /// (docs/tmt/language.md (declarations)): a callee found in one of these
 /// modules contributes its DECLARED effective write set to the footprint
@@ -34,6 +50,25 @@ pub enum Origin {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Declarations {
     modules: Vec<(Origin, Resolved)>,
+}
+
+/// The reading of a declared world a caller is checked and lowered
+/// against: the first module's world satisfying `want`, in table order.
+/// Readings of a name some module publishes agree on everything a caller
+/// can name — a reading taken from a compiled object included, since the
+/// object records its parameters' names (`Declarations::check_conflicts`)
+/// — so which reading is taken is immaterial and the result is
+/// independent of `--extern`/library order (docs/tmt/language.md
+/// (declarations)). The one rule behind [`Declarations::routine`] and
+/// `compiler::find_external_routine`, so the argument check and the IR
+/// lowering can never read different readings.
+pub(crate) fn first_reading<'a>(
+    modules: &[&'a Resolved],
+    want: impl Fn(&ResolvedWorld) -> bool,
+) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
+    modules
+        .iter()
+        .find_map(|m| m.worlds.iter().find(|w| want(w)).map(|w| (*m, w)))
 }
 
 impl Declarations {
@@ -109,10 +144,83 @@ impl Declarations {
             .map(|(origin, _)| origin)
     }
 
-    /// The declared world named `name` (a routine, first-match over
-    /// `modules()` in table order — `--extern` files in command-line
-    /// order, then the embedded stdlib last), or `None` when no module
-    /// this compile was given declares it. The one lookup an external
+    /// Every module with the origin it came from, in table order.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&Origin, &Resolved)> {
+        self.modules
+            .iter()
+            .map(|(origin, resolved)| (origin, resolved))
+    }
+
+    /// Two modules declaring one name differently (docs/tmt/language.md
+    /// (declarations)), reported at `0:0` like every compile-wide error.
+    /// What is compared is exactly what the lookups can return
+    /// (`published::visible_forms`): every declaration a module carries,
+    /// exported or not, against the readings of the same name in the
+    /// OTHER modules, by the one rule for a pair
+    /// (`published::readings_conflict`) — the two conflict when at least
+    /// one is published and their forms disagree. A private declaration
+    /// takes part because a consumer's lookup sees it whatever its export
+    /// status: beside a published one of another form it would be picked
+    /// by table order. Two modules' private declarations of one name are
+    /// not compared with each other.
+    ///
+    /// A name conflicts iff ANY such pair of its readings does: a private
+    /// reading is not compared with another private one, so the relation
+    /// is not transitive and each new reading is tested against every
+    /// distinct reading already seen, never only the first; a reading is
+    /// distinct by its form AND its export status, so a
+    /// published reading equal to an earlier private one is kept. The
+    /// origins named are the first conflicting pair in table order, the
+    /// earlier origin first. Identical forms merge, whatever their
+    /// origins; fewer than two modules cannot conflict (the editor's
+    /// per-keystroke path has one).
+    pub(crate) fn check_conflicts(&self) -> Result<(), CompileError> {
+        if self.modules.len() < 2 {
+            return Ok(());
+        }
+        let mut seen: BTreeMap<String, Vec<(&Origin, bool, PublishedForm)>> = BTreeMap::new();
+        for (origin, resolved) in self.entries() {
+            let forms = visible_forms(resolved);
+            // Against the EARLIER modules only: a module is never compared
+            // with itself, so its readings join `seen` once all are tested.
+            for v in &forms {
+                let earlier = seen.get(&v.name).and_then(|readings| {
+                    readings.iter().find(|(_, published, form)| {
+                        readings_conflict(*published, form, v.published, &v.form)
+                    })
+                });
+                if let Some((earlier, _, _)) = earlier {
+                    return Err(CompileError {
+                        span: Span::point(0, 0),
+                        kind: CompileErrorKind::ConflictingDeclaration {
+                            name: v.name.clone(),
+                            first: earlier.describe(),
+                            second: origin.describe(),
+                        },
+                    });
+                }
+            }
+            for v in forms {
+                let readings = seen.entry(v.name).or_default();
+                if !readings
+                    .iter()
+                    .any(|(_, published, form)| *published == v.published && *form == v.form)
+                {
+                    readings.push((origin, v.published, v.form));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The declared ROUTINE named `name` (a graph of that name is not one), or `None` when no
+    /// module this compile was given declares it — exported or not. The
+    /// first reading in table order is taken ([`first_reading`]). For a name any
+    /// module publishes, every other module's declaration of it has the
+    /// same form ([`check_conflicts`](Self::check_conflicts)), so the
+    /// table's order decides nothing; it decides only between two
+    /// modules' PRIVATE routines of a name none publishes, which are not
+    /// compared. The one lookup an external
     /// call/bind site's own arg-list checks and ordering read
     /// (`ir::resolve_binding`, `compiler::expand_named_maps_in_args`):
     /// when a callee's declarations are in hand, its tape order and
@@ -120,9 +228,10 @@ impl Declarations {
     /// signature's are; when they are not, the checks defer to the
     /// linker (docs/formats.md (bound calls)).
     pub(crate) fn routine(&self, name: &str) -> Option<&ResolvedWorld> {
-        self.modules()
-            .into_iter()
-            .find_map(|m| m.worlds.iter().find(|w| w.name == name))
+        first_reading(&self.modules(), |w| {
+            w.kind == crate::compiler::WorldKind::Routine && w.name == name
+        })
+        .map(|(_, w)| w)
     }
 
     /// How many declaration modules this carries — the public shape of

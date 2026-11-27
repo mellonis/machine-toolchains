@@ -6,7 +6,8 @@ table: a `.pmc` file runs the compiler's analysis (through lowering, no
 code generation) against the pmc rule catalog below; a `.pma` file runs
 a full assemble against the arch-agnostic assembly rule catalog,
 further down this page, read against the PM-1 syntax. Either way, a
-finding prints as `FILE:LINE:COL: lint: MESSAGE`. Exit code 0 means
+finding prints as `FILE:LINE:COL: lint: MESSAGE [CODE]`, the code being the
+rule's name — what `--allow` and `lint.allow` take. Exit code 0 means
 every file is clean; 1 means findings (or errors) somewhere. Lint
 reports lint findings only — compile/assembly warnings, if any, stay on
 `pmt compile`/`pmt asm`.

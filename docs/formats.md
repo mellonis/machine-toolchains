@@ -246,11 +246,13 @@ interface (present iff flags bit 5 is set; requires flags bit 1), once
                 (bit 0 = enters present, bit 1 = leaves present,
                 bit 2 = opaque), then when bit 0: u8 count, count × u32
                 glyph, then when bit 1: the same;
-                then per blob: u8 exits (the state-parameter count),
+                then per blob: u8 exit count, count × u32 exit name
+                (the state parameters, in declaration order),
                 u8 returns (0 = noreturn)
                 then once: u32 alphabet count, per alphabet: u32 name,
                 u8 glyph count, count × u32 glyph;
-                u32 graph count, per graph: u32 name, u32 digest;
+                u32 graph count, per graph: u32 name, u32 digest,
+                u8 exported (1 exported, 0 private);
                 u32 import count, per import: u32 name, u32 glyph count,
                 count × u32 glyph
 graft provenance (unconditional at version 4):
@@ -320,10 +322,13 @@ case, which is exactly the case that forces version 4.
 - **Table blobs** hold a routine's own match/dispatch tables — the
   per-routine counterpart of the executable's table section — one blob per
   code blob.
-- **Table fixups** are operand holes in a blob's `mtc`/`djmp` instructions:
-  the u32 operand is an offset into that blob's own table blob, which the
-  linker rebases into the final image's table section. The 4-byte hole obeys
-  the same `offset..offset + 4` in-blob invariant as a call relocation.
+- **Table fixups** are operand holes in a blob's table-reference
+  instructions (TM-1's `mtc`/`djmp`) and in the frame half of its framed
+  calls: the u32 operand is an offset into that blob's own table blob,
+  which the linker rebases into the final image's table section. The
+  4-byte hole obeys the same `offset..offset + 4` in-blob invariant as a
+  call relocation. A fixup records no kind; the linker tells the kinds
+  apart from the code bytes (`docs/core.md (relaxation)`).
 - **Bound calls** are the declarative call sites of composed routines
   (`call name [binding]`): each marks a call operand hole, like a
   relocation, then binds every callee virtual tape — which caller tape feeds
@@ -358,16 +363,17 @@ case, which is exactly the case that forces version 4.
   clause (the glyphs the head may stand on when the routine is entered
   and when it leaves), and an **opaque** bit saying that every state
   reading this tape reads it as a wildcard, so the routine never
-  discriminates its glyphs. Per routine it then carries the number of
-  **exits** — the state parameters a caller must supply — and a
-  **returns** flag, false for a routine control never comes back from.
+  discriminates its glyphs. Per routine it then carries the names of
+  its **exits** — the state parameters a caller must supply, in
+  declaration order — and a **returns** flag, false for a routine control never comes back from.
   One record per code blob, parallel to the blobs like the signatures,
   which is why the section is **all-or-none**: an object describes every
   function's interface or none at all.
 - **Exported alphabets, graphs, and imported alphabets** close the
   interface section: an exported alphabet is a name plus its glyphs in
-  band order; a graph is a name plus the `u32` **digest** of the body a
-  grafting unit must have spliced; an **imported alphabet** is a name
+  band order; a graph is a name, the `u32` **digest** of the body a
+  grafting unit must have spliced, and a byte saying whether the graph is
+  exported (`1`) or only recorded privately (`0`); an **imported alphabet** is a name
   plus the glyph list the unit compiled against, for the linker to
   compare against the exporting object's own declaration
   (`docs/core.md (graft drift)`).
@@ -379,7 +385,10 @@ case, which is exactly the case that forces version 4.
 
 Digests are content addresses, not offsets: a `u32` CRC-32 — the same
 checksum the containers themselves use — of the graph body being
-addressed, matched like a short hash and never decoded. Assembly text
+addressed, matched like a short hash and never decoded. The TM-1
+compiler digests the body as its header printer renders it, before any
+formatting of the printed header, so a change to how `tmt fmt` lays a
+header out never moves a digest. Assembly text
 spells one as an unsigned decimal number (the assembly lexer has no
 hexadecimal literal).
 
@@ -599,7 +608,7 @@ default section is `code`, so a file may omit `.section code`. Only table
 directives are legal in the tables section, and only functions/code in the
 code section.
 
-`.routine <name>, tapes=<N>, alpha=(<c1>, …, <cN>)[, exits=<K>][, noreturn]`
+`.routine <name>, tapes=<N>, alpha=(<c1>, …, <cN>)[, exits=(<name>, …)][, noreturn]`
 declares a function's
 generic-routine signature: `tapes` is the tape count (1..=16), and `alpha`
 lists one alphabet cardinality per tape (each at least 1; the list length
@@ -609,16 +618,22 @@ entry routine's signature fixes the executable image's tape count and
 per-tape alphabets, which a run validates its tape band against.
 
 The two optional tail fields belong to the routine's **interface**, not to
-its signature, and ride the interface capability: `exits=<K>` is the
-number of state parameters the routine leaves through (`0..=255`, default
-`0`), and `noreturn` states that control never comes back to the caller
-(the default is that it does). They are written in that fixed order, each
-at most once, and each is independent of the other. Both live *inside* the
-interface record on the wire, so a `.routine` line carrying a non-zero
-`exits=` or `noreturn` needs the `.param` lines below — there is nowhere
-else for the fields to go. A written `exits=0` alone is the exception: it
-is accepted without them and, being the field's default, produces the
-same object either way and is never printed back.
+its signature, and ride the interface capability: `exits=(<name>, …)`
+names the state parameters the routine leaves through, in declaration
+order (at most 255, default none), and `noreturn` states that control
+never comes back to the caller (the default is that it does). They are
+written in that fixed order, each at most once, and each is independent of
+the other. The exit names are part of what a caller sees — a declaration
+read back from the object offers them exactly as the source declared them
+— so they are pairwise distinct and none repeats the name of one of the
+routine's `.param` tapes; `retx #k` leaves through the `k`-th of them. A
+bare count is not a spelling of the field: the names are what the record
+holds. Both fields live *inside* the interface record on the wire, so a
+`.routine` line carrying a non-empty `exits=` or `noreturn` needs the
+`.param` lines below — there is nowhere else for the fields to go. A
+written `exits=()` alone is the exception: it is accepted without them
+and, being the field's default, produces the same object either way and
+is never printed back.
 
 Disassembling a linked image recovers a non-entry callee's signature
 only when it is reached through a `.frame` descriptor: `tapes` comes
@@ -637,7 +652,7 @@ what the routine promises about them.
 ```asm
 .graph lib::findAGraph, 42
 .grafted std::binaryNumbers::plusOneGraph, 7
-.routine main, tapes=2, alpha=(3, 6), exits=1, noreturn
+.routine main, tapes=2, alpha=(3, 6), exits=(found), noreturn
 .param ctl, ('_', '0', '1'), opaque
 .param data, ('_', 'a', 'b', '0', '1', '$'), writes=('0', '1'), enters=('$'), leaves=('$')
 ```
@@ -657,7 +672,7 @@ as an empty one. What each says:
   decoded and a disassembly prints neither. A compiled routine always
   carries the list: the `.tmc` compiler fills it with the tape's declared
   EFFECTIVE set when the source declared a contract (`writes` minus
-  `preserves`, `docs/tmt/language.md (contract clauses)`), and with its
+  `never writes`, `docs/tmt/language.md (contract clauses)`), and with its
   own inferred write set for that tape when the source declared none —
   so "no clause declared" never reaches the wire as "writes anything".
   The entry world is the one exception: a `machine` compiles to `main`,
@@ -668,8 +683,12 @@ as an empty one. What each says:
   written-but-empty `enters=()`/`leaves=()` is **rejected** — a clause
   lists at least one glyph, and the way to say "no clause" is to omit the
   suffix. Every glyph listed must be one of the tape's own;
-- `opaque` marks a tape every state reads as a wildcard: the routine
-  never discriminates its glyphs.
+- `opaque` marks a tape the routine can read the opaque index on
+  without that index ever deciding whether a rule matches — the property
+  an open binding (the `*` of a call operand's pair list, "Bound calls"
+  below) requires of its callee tape, and which the linker checks before
+  it accepts one. The `.tmc` compiler infers it and has no spelling for
+  it; the rule it infers by is `docs/tmt/language.md (symbol maps)`.
 
 Placement is strict, because the record it builds is per-function and
 positional. A `.param` is legal in the **code section only**, it follows
@@ -689,21 +708,38 @@ any interface content in a file — a `.param` line, a `.graph`, a
 signature and its full set of `.param` lines. A file with signatures and
 no interface content is unaffected: that is the ordinary version-3 shape.
 
-`.graph <name>, <digest>` records a graph this unit **exports** and the
-digest of the body a grafting unit must have spliced; `.grafted <name>,
-<digest>` records a library graph this unit **spliced** and the digest it
-spliced. Both stand in the code section before the first `.func`, and
-both write the digest as an unsigned decimal `u32`. They are
+`.graph <name>, <digest>[, private]` records every graph the unit's header
+prints and the digest of the body a grafting unit must have spliced;
+`.grafted <name>, <digest>` records every library graph this unit
+**spliced**, nested ones included, and the digest it spliced; a unit
+records one `.grafted` line per name, since one compile never splices two
+different graphs under one name. Both stand in the code section before
+the first `.func`, and both write the digest as an unsigned decimal
+`u32`. They are
 object-level, not per-function, but they still oblige the all-or-none
 rule above — a digest is meaningless without the interface it is checked
 against.
 
-At link, every recorded `.grafted` digest is checked against the matching
-`.graph` digest of the object that exports it, when one is present in the
-link — first-wins in the linker's own namespace order, exactly as a symbol
-resolves. A graph no input to the link exports is **not** checked: that is
-a header-only library, the one place a header's own declaration is
-trusted outright rather than verified against a compiled object.
+At link, every recorded `.grafted` digest is checked against the `.graph`
+digest of the input that exports it, when one is present in the link;
+identical exports from several inputs count as one, and differing ones are
+a link error when the graph is grafted (`docs/core.md (graft drift)`). A
+graph no input to the link records is **not** checked: that is a
+header-only library, the one place a header's own declaration is trusted
+outright rather than verified against a compiled object.
+
+A `.graph` line may be marked `private`: the unit prints that graph in its
+header without exporting it. A private record never conflicts with another
+input's record of the same name; it only lets the link check a consumer
+that spliced the graph, which must match at least one input's private
+record when no input exports the name. A consumer whose record matches a
+private one while another input exports the name with a different digest
+is refused, with an error naming both inputs
+(`docs/core.md (graft drift)`). The private check has a known limit: a
+consumer's record of a graph no input exports is satisfied by ANY input's
+matching private record, so when two libraries carry identical private
+graphs of one name and one of them later changes, the other's record
+still satisfies the consumer.
 
 **Glyph literals and glyph lists.** A glyph literal is any **non-empty**
 content in single quotes — `'x'`, `'ab'`, `'->'` — so one grapheme, an
@@ -1311,7 +1347,7 @@ alphabet *name* and cardinality ride along for readability and for
 index-bound validation; since version 4 every tape also carries its own
 glyph table (`glyphs`, one entry per index) and, for a contracted signature
 tape, its declared effective write set as glyphs (`writes` — `writes` minus
-`preserves`; omitted when the parameter declares neither clause). A
+`never writes`; omitted when the parameter declares neither clause). A
 pre-version-4 document has neither field.
 
 - `kind` per world is `machine` or `routine`. Graphs do not survive to the
@@ -1328,7 +1364,9 @@ pre-version-4 document has neither field.
 - Per-transition tags (`kind` field, snake_case): `goto` (`state`),
   `call_then` (`target`, an optional `binding`, an `exits` list of same-world
   resume states, and an OPTIONAL `then` resume point that is itself a
-  `goto`/`return`/`stop`/`halt` when present — absent only for a call in
+  `goto`/`return`/`return_exit`/`stop`/`halt` when present (`return_exit`
+  leaving the ENCLOSING routine through its exit `exit`, what `then
+  <state parameter>` lowers to) — absent only for a call in
   TAIL POSITION, the source having omitted `then` against a callee KNOWN
   to be `noreturn`; codegen still emits an instruction there, a
   synthesized safety trap rather than nothing, so a `noreturn` claim that
@@ -1336,8 +1374,10 @@ pre-version-4 document has neither field.
   into whatever follows — docs/tmt/language.md (routines)), `return`,
   `return_exit` (`exit`, a resume
   through one of the callee's declared exits instead of `then`), `stop`,
-  `halt`, `tail_call` (`target`), and the two synthesized trap terminals
-  `trap_read` and `trap_write`. A `binding` entry carries the same
+  `halt`, `tail_call` (`target`), and the three synthesized trap
+  terminals `trap_read`, `trap_write` and `trap_contract` — the first two
+  the map-hole failure kinds, the third a check finding false something
+  the source declared about itself. A `binding` entry carries the same
   per-callee-tape data the `.tma` binding-call operand does: `caller_tape`,
   an optional `param` naming a symbolic (out-of-unit) entry's callee
   parameter, `map_written` (whether a `with map` was authored at all — an
@@ -1364,7 +1404,8 @@ pre-version-4 document has neither field.
   and `synthesized` row flags are the shapes only the optimizer or the
   compiler's own splicing produce; a `-O0` document carries none of them but
   `synthesized`.
-- Per-world, `exits` (a `.routine`'s declared exit count) and `returns`
+- Per-world, `exits` (the names of a `.routine`'s declared exits, in
+  signature order; absent when it declares none) and `returns`
   (`false` only for a `noreturn` routine) round out the same reserved
   vocabulary. `returns` carries the INFERRED fact — whether the source body
   has any way to return, counted conservatively over the whole body (dead
@@ -1374,3 +1415,81 @@ pre-version-4 document has neither field.
   (routines)). A world without any way to return omits the field
   (`returns: true` is the fill/deserialization default, since a v3 document
   never omitted it).
+
+### Graph label notation
+
+`tmt ir graph` and `pmt ir graph` draw an IR document in three views
+(`docs/tmt/cli.md (tmt ir)`, `docs/pmt/cli.md (pmt ir)`): **raw**, one
+arrow per rule row exactly as the IR lists it; **merged**, the default,
+where parallel rows are folded into one arrow; and **shape**, one arrow
+per pair of states labelled with the number of rows it stands for. This
+section is the one definition of how a merged arrow is labelled, so any
+other renderer of the same graph can write the same text.
+
+**When rows merge.** Two rows of one state merge only when they share
+the target, the write vector, the move vector, the `debugger` flag and
+the whole transition (for a call: callee, binding record and exits), and
+their read patterns differ in **exactly one** cell, by disjoint symbol
+sets. The merged arrow reads the union in that cell. Merged arrows merge
+again under the same rule until nothing changes. A `*` cell equals only
+a `*` cell and never joins a set. So expanding a merged arrow — the
+cartesian product of its cells — gives back exactly the raw rows it
+replaced, each as many times as it occurred: rows `[1,2]` and `[2,1]`
+stay two arrows, because a per-cell union `[{1,2},{1,2}]` would also
+describe `[1,1]` and `[2,2]`, which do not exist.
+
+**Order.** A merged arrow is drawn where its first raw row stood. Rows
+that carry a wildcard are tried in source order (`docs/tmt/language.md
+(which rule fires)`), so a row is never moved above an earlier
+wildcard-bearing row whose pattern overlaps its own; where that would
+happen the rows stay apart. Exact rows and the catch-all do not depend
+on position, so they merge freely.
+
+**Labels.** A merged label has the raw label's layout — the read vector
+in `[…]`, then `w[…]` and `m[…]` where the row writes or moves, `brk `
+in front of a `debugger` row, `call`/`tail` and the callee after a call —
+with two changes inside the vectors:
+
+- A read cell holding one symbol is that index, as in the raw view. A
+  run of three or more consecutive indices is written `a–b`, with an en
+  dash (U+2013). Any other set is written in braces, runs of three or
+  more still as ranges inside: `{1,2}`, `{1,3}`, `{1–3,7,9–12}`. The
+  braces keep a set's own commas from being read as cell separators.
+  Indices are the IR's symbol indices, so a range is a range of
+  consecutive indices, not of glyphs.
+- In any vector — read, write or move — three or more identical
+  adjacent cells are written once as `cell×k` (U+00D7): `*×13`, `-×13`,
+  `.×13`, `{1,2}×3`. Two identical cells are written out.
+
+A label is a quoted Mermaid string, where the en dash, the multiplication
+sign and the braces need no escaping. In every view, raw included, `<`,
+`>` and `&` are written as Mermaid's entity codes `#lt;`, `#gt;` and
+`#amp;` — Mermaid empties a label holding a bare `<` — so a move vector
+reads `m[#lt;,#gt;]` in the text and draws as `m[<,>]`; the table below
+shows labels before that step. A `.pmc` graph has no vectors to
+compress; its one parallel pair, a `check` whose two arms reach the same
+block, merges to one edge labelled `{MF,!MF}`.
+
+The cases below are held to the renderer by a test, row for row. Each
+left cell lists the raw labels of one state's rows (every row with the
+same target and transition); the right cell lists the arrows the merged
+view draws for them.
+
+| Raw rows | Merged view |
+|---|---|
+| `[4]` | `[4]` |
+| `[1]` `[2]` | `[{1,2}]` |
+| `[1]` `[2]` `[3]` | `[1–3]` |
+| `[1]` `[3]` | `[{1,3}]` |
+| `[1]` `[2]` `[3]` `[7]` `[9]` `[10]` `[11]` `[12]` | `[{1–3,7,9–12}]` |
+| `[1,*,*,*]` `[2,*,*,*]` `[3,*,*,*]` | `[1–3,*×3]` |
+| `[*,*]` | `[*,*]` |
+| `[1,*,*] w[-,-,-] m[.,.,.]` | `[1,*,*] w[-×3] m[.×3]` |
+| `[1,1,1]` `[1,1,2]` `[1,2,1]` `[1,2,2]` `[2,1,1]` `[2,1,2]` `[2,2,1]` `[2,2,2]` | `[{1,2}×3]` |
+| `[1,2]` `[2,1]` | `[1,2]` `[2,1]` |
+| `[1,1]` `[2,1]` `[1,2]` `[2,2]` | `[{1,2},{1,2}]` |
+| `[*,1]` `[2,1]` | `[*,1]` `[2,1]` |
+| `[1,1]` `[1,1]` | `[1,1]` `[1,1]` |
+| `[1,*]` `[*,2]` `[2,*]` | `[1,*]` `[*,2]` `[2,*]` |
+| `[1,0]` `[*,2]` `[2,0]` | `[{1,2},0]` `[*,2]` |
+| `[1] w[2]` `[2] w[3]` | `[1] w[2]` `[2] w[3]` |

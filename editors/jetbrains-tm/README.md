@@ -19,6 +19,11 @@ One `tmt lsp` process serves both languages. The server routes each open
 document to its own language service by file extension, so a `.tmc` file
 and a `.tma` file coexist in one session without perturbing each other.
 
+A `.tmh` header — the declarations of a unit, as `tmt interface` prints
+them — opens as the same file type as `.tmc`. The server reads it
+declarations-only and lints it by the header rule subset, exactly as
+`tmt lint` does on the command line.
+
 ## Requirements
 
 - A `tmt` binary reachable on `PATH`, or pointed to with the settings
@@ -27,13 +32,14 @@ and a `.tma` file coexist in one session without perturbing each other.
   sideload this plugin (`MAINTAINERS.md`) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.2.1, targeting `tmt` 0.4.0 as its tested
-  floor: on startup it runs `tmt --version` and shows a warning
+- This plugin is version 0.2.2, targeting `tmt` 0.6.0 as its tested
+  floor — the first `tmt` whose language server reads a `.tmh` header:
+  on startup it runs `tmt --version` and shows a warning
   notification (not a hard failure) if the binary reports something
   older, or an error notification if the binary can't be found at all.
   The plugin's own version number and the `tmt` floor version are
   independent numbers.
-- Built against **LSP4IJ 0.20.1** on an IntelliJ Platform 2024.3
+- Built against **LSP4IJ 0.30.1** on an IntelliJ Platform 2024.3
   baseline — the Gradle build resolves and compiles against both pinned
   versions, which demonstrates API compatibility; the build target is
   IntelliJ IDEA Community, so no Ultimate-only APIs are referenced. None
@@ -73,7 +79,7 @@ sideloaded plugin is installed from a local file, not from the Marketplace,
 so the IDE has no opportunity to resolve and auto-install a declared plugin
 dependency the way it would for a Marketplace install. Skipping this step
 leaves this plugin disabled with an unsatisfied-dependency error. The
-shipped build was compiled against LSP4IJ 0.20.1 — a build-time
+shipped build was compiled against LSP4IJ 0.30.1 — a build-time
 compatibility check, not a runtime one; a newer 0.x/1.x release should
 work unless its own compatibility range excludes this plugin's IntelliJ
 Platform baseline (2024.3).

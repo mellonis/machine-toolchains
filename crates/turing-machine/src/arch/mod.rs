@@ -41,8 +41,10 @@ pub mod opcodes {
     /// group; the move group uses the same 0 stay / 1 left / 2 right codes.
     pub const WRMV: u8 = 0x12;
     /// Raise a typed trap explicitly (`trap #kind`): kind `0` = unmapped
-    /// read, `1` = unmapped write. The frames stubs a linker composition
-    /// emits reach for these to signal a crossed map hole.
+    /// read, `1` = unmapped write, `2` = broken contract. The frames stubs
+    /// a linker composition emits reach for the first two to signal a
+    /// crossed map hole; the compiler emits the third where a check finds
+    /// false something the source declared about itself.
     pub const TRAP: u8 = 0x11;
     /// Framed call (`call.m target, F`): call `target` and activate the
     /// frame descriptor at table label `F` for the callee. The caller's
@@ -225,15 +227,21 @@ impl Arch for Tm1 {
                 }
                 ops
             }
-            // `trap #kind`: 0 → unmapped-read, 1 → unmapped-write; any other
-            // kind is a malformed operand (numeric kinds leave room for
-            // named kinds later without a grammar break).
+            // `trap #kind`: 0 → unmapped-read, 1 → unmapped-write, 2 →
+            // contract; any other kind is a malformed operand (numeric
+            // kinds leave room for named kinds later without a grammar
+            // break). The kinds themselves are the core's vocabulary of
+            // what an architecture may raise; only the NUMBERING is
+            // TM-1's, and it lives here.
             TRAP => match imm(operand)? {
                 0 => vec![MicroOp::Raise {
                     kind: RaisedTrapKind::UnmappedRead,
                 }],
                 1 => vec![MicroOp::Raise {
                     kind: RaisedTrapKind::UnmappedWrite,
+                }],
+                2 => vec![MicroOp::Raise {
+                    kind: RaisedTrapKind::Contract,
                 }],
                 _ => return Err(Trap::BadOperand { at: 0 }),
             },
@@ -642,8 +650,11 @@ mod tests {
         );
     }
 
+    /// Mutation: map `2` to `RaisedTrapKind::UnmappedRead` (or drop its
+    /// arm so it falls through to the malformed-operand catch-all) and
+    /// the kind-2 assertion fails.
     #[test]
-    fn trap_lowers_to_the_two_raise_kinds_and_rejects_other_kinds() {
+    fn trap_lowers_to_the_three_raise_kinds_and_rejects_other_kinds() {
         let a = Tm1::new(2);
         assert_eq!(
             a.lower(TRAP, &Operand::Imm(0)).unwrap(),
@@ -657,9 +668,15 @@ mod tests {
                 kind: RaisedTrapKind::UnmappedWrite
             }]
         );
-        // Kind 2 has no meaning yet: a lower-time malformed operand.
         assert_eq!(
-            a.lower(TRAP, &Operand::Imm(2)),
+            a.lower(TRAP, &Operand::Imm(2)).unwrap(),
+            vec![MicroOp::Raise {
+                kind: RaisedTrapKind::Contract
+            }]
+        );
+        // Kind 3 has no meaning: a lower-time malformed operand.
+        assert_eq!(
+            a.lower(TRAP, &Operand::Imm(3)),
             Err(Trap::BadOperand { at: 0 })
         );
         // Wrong operand shape is also malformed.

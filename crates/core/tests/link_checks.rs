@@ -7,7 +7,7 @@
 //! convention), so core stays provably arch-agnostic.
 
 use mtc_core::asm::{ArchSyntax, AsmCaps, Flow, RelaxPair, SyntaxEntry, assemble};
-use mtc_core::formats::object::ObjectFile;
+use mtc_core::formats::object::{ObjectFile, SymbolDef};
 use mtc_core::linker::{CallMech, LinkError, LinkOptions, link};
 use mtc_core::vm::OperandKind;
 
@@ -18,7 +18,9 @@ const ARCH: u8 = 0x7E;
 /// lowers into, the read/write/move/trap surface mono stamping projects,
 /// and an unconditional `jmp` — a relocated tail jump is a
 /// `SiteKind::Plain` site exactly like a relocated call, so the
-/// exit-count tests need one to reach a callee that way too.
+/// exit-count tests need one to reach a callee that way too. `retx` is
+/// the multi-exit return: an `Imm8` operand like `trap`, told apart from
+/// it only by its `Stop` flow (docs/core.md (link warnings)).
 fn fake_syntax() -> ArchSyntax {
     use Flow::{Call, FallThrough as FT, Jump, Stop};
     ArchSyntax {
@@ -84,6 +86,12 @@ fn fake_syntax() -> ArchSyntax {
                 flow: FT,
             },
             SyntaxEntry {
+                opcode: 0x19,
+                mnemonic: "retx",
+                operand: OperandKind::Imm8,
+                flow: Stop,
+            },
+            SyntaxEntry {
                 opcode: 0x0E,
                 mnemonic: "ent",
                 operand: OperandKind::None,
@@ -116,6 +124,29 @@ fn fake_syntax() -> ArchSyntax {
 
 fn asm(src: &str) -> ObjectFile {
     assemble(&fake_syntax(), ARCH, src, false).expect("assembles")
+}
+
+/// Assemble `src`, then set `routine`'s declared exit count to `exits` in
+/// the object's interface — the one way a body returning through an
+/// undeclared exit reaches the linker now that the assembler refuses it.
+fn declaring_exits(src: &str, routine: &str, exits: u8) -> ObjectFile {
+    let mut obj = asm(src);
+    let blob = obj
+        .symbols
+        .iter()
+        .find_map(|s| match s.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } if s.name == routine => {
+                Some(blob)
+            }
+            _ => None,
+        })
+        .expect("the routine is defined");
+    obj.interface
+        .as_mut()
+        .expect("the object has an interface")
+        .routines[blob as usize]
+        .exits = (0..exits).map(|k| format!("e{k}")).collect();
+    obj
 }
 
 const MECHS: [CallMech; 3] = [CallMech::Mono, CallMech::Frames, CallMech::Hybrid];
@@ -411,7 +442,7 @@ fn a_plain_call_into_an_exit_bearing_callee_is_refused() {
     const EXIT_CALLEE: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param x, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param p, ('_', '0', '1')
 .section code
 .func main
@@ -447,7 +478,7 @@ fn a_relocated_jump_into_an_exit_bearing_callee_is_refused() {
     const EXIT_JUMP: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param x, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param p, ('_', '0', '1')
 .section code
 .func main
@@ -594,16 +625,57 @@ fn a_graft_with_no_exporter_in_the_link_is_unchecked() {
         .expect("an unexported graft is not checked");
 }
 
-/// A user object that ALSO exports the graph shadows the library's
-/// export, exactly as a user symbol shadows a library one: the consumer
-/// is checked against the user object's digest, not the library's.
-///
-/// Mutation it catches: resolve the exporter last-wins (or library-first)
-/// and the consumer, which agrees with the user object and disagrees
-/// with the library, is refused.
-#[test]
-fn a_user_export_shadows_a_library_export_for_the_check() {
-    const USER_EXPORTER: &str = "\
+/// `exporter`'s twin under another routine name, so two of them in one link
+/// contest only the graph export, never a symbol.
+fn exporter_b(digest: u32) -> String {
+    format!(
+        "\
+.graph lib::findA, {digest}
+.routine lib::other, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func lib::other
+        ret
+"
+    )
+}
+
+/// An entry that grafts nothing and calls nothing.
+fn plain_main() -> String {
+    "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func main
+        stp
+"
+    .to_string()
+}
+
+/// A library-shaped object carrying a PRIVATE record of `lib::step` and a
+/// routine `lib::<tag>`, so two of them contest no symbol.
+fn private_exporter(tag: &str, digest: u32) -> String {
+    format!(
+        "\
+.graph lib::step, {digest}, private
+.routine lib::{tag}, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.section code
+.func lib::{tag}
+        ret
+"
+    )
+}
+
+/// A consumer that grafted `lib::step` with the given digest and calls
+/// nothing the exporters define.
+fn step_consumer(digest: u32) -> String {
+    consumer(digest)
+        .replace("lib::findA", "lib::step")
+        .replace("call    lib::facade", "stp")
+}
+
+const USER_EXPORTER: &str = "\
 .graph lib::findA, 42
 .routine helper, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
@@ -611,13 +683,345 @@ fn a_user_export_shadows_a_library_export_for_the_check() {
 .func helper
         ret
 ";
-    link(
+
+fn graph_conflict(name: &str, first: &str, second: &str) -> LinkError {
+    LinkError::ConflictingExport {
+        what: "graph",
+        name: name.into(),
+        first: first.into(),
+        second: second.into(),
+    }
+}
+
+/// Two libraries export `lib::findA` with different digests and the
+/// consumer grafts it: the link cannot tell which body the consumer
+/// spliced. Mutation it catches: keep the first-wins exporter map — the
+/// consumer agrees with the first library and the link succeeds.
+#[test]
+fn two_library_graph_exports_that_differ_are_refused_when_grafted() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(&consumer(42))],
+        &[asm(&exporter(42)), asm(&exporter_b(7))],
+        opts(CallMech::Frames),
+    )
+    .expect_err("two differing exports of a grafted graph");
+    assert_eq!(err, graph_conflict("lib::findA", "input #1", "input #2"));
+}
+
+/// A user object and a library export the graph differently and the
+/// consumer grafts it. Mutation it catches: prefer the user object's
+/// export silently (the old shadowing) — the consumer agrees with it and
+/// the link succeeds.
+#[test]
+fn a_user_export_and_a_library_export_that_differ_are_refused_when_grafted() {
+    let err = link(
         &fake_syntax(),
         &[asm(&consumer(42)), asm(USER_EXPORTER)],
         &[asm(&exporter(7))],
         opts(CallMech::Frames),
     )
-    .expect("the user object's export wins, and it agrees");
+    .expect_err("a user export and a library export that differ");
+    assert_eq!(err, graph_conflict("lib::findA", "input #1", "input #2"));
+}
+
+/// Mutation it catches: compare exporters per input instead of per record
+/// — two identical exports are then a conflict.
+#[test]
+fn identical_graph_exports_are_one_export() {
+    link(
+        &fake_syntax(),
+        &[asm(&consumer(42))],
+        &[asm(&exporter(42)), asm(&exporter_b(42))],
+        opts(CallMech::Frames),
+    )
+    .expect("identical exports count as one");
+}
+
+/// Nothing grafts the graph, and both exporters are libraries: the
+/// differing records are a header-only standing, not a conflict.
+/// Mutation it catches: ignore consumption and refuse every differing pair.
+#[test]
+fn differing_graph_exports_nothing_grafts_link() {
+    link(
+        &fake_syntax(),
+        &[asm(&plain_main())],
+        &[asm(&exporter(42)), asm(&exporter_b(7))],
+        opts(CallMech::Frames),
+    )
+    .expect("an unconsumed differing library export links");
+}
+
+/// Mutation it catches: drop the both-user-objects arm — nothing grafts
+/// the graph, so only that arm refuses.
+#[test]
+fn two_user_objects_exporting_one_graph_differently_are_refused() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(&exporter(42)), asm(&exporter_b(7)), asm(&plain_main())],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect_err("two user objects exporting one graph differently");
+    assert_eq!(err, graph_conflict("lib::findA", "input #0", "input #1"));
+}
+
+/// The near miss of the test below: the same two differing library
+/// alphabet exports, but nobody imports `lib::bits`, so they link.
+/// Mutation it catches: `check_imported_alphabets` marking every exported
+/// alphabet as consumed.
+#[test]
+fn differing_library_alphabet_exports_nobody_imports_link() {
+    let bits = |glyphs: [&str; 3]| mtc_core::formats::object::ExportedAlphabet {
+        name: "lib::bits".to_string(),
+        glyphs: glyphs.iter().map(|g| g.to_string()).collect(),
+    };
+    let mut lib_a = asm(&exporter(1));
+    lib_a
+        .interface
+        .as_mut()
+        .unwrap()
+        .alphabets
+        .push(bits(["_", "0", "1"]));
+    let mut lib_b = asm(&exporter_b(1));
+    lib_b
+        .interface
+        .as_mut()
+        .unwrap()
+        .alphabets
+        .push(bits(["_", "1", "0"]));
+    link(
+        &fake_syntax(),
+        &[asm(&plain_main())],
+        &[lib_a, lib_b],
+        opts(CallMech::Frames),
+    )
+    .expect("an unimported differing library alphabet export links");
+}
+
+/// Two libraries export `lib::bits` with different glyph orders and a
+/// consumer imports it. Mutation it catches: leave the alphabet exporter
+/// map first-wins — the consumer agrees with the first library.
+#[test]
+fn two_library_alphabet_exports_that_differ_are_refused_when_imported() {
+    let bits = |glyphs: [&str; 3]| mtc_core::formats::object::ExportedAlphabet {
+        name: "lib::bits".to_string(),
+        glyphs: glyphs.iter().map(|g| g.to_string()).collect(),
+    };
+    let mut lib_a = asm(&exporter(1));
+    lib_a
+        .interface
+        .as_mut()
+        .unwrap()
+        .alphabets
+        .push(bits(["_", "0", "1"]));
+    let mut lib_b = asm(&exporter_b(1));
+    lib_b
+        .interface
+        .as_mut()
+        .unwrap()
+        .alphabets
+        .push(bits(["_", "1", "0"]));
+    let mut app = asm(&consumer(1));
+    app.interface
+        .as_mut()
+        .unwrap()
+        .imports
+        .push(mtc_core::formats::object::ImportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into(), "1".into()],
+        });
+    let err = link(
+        &fake_syntax(),
+        &[app],
+        &[lib_a, lib_b],
+        opts(CallMech::Frames),
+    )
+    .expect_err("two differing exports of an imported alphabet");
+    assert_eq!(
+        err,
+        LinkError::ConflictingExport {
+            what: "alphabet",
+            name: "lib::bits".into(),
+            first: "input #1".into(),
+            second: "input #2".into(),
+        }
+    );
+}
+
+/// A `private` graph record assembles, carries `exported: false`, and the
+/// disassembler prints it back. Mutation it catches: the disassembler
+/// dropping `, private` — the reassembled record is exported.
+#[test]
+fn a_private_graph_record_round_trips_through_text() {
+    let obj = asm(&private_exporter("a", 7));
+    assert_eq!(
+        obj.interface.as_ref().unwrap().graphs,
+        vec![mtc_core::formats::object::ExportedGraph {
+            name: "lib::step".into(),
+            digest: 7,
+            exported: false,
+        }]
+    );
+    let text = mtc_core::asm::disassemble_object(&fake_syntax(), &obj);
+    assert!(text.contains(".graph lib::step, 7, private\n"), "{text}");
+    let again = asm(&text);
+    assert_eq!(again.interface, obj.interface);
+    assert_eq!(again.to_bytes(), obj.to_bytes());
+}
+
+/// Mutation it catches: feed private records into the conflict pass — the
+/// user-user arm then refuses two private records of one name.
+#[test]
+fn differing_private_graphs_of_two_user_objects_link() {
+    link(
+        &fake_syntax(),
+        &[
+            asm(&plain_main()),
+            asm(&private_exporter("a", 1)),
+            asm(&private_exporter("b", 2)),
+        ],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect("private records never conflict");
+}
+
+/// The near miss of the test above: the same two graphs EXPORTED.
+/// Mutation it catches: ignore the exported flag too.
+#[test]
+fn differing_exported_graphs_of_two_user_objects_are_refused() {
+    let exported = |tag: &str, digest: u32| private_exporter(tag, digest).replace(", private", "");
+    let err = link(
+        &fake_syntax(),
+        &[
+            asm(&plain_main()),
+            asm(&exported("a", 1)),
+            asm(&exported("b", 2)),
+        ],
+        &[],
+        opts(CallMech::Frames),
+    )
+    .expect_err("two exported records that differ");
+    assert_eq!(err, graph_conflict("lib::step", "input #1", "input #2"));
+}
+
+/// A graft of a graph no input exports must match at least one private
+/// record. Mutation it catches: compare only against the FIRST private
+/// record — digest 2 belongs to the second.
+#[test]
+fn a_graft_of_a_private_graph_matches_any_provider() {
+    link(
+        &fake_syntax(),
+        &[asm(&step_consumer(2))],
+        &[
+            asm(&private_exporter("a", 1)),
+            asm(&private_exporter("b", 2)),
+        ],
+        opts(CallMech::Frames),
+    )
+    .expect("the second private record matches");
+}
+
+/// Mutation it catches: leave private records unchecked — digest 3
+/// matches neither and links silently.
+#[test]
+fn a_graft_of_a_private_graph_no_provider_matches_is_drift() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(&step_consumer(3))],
+        &[
+            asm(&private_exporter("a", 1)),
+            asm(&private_exporter("b", 2)),
+        ],
+        opts(CallMech::Frames),
+    )
+    .expect_err("no private record matches");
+    assert_eq!(
+        err,
+        LinkError::GraftDrift {
+            graph: "lib::step".into(),
+            consumer: "input #0".into(),
+            library: "input #1".into(),
+        }
+    );
+}
+
+/// One input holds `lib::step` PRIVATELY with the digest the consumer
+/// recorded, another EXPORTS a graph of that name with a different
+/// digest. The link still refuses the pair, but it says what is true: the
+/// consumer's graph is the first input's private one, and the second
+/// exports the name differently — not that the consumer's header drifted
+/// from the exporter, which it never read. Both input orders, each input
+/// named by its label. Mutation it catches: always report plain drift —
+/// the error is then `GraftDrift` naming the exporter alone.
+#[test]
+fn a_graft_matching_a_private_record_beside_a_different_export_names_both() {
+    let exported = private_exporter("b", 2).replace(", private", "");
+    let private = private_exporter("a", 1);
+    for (libraries, labels) in [
+        ([asm(&private), asm(&exported)], ["a.lib", "b.lib"]),
+        ([asm(&exported), asm(&private)], ["b.lib", "a.lib"]),
+    ] {
+        let err = link(
+            &fake_syntax(),
+            &[asm(&step_consumer(1))],
+            &libraries,
+            LinkOptions {
+                labels: vec![
+                    Some("app.o".into()),
+                    Some(labels[0].into()),
+                    Some(labels[1].into()),
+                ],
+                ..opts(CallMech::Frames)
+            },
+        )
+        .expect_err("a private graph beside a different export of its name");
+        assert_eq!(
+            err,
+            LinkError::PrivateGraftBesideExport {
+                graph: "lib::step".into(),
+                consumer: "app.o".into(),
+                provider: "a.lib".into(),
+                exporter: "b.lib".into(),
+            },
+            "{labels:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "`lib::step`, grafted into app.o, is provided privately by a.lib and \
+             exported differently by b.lib"
+        );
+    }
+}
+
+/// The control: the consumer's digest matches NO record — neither the
+/// private one nor the exported one — so it is a genuine drift and keeps
+/// the drift message, naming the exporter. Mutation it catches: report
+/// the private-beside-export error whenever a private record of the name
+/// exists, whatever its digest.
+#[test]
+fn a_graft_matching_no_record_beside_a_private_one_and_an_export_is_plain_drift() {
+    let exported = private_exporter("b", 2).replace(", private", "");
+    let err = link(
+        &fake_syntax(),
+        &[asm(&step_consumer(3))],
+        &[asm(&private_exporter("a", 1)), asm(&exported)],
+        opts(CallMech::Frames),
+    )
+    .expect_err("no record matches");
+    assert_eq!(
+        err,
+        LinkError::GraftDrift {
+            graph: "lib::step".into(),
+            consumer: "input #0".into(),
+            library: "input #2".into(),
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "`lib::step` was grafted into input #0 from a header that does not match input #2"
+    );
 }
 
 /// Mutation it catches: compare only the alphabet NAMES and a drifted
@@ -1023,7 +1427,7 @@ fn an_exit_bearing_tail_position_bound_call_does_not_warn_under_frames() {
     const SRC: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param p, ('_', '0', '1')
 .section code
 .func main
@@ -1040,5 +1444,393 @@ won:    nop
             .all(|d| d.code != "tail-call-no-continuation"),
         "{:?}",
         out.report.diagnostics
+    );
+}
+
+/// A callee declaring TWO exits whose body's last instruction is `last`
+/// — the one line the undeclared-exit fixtures vary, so all of them put it
+/// at the same blob offset.
+fn two_exit_callee(last: &str) -> String {
+    format!(
+        "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
+.param p, ('_', '0', '1')
+.section code
+.func main
+        call    sub [0] exits=(hit, miss)
+        stp
+hit:    stp
+miss:   stp
+.func sub
+        rd
+        retx    #0
+        {last}
+"
+    )
+}
+
+/// `two_exit_callee`, its callee declaring THREE exits: a body returning
+/// through exit 2 then assembles, and `declaring_exits(…, "sub", 2)` lowers
+/// the count back to what the call site's two labels bind.
+fn three_exit_callee(last: &str) -> String {
+    two_exit_callee(last).replace("exits=(e0, e1)", "exits=(e0, e1, e2)")
+}
+
+/// A body returning through exit 2 of a callee that declares two is
+/// refused under every mechanism: FRAMES used to link it (the return only
+/// trapped at run time) and the copying mechanisms said `bad binding`;
+/// now all three name the routine, the index and the declared count.
+///
+/// Mutation it catches: drop `stamp::check_declared_exits` from `link` —
+/// frames links again and the others report `BadBinding`.
+#[test]
+fn a_return_through_an_undeclared_exit_is_refused_under_every_mechanism() {
+    for mech in MECHS {
+        let err = link(
+            &fake_syntax(),
+            &[declaring_exits(&three_exit_callee("retx    #2"), "sub", 2)],
+            &[],
+            opts(mech),
+        )
+        .expect_err("an undeclared exit stops the link");
+        assert_eq!(
+            err,
+            LinkError::UndeclaredExit {
+                routine: "sub".into(),
+                exit: 2,
+                declared: 2
+            },
+            "under {mech}"
+        );
+    }
+}
+
+/// A routine `stray` that declares two exits and returns through exit 2,
+/// with nothing calling it.
+fn stray_overrunning_its_exits() -> String {
+    "\
+.routine stray, tapes=1, alpha=(3), exits=(e0, e1, e2)
+.param p, ('_', '0', '1')
+.section code
+.func stray
+        rd
+        retx    #2
+"
+    .to_string()
+}
+
+/// The undeclared-exit check runs over the routines the program REACHES:
+/// a routine nothing calls is dropped from the link, so its body
+/// returning past its declared exits does not fail an unrelated program —
+/// whether it sits in the entry's own object or in a library, under every
+/// mechanism. (The same routine, once called, is refused: the test above.)
+///
+/// Mutation it catches: scan every input routine, not the reached order
+/// (in `link`, compare each interface routine of every object and library
+/// with its blob's exit returns) — both links then fail `UndeclaredExit`
+/// naming `stray`.
+#[test]
+fn an_unreached_routine_returning_through_an_undeclared_exit_does_not_fail_the_link() {
+    let entry_with_stray = format!(
+        "\
+.routine main, tapes=1, alpha=(3)
+.param t, ('_', '0', '1')
+{}.func main
+        stp
+",
+        stray_overrunning_its_exits()
+    );
+    for mech in MECHS {
+        // The stray routine beside the entry, in the entry's object.
+        link(
+            &fake_syntax(),
+            &[declaring_exits(&entry_with_stray, "stray", 2)],
+            &[],
+            opts(mech),
+        )
+        .unwrap_or_else(|e| panic!("stray in the entry object, under {mech}: {e}"));
+        // The stray routine in a library the program never calls into.
+        link(
+            &fake_syntax(),
+            &[asm(&plain_main())],
+            &[declaring_exits(&stray_overrunning_its_exits(), "stray", 2)],
+            opts(mech),
+        )
+        .unwrap_or_else(|e| panic!("stray in a library, under {mech}: {e}"));
+    }
+}
+
+/// A body returning through exit 2 of a routine that declares two is
+/// refused by the assembler itself, at the offending instruction.
+///
+/// Mutation it catches: drop the check in `assemble_lowered` — the file
+/// assembles.
+#[test]
+fn a_return_through_an_undeclared_exit_does_not_assemble() {
+    const SRC: &str = "\
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
+.param p, ('_', '0', '1')
+.section code
+.func sub
+        retx    #2
+";
+    let err = assemble(&fake_syntax(), ARCH, SRC, false).unwrap_err();
+    assert_eq!(
+        err.kind,
+        mtc_core::asm::AsmErrorKind::UndeclaredExit {
+            routine: "sub".into(),
+            exit: 2,
+            declared: 2
+        }
+    );
+    assert_eq!(err.span.start.line, 5);
+}
+
+/// The in-range near miss for the assembler: exit 1 of two is declared.
+///
+/// Mutation it catches: an off-by-one bound (`k + 1 >= declared`) and this
+/// honest body stops assembling.
+#[test]
+fn a_return_through_a_declared_exit_assembles() {
+    const SRC: &str = "\
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
+.param p, ('_', '0', '1')
+.section code
+.func sub
+        retx    #1
+";
+    assert!(assemble(&fake_syntax(), ARCH, SRC, false).is_ok());
+}
+
+/// The operand-kind near miss for the assembler: `trap #2` shares
+/// `retx`'s `Imm8` operand but falls through rather than returning.
+///
+/// Mutation it catches: classifying an exit return by operand kind alone
+/// and this trap stops assembling.
+#[test]
+fn a_trap_with_an_exit_sized_immediate_assembles() {
+    const SRC: &str = "\
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
+.param p, ('_', '0', '1')
+.section code
+.func sub
+        trap    #2
+";
+    assert!(assemble(&fake_syntax(), ARCH, SRC, false).is_ok());
+}
+
+/// The in-range near miss: exit 1 of two is declared.
+///
+/// Mutation it catches: an off-by-one bound (`k + 1 >= exits`) and this
+/// honest body is refused.
+#[test]
+fn a_return_through_a_declared_exit_is_silent() {
+    let src = two_exit_callee("retx    #1");
+    for mech in MECHS {
+        link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("links");
+    }
+}
+
+/// The operand-kind near miss: `trap #2` shares `retx`'s `Imm8` operand
+/// and sits at the same offset, but falls through rather than returning.
+///
+/// Mutation it catches: classifying an exit return by operand kind alone
+/// (every `Imm8` instruction) and this trap reads as exit 2 and the link
+/// is refused.
+#[test]
+fn a_trap_with_the_same_immediate_is_not_an_exit() {
+    let src = two_exit_callee("trap    #2");
+    for mech in MECHS {
+        link(&fake_syntax(), &[asm(&src)], &[], opts(mech)).expect("links");
+    }
+}
+
+const DUP_A: &str = "\
+.func main
+        call    helper
+        stp
+.func helper
+        ret
+";
+
+const DUP_B: &str = "\
+.func helper
+        ret
+";
+
+/// Mutation it catches: render `DuplicateSymbol` without its two input
+/// names — the equality and the text assertion both fail.
+#[test]
+fn a_duplicate_symbol_names_both_inputs() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A), asm(DUP_B)],
+        &[],
+        LinkOptions {
+            labels: vec![Some("a.o".into()), Some("b.o".into())],
+            ..Default::default()
+        },
+    )
+    .expect_err("two user definitions of one name");
+    assert_eq!(
+        err,
+        LinkError::DuplicateSymbol {
+            name: "helper".into(),
+            first: "a.o".into(),
+            second: "b.o".into(),
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        "duplicate symbol `helper`: defined by a.o and by b.o"
+    );
+}
+
+/// Mutation it catches: `input_name` ignoring `sources` — `first` becomes
+/// `input #0`.
+#[test]
+fn a_link_error_falls_back_to_sources_then_position() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A), asm(DUP_B)],
+        &[],
+        LinkOptions {
+            sources: vec![Some("src/a.x".into()), None],
+            ..Default::default()
+        },
+    )
+    .expect_err("two user definitions of one name");
+    assert_eq!(
+        err,
+        LinkError::DuplicateSymbol {
+            name: "helper".into(),
+            first: "src/a.x".into(),
+            second: "input #1".into(),
+        }
+    );
+}
+
+/// A label beats the same input's `sources` entry, and an input with no
+/// label falls back to its own `sources` entry rather than to nothing.
+///
+/// Mutation it catches: in `link`, try `sources` before `labels` — the
+/// first input is then named `src/a.x`.
+#[test]
+fn a_label_wins_over_the_same_inputs_source() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A), asm(DUP_B)],
+        &[],
+        LinkOptions {
+            labels: vec![Some("a.o".into()), None],
+            sources: vec![Some("src/a.x".into()), Some("src/b.x".into())],
+            ..Default::default()
+        },
+    )
+    .expect_err("two user definitions of one name");
+    assert_eq!(
+        err,
+        LinkError::DuplicateSymbol {
+            name: "helper".into(),
+            first: "a.o".into(),
+            second: "src/b.x".into(),
+        }
+    );
+}
+
+/// One input defining a name twice is named once, by its label, in the
+/// "defined twice" wording.
+///
+/// Mutation it catches: delete the `first == second` rendering arm — the
+/// text then reads "defined by a.o and by a.o".
+#[test]
+fn an_in_object_duplicate_names_the_one_input() {
+    let mut object = asm(DUP_B);
+    let again = object.symbols[0].clone();
+    object.symbols.push(again);
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A), object],
+        &[],
+        LinkOptions {
+            labels: vec![Some("a.o".into()), Some("twice.o".into())],
+            ..Default::default()
+        },
+    )
+    .expect_err("one object defining a name twice");
+    assert_eq!(
+        err.to_string(),
+        "duplicate symbol `helper`: defined twice by twice.o"
+    );
+}
+
+/// An alphabet drift names the consumer by its label and the exporting
+/// library by its label.
+///
+/// Mutation it catches: pass `&[]` (or `sources`) to
+/// `check_imported_alphabets` — the message then names `input #0` and
+/// `input #1`.
+#[test]
+fn an_alphabet_drift_names_the_consumer_and_the_library() {
+    let mut lib = asm(&exporter(1));
+    lib.interface
+        .as_mut()
+        .expect("the exporter declares an interface")
+        .alphabets
+        .push(mtc_core::formats::object::ExportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "0".into(), "1".into()],
+        });
+    let mut app = asm(&consumer(1));
+    app.interface
+        .as_mut()
+        .expect("the consumer declares an interface")
+        .imports
+        .push(mtc_core::formats::object::ImportedAlphabet {
+            name: "lib::bits".to_string(),
+            glyphs: vec!["_".into(), "1".into(), "0".into()],
+        });
+    let err = link(
+        &fake_syntax(),
+        &[app],
+        &[lib],
+        LinkOptions {
+            labels: vec![Some("app.o".into()), Some("library `lib`".into())],
+            ..opts(CallMech::Frames)
+        },
+    )
+    .expect_err("a drifted import must stop the link");
+    let LinkError::AlphabetDrift {
+        consumer, library, ..
+    } = &err
+    else {
+        panic!("{err:?}");
+    };
+    assert_eq!(consumer, "app.o");
+    assert_eq!(library, "library `lib`");
+}
+
+/// Mutation it catches: the contenders check consulting user objects only.
+#[test]
+fn a_reached_name_a_library_also_defines_is_refused() {
+    let err = link(
+        &fake_syntax(),
+        &[asm(DUP_A)],
+        &[asm(DUP_B)],
+        LinkOptions {
+            labels: vec![Some("a.o".into()), Some("b.lib".into())],
+            ..Default::default()
+        },
+    )
+    .expect_err("a reached name two inputs define");
+    assert_eq!(
+        err,
+        LinkError::DuplicateSymbol {
+            name: "helper".into(),
+            first: "a.o".into(),
+            second: "b.lib".into(),
+        }
     );
 }

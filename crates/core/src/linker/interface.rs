@@ -28,7 +28,7 @@
 use super::LinkError;
 use super::resolve::FuncRef;
 use crate::formats::object::{BoundCall, ObjectFile, RoutineInterface, TapeBinding};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Resolve every reached bound call's binding against its callee's
 /// interface. Returns one `Vec<BoundCall>` per function, parallel to
@@ -79,7 +79,7 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     // transparent, and an exit-BEARING one is refused a few lines below
     // by `require_interface`, whose message names the missing interface
     // rather than a count mismatch (docs/core.md (symbolic resolution)).
-    let declared = usize::from(callee.interface.map_or(0, |i| i.exits));
+    let declared = callee.interface.map_or(0, |i| i.exits.len());
     if named == 0 && !labelled && !open && record.exits.is_empty() && declared == 0 {
         return Ok(record.clone());
     }
@@ -108,7 +108,7 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     // interfaceless callee is named as such rather than as "declares 0".
     if !record.exits.is_empty() {
         let iface = require_interface(callee, "an exit vector")?;
-        if record.exits.len() != usize::from(iface.exits) {
+        if record.exits.len() != iface.exits.len() {
             return Err(bad(
                 callee,
                 exit_count_mismatch(&callee.name, record.exits.len(), declared),
@@ -311,13 +311,78 @@ pub(super) fn rebind<'a>(
     order
 }
 
+/// The single export each name resolves to for the drift checks, or the
+/// conflict that stops the link (docs/core.md (graft drift)). `exports`
+/// lists every (input, name, record) in input order; `consumed` holds every
+/// name some input consumes; `users` is how many inputs are user objects.
+///
+/// The error names two inputs: the first exporter in input order and the
+/// first exporter whose record differs from it (when only user objects
+/// are contested, the first user exporter and the first user exporter
+/// that differs from it).
+///
+/// Records compare by value: two inputs exporting one name with equal
+/// records are one export. A name whose records differ is a conflict when
+/// some input consumes it or when both differing exporters are user
+/// objects; otherwise it is dropped from the map, which leaves it
+/// unchecked — the standing of a header-only library.
+fn settle_exports<'a, R: PartialEq>(
+    exports: Vec<(usize, &'a str, R)>,
+    consumed: &HashSet<&str>,
+    users: usize,
+    what: &'static str,
+    names: &[Option<String>],
+) -> Result<HashMap<&'a str, (usize, R)>, LinkError> {
+    let mut grouped: BTreeMap<&'a str, Vec<(usize, R)>> = BTreeMap::new();
+    for (input, name, record) in exports {
+        grouped.entry(name).or_default().push((input, record));
+    }
+    let mut settled = HashMap::new();
+    for (name, mut records) in grouped {
+        // The first record that differs from the first one overall, and
+        // the first user record that differs from the first user record.
+        let differing = |of: &[&(usize, R)]| -> Option<(usize, usize)> {
+            let (head, rest) = of.split_first()?;
+            let other = rest.iter().find(|(_, record)| *record != head.1)?;
+            Some((head.0, other.0))
+        };
+        let all: Vec<&(usize, R)> = records.iter().collect();
+        let user_records: Vec<&(usize, R)> = all.iter().copied().filter(|r| r.0 < users).collect();
+        let conflict = if consumed.contains(name) {
+            differing(&all)
+        } else {
+            differing(&user_records)
+        };
+        if let Some((first, second)) = conflict {
+            return Err(LinkError::ConflictingExport {
+                what,
+                name: name.to_string(),
+                first: super::input_name(names, first),
+                second: super::input_name(names, second),
+            });
+        }
+        if differing(&all).is_some() {
+            continue; // differing library exports nobody consumes
+        }
+        settled.insert(name, records.swap_remove(0));
+    }
+    Ok(settled)
+}
+
 /// Compare every recorded library graft against the digest its exporter
-/// declares (docs/core.md (graft drift)). The exporter is found in the
-/// linker's own namespace order — user objects first, then libraries,
-/// first-wins — so a user object that also exports the graph shadows a
-/// library exactly as it shadows a symbol. A graph no input exports is
-/// NOT checked: that is a header-only library, the one place a header is
-/// trusted.
+/// declares (docs/core.md (graft drift)). Every input's EXPORTED graph
+/// records go through [`settle_exports`]: identical exports count as one,
+/// differing ones are a conflict when some input grafts the graph or when
+/// both exporters are user objects, so each consumer is compared against
+/// the one export that remains. A graft that differs from that export but
+/// matches some input's PRIVATE record of the name is refused too — a
+/// private graph beside another input's different export of its name is
+/// the same pair the compiler refuses — with the error that names the
+/// private provider and the exporter rather than a drift. A graph no
+/// input exports is checked against the PRIVATE records inputs hold of it
+/// — the graft must match at least one of them, whichever input provided
+/// it — and a graph no input records at all is NOT checked: that is a
+/// header-only library, the one place a header is trusted.
 ///
 /// Object-level, not per-blob: `Interface::graphs` and
 /// `ObjectFile::grafts` describe a whole unit, so this runs over the
@@ -326,71 +391,102 @@ pub(super) fn rebind<'a>(
 pub(super) fn check_graft_drift(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
-    sources: &[Option<String>],
+    names: &[Option<String>],
 ) -> Result<(), LinkError> {
     let inputs: Vec<&ObjectFile> = objects.iter().chain(libraries).collect();
-    let name_of = |i: usize| -> String {
-        sources
-            .get(i)
-            .and_then(Option::as_ref)
-            .cloned()
-            .unwrap_or_else(|| format!("input #{i}"))
-    };
-    // First-wins exporter map, in the namespace's own order.
-    let mut exporter: HashMap<&str, (usize, u32)> = HashMap::new();
+    let name_of = |i: usize| -> String { super::input_name(names, i) };
+    let mut exports: Vec<(usize, &str, u32)> = Vec::new();
+    let mut private: HashMap<&str, Vec<(usize, u32)>> = HashMap::new();
     for (i, obj) in inputs.iter().enumerate() {
         let Some(iface) = obj.interface.as_ref() else {
             continue;
         };
         for g in &iface.graphs {
-            exporter.entry(g.name.as_str()).or_insert((i, g.digest));
+            if g.exported {
+                exports.push((i, g.name.as_str(), g.digest));
+            } else {
+                private
+                    .entry(g.name.as_str())
+                    .or_default()
+                    .push((i, g.digest));
+            }
         }
     }
+    let consumed: HashSet<&str> = inputs
+        .iter()
+        .flat_map(|obj| obj.grafts.iter().map(|g| g.graph.as_str()))
+        .collect();
+    let exporter = settle_exports(exports, &consumed, objects.len(), "graph", names)?;
     for (i, obj) in inputs.iter().enumerate() {
         for graft in &obj.grafts {
-            let Some(&(lib, digest)) = exporter.get(graft.graph.as_str()) else {
-                continue; // header-only library: nothing to check against
-            };
-            if digest != graft.digest {
+            if let Some(&(lib, digest)) = exporter.get(graft.graph.as_str()) {
+                if digest != graft.digest {
+                    // Still refused, but told truthfully: when some input
+                    // holds the graph PRIVATELY with the digest this unit
+                    // recorded, the splice matches its provider, and what
+                    // stops the link is that provider's private graph
+                    // beside another input's different export of the name.
+                    let provider = private
+                        .get(graft.graph.as_str())
+                        .and_then(|records| records.iter().find(|r| r.1 == graft.digest));
+                    return Err(match provider {
+                        Some(&(provider, _)) => LinkError::PrivateGraftBesideExport {
+                            graph: graft.graph.clone(),
+                            consumer: name_of(i),
+                            provider: name_of(provider),
+                            exporter: name_of(lib),
+                        },
+                        None => LinkError::GraftDrift {
+                            graph: graft.graph.clone(),
+                            consumer: name_of(i),
+                            library: name_of(lib),
+                        },
+                    });
+                }
+            } else if let Some(records) = private.get(graft.graph.as_str())
+                && !records.iter().any(|&(_, digest)| digest == graft.digest)
+            {
                 return Err(LinkError::GraftDrift {
                     graph: graft.graph.clone(),
                     consumer: name_of(i),
-                    library: name_of(lib),
+                    library: name_of(records[0].0),
                 });
             }
+            // Otherwise: a header-only library, nothing to check against.
         }
     }
     Ok(())
 }
 
 /// Compare every recorded alphabet import against the exporting object's
-/// own declaration (docs/core.md (graft drift)): same first-wins,
-/// object-level, header-only-is-unchecked shape as `check_graft_drift`,
-/// over `Interface::imports`/`Interface::alphabets` instead of
+/// own declaration (docs/core.md (graft drift)): the same single-export
+/// rule as `check_graft_drift` — identical exports count as one, differing
+/// ones are a conflict when some input imports the alphabet or both
+/// exporters are user objects — and the same object-level,
+/// header-only-is-unchecked shape, over
+/// `Interface::imports`/`Interface::alphabets` instead of
 /// `ObjectFile::grafts`/`Interface::graphs`.
 pub(super) fn check_imported_alphabets(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
-    sources: &[Option<String>],
+    names: &[Option<String>],
 ) -> Result<(), LinkError> {
     let inputs: Vec<&ObjectFile> = objects.iter().chain(libraries).collect();
-    let name_of = |i: usize| -> String {
-        sources
-            .get(i)
-            .and_then(Option::as_ref)
-            .cloned()
-            .unwrap_or_else(|| format!("input #{i}"))
-    };
-    // First-wins exporter map, in the namespace's own order.
-    let mut exporter: HashMap<&str, (usize, &Vec<String>)> = HashMap::new();
+    let name_of = |i: usize| -> String { super::input_name(names, i) };
+    let mut exports: Vec<(usize, &str, &Vec<String>)> = Vec::new();
+    let mut consumed: HashSet<&str> = HashSet::new();
     for (i, obj) in inputs.iter().enumerate() {
         let Some(iface) = obj.interface.as_ref() else {
             continue;
         };
         for a in &iface.alphabets {
-            exporter.entry(a.name.as_str()).or_insert((i, &a.glyphs));
+            exports.push((i, a.name.as_str(), &a.glyphs));
+        }
+        for imported in &iface.imports {
+            consumed.insert(imported.name.as_str());
         }
     }
+    let exporter = settle_exports(exports, &consumed, objects.len(), "alphabet", names)?;
     for (i, obj) in inputs.iter().enumerate() {
         let Some(iface) = obj.interface.as_ref() else {
             continue;
@@ -479,7 +575,7 @@ mod tests {
     #[test]
     fn rebind_points_every_site_at_its_arena_record() {
         let objects = numeric_fixture();
-        let order = crate::linker::resolve::resolve(&objects, &[], "main")
+        let order = crate::linker::resolve::resolve(&objects, &[], "main", &[])
             .expect("the fixture resolves")
             .order;
         // Non-vacuity: every assertion below lives inside a zip over
@@ -529,7 +625,7 @@ mod tests {
             enters: vec![None],
             leaves: vec![None],
             opaque: vec![false],
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }
     }
@@ -545,7 +641,7 @@ mod tests {
             enters: Vec::new(),
             leaves: Vec::new(),
             opaque: Vec::new(),
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }
     }
@@ -600,7 +696,7 @@ mod tests {
     #[test]
     fn resolve_labels_clears_the_label_it_consumes() {
         let objects = labelled_fixture();
-        let order = crate::linker::resolve::resolve(&objects, &[], "main")
+        let order = crate::linker::resolve::resolve(&objects, &[], "main", &[])
             .expect("the fixture resolves")
             .order;
         let arena = resolve_bindings(&order).expect("a labelled binding resolves");

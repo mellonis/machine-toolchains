@@ -19,9 +19,9 @@ use crate::optimizer::OptLevel;
 use crate::stdlib;
 
 use super::build::{
-    find_library_for_build, out_path, parse_call_mech, read_object, render_link_diagnostics,
-    render_link_report, render_opt_report, render_warnings, sidecar_path, take_disabled_passes,
-    werror_message,
+    find_library_for_build, link_labels, out_path, parse_call_mech, read_object,
+    render_link_diagnostics, render_link_report, render_opt_report, render_warnings, sidecar_path,
+    take_disabled_passes, werror_message,
 };
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
@@ -40,6 +40,7 @@ COMPILE FLAGS (argv mode; manifest mode: override the profile):
   -O0 | -O1             optimization level
   -g                    record debug info
   --strip-debugger      drop `brk` at codegen
+  --strip-asserts       drop contract-check states
   --fno-<pass>          disable one optimizer pass (repeatable)
   --foutline            enable the default-off `outline` pass
   -Werror               treat (post-refinement) warnings as errors
@@ -51,7 +52,7 @@ LINK FLAGS (argv mode only; the manifest declares these):
   -o OUT.tmx            output path
 
 COMMON:
-  --allow CODE          suppress a link warning code (repeatable)
+  --allow CODE          suppress a compile or link warning code (repeatable)
   --no-relax            keep every symbol site in far form
   --call-mech MECH      bound-call lowering: mono | frames | hybrid
   --keep-objects        write each intermediate .tmo next to its source
@@ -67,6 +68,7 @@ struct Flags {
     o1: bool,
     debug_info: bool,
     strip_debugger: bool,
+    strip_asserts: bool,
     outline: bool,
     werror: bool,
     allow: Vec<String>,
@@ -98,6 +100,7 @@ pub(super) fn build(raw: &[String]) -> Result<CliOutput, String> {
         o1: args.flag("-O1"),
         debug_info: args.flag("-g"),
         strip_debugger: args.flag("--strip-debugger"),
+        strip_asserts: args.flag("--strip-asserts"),
         outline: args.flag("--foutline"),
         werror: args.flag("-Werror"),
         allow: args.values("--allow")?,
@@ -232,8 +235,8 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
 /// "no manifest found" wording. Also returns that same file's own
 /// `lint.allow` — from the SAME load the walk already did, never a
 /// second parse of the located path — which both callers union with
-/// their own `--allow` list to suppress link warnings (docs/tmt/lint.md
-/// (the allow namespace)).
+/// their own `--allow` list to suppress compile and link warnings
+/// (docs/tmt/lint.md (the allow namespace)).
 fn discover_project(
     start: &Path,
 ) -> Result<(PathBuf, crate::project::Manifest, Vec<String>), String> {
@@ -311,8 +314,8 @@ pub(crate) struct DapTargetBuild {
 ///
 /// Scope deliberately narrower than a full `tmt build TARGET` run: only
 /// `-g` is force-overridable here — opt level, `--strip-debugger`,
-/// `-Werror`, and `--call-mech` still come from the resolved profile /
-/// manifest declaration as declared (`build_one_target`'s own
+/// `--strip-asserts`, `-Werror`, and `--call-mech` still come from the
+/// resolved profile / manifest declaration as declared (`build_one_target`'s own
 /// `flags.call_mech.or_else(|| manifest.effective_call_mech(target))`
 /// chain applies unchanged — this seam never sets `flags.call_mech`,
 /// so the target's own committed lowering wins, exactly as `tmt build
@@ -360,6 +363,7 @@ pub(crate) fn build_target_for_launch(
         o1: false,
         debug_info: force_debug_info,
         strip_debugger: false,
+        strip_asserts: false,
         outline: false,
         werror: false,
         allow: Vec::new(),
@@ -408,23 +412,18 @@ pub(crate) fn build_target_for_launch(
     })
 }
 
-/// Builds one target: compile/assemble/load its effective sources with
-/// the resolved profile (+ flag overrides), refine warnings against the
-/// declared set, link with the declared libraries + entry + resolved
-/// call-mech, write the output (+ sidecar) relative to the manifest
-/// directory. Returns the absolute output path and the stderr chunk.
-fn build_one_target(
-    root: &Path,
-    manifest: &crate::project::Manifest,
-    name: &str,
-    target: &crate::project::Target,
+/// The manifest-mode profile/flag merge alone — factored out of
+/// `build_one_target` so a unit test can inspect the resulting
+/// [`CompileOptions`] directly. `--strip-asserts` has no CLI-observable
+/// effect yet (docs/tmt/cli.md (build)): with nothing to strip, a build
+/// with the flag and one without it produce byte-identical output, so the
+/// axes' usual end-to-end tests (mirrored on `--strip-debugger` via `tmt
+/// dis`) cannot exercise the flag-beats-profile contract for it. This is
+/// the route that can.
+fn manifest_compile_options(
+    profile: crate::project::ResolvedProfile,
     flags: &Flags,
-    manifest_allow: &[String],
-) -> Result<(PathBuf, String), String> {
-    // In manifest mode --debug/--release are PURE profile selectors
-    // (docs/tmt/cli.md (build)): only the individual flags (-g, -O*,
-    // --strip-debugger, -Werror) override the resolved profile's keys.
-    let profile = manifest.profiles.resolve(flags.release_preset);
+) -> CompileOptions {
     let mut options = CompileOptions {
         // Overwritten per unit, below `unit_declarations` — this base
         // value is never itself handed to a compile.
@@ -438,6 +437,11 @@ fn build_one_target(
             true
         } else {
             profile.strip_debugger
+        },
+        strip_asserts: if flags.strip_asserts {
+            true
+        } else {
+            profile.strip_asserts
         },
         opt_level: profile.opt_level,
         disabled_passes: flags.disabled_passes.clone(),
@@ -460,9 +464,32 @@ fn build_one_target(
     if flags.o1 {
         options.opt_level = OptLevel::O1;
     }
+    options
+}
+
+/// Builds one target: compile/assemble/load its effective sources with
+/// the resolved profile (+ flag overrides), refine warnings against the
+/// declared set, link with the declared libraries + entry + resolved
+/// call-mech, write the output (+ sidecar) relative to the manifest
+/// directory. Returns the absolute output path and the stderr chunk.
+fn build_one_target(
+    root: &Path,
+    manifest: &crate::project::Manifest,
+    name: &str,
+    target: &crate::project::Target,
+    flags: &Flags,
+    manifest_allow: &[String],
+) -> Result<(PathBuf, String), String> {
+    // In manifest mode --debug/--release are PURE profile selectors
+    // (docs/tmt/cli.md (build)): only the individual flags (-g, -O*,
+    // --strip-debugger, --strip-asserts, -Werror) override the resolved
+    // profile's keys.
+    let profile = manifest.profiles.resolve(flags.release_preset);
+    let options = manifest_compile_options(profile, flags);
     let werror = profile.werror || flags.werror;
-    // The link stage's allow list is `--allow` unioned with this same
-    // manifest file's own `lint.allow` — no second discovery walk, since
+    // Both stages' allow list — compile warnings and link warnings — is
+    // `--allow` unioned with this same manifest file's own `lint.allow` —
+    // no second discovery walk, since
     // `manifest_allow` already came off the file `discover_project`
     // located (docs/tmt/lint.md (the allow namespace)).
     let allow: Vec<String> = flags
@@ -498,9 +525,11 @@ fn build_one_target(
     // libraries — resolved together through the one shared fixpoint
     // (docs/tmt/project.md (Declaration derivation)); a header-only
     // library's absent object is never in `libraries` to begin with.
-    let (sibling_declarations, library_declarations, mut libraries) =
+    let (sibling_declarations, library_declarations, library_pairs) =
         resolve_target_declarations(&source_paths, &libs.link, &dirs, manifest.stdlib)
             .map_err(|e| format!("{read_err_prefix}{e}"))?;
+    let (library_names, mut libraries): (Vec<String>, Vec<ObjectFile>) =
+        library_pairs.into_iter().unzip();
     if manifest.stdlib {
         libraries.push(stdlib::object().clone());
     }
@@ -532,8 +561,10 @@ fn build_one_target(
     let mut stderr = String::new();
     let mut warning_count = 0usize;
     for (path, report) in &reports {
-        warning_count += report.diagnostics.len();
-        render_warnings(&mut stderr, path, report);
+        // The same union allow list the link stage reads: `--allow` plus
+        // the manifest's own `lint.allow` (docs/tmt/cli.md (compile
+        // warnings)). `-Werror` counts what survives it.
+        warning_count += render_warnings(&mut stderr, path, report, &allow);
         if flags.verbose {
             render_opt_report(&mut stderr, report);
         }
@@ -562,6 +593,11 @@ fn build_one_target(
         &allow,
         &output,
         &unit_sources,
+        &link_labels(
+            &manifest.effective_sources(target),
+            &library_names,
+            manifest.stdlib,
+        ),
     )
     .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
@@ -600,6 +636,7 @@ fn link_and_write(
     allow: &[String],
     output: &Path,
     unit_sources: &[Option<PathBuf>],
+    labels: &[Option<String>],
 ) -> Result<(String, usize), String> {
     // The sidecar path anchors the provenance strings, so it is resolved
     // BEFORE the link (docs/formats.md (map sidecar)).
@@ -617,6 +654,7 @@ fn link_and_write(
                 .or_else(|| manifest.effective_call_mech(target))
                 .unwrap_or_default(),
             sources: sidecar_sources(&map_path, unit_sources),
+            labels: labels.to_vec(),
         },
     )
     .map_err(|e| format!("target `{name}`: {e}"))?;
@@ -749,6 +787,7 @@ fn argv_compile_options(flags: &Flags) -> CompileOptions {
         externals: Declarations::none(),
         debug_info: flags.debug_preset || flags.debug_info,
         strip_debugger: flags.release_preset || flags.strip_debugger,
+        strip_asserts: flags.release_preset || flags.strip_asserts,
         opt_level: if flags.release_preset {
             OptLevel::O1
         } else {
@@ -783,12 +822,14 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     // the same rule manifest mode's `build_one_target` applies
     // (docs/tmt/project.md (Declaration derivation)); a header-only
     // library's absent object is never in `libraries` to begin with.
-    let (sibling_declarations, library_declarations, mut libraries) = resolve_target_declarations(
+    let (sibling_declarations, library_declarations, library_pairs) = resolve_target_declarations(
         &source_paths,
         &flags.lib_names,
         &flags.search_dirs,
         !flags.nostdlib,
     )?;
+    let (library_names, mut libraries): (Vec<String>, Vec<ObjectFile>) =
+        library_pairs.into_iter().unzip();
     if !flags.nostdlib {
         libraries.push(stdlib::object().clone());
     }
@@ -821,8 +862,9 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     let mut stderr = String::new();
     let mut warning_count = 0usize;
     for (path, report) in &reports {
-        warning_count += report.diagnostics.len();
-        render_warnings(&mut stderr, path, report);
+        // Argv mode reads no `tmt.json`, so `--allow` alone — the list its
+        // link stage reads too.
+        warning_count += render_warnings(&mut stderr, path, report, &flags.allow);
         if flags.verbose {
             render_opt_report(&mut stderr, report);
         }
@@ -837,9 +879,15 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     // failure anywhere in it carries the warnings already rendered above
     // rather than dropping them on an early `?` return
     // (docs/tmt/cli.md (build)).
-    let (tail, link_warnings) =
-        link_and_write_argv(&objects, &libraries, flags, &files[0], &unit_sources)
-            .map_err(|e| format!("{stderr}{e}"))?;
+    let (tail, link_warnings) = link_and_write_argv(
+        &objects,
+        &libraries,
+        flags,
+        files,
+        &unit_sources,
+        &library_names,
+    )
+    .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
     // The inner refusal already kept the write from happening; this outer
     // check carries the accumulated stderr — compile warnings plus link
@@ -865,10 +913,11 @@ fn link_and_write_argv(
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
     flags: &Flags,
-    first_file: &str,
+    files: &[String],
     unit_sources: &[Option<PathBuf>],
+    library_names: &[String],
 ) -> Result<(String, usize), String> {
-    let target = out_path(Path::new(first_file), flags.out.clone(), "tmx");
+    let target = out_path(Path::new(&files[0]), flags.out.clone(), "tmx");
     let map_path = sidecar_path(&target);
     // Argv mode threads relax / entry / call_mech explicitly — there is
     // no default to lean on for `call_mech` once the flag exists (TM's
@@ -882,6 +931,7 @@ fn link_and_write_argv(
             entry: flags.entry.clone(),
             call_mech: flags.call_mech.unwrap_or_default(),
             sources: sidecar_sources(&map_path, unit_sources),
+            labels: link_labels(files, library_names, !flags.nostdlib),
         },
     )
     .map_err(|e| e.to_string())?;
@@ -1005,21 +1055,28 @@ fn source_declaration_text(path: &Path) -> Result<crate::header::DeclarationText
 /// its own path, before the fixpoint runs at all. Once every source has
 /// TEXT, `stdlib` reaches every one of their reads alike, siblings and
 /// libraries both (a library header depending on `std::` resolves
-/// exactly as a sibling would). Every source that never reads clean
-/// once the fixpoint stops making progress is reported here, together,
+/// exactly as a sibling would). Every source whose read against the
+/// settled set failed is reported here, together,
 /// before any unit is compiled, never swallowed and never narrowed down
 /// to a single "most likely" one and left for a dependent's own compile
 /// to misreport (docs/tmt/project.md (Declaration derivation) —
-/// including the case where two sources genuinely need EACH OTHER and
-/// neither ever resolves: [`super::build::render_unresolved`] names
-/// both, in either declared order).
+/// including the case where two sources need EACH OTHER's declarations
+/// merely to be read, so neither ever is: [`super::build::render_unresolved`]
+/// names both, in either declared order).
 #[allow(clippy::type_complexity)]
 fn resolve_target_declarations(
     source_paths: &[PathBuf],
     library_names: &[String],
     library_dirs: &[String],
     stdlib: bool,
-) -> Result<(Vec<Resolved>, Vec<(String, Resolved)>, Vec<ObjectFile>), String> {
+) -> Result<
+    (
+        Vec<Resolved>,
+        Vec<(String, Resolved)>,
+        Vec<(String, ObjectFile)>,
+    ),
+    String,
+> {
     let mut sources = Vec::with_capacity(source_paths.len() + library_names.len());
     for path in source_paths {
         sources.push(crate::header::DeclarationSource {
@@ -1056,11 +1113,13 @@ fn resolve_target_declarations(
     Ok((
         sibling_declarations,
         library_declarations,
-        link_library_objects(library_objects),
+        link_library_objects(library_names, library_objects),
     ))
 }
 
-/// The OBJECTS a target's declared libraries hand the linker: one per
+/// The OBJECTS a target's declared libraries hand the linker, each paired
+/// with the `-l` name it was found under (the name a link error gives it,
+/// docs/core.md (linking)): one per
 /// entry that found a real `<name>.tmo` on the search path, in the same
 /// order [`find_library_for_build`] resolved them — a header-only
 /// library (`find_library_for_build`'s own `None`) contributes nothing
@@ -1070,8 +1129,16 @@ fn resolve_target_declarations(
 /// a build hands the linker directly, rather than only inferring it
 /// indirectly from link success or failure — `LinkReport` itself names
 /// no per-object list a caller could check instead.
-fn link_library_objects(library_objects: Vec<Option<ObjectFile>>) -> Vec<ObjectFile> {
-    library_objects.into_iter().flatten().collect()
+fn link_library_objects(
+    names: &[String],
+    library_objects: Vec<Option<ObjectFile>>,
+) -> Vec<(String, ObjectFile)> {
+    names
+        .iter()
+        .cloned()
+        .zip(library_objects)
+        .filter_map(|(name, object)| object.map(|o| (name, o)))
+        .collect()
 }
 
 /// The declarations table for compiling unit `i` of `paths`, in the
@@ -1211,7 +1278,7 @@ mod tests {
     /// module, not a `tests/*.rs` integration binary, so `CARGO_TARGET_TMPDIR`
     /// is not set here; mirrors `project.rs`'s own `unique_tmp_dir` for the
     /// same reason (and PM's identical driver.rs test helper).
-    fn unique_tmp_dir(label: &str) -> PathBuf {
+    fn unique_tmp_dir(label: &str) -> ScratchDir {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -1219,8 +1286,45 @@ mod tests {
             "tmt-driver-test-{label}-{}-{n}",
             std::process::id()
         ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+        ScratchDir::fresh(dir)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// A minimal single-tape fixture: one mapped instruction line (line 7,
@@ -1389,7 +1493,92 @@ machine {
     fn link_library_objects_drops_a_header_only_entry() {
         let a = placeholder_object(1);
         let b = placeholder_object(2);
-        let objects = link_library_objects(vec![Some(a.clone()), None, Some(b.clone())]);
-        assert_eq!(objects, vec![a, b]);
+        let names = ["a".to_string(), "h".to_string(), "b".to_string()];
+        let objects = link_library_objects(&names, vec![Some(a.clone()), None, Some(b.clone())]);
+        assert_eq!(objects, vec![("a".to_string(), a), ("b".to_string(), b)]);
+    }
+
+    // ---- `--strip-asserts` manifest-mode flag-beats-profile pair ---------
+    //
+    // `--strip-asserts` has no CLI-observable effect yet (nothing exists
+    // for it to strip), so the end-to-end route the other axes' "flag
+    // wins" tests use (`tests/build_driver.rs`, via `tmt dis` for
+    // `--strip-debugger`) cannot exercise it. `manifest_compile_options`
+    // is the white-box seam instead: both directions of the contract are
+    // needed, because each catches a DIFFERENT broken merge (neither
+    // direction alone would).
+
+    /// A `Flags` value with every axis at its argv-mode-off default,
+    /// overridden field by field per test — mirrors
+    /// `build_target_for_launch`'s own full literal, since `Flags` derives
+    /// no `Default`.
+    fn no_flags() -> Flags {
+        Flags {
+            debug_preset: false,
+            release_preset: false,
+            o0: false,
+            o1: false,
+            debug_info: false,
+            strip_debugger: false,
+            strip_asserts: false,
+            outline: false,
+            werror: false,
+            allow: Vec::new(),
+            disabled_passes: Vec::new(),
+            no_relax: false,
+            nostdlib: false,
+            keep_objects: false,
+            search_dirs: Vec::new(),
+            lib_names: Vec::new(),
+            out: None,
+            entry: None,
+            call_mech: None,
+            run: false,
+            list_targets: false,
+            verbose: false,
+        }
+    }
+
+    /// Direction 1: no `--strip-asserts` flag, but the RELEASE base turns
+    /// it on by itself. Mutation this catches: a merge that reads only
+    /// `flags.strip_asserts` and drops the profile fallback entirely —
+    /// `options.strip_asserts` would then be `false` here even though the
+    /// profile says `true`.
+    #[test]
+    fn strip_asserts_profile_wins_when_the_flag_is_absent() {
+        let profile = crate::project::Profiles::default().resolve(true);
+        assert!(
+            profile.strip_asserts,
+            "premise: the release base strips asserts"
+        );
+        let options = manifest_compile_options(profile, &no_flags());
+        assert!(
+            options.strip_asserts,
+            "the release base's strip-asserts must reach CompileOptions when no flag overrides it"
+        );
+    }
+
+    /// Direction 2 — the pair's real headline: the DEBUG base leaves
+    /// strip-asserts off, and `--strip-asserts` is passed anyway. Mutation
+    /// this catches: a merge that reads only `profile.strip_asserts` and
+    /// never consults the flag — direction 1 above would still pass by
+    /// coincidence against such a bug, since the release base is already
+    /// `true` there regardless of the flag.
+    #[test]
+    fn strip_asserts_flag_wins_against_a_false_profile() {
+        let profile = crate::project::Profiles::default().resolve(false);
+        assert!(
+            !profile.strip_asserts,
+            "premise: the debug base leaves it off"
+        );
+        let flags = Flags {
+            strip_asserts: true,
+            ..no_flags()
+        };
+        let options = manifest_compile_options(profile, &flags);
+        assert!(
+            options.strip_asserts,
+            "--strip-asserts must override the debug base's strip-asserts: false"
+        );
     }
 }

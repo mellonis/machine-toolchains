@@ -138,11 +138,12 @@ pub struct IrWorld {
     pub local: bool,
     /// Source line of the world's definition; `0` if unknown.
     pub line: u32,
-    /// The `.routine`'s declared exit count (its `exits=` clause) — `0` when
+    /// The `.routine`'s declared exits (its `exits=(…)` clause): the names
+    /// of the world's `state` parameters, in signature order — empty when
     /// none is declared, which is every `machine` and every routine whose
     /// signature takes no `state` parameter.
-    #[serde(default, skip_serializing_if = "is_zero_u8")]
-    pub exits: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exits: Vec<String>,
     /// Whether the world can resume normally at a call site's `then` —
     /// `false` only for a `noreturn` routine. `true` (the only state a v3
     /// document ever meant) is the fill/deserialization default, so absence
@@ -157,10 +158,6 @@ fn default_true() -> bool {
 
 fn is_true(b: &bool) -> bool {
     *b
-}
-
-fn is_zero_u8(n: &u8) -> bool {
-    *n == 0
 }
 
 /// A world kind that survives to the IR (graphs are gone).
@@ -193,7 +190,7 @@ pub struct IrTape {
     /// A ROUTINE tape's published write set, as glyphs
     /// (`compiler::published_writes`, the one function both this lowering
     /// and the source arm of `tmt interface` call): the declared EFFECTIVE
-    /// set (`writes` minus `preserves`) for a contracted signature tape,
+    /// set (`writes` minus `never writes`) for a contracted signature tape,
     /// or — when the parameter declares NEITHER clause — the tape's
     /// INFERRED write set (`footprint::infer_resolved_with`, the same
     /// sound-upper-bound analysis `check_contracts` runs to validate a
@@ -201,7 +198,7 @@ pub struct IrTape {
     /// declared" (an absent `writes=` decodes as "writes nothing" —
     /// docs/formats.md (routine interfaces)), so an uncontracted routine
     /// tape must still publish what it actually writes rather than an
-    /// empty set that would understate it. `preserves` itself has no IR
+    /// empty set that would understate it. `never writes` itself has no IR
     /// representation either way: it is source-level sugar the effective
     /// set already absorbs.
     ///
@@ -214,6 +211,33 @@ pub struct IrTape {
     /// compiled bytes for no observable gain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writes: Option<Vec<String>>,
+    /// A ROUTINE tape's declared entry contract, as glyphs
+    /// (`compiler::clause_glyphs` over `ResolvedTape::enters` — the same
+    /// declared-clause resolution `writes` already goes through, applied
+    /// to a clause that carries no effective-set arithmetic of its own):
+    /// the symbols the head may be sitting on when a call transfers
+    /// control into this tape. `None` when the parameter declares no
+    /// `enters { … }` clause; a `Some` list is never empty (the source
+    /// languages reject an empty clause). Always `None` on a MACHINE tape,
+    /// for the same reason `writes` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enters: Option<Vec<String>>,
+    /// A ROUTINE tape's declared exit contract, same shape and same
+    /// `None`/never-empty meaning as `enters`: the symbols the head may be
+    /// sitting on when control returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaves: Option<Vec<String>>,
+    /// Whether an opaque symbol on this tape — the index past its
+    /// alphabet, which an OPEN binding delivers for every caller glyph it
+    /// does not list — can never be why no row matches, and is never
+    /// forwarded to a callee that could not take it. The precondition a
+    /// caller's open binding needs, and the one fact the linker checks
+    /// before admitting one ([`rows_admit_the_opaque_index`] and
+    /// [`settle_opacity`] compute it; docs/formats.md (routine
+    /// interfaces)). Always `false` on a MACHINE tape, for the same reason
+    /// `writes`/`enters`/`leaves` are `None` there.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub opaque: bool,
 }
 
 /// One state: an id, its source name (synthetic for graft-instance internals),
@@ -310,8 +334,9 @@ pub enum IrMove {
 }
 
 /// A row's control transfer. `Goto` stays in-world; `CallThen` crosses to a
-/// routine and resumes at `then`; the terminators end the run; the two traps
-/// are the graft-hole failure kinds (`trap #0` / `trap #1`).
+/// routine and resumes at `then`; the terminators end the run; two of the
+/// traps are the graft-hole failure kinds (`trap #0` / `trap #1`) and the
+/// third is the broken-contract kind (`trap #2`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IrTransition {
@@ -341,7 +366,7 @@ pub enum IrTransition {
         /// (`compiler::CompileErrorKind::ThenRequired` refuses every other
         /// omission), so control is never MEANT to come back to resume one
         /// (docs/tmt/language.md (reuse)). Codegen still emits a
-        /// synthesized `trap #0` there rather than nothing: an honest
+        /// synthesized `trap #2` there rather than nothing: an honest
         /// program never reaches it, but a callee whose declared
         /// `noreturn` turns out to be a lie (a header, or a shadowed
         /// definition) would otherwise fall through into whatever the
@@ -377,6 +402,11 @@ pub enum IrTransition {
     TrapRead,
     /// A synthesized unmapped-write trap (`trap #1`).
     TrapWrite,
+    /// A synthesized contract trap (`trap #2`): a check the compiler
+    /// planted for something the source DECLARED about itself found the
+    /// declaration false. Unlike the two above it says nothing about a
+    /// map — the failure is the broken promise itself.
+    TrapContract,
 }
 
 /// A `call … then` resume point: a same-world state (its id), a terminator,
@@ -433,6 +463,16 @@ pub struct IrTapeBinding {
     /// (docs/formats.md (bound calls)).
     #[serde(default, skip_serializing_if = "is_false")]
     pub map_written: bool,
+    /// Whether the site's map was left OPEN with `*` (`with map { 'a' ->
+    /// 'a', * }`, or `with map { * }`): every caller symbol the pairs do
+    /// not list reads as the callee's OPAQUE index — the index equal to
+    /// its cardinality, which no callee row names and only a `*` row
+    /// matches — instead of becoming a hole. An open map is written by
+    /// definition, so this never appears without `map_written`. The
+    /// linker refuses an open binding into a tape the callee does not
+    /// publish as `opaque` (docs/formats.md (bound calls)).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub open: bool,
 }
 
 /// One `src -> dst` (or `src => dst`, `one_way`) symbol-map pair: `src` a
@@ -470,191 +510,20 @@ impl IrProgram {
 }
 
 impl IrWorld {
-    /// A Mermaid flowchart of this world's state graph (`tmt ir graph`):
-    /// nodes are states, edges are rows labelled by a compact pattern/action
-    /// summary. Terminators (and call `then`-terminators) route to shared
-    /// round terminal nodes so the whole control flow is visible.
+    /// A Mermaid flowchart of this world's state graph, row for row — the
+    /// raw view of `tmt ir graph --raw`: nodes are states, edges are rows
+    /// labelled by a compact pattern/action summary. Terminators (and call
+    /// `then`-terminators) route to shared round terminal nodes so the
+    /// whole control flow is visible.
     pub fn to_mermaid(&self) -> String {
-        use std::fmt::Write as _;
-        let mut out = String::from("flowchart TD\n");
-        for st in &self.states {
-            let _ = writeln!(out, "    S{}[\"{}\"]", st.id, escape(&st.name));
-        }
-        // Terminal pseudo-nodes, declared once each on first use.
-        let mut terms: HashSet<&'static str> = HashSet::new();
-        let declare =
-            |out: &mut String, id: &'static str, text: &str, terms: &mut HashSet<&'static str>| {
-                if terms.insert(id) {
-                    let _ = writeln!(out, "    {id}((\"{text}\"))");
-                }
-            };
-        // `ReturnExit` terminals are per-exit, so they cannot share the
-        // `&'static str` pool above; one shared node per exit number instead.
-        let mut ret_exit_terms: HashSet<u32> = HashSet::new();
-        // Two passes so all node declarations precede the edges.
-        let mut edges = String::new();
-        for st in &self.states {
-            for r in &st.rules {
-                let label = row_label(r);
-                match &r.transition {
-                    IrTransition::Goto { state } => {
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| S{state}", st.id);
-                    }
-                    IrTransition::CallThen {
-                        target,
-                        exits,
-                        then,
-                        ..
-                    } => {
-                        let call = format!("{label} call {}", escape(target));
-                        // Each declared exit resumes at a state of this
-                        // world, so the graph carries one edge per exit
-                        // alongside the `then` — the whole control flow is
-                        // what this rendering exists to show.
-                        for (k, state) in exits.iter().enumerate() {
-                            let _ = writeln!(
-                                edges,
-                                "    S{} -->|\"{call} exit #{k}\"| S{state}",
-                                st.id
-                            );
-                        }
-                        // `then: None` is the omitted-`then` (tail-position)
-                        // shape — control never comes back to this call at
-                        // all, so there is no edge left to draw for it
-                        // beyond the exits already rendered above.
-                        if let Some(then) = then {
-                            match then {
-                                IrThen::Goto { state } => {
-                                    let _ =
-                                        writeln!(edges, "    S{} -->|\"{call}\"| S{state}", st.id);
-                                }
-                                IrThen::Return => {
-                                    declare(&mut out, "T_ret", "ret", &mut terms);
-                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_ret", st.id);
-                                }
-                                IrThen::ReturnExit { exit } => {
-                                    if ret_exit_terms.insert(*exit) {
-                                        let _ = writeln!(out, "    T_ret{exit}((\"ret #{exit}\"))");
-                                    }
-                                    let _ = writeln!(
-                                        edges,
-                                        "    S{} -->|\"{call}\"| T_ret{exit}",
-                                        st.id
-                                    );
-                                }
-                                IrThen::Stop => {
-                                    declare(&mut out, "T_stp", "stp", &mut terms);
-                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_stp", st.id);
-                                }
-                                IrThen::Halt => {
-                                    declare(&mut out, "T_hlt", "hlt", &mut terms);
-                                    let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_hlt", st.id);
-                                }
-                            }
-                        }
-                    }
-                    IrTransition::TailCall { target } => {
-                        // A tail call transfers out of this world for good (no
-                        // return trip), so it routes to a shared terminal node,
-                        // its label naming the callee.
-                        declare(&mut out, "T_tail", "tail", &mut terms);
-                        let _ = writeln!(
-                            edges,
-                            "    S{} -->|\"{label} tail {}\"| T_tail",
-                            st.id,
-                            escape(target)
-                        );
-                    }
-                    IrTransition::Return => {
-                        declare(&mut out, "T_ret", "ret", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_ret", st.id);
-                    }
-                    IrTransition::ReturnExit { exit } => {
-                        if ret_exit_terms.insert(*exit) {
-                            let _ = writeln!(out, "    T_ret{exit}((\"ret #{exit}\"))");
-                        }
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_ret{exit}", st.id);
-                    }
-                    IrTransition::Stop => {
-                        declare(&mut out, "T_stp", "stp", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_stp", st.id);
-                    }
-                    IrTransition::Halt => {
-                        declare(&mut out, "T_hlt", "hlt", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_hlt", st.id);
-                    }
-                    IrTransition::TrapRead => {
-                        declare(&mut out, "T_trap0", "trap #0", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_trap0", st.id);
-                    }
-                    IrTransition::TrapWrite => {
-                        declare(&mut out, "T_trap1", "trap #1", &mut terms);
-                        let _ = writeln!(edges, "    S{} -->|\"{label}\"| T_trap1", st.id);
-                    }
-                }
-            }
-        }
-        out.push_str(&edges);
-        out
+        crate::ir_graph::render(self, crate::ir_graph::GraphView::Raw)
     }
-}
 
-/// A compact row summary for a Mermaid edge label: the pattern, then the
-/// write/move action when present, then a `brk` marker. ASCII only; `"` and
-/// `|` are stripped since Mermaid edge labels are pipe-delimited.
-fn row_label(r: &IrRule) -> String {
-    let mut s = String::new();
-    if r.debugger {
-        s.push_str("brk ");
+    /// The same flowchart in any of `tmt ir graph`'s three views
+    /// ([`crate::ir_graph`]).
+    pub fn to_mermaid_view(&self, view: crate::ir_graph::GraphView) -> String {
+        crate::ir_graph::render(self, view)
     }
-    s.push('[');
-    for (i, c) in r.pattern.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        match c {
-            IrCell::Wildcard => s.push('*'),
-            IrCell::Index { index } => {
-                let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{index}"));
-            }
-        }
-    }
-    s.push(']');
-    if let Some(w) = &r.write {
-        s.push_str(" w[");
-        for (i, c) in w.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            match c {
-                IrWrite::Keep => s.push('-'),
-                IrWrite::Index { index } => {
-                    let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{index}"));
-                }
-            }
-        }
-        s.push(']');
-    }
-    if let Some(m) = &r.moves {
-        s.push_str(" m[");
-        for (i, d) in m.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push(match d {
-                IrMove::Left => '<',
-                IrMove::Right => '>',
-                IrMove::Stay => '.',
-            });
-        }
-        s.push(']');
-    }
-    s
-}
-
-/// Strip the two characters Mermaid quoted labels cannot carry.
-fn escape(s: &str) -> String {
-    s.replace(['"', '|'], "")
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +595,10 @@ pub(crate) fn lower(
             &mut warnings,
         )?);
     }
+
+    // A tape's opacity also depends on the callees it is forwarded to,
+    // so it settles only once every world of the unit is lowered.
+    settle_opacity(&mut worlds);
 
     let program = IrProgram {
         version: TM_IR_VERSION,
@@ -815,8 +688,11 @@ fn args_return(args: &[BindingArg]) -> bool {
 /// it, built by mapping every world of an EXPANDED module through
 /// `body_can_return` (exactly what `lower` does once, up front, before its
 /// own per-world loop runs). An OUT-OF-UNIT callee has no body this unit
-/// can read, so its fact is its DECLARED `noreturn` clause alone, exactly
-/// as the object arm's printer reads a bodiless header
+/// can read, so its fact is the one its declarations carry — the DECLARED
+/// `noreturn` clause of a header or object, or, for a sibling source read
+/// leniently, the fact inferred from its body at read time exactly as
+/// `tmt interface` infers it (`header::read_extern`) — exactly as the
+/// object arm's printer reads a bodiless header
 /// (docs/tmt/language.md (routines)); the header-versus-object question —
 /// whether a lying header is later caught — is a different, later check
 /// (docs/formats.md (routine interfaces)).
@@ -842,6 +718,175 @@ pub(crate) fn known_noreturn(
     } else {
         can_return.get(target).map(|&returns| !returns)
     }
+}
+
+/// Whether tape position `k` of a world whose lowered states are `states`
+/// can never be the REASON no row matches — the local half of a routine
+/// tape's `opaque` bit (docs/formats.md (routine interfaces)). The other
+/// half, what the rows do with the tape once they match, is
+/// [`settle_opacity`]'s.
+///
+/// An opaque symbol is the index past the tape's alphabet: no row names
+/// it, and only a `*` cell at `k` matches it. So the question for each
+/// state is whether replacing the glyph at `k` by that symbol can turn a
+/// match into a miss. It cannot when every row `R` of the state is
+/// COVERED by a row `W` with `*` at `k` that also accepts whatever `R`
+/// accepts on every OTHER position (`W[i]` is `*`, or equals `R[i]`):
+/// whenever the other tapes let `R` fire, `W` fires too, opaque symbol and
+/// all. This is single-row cover, the relation the `dead-rows` pass uses.
+/// It is exact at arity 1, where it reduces to "the state has a `*` row";
+/// above it, rows `[0, *]` and `[*, 1]` are NOT opaque on either tape —
+/// an opaque symbol on tape 0 with tape 1 on `0` matches neither — though
+/// a per-position reading would call both tapes opaque. Joint cover by
+/// several `*`-at-`k` rows is not credited; that only costs precision.
+///
+/// **A state reads the tape iff it has at least one rule** — TM-1 reads
+/// every head at once, then does one table lookup — so a ROWLESS state
+/// reads nothing (it traps on entry, whatever the tapes hold), and a
+/// world with no reading state is opaque vacuously.
+/// The single-row-cover relation behind [`rows_admit_the_opaque_index`] and
+/// the graft-side coverage check (`expand.rs`), over raw pattern slices so the
+/// two callers cannot drift: `state_rows` holds each state's row patterns in
+/// order. Same law either side: every row `R` must be covered by some row `W`
+/// whose cell at `k` is a wildcard and whose other cells are wildcards-or-equal
+/// to `R`'s — "whenever the other tapes let `R` fire, `W` fires too, opaque
+/// symbol and all".
+pub(crate) fn rows_admit_opaque_index_over_rows<C: PartialEq>(
+    state_rows: &[&[&[C]]],
+    k: usize,
+    is_wild: impl Fn(&C) -> bool,
+) -> bool {
+    state_rows.iter().all(|rules| {
+        rules.iter().all(|r| {
+            rules.iter().any(|w| {
+                matches!(w.get(k), Some(wc) if is_wild(wc))
+                    && w.len() == r.len()
+                    && w.iter()
+                        .zip(r.iter())
+                        .enumerate()
+                        .all(|(i, (wc, rc))| i == k || is_wild(wc) || wc == rc)
+            })
+        })
+    })
+}
+
+fn rows_admit_the_opaque_index(states: &[IrState], k: usize) -> bool {
+    let groups: Vec<Vec<&[IrCell]>> = states
+        .iter()
+        .map(|s| s.rules.iter().map(|r| r.pattern.as_slice()).collect())
+        .collect();
+    let refs: Vec<&[&[IrCell]]> = groups.iter().map(Vec::as_slice).collect();
+    rows_admit_opaque_index_over_rows(&refs, k, |c| matches!(c, IrCell::Wildcard))
+}
+
+/// Close every routine tape whose opaque symbol a row could hand to a
+/// callee that cannot take it — the second half of the `opaque` bit, after
+/// [`rows_admit_the_opaque_index`] (docs/formats.md (routine interfaces)).
+///
+/// A row that binds tape `k` into a nested `call` or `bind` passes the
+/// WHOLE band, not just the cell under the head, so an opaque symbol
+/// anywhere on it reaches the inner callee — whatever the row's own
+/// pattern, and whether or not the row matched through a `*`. The linker
+/// checks opacity only at an open site's direct callee, so the forward is
+/// safe only when the symbol lands on the inner callee's OWN opaque index
+/// and that tape is itself opaque.
+///
+/// The link engine composes the outer and inner maps by passing an index
+/// outside the inner map's pairs straight through, unchanged — whether
+/// the inner map is omitted, closed, or open. The outer opaque symbol is
+/// such an index (it lies past the forwarding tape's alphabet), so it
+/// arrives as ITSELF, which is the callee's opaque index exactly when the
+/// two tapes have the SAME cardinality. That is the whole rule: an
+/// equal-size forward into an opaque tape keeps the tape opaque; on
+/// unequal alphabets the symbol lands on a real glyph of the callee or on
+/// a hole, and the tape closes. (An open inner map on unequal alphabets
+/// is no exception — measured, the symbol still passes through as itself.)
+///
+/// A TRANSPARENT call or bind — no argument list — forwards too: it
+/// binds callee tape `k` to caller tape `k` by index, so every caller
+/// tape the callee has is forwarded, under the same rule.
+///
+/// A forward into a routine OUTSIDE this compilation unit always closes — a header
+/// carries no opacity, so whether the callee could take the symbol is not
+/// knowable here. A routine that forwards a tape to another unit's routine
+/// — bound or transparent — is therefore never opaque on that tape; a
+/// transparent call into another unit closes every tape of the caller,
+/// the callee's arity being unknown here too.
+///
+/// Computed as a GREATEST fixpoint over the unit's routines: start from
+/// the local answer and close tapes until nothing changes, so a routine
+/// that forwards a tape to itself, or to a peer that forwards it back,
+/// stays opaque exactly when nothing else closes it.
+fn settle_opacity(worlds: &mut [IrWorld]) {
+    let by_name: HashMap<String, usize> = worlds
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.kind == IrWorldKind::Routine)
+        .map(|(i, w)| (w.name.clone(), i))
+        .collect();
+    loop {
+        let mut close: Vec<(usize, usize)> = Vec::new();
+        for (wi, w) in worlds.iter().enumerate() {
+            for (k, tape) in w.tapes.iter().enumerate() {
+                if !tape.opaque {
+                    continue;
+                }
+                let forwards_unsafely = w.states.iter().flat_map(|s| &s.rules).any(|r| {
+                    let IrTransition::CallThen {
+                        target, binding, ..
+                    } = &r.transition
+                    else {
+                        return false;
+                    };
+                    if binding.is_empty() {
+                        // A TRANSPARENT call forwards every tape it has
+                        // by index: callee tape `k` IS caller tape `k`.
+                        // Its arity is known only for an in-unit callee;
+                        // for any other, every tape counts as forwarded,
+                        // and closes, since nothing here knows the
+                        // callee's opacity anyway.
+                        let forwarded = by_name
+                            .get(target.as_str())
+                            .is_none_or(|&ci| k < worlds[ci].tapes.len());
+                        return forwarded
+                            && !forward_keeps_opacity(worlds, &by_name, target, k, tape);
+                    }
+                    binding.iter().enumerate().any(|(j, b)| {
+                        b.caller_tape as usize == k
+                            && !forward_keeps_opacity(worlds, &by_name, target, j, tape)
+                    })
+                });
+                if forwards_unsafely {
+                    close.push((wi, k));
+                }
+            }
+        }
+        if close.is_empty() {
+            return;
+        }
+        for (wi, k) in close {
+            worlds[wi].tapes[k].opaque = false;
+        }
+    }
+}
+
+/// Whether binding entry `j` of a call to `target`, which forwards the
+/// opaque-carrying `tape`, delivers the opaque symbol intact onto an
+/// opaque tape of an in-unit callee ([`settle_opacity`]'s rule).
+fn forward_keeps_opacity(
+    worlds: &[IrWorld],
+    by_name: &HashMap<String, usize>,
+    target: &str,
+    j: usize,
+    tape: &IrTape,
+) -> bool {
+    // `by_name` holds this unit's routines only, so a callee in another
+    // unit is simply not found — and closes the tape, its opacity being
+    // unknowable here.
+    let Some(inner) = by_name.get(target).and_then(|&i| worlds[i].tapes.get(j)) else {
+        return false;
+    };
+    inner.opaque && inner.cardinality == tape.cardinality
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -941,31 +986,43 @@ fn lower_world(
                 // `rw.tapes` and `ew.tapes` are both vector-position order
                 // over the same signature (a machine's tape decls, or a
                 // routine's tape params), so index `i` names the same tape
-                // in both.
-                let writes = rw.and_then(|w| {
-                    let rt = w.tapes.get(i)?;
-                    // Machine worlds are excluded — nothing reads `main`'s
-                    // own interface entry (the object arm's printer skips
-                    // the entry world outright — docs/tmt/cli.md
-                    // (interface)) — so this deliberately withholds an
-                    // inferred set rather than computing and discarding
-                    // one, leaving that path's codegen and every
-                    // `machine`-bearing golden alone.
+                // in both. Machine worlds are excluded — nothing reads
+                // `main`'s own interface entry (the object arm's printer
+                // skips the entry world outright — docs/tmt/cli.md
+                // (interface)) — so `writes`/`enters`/`leaves` all
+                // deliberately withhold their contract rather than
+                // computing and discarding one, leaving that path's
+                // codegen and every `machine`-bearing golden alone.
+                // `(w, rt)` bound together — never `rt` alone — so `writes`
+                // below never needs to re-derive `w` from `rw` (and so never
+                // needs an `.expect` to justify doing so: `rt`'s own
+                // presence already proves a routine world was found).
+                let routine_tape = rw.and_then(|w| {
                     if w.kind != WorldKind::Routine {
                         return None;
                     }
+                    w.tapes.get(i).map(|rt| (w, rt))
+                });
+                let writes = routine_tape.map(|(w, rt)| {
                     let inferred = footprint
                         .worlds
                         .get(&w.name)
                         .and_then(|wf| wf.tapes.get(i).copied());
                     let indices = crate::compiler::published_writes(rt, inferred);
-                    Some(
-                        indices
-                            .iter()
-                            .filter_map(|index| glyphs.get(index as usize).cloned())
-                            .collect(),
-                    )
+                    crate::compiler::symset_glyphs(indices, &glyphs)
                 });
+                let enters = routine_tape
+                    .and_then(|(_, rt)| crate::compiler::clause_glyphs(rt.enters, &glyphs));
+                let leaves = routine_tape
+                    .and_then(|(_, rt)| crate::compiler::clause_glyphs(rt.leaves, &glyphs));
+                // Opacity is a ROUTINE's promise to its callers, read only
+                // by the linker when it judges an open binding, so it is
+                // withheld on a machine tape for exactly the reason
+                // `writes`/`enters`/`leaves` are: `main` is never a
+                // callee, nothing reads its interface entry, and a
+                // suffix there would move every `machine`-bearing
+                // program's bytes for no observable gain.
+                let opaque = routine_tape.is_some() && rows_admit_the_opaque_index(&states, i);
                 IrTape {
                     name: t.name.clone(),
                     alphabet: t.alphabet.clone(),
@@ -973,6 +1030,9 @@ fn lower_world(
                     volatile: t.volatile,
                     glyphs,
                     writes,
+                    enters,
+                    leaves,
+                    opaque,
                 }
             })
             .collect(),
@@ -980,12 +1040,12 @@ fn lower_world(
         states,
         local: rw.map(|w| w.local).unwrap_or(false),
         line: rw.map(|w| w.name_span.start.line).unwrap_or(0),
-        // A routine's `state` parameters ARE its exits, in signature order.
-        // The count was narrowed to its one wire byte where the signature
-        // was resolved (`compiler::ResolvedWorld::exits`) — the single
-        // place that check lives — so it is read here, never re-derived
-        // from the list.
-        exits: rw.map(|w| w.exits).unwrap_or(0),
+        // A routine's `state` parameters ARE its exits, in signature order,
+        // and their names travel to the object's interface. The list was
+        // held to the wire's one count byte where the signature was
+        // resolved (`compiler::ResolvedWorld::exits`) — the single place
+        // that check lives.
+        exits: rw.map(|w| w.state_params.clone()).unwrap_or_default(),
         // The inferred fact, computed once in `lower` over the EXPANDED
         // module before the optimizer runs — opt-independent by
         // construction (`body_can_return`'s own doc). A `machine` publishes
@@ -1462,7 +1522,14 @@ impl Forwarders {
 /// returning: `base`, then `base_1`, `base_2`, … Mirrors codegen's own
 /// label minting, and keeps the result a plain identifier so it stays a
 /// legal assembly label.
-fn fresh_state_name(used: &mut HashSet<String>, base: &str) -> String {
+///
+/// The ONE freshening mechanism for a synthesized state name — the
+/// forwarders above and the head-contract checks (`contracts::head`) both
+/// mint through it. It renames the SYNTHESIZED name on a collision, never
+/// the source's: there is no reserved state-name namespace in this crate,
+/// and a user state that happens to take a name a later synthesis wanted is
+/// not an error.
+pub(crate) fn fresh_state_name(used: &mut HashSet<String>, base: &str) -> String {
     if used.insert(base.to_string()) {
         return base.to_string();
     }
@@ -1534,7 +1601,8 @@ fn order_by_callee_tapes<'a>(
 /// place of an index. `caller_tape` and `src` stay numeric in both forms:
 /// both name THIS unit's own bands and alphabet. When the callee's
 /// declarations are known (`externals`), its tape order and parameter names
-/// are checked here, exactly as a local signature's are; when they are not,
+/// are checked by the compiler's shared argument check, exactly as a local
+/// signature's are; this only orders the entries. When they are not known,
 /// the site keeps its source order and every entry is named, which is
 /// exactly what the linker's own `reorder_named` exists to fix up once the
 /// callee's real signature is known.
@@ -1566,34 +1634,10 @@ fn resolve_binding(
         let callee_decl = externals.routine(target);
         let order: Vec<&BindingArg> = match callee_decl {
             Some(sig) => {
-                // Every named arg must name a real declared parameter of
-                // the callee — tape or state — and no name may repeat,
-                // checked here because `order_by_callee_tapes` below only
-                // walks the FORWARD direction (a tape param with no
-                // matching arg): an arg naming nothing the callee declares,
-                // or naming the same parameter twice, would otherwise be
-                // silently dropped or silently overwritten rather than
-                // reported — the silent-failure shape this arc exists to
-                // raise. A legitimate state-param arg is excluded from the
-                // unknown-name check (it never matches a tape name and is
-                // not this branch's to bind), not flagged.
-                let mut seen: HashSet<&str> = HashSet::new();
-                for a in &named_args {
-                    if !seen.insert(a.name.as_str()) {
-                        return Err(CompileError {
-                            span: a.name_span,
-                            kind: CompileErrorKind::DuplicateArg(a.name.clone()),
-                        });
-                    }
-                    if !sig.tapes.iter().any(|t| t.name == a.name)
-                        && !sig.state_params.iter().any(|p| p == &a.name)
-                    {
-                        return Err(CompileError {
-                            span: a.name_span,
-                            kind: CompileErrorKind::UnknownArg(a.name.clone()),
-                        });
-                    }
-                }
+                // The compiler's shared argument check has already run on
+                // this list against the same declarations (repeated and
+                // unknown names, kinds, aliased tapes, unbound
+                // parameters); this only orders the entries.
                 order_by_callee_tapes(sig.tapes.iter().map(|t| t.name.as_str()), &named_args, site)?
             }
             // No declarations for this callee: keep the site's own source
@@ -1648,6 +1692,7 @@ fn resolve_binding(
                 caller_tape: phys as u32,
                 pairs,
                 map_written: map.is_some(),
+                open: map.as_ref().is_some_and(|m| m.open.is_some()),
             });
         }
         // Entries are named or positional, never mixed in one list (a
@@ -1727,6 +1772,10 @@ fn resolve_binding(
             // out-of-unit entry — the wire's `map_written` distinction is
             // not symbolic-only (docs/formats.md (bound calls)).
             map_written: map.is_some(),
+            // Likewise the open marker: an in-unit callee is judged by
+            // the linker against its own published `opaque` bit exactly
+            // as an out-of-unit one is.
+            open: map.as_ref().is_some_and(|m| m.open.is_some()),
         });
     }
     Ok(binding)
@@ -1788,7 +1837,8 @@ fn unreachable_state_warnings(world: &IrWorld, ew: &ExpandedWorld, warnings: &mu
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
+                | IrTransition::TrapWrite
+                | IrTransition::TrapContract => {}
             }
         }
     }
@@ -1940,7 +1990,7 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
             }
             let is_trap = matches!(
                 r.transition,
-                IrTransition::TrapRead | IrTransition::TrapWrite
+                IrTransition::TrapRead | IrTransition::TrapWrite | IrTransition::TrapContract
             );
             if is_trap && !r.synthesized {
                 return Err(format!(
@@ -1973,10 +2023,13 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                         // exit of THIS world, so the number is bounded the
                         // same way the terminal form is.
                         Some(IrThen::ReturnExit { exit }) => {
-                            if *exit >= w.exits as u32 {
+                            if *exit >= w.exits.len() as u32 {
                                 return Err(format!(
                                     "{}: state {} resumes through exit {} (the world declares {})",
-                                    w.name, st.id, exit, w.exits
+                                    w.name,
+                                    st.id,
+                                    exit,
+                                    w.exits.len()
                                 ));
                             }
                         }
@@ -2010,10 +2063,13 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                 // `retx #k` leaves through exit `k` of THIS world, so the
                 // number must fall inside the count the world declares.
                 IrTransition::ReturnExit { exit } => {
-                    if *exit >= w.exits as u32 {
+                    if *exit >= w.exits.len() as u32 {
                         return Err(format!(
                             "{}: state {} returns through exit {} (the world declares {})",
-                            w.name, st.id, exit, w.exits
+                            w.name,
+                            st.id,
+                            exit,
+                            w.exits.len()
                         ));
                     }
                 }
@@ -2025,7 +2081,8 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
+                | IrTransition::TrapWrite
+                | IrTransition::TrapContract => {}
             }
         }
     }
@@ -2059,13 +2116,102 @@ mod tests {
         lower(&ex, &a.resolved, &externals).unwrap_or_else(|e| panic!("lower failed: {e}"))
     }
 
-    /// analyze → expand → lower, expecting the front end to pass and lowering
-    /// to fail; returns the lowering `CompileError`.
-    fn lower_err_of(src: &str) -> CompileError {
-        let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
-        let externals = Declarations::stdlib();
-        let ex = expand(&a.resolved, &externals).unwrap_or_else(|e| panic!("expand failed: {e}"));
-        lower(&ex, &a.resolved, &externals).expect_err("expected lowering to fail")
+    /// One-tape routine world `name` over `card` symbols, `opaque` as
+    /// given, whose single state holds `rules` — the minimal IR shape
+    /// [`settle_opacity`] reads.
+    fn opacity_world(name: &str, card: u32, opaque: bool, rules: Vec<IrRule>) -> IrWorld {
+        IrWorld {
+            name: name.into(),
+            kind: IrWorldKind::Routine,
+            arity: 1,
+            tapes: vec![IrTape {
+                name: "n".into(),
+                alphabet: "al".into(),
+                cardinality: card,
+                volatile: false,
+                glyphs: (0..card).map(|i| i.to_string()).collect(),
+                writes: None,
+                enters: None,
+                leaves: None,
+                opaque,
+            }],
+            entry: 0,
+            states: vec![IrState {
+                id: 0,
+                name: "s".into(),
+                line: 1,
+                rules,
+                dispatch: IrDispatch::Table,
+            }],
+            local: false,
+            line: 1,
+            exits: Vec::new(),
+            returns: true,
+        }
+    }
+
+    /// A `[*]` row whose transition is `transition`.
+    fn star_row(transition: IrTransition) -> IrRule {
+        IrRule {
+            pattern: vec![IrCell::Wildcard],
+            write: None,
+            moves: None,
+            debugger: false,
+            transition,
+            synthesized: false,
+            direct: false,
+            line: 1,
+        }
+    }
+
+    /// `r`'s one row calls `callee` TRANSPARENTLY — an empty binding, which
+    /// forwards caller tape 0 to callee tape 0 by index.
+    fn transparent_caller(callee: &str) -> IrWorld {
+        opacity_world(
+            "r",
+            3,
+            true,
+            vec![star_row(IrTransition::CallThen {
+                target: callee.into(),
+                binding: Vec::new(),
+                exits: Vec::new(),
+                then: Some(IrThen::Return),
+            })],
+        )
+    }
+
+    /// A transparent call into an in-unit callee whose same-size tape is
+    /// itself opaque delivers the opaque symbol onto the callee's own
+    /// opaque index, so the caller stays opaque. `.tmc` cannot spell this
+    /// in-unit (a bindless call into a tape-bearing routine is
+    /// `missing-arg`), but IR the compiler builds for itself can, and the
+    /// rule has to be right for it.
+    ///
+    /// Mutation it catches: close every tape a transparent call forwards,
+    /// whatever the callee — `r` loses the bit.
+    #[test]
+    fn a_transparent_call_into_an_opaque_same_size_callee_keeps_opacity() {
+        let mut worlds = vec![
+            transparent_caller("inner"),
+            opacity_world("inner", 3, true, vec![star_row(IrTransition::Return)]),
+        ];
+        settle_opacity(&mut worlds);
+        assert!(worlds[0].tapes[0].opaque);
+    }
+
+    /// The same transparent call into a callee that is NOT opaque closes
+    /// the caller's tape.
+    ///
+    /// Mutation it catches: skip calls whose binding is empty when looking
+    /// for forwards — `r` keeps the bit.
+    #[test]
+    fn a_transparent_call_into_a_non_opaque_callee_closes_the_tape() {
+        let mut worlds = vec![
+            transparent_caller("inner"),
+            opacity_world("inner", 3, false, vec![star_row(IrTransition::Return)]),
+        ];
+        settle_opacity(&mut worlds);
+        assert!(!worlds[0].tapes[0].opaque);
     }
 
     const A1: &str = "\
@@ -2134,9 +2280,10 @@ machine {
 
     /// The bare version literal names the acceptance contract, not a hint:
     /// version 4 has not shipped in any release, so every field this arc
-    /// adds — `param`, the `Label` `dst`, and `map_written` — joins the
-    /// same number instead of opening a new one. Mutation: bumping
-    /// `TM_IR_VERSION` to 5.
+    /// adds — `param`, the `Label` `dst`, `map_written`,
+    /// `IrTapeBinding::open`, and `IrTape`'s `enters`, `leaves` and
+    /// `opaque` — joins the same number instead of opening a new one.
+    /// Mutation: bumping `TM_IR_VERSION` to 5.
     #[test]
     fn the_version_literal_is_four() {
         assert_eq!(TM_IR_VERSION, 4);
@@ -2145,16 +2292,24 @@ machine {
     /// A document exercising every v4 field — glyphs and an effective
     /// write set, a two-exit `CallThen` alongside a `ReturnExit`, a
     /// `noreturn` world, a named (WRITTEN) binding-call param, a
-    /// glyph-labelled map pair, and a SECOND binding entry that is
+    /// glyph-labelled map pair, a SECOND binding entry that is
     /// `map_written: true` with an EMPTY `pairs` list — the one shape
     /// where the field carries the whole meaning, since a pair-bearing
-    /// entry is written by definition either way. Round-trips unchanged.
-    /// Mutation: `#[serde(skip_serializing)]` on `IrTapeBinding.param`
-    /// (or on `map_written`) drops it from the wire form, so the compare
-    /// goes red — the second entry is what makes the `map_written`
-    /// mutation observable at all, since the first entry's own
-    /// `map_written: true` is otherwise redundant with its non-empty
-    /// `pairs`.
+    /// entry is written by definition either way — an `open` entry
+    /// beside a closed one, on the routine
+    /// world's own tape, a declared `enters`/`leaves` pair plus `opaque:
+    /// true`, and the contract terminal, whose whole wire form is its
+    /// tag. Round-trips unchanged. Mutation: `#[serde(skip_serializing)]`
+    /// on `IrTapeBinding.param` (or on `map_written`) drops it from the
+    /// wire form, so the compare goes red — the second entry is what
+    /// makes the `map_written` mutation observable at all, since the
+    /// first entry's own `map_written: true` is otherwise redundant with
+    /// its non-empty `pairs`; the same `#[serde(skip_serializing)]`
+    /// mutation on `IrTapeBinding::open` and on
+    /// `IrTape::enters`/`::leaves`/`::opaque` drops each of
+    /// those from the wire form the identical way, and renaming the
+    /// contract terminal's `#[serde]` tag makes its row fail to read
+    /// back.
     #[test]
     fn v4_documents_round_trip() {
         let ir = IrProgram {
@@ -2171,6 +2326,9 @@ machine {
                         volatile: false,
                         glyphs: vec!["_".into(), "x".into(), "y".into()],
                         writes: Some(vec!["x".into(), "y".into()]),
+                        enters: None,
+                        leaves: None,
+                        opaque: false,
                     }],
                     entry: 0,
                     states: vec![IrState {
@@ -2202,12 +2360,14 @@ machine {
                                             ],
                                             param: Some("k".into()),
                                             map_written: true,
+                                            open: true,
                                         },
                                         IrTapeBinding {
                                             caller_tape: 0,
                                             pairs: Vec::new(),
                                             param: Some("j".into()),
                                             map_written: true,
+                                            open: false,
                                         },
                                     ],
                                     // A two-exit call: the exits= operand
@@ -2239,12 +2399,25 @@ machine {
                                 direct: false,
                                 line: 3,
                             },
+                            // The contract terminal — a synthesized row like
+                            // every trap row, and the only transition whose
+                            // wire form this document would otherwise miss.
+                            IrRule {
+                                pattern: vec![IrCell::Wildcard],
+                                write: None,
+                                moves: None,
+                                debugger: false,
+                                transition: IrTransition::TrapContract,
+                                synthesized: true,
+                                direct: false,
+                                line: 4,
+                            },
                         ],
                         dispatch: IrDispatch::Table,
                     }],
                     local: false,
                     line: 1,
-                    exits: 2,
+                    exits: vec!["e0".to_string(), "e1".to_string()],
                     returns: true,
                 },
                 IrWorld {
@@ -2258,6 +2431,9 @@ machine {
                         volatile: false,
                         glyphs: vec!["_".into(), "x".into(), "y".into()],
                         writes: None,
+                        enters: Some(vec!["x".into()]),
+                        leaves: Some(vec!["y".into()]),
+                        opaque: true,
                     }],
                     entry: 0,
                     states: vec![IrState {
@@ -2280,7 +2456,7 @@ machine {
                     line: 1,
                     // A routine declared `noreturn` — it never resumes at an
                     // in-caller `then`.
-                    exits: 0,
+                    exits: Vec::new(),
                     returns: false,
                 },
             ],
@@ -2339,11 +2515,14 @@ machine {
         }"#;
         let ir = IrProgram::from_json(v3).unwrap();
         let w = &ir.worlds[0];
-        assert_eq!(w.exits, 0);
+        assert!(w.exits.is_empty());
         assert!(w.returns, "absent means returns — v3 knew no noreturn");
         let tape = &w.tapes[0];
         assert!(tape.glyphs.is_empty());
         assert_eq!(tape.writes, None);
+        assert_eq!(tape.enters, None);
+        assert_eq!(tape.leaves, None);
+        assert!(!tape.opaque);
         let IrTransition::CallThen { binding, .. } = &w.states[0].rules[0].transition else {
             panic!("expected a call_then");
         };
@@ -2371,6 +2550,9 @@ machine {
                             volatile: false,
                             glyphs: vec!["_".into(), "x".into(), "y".into()],
                             writes: None,
+                            enters: None,
+                            leaves: None,
+                            opaque: false,
                         },
                         IrTape {
                             name: "b".into(),
@@ -2379,6 +2561,9 @@ machine {
                             volatile: false,
                             glyphs: vec!["_".into(), "x".into(), "y".into()],
                             writes: None,
+                            enters: None,
+                            leaves: None,
+                            opaque: false,
                         },
                     ],
                     entry: 0,
@@ -2403,6 +2588,7 @@ machine {
                                         }],
                                         param: None,
                                         map_written: true,
+                                        open: false,
                                     }],
                                     exits: Vec::new(),
                                     then: Some(IrThen::Goto { state: 0 }),
@@ -2427,7 +2613,7 @@ machine {
                     }],
                     local: false,
                     line: 1,
-                    exits: 0,
+                    exits: Vec::new(),
                     returns: true,
                 },
                 IrWorld {
@@ -2441,6 +2627,9 @@ machine {
                         volatile: false,
                         glyphs: vec!["_".into(), "x".into(), "y".into()],
                         writes: None,
+                        enters: None,
+                        leaves: None,
+                        opaque: false,
                     }],
                     entry: 0,
                     states: vec![IrState {
@@ -2478,7 +2667,7 @@ machine {
                     }],
                     local: true,
                     line: 1,
-                    exits: 0,
+                    exits: Vec::new(),
                     returns: true,
                 },
             ],
@@ -2524,6 +2713,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         };
         let json = serde_json::to_string(&tape).unwrap();
         assert!(!json.contains("volatile"), "false is omitted: {json}");
@@ -2563,14 +2755,14 @@ machine {
 
     /// `IrTape.glyphs` carries every tape's glyph table, and `IrTape.writes`
     /// carries the EFFECTIVE set (`compiler::declared_effective`) — never the
-    /// raw `writes` clause. The `preserves`-only routine mirrors
-    /// `std::…::invertNumber` (`preserves { '_' }`, no `writes` clause): the
-    /// a `preserves` clause on its own DOES constrain the tape, so this
+    /// raw `writes` clause. The `never writes`-only routine mirrors
+    /// `std::…::invertNumber` (`never writes { '_' }`, no `writes` clause): the
+    /// a `never writes` clause on its own DOES constrain the tape, so this
     /// must still yield `Some` (the alphabet minus the preserved glyph),
     /// not the `None` a raw reading of "no `writes` clause" would produce
     /// (docs/tmt/language.md (contract clauses)). Mutation: reading `tape.writes`
     /// directly instead of calling `declared_effective` makes the
-    /// `preserves`-only assertion fail (it would see `None`).
+    /// `never writes`-only assertion fail (it would see `None`).
     #[test]
     fn writes_is_the_effective_set_not_the_raw_clause() {
         let src = "\
@@ -2578,7 +2770,7 @@ alphabet bits { '_', '1' }
 export routine byWrites(tape a: bits writes { '1' }) {
   entry state s { [*] -> return; }
 }
-export routine byPreserves(tape a: bits preserves { '_' }) {
+export routine byNeverWrites(tape a: bits never writes { '_' }) {
   entry state s { [*] -> return; }
 }
 export routine byNeither(tape a: bits) {
@@ -2603,15 +2795,15 @@ machine {
             .expect("the byWrites world");
         assert_eq!(by_writes.tapes[0].writes, Some(vec!["1".to_string()]));
 
-        // The invertNumber shape: `preserves` only, no `writes` clause. A raw
+        // The invertNumber shape: `never writes` only, no `writes` clause. A raw
         // reading of "no `writes` clause" would answer `None`; the effective
         // set is the alphabet minus the preserved blank.
-        let by_preserves = ir
+        let by_never_writes = ir
             .worlds
             .iter()
-            .find(|w| w.name.ends_with("byPreserves"))
-            .expect("the byPreserves world");
-        assert_eq!(by_preserves.tapes[0].writes, Some(vec!["1".to_string()]));
+            .find(|w| w.name.ends_with("byNeverWrites"))
+            .expect("the byNeverWrites world");
+        assert_eq!(by_never_writes.tapes[0].writes, Some(vec!["1".to_string()]));
 
         // Neither clause: the routine's body (a bare `return`) writes
         // nothing, so the INFERRED set is empty — `Some(vec![])`, never
@@ -2928,7 +3120,7 @@ machine {
 }";
         let (ir, _) = lower_of(src);
         let r = world(&ir, "r");
-        assert_eq!(r.exits, 2, "one exit per `state` parameter");
+        assert_eq!(r.exits.len(), 2, "one exit per `state` parameter");
         let exits: Vec<u32> = state(r, "s")
             .rules
             .iter()
@@ -3035,9 +3227,11 @@ machine {
         assert_eq!(exits_of("again"), vec![3, 4]);
     }
 
-    /// `return` as a `state` argument inside the machine world keeps the
-    /// front end's refusal: `main` has no caller to return to. Mutation:
-    /// minting a `Return` resume state regardless of the world kind.
+    /// `return` as a `state` argument inside the machine world is refused
+    /// before lowering is reached: `main` has no caller to return to.
+    /// Mutation: drop the call-list check from the compiler's reuse pass
+    /// (the resolver's own arm then refuses later, at lowering, which
+    /// `analyze` never reaches).
     #[test]
     fn a_return_argument_in_the_machine_world_is_refused() {
         let src = "\
@@ -3050,7 +3244,9 @@ machine {
   entry state go { [*] -> call inner(t = t, hit = return) then fin; }
   state fin { [*] -> stop; }
 }";
-        let e = lower_err_of(src);
+        let Err(e) = analyze(src) else {
+            panic!("expected the front end to refuse");
+        };
         assert_eq!(e.kind.code(), "return-outside-routine");
     }
 
@@ -3130,6 +3326,58 @@ machine {
         assert!(mer.contains("-->|"), "{mer}");
         // The `stop` row routes to the shared terminal node.
         assert!(mer.contains("T_stp"), "{mer}");
+    }
+
+    /// Each trap kind is its own terminal node: a graph that folded the
+    /// contract trap onto a map-hole terminal would show a reader a
+    /// failure that cannot happen at that row. Nothing lowers to the
+    /// contract terminal yet, so the world is built by hand.
+    ///
+    /// Mutation: render `TrapContract` through `T_trap0` (the
+    /// unmapped-read terminal) and the `trap #2` node is gone.
+    #[test]
+    fn to_mermaid_gives_the_contract_trap_its_own_terminal() {
+        let w = IrWorld {
+            name: "main".into(),
+            kind: IrWorldKind::Machine,
+            arity: 1,
+            tapes: vec![IrTape {
+                name: "t".into(),
+                alphabet: "al".into(),
+                cardinality: 2,
+                volatile: false,
+                glyphs: vec!["_".into(), "a".into()],
+                writes: None,
+                enters: None,
+                leaves: None,
+                opaque: false,
+            }],
+            entry: 0,
+            states: vec![IrState {
+                id: 0,
+                name: "s".into(),
+                line: 1,
+                rules: vec![IrRule {
+                    pattern: vec![IrCell::Wildcard],
+                    write: None,
+                    moves: None,
+                    debugger: false,
+                    transition: IrTransition::TrapContract,
+                    synthesized: true,
+                    direct: false,
+                    line: 1,
+                }],
+                dispatch: IrDispatch::Table,
+            }],
+            local: false,
+            line: 1,
+            exits: Vec::new(),
+            returns: true,
+        };
+        let mer = w.to_mermaid();
+        assert!(mer.contains("T_trap2((\"trap #2\"))"), "{mer}");
+        assert!(mer.contains("| T_trap2"), "{mer}");
+        assert!(!mer.contains("T_trap0"), "{mer}");
     }
 
     /// The graph shows every way control leaves a call: one edge per

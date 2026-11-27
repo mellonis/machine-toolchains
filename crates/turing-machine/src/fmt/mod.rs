@@ -19,7 +19,8 @@ mod trivia;
 #[cfg(test)]
 mod tests;
 
-/// One `writes { … }` or `preserves { … }` clause in canonical form,
+/// One contract clause (`writes`, `never writes`, `enters`, `leaves`) in
+/// canonical form,
 /// re-exported so the LSP hover renderers (`lsp/navigate.rs`) can spell a
 /// declared clause identically to this printer's output instead of keeping
 /// a second copy of the same string in sync.

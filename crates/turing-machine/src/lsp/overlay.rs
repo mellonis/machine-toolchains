@@ -398,8 +398,10 @@ pub(super) struct OverlaySym {
 
 /// One open document's cross-file symbol table: every name its siblings
 /// and libraries export, first-wins (sources before libraries, each in
-/// `ProjectView`'s own order, mirroring the linker's own
-/// user-objects-beat-libraries / first-dir-wins precedent), plus a
+/// `ProjectView`'s own order — the order the linker reads its inputs in.
+/// The linker itself picks no winner: a name two inputs define is a link
+/// error once the program reaches it, docs/core.md (linking), so
+/// first-wins here only decides what the editor shows for it), plus a
 /// `members` index for namespace-qualified lookups (a bare name under
 /// its namespace path; top-level exports live under the empty path;
 /// EVERY intermediate namespace level along a name's path is registered
@@ -536,15 +538,75 @@ mod tests {
     /// dependency, matching the zero-new-deps constraint; house
     /// convention has no shared test-support module, so each file defines
     /// its own local helper).
-    fn temp_tree() -> PathBuf {
+    fn temp_tree() -> ScratchDir {
         static N: AtomicU32 = AtomicU32::new(0);
         let d = std::env::temp_dir().join(format!(
             "tmt-overlay-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&d).unwrap();
-        d
+        ScratchDir::fresh(d)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A scratch directory a test is handed starts EMPTY even when an
+    /// earlier process that shared this pid left one under the same name —
+    /// the leftover that once made a manifest walk here read another run's
+    /// `tmt.json` — and is gone once the guard drops. Mutation: dropping
+    /// `ScratchDir::fresh`'s removal step, the stale file is still there;
+    /// dropping the `Drop` impl, the directory outlives the guard.
+    #[test]
+    fn a_scratch_dir_starts_empty_and_is_removed_on_drop() {
+        let path =
+            std::env::temp_dir().join(format!("tmt-overlay-stale-probe-{}", std::process::id()));
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("tmt.json"), "{}").unwrap();
+
+        let dir = ScratchDir::fresh(path.clone());
+        assert_eq!(
+            fs::read_dir(&*dir).unwrap().count(),
+            0,
+            "a stale file from an earlier run survived"
+        );
+        drop(dir);
+        assert!(!path.exists(), "the guard left its directory behind");
     }
 
     #[test]
@@ -560,7 +622,7 @@ mod tests {
         let view =
             project_view(&root.join("app.tmc"), &mut cache).expect("app.tmc is a target member");
 
-        assert_eq!(view.root, root);
+        assert_eq!(view.root, *root);
         assert!(view.stdlib);
         assert_eq!(view.siblings, vec![root.join("shared.tmc")]);
     }
@@ -628,7 +690,7 @@ mod tests {
         let mut cache = ManifestCache::new();
         let view = project_view(&sub.join("deep.tmc"), &mut cache)
             .expect("the lint-only sub/tmt.json is transparent; the root manifest is found");
-        assert_eq!(view.root, root);
+        assert_eq!(view.root, *root);
     }
 
     #[test]
@@ -806,7 +868,7 @@ mod tests {
         );
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: true,
             siblings: vec![sibling.clone()],
             library_paths: vec![],
@@ -852,7 +914,7 @@ mod tests {
         fs::write(&sibling, ".func a\nhlt\n.func b local\nhlt\n").unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling.clone()],
             library_paths: vec![],
@@ -928,7 +990,7 @@ mod tests {
         fs::write(&as_library, &library_bytes).unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![as_source],
             library_paths: vec![as_library],
@@ -989,7 +1051,7 @@ mod tests {
         // source supplying `ns::dup` regardless of whether the library
         // leg contributed anything at all.
         let library_only_view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![],
             library_paths: vec![library.clone()],
@@ -1007,7 +1069,7 @@ mod tests {
         );
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling.clone()],
             library_paths: vec![library],
@@ -1040,7 +1102,7 @@ mod tests {
         .unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![broken, fine],
             library_paths: vec![],
@@ -1063,7 +1125,8 @@ mod tests {
         // round-trip load-bearing: without one, a bug that stopped
         // percent-encoding (or decoding) would go uncaught, since every
         // character in an unescaped path is already its own encoding.
-        let root = temp_tree().join("has space");
+        let tree = temp_tree();
+        let root = tree.join("has space");
         fs::create_dir_all(&root).unwrap();
         let sibling = root.join("sibling.tmc");
         fs::write(
@@ -1085,7 +1148,7 @@ mod tests {
         open_docs.insert(uri, live);
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling],
             library_paths: vec![],
@@ -1116,7 +1179,7 @@ mod tests {
             )
             .unwrap();
             let view = ProjectView {
-                root: root.clone(),
+                root: root.to_path_buf(),
                 stdlib: false,
                 siblings: vec![path],
                 library_paths: vec![],
@@ -1141,7 +1204,7 @@ mod tests {
         )
         .unwrap();
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![path.clone()],
             library_paths: vec![],
@@ -1195,7 +1258,7 @@ mod tests {
         .unwrap();
 
         let view = ProjectView {
-            root: root.clone(),
+            root: root.to_path_buf(),
             stdlib: false,
             siblings: vec![sibling],
             library_paths: vec![],
@@ -1285,15 +1348,52 @@ mod faithfulness {
     /// convention has no shared test-support module, so each file
     /// defines its own local helper — mirrors `overlay::tests`' own
     /// copy).
-    fn temp_tree() -> PathBuf {
+    fn temp_tree() -> ScratchDir {
         static N: AtomicU32 = AtomicU32::new(0);
         let d = std::env::temp_dir().join(format!(
             "tmt-faithfulness-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&d).unwrap();
-        d
+        ScratchDir::fresh(d)
+    }
+
+    /// A scratch directory this test owns. Its name can repeat across
+    /// processes — a later test process may reuse a pid, restarting the
+    /// counter — so `fresh` removes whatever an earlier run left under the
+    /// name before creating it, and `Drop` removes it again once the test
+    /// ends, passing or panicking.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn fresh(dir: std::path::PathBuf) -> Self {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("clearing stale scratch dir {}: {e}", dir.display()),
+            }
+            std::fs::create_dir_all(&dir).unwrap();
+            ScratchDir(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<std::path::Path> for ScratchDir {
+        fn as_ref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// Loads one already-resolved source path per its extension, mirroring
@@ -1335,23 +1435,22 @@ mod faithfulness {
     fn overlay_resolution_matches_linker_resolution_with_provenance() {
         // One target, everything reachable from `main` (see this module's
         // own doc comment): `shared.tmc` a manifest-level source (bare
-        // top-level `helper`, `ns::inner`, and `ns::dup` — the LAST one
-        // deliberately re-declared by the library below too); `app.tmc`
+        // top-level `helper`, `ns::inner`, and `ns::dup`); `app.tmc`
         // the target's own entry (the `machine` block — TM-1's `main`),
-        // calling every kind of cross-file name this task's design
+        // calling every kind of cross-file name this design
         // distinguishes: a bare `.tmc` sibling export, a qualified
-        // `.tmc` sibling export, the SHADOWED qualified name, a bare
+        // `.tmc` sibling export, a second qualified name, a bare
         // `.tma` sibling export, a bare `.tmo`-backed source export, and
         // a `std::` call routed through the separate stdlib channel;
         // `helpers.tma` a `.tma` sibling; `pre.tmo` a `.tmo` declared
         // directly as a target source; `libs/bitops.tmo` a declared
-        // LIBRARY that also defines `ns::dup` (the shadowing case: the
-        // linker's rule is user objects beat libraries) plus an
-        // unrelated `bit_only` export that APP calls too — the ONLY
-        // library-provenance leg in this fixture: every other name has a
-        // `.tmc`/`.tma`/`.tmo` SOURCE contributor, so `bit_only` is what
-        // proves a `.tmo`-shaped overlay answer can also mean "the
-        // declared library", not just "some source `.tmo`".
+        // LIBRARY with a single `bit_only` export that APP calls too —
+        // the ONLY library-provenance leg in this fixture: every other
+        // name has a `.tmc`/`.tma`/`.tmo` SOURCE contributor, so
+        // `bit_only` is what proves a `.tmo`-shaped overlay answer can
+        // also mean "the declared library", not just "some source
+        // `.tmo`". Every name has exactly one definer, as the linker
+        // requires of a reached name.
         let root = temp_tree();
         fs::create_dir_all(root.join("libs")).unwrap();
         fs::write(
@@ -1412,7 +1511,7 @@ machine {
         fs::write(root.join("pre.tmo"), &pre_bytes).unwrap();
 
         let bitops_bytes = crate::compiler::compile(
-            "alphabet b { '_', '0', '1' }\nnamespace ns {\nexport routine dup(tape t: b) { entry state s { [*] -> return; } }\n}\nexport routine bit_only(tape t: b) { entry state s { [*] -> return; } }\n",
+            "alphabet b { '_', '0', '1' }\nexport routine bit_only(tape t: b) { entry state s { [*] -> return; } }\n",
             crate::compiler::CompileOptions::default(),
         )
         .expect("bitops's source compiles")
@@ -1550,23 +1649,7 @@ machine {
             SymbolOrigin::Object(0),
             "shared.tmc"
         );
-        // THE discriminating assertion: the linker's own, independently
-        // implemented shadowing rule (`resolve::resolve` — user objects
-        // beat libraries) also picks shared.tmc over libs/bitops.tmo. If
-        // the overlay's first-wins ordering (`insert_export`, above) ever
-        // diverged from the linker's — say, libraries were merged before
-        // sources, or a `.tmo` library name were preferred by
-        // registration order rather than by kind — the two independent
-        // answers being compared here (this one, and the overlay's own
-        // `ns::dup` pick asserted above) would disagree, and only THIS
-        // fixture's duplicate-defined `ns::dup` can catch that: every
-        // other name in this fixture has exactly one definer, so picking
-        // the wrong one would be invisible to a name-only comparison.
-        assert_eq!(
-            origin_of("ns::dup"),
-            SymbolOrigin::Object(0),
-            "shared.tmc must win — NOT libs/bitops.tmo"
-        );
+        assert_eq!(origin_of("ns::dup"), SymbolOrigin::Object(0), "shared.tmc");
         assert_eq!(origin_of("asm_fn"), SymbolOrigin::Object(2), "helpers.tma");
         assert_eq!(origin_of("pre_fn"), SymbolOrigin::Object(3), "pre.tmo");
         assert_eq!(
@@ -1635,19 +1718,23 @@ machine {
         );
     }
 
+    /// Mutation: first-wins restored in `resolve` — `resolve_names`
+    /// returns Ok and the test reddens.
     #[test]
-    fn overlay_resolution_matches_linker_resolution_for_a_shadowed_std_name() {
-        // The `ns::dup` shape (the sibling-vs-library shadowing case
-        // above), one level over: a sibling's own `namespace std {
-        // namespace binaryNumbers { export routine goToNumber ... } }`
-        // mangles to the SAME `std::binaryNumbers::goToNumber` key the
-        // embedded stdlib roster answers under, creating a genuine
-        // two-definer collision — the embedded stdlib object really
-        // does export a symbol named `std::binaryNumbers::goToNumber`.
-        // Both sides must pick the sibling: `Overlay.symbols`'s own
-        // first-wins `insert_export` (sources before libraries) against
-        // `resolve_names`'s independently-implemented shadowing rule
-        // (user objects beat libraries).
+    fn a_sibling_defining_a_reached_std_name_is_a_link_error_the_overlay_does_not_yet_report() {
+        // A sibling's own `namespace std { namespace binaryNumbers {
+        // export routine goToNumber ... } }` mangles to the SAME
+        // `std::binaryNumbers::goToNumber` key the embedded stdlib roster
+        // answers under, creating a genuine two-definer collision — the
+        // embedded stdlib object really does export a symbol named
+        // `std::binaryNumbers::goToNumber`. The overlay picks the sibling
+        // (`Overlay.symbols`'s own first-wins `insert_export`); the
+        // linker refuses the pair once the program reaches the name
+        // (docs/core.md (linking)), and the overlay has no duplicate
+        // diagnostic of its own yet (docs/lsp.md (caveats)). The
+        // fixture declares the stdlib's exact signature, so the
+        // compile-time one-declaration rule lets it through to the
+        // linker.
         //
         // SCOPE, PRECISELY — what this test does and does not cover:
         // `Overlay.symbols` is built ONLY from `view.siblings` and
@@ -1695,20 +1782,17 @@ machine {
         )
         .unwrap();
         const SHARED: &str = "\
-alphabet b { '_', '0' }
 namespace std {
 namespace binaryNumbers {
-export routine goToNumber(tape num: b) { entry state s { [*] -> return; } }
+export routine goToNumber(tape num: std::binaryNumbers::symbols writes {} leaves { '$' }) { entry state s { [*] -> return; } }
 }
 }
 ";
         fs::write(root.join("shared.tmc"), SHARED).unwrap();
 
         const APP: &str = "\
-alphabet b { '_', '0' }
-
 machine {
-  tape t: b;
+  tape t: std::binaryNumbers::symbols;
   entry state s { [*] -> call std::binaryNumbers::goToNumber() then done; }
   state done { [*] -> stop; }
 }
@@ -1760,29 +1844,15 @@ machine {
             .collect();
         let libraries = vec![crate::stdlib::object().clone()];
 
-        // As in the provenance test above: `resolve_names` alone proves
-        // only name resolution, not that this link set is legal
-        // end-to-end (docs/core.md (linking)).
-        crate::asm::link(
-            &objects,
-            &libraries,
-            mtc_core::linker::LinkOptions::default(),
-        )
-        .expect("this fixture's link set must actually link, not just resolve names");
-
-        let resolved = resolve_names(&objects, &libraries, "main").expect(
-            "std::binaryNumbers::goToNumber resolves — the sibling, not a genuine unresolved miss",
-        );
-        let origin = resolved
-            .reached
-            .iter()
-            .find(|r| r.name == "std::binaryNumbers::goToNumber")
-            .expect("std::binaryNumbers::goToNumber is reached from main")
-            .origin;
-        assert_eq!(
-            origin,
-            SymbolOrigin::Object(1),
-            "shared.tmc (object index 1) must win — NOT the embedded stdlib library"
+        let err = resolve_names(&objects, &libraries, "main")
+            .expect_err("the sibling and the embedded stdlib both define a reached name");
+        assert!(
+            matches!(
+                &err,
+                LinkError::DuplicateSymbol { name, .. }
+                    if name == "std::binaryNumbers::goToNumber"
+            ),
+            "{err:?}"
         );
     }
 

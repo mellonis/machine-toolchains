@@ -2,7 +2,9 @@
 
 `tmt fmt` reprints a source file to one canonical layout. Each input's
 extension picks its formatter: a `.tmc` file goes through the language's
-own printer, described on this page; a `.tma` file goes through the
+own printer, described on this page, and so does a `.tmh` header, which
+is `.tmc` syntax — every header `tmt interface` generates is already this
+printer's output (`docs/tmt/cli.md (interface)`); a `.tma` file goes through the
 canonical assembly grid shared with the rest of the toolchain
 (`docs/formats.md`). The command surface — the directory walk,
 `--check`, stdin with `--lang`, exit codes — is `docs/tmt/cli.md`.
@@ -146,9 +148,9 @@ to that token's column:
        ) then fin;
 ```
 
-A tape parameter's `writes`/`preserves` clause
-(`docs/tmt/language.md (contract clauses)`) renders as part of the
-parameter it decorates — one leading space before the keyword, `{ … }`
+A tape parameter's contract clauses — `writes`, `never writes`,
+`enters`, `leaves` (`docs/tmt/language.md (contract clauses)`) — render
+as part of the parameter they decorate — one leading space before the keyword, `{ … }`
 with interior spacing around a non-empty body and bare `{}` for an empty
 one — and counts toward that same parameter's own width like any other
 token, not as an exemption from it. A signature with a clause wraps
@@ -170,6 +172,12 @@ of whether the resulting line would have fit
 comment, which stays inline there; a `//` comment, or any own-line
 comment, block or line, still forces a break in an `alphabet` body
 exactly as it does in every other list — not just because of width.
+
+A `set` declaration prints in an `alphabet`'s shape — `set digits {
+'0'..'2' }`, and `set none {}` for an empty one — and a set named in an
+alphabet body, a clause or a pattern cell prints as written, qualified
+or bare. An open map's `*` prints as the map's last entry, `with map {
+'0' -> '0', * }`, a trailing comma after it dropped like any other.
 
 A single binding argument is never broken further on width alone — a
 `with map { … }` with no interior comment of its own stays inline, so one
@@ -381,7 +389,26 @@ stream. A block comment stays inline wherever it was written —
 `state /* mid */ s {`, `machine /* x */ {`, `tape main /* c */ : ab;`,
 `routine r(tape t: ab) /* c */ {` are all fixed points. A comment is
 never glued to a neighbouring token, so a `:` or `;` that normally
-abuts its predecessor takes a space when a comment intervenes.
+abuts its predecessor takes a space when a comment intervenes. A named
+vector cell owns its `name`-to-`:` slot the same way — `[t /* c */ : 'a']
+-> stop;` and `[t: /* c */ 'a'] -> stop;` are fixed points like any other
+(docs/tmt/language.md (named vector cells)).
+
+A rule guard's own tokens are written text, printed as written — names,
+literals and parentheses intact — and its comments hold the rule in
+every slot around it: between `]` and `where`, between `where` and its
+`{`, after the `{` and before the `}`, on either side of the `==`, `!=`,
+`in`, `&&`, `||` and order operators inside, and between the closing
+`}` and the `->` (docs/tmt/language.md (rule guards)):
+
+```
+['a' as x] /* c */ where { x /* d */ == 'a' /* e */ } -> stop;
+```
+
+A LINE comment inside a guard ends its line and the run continues at
+the continuation indent, exactly as one in a vector does, and takes the
+rule off the grid like any LINE comment. Comments aside, the guard sits
+in the pattern column, which widens for it as for any column content.
 
 **On the state-block grid**, a BLOCK comment keeps its rule on the grid,
 occupying its column: it joins the first column the grid has at or after
@@ -401,6 +428,12 @@ between its own tokens — the one place a substitution reprints spaced
 rather than tight, since a comment cannot be concatenated into the tight
 form.
 
+The rule holds with no exception inside a `set` declaration and a
+qualified set reference, anywhere in a pattern cell naming a set —
+qualified or not, bound with `as` or not — before and inside the
+`enters`/`leaves` clauses and between them, between the two words of
+`never writes`, and on either side of an open map's `*`.
+
 **Three recorded residuals** still relocate, all stable on the first
 pass, all inside a construct whose own list machinery claims every
 pending comment wholesale:
@@ -414,8 +447,9 @@ pending comment wholesale:
 - in a signature's parameter list, a comment between a parameter and the
   following `,` crosses the comma and prints after it. The parameter's
   own interior is unaffected — a comment inside the parameter, including
-  one inside its `writes`/`preserves` clause, stays where it was
-  written, and so does one written after the comma:
+  one inside any of its contract clauses or between the two words of
+  `never writes`, stays where it was written, and so does one written
+  after the comma:
 
   ```
   routine r(tape t: ab writes /* o */ {} /* p */ , /* q */ state /* r */ hit)

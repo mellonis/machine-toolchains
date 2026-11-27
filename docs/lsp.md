@@ -252,17 +252,24 @@ than the syntax tree — a document being typed into is a document that
 does not parse, and anchoring on the tree would switch completions off
 exactly when they are wanted. Its contexts:
 
-- **Top-level and world-item position** — the reserved words legal there
-  (`alphabet`, `export`, `graph`, `machine`, `namespace`, `routine`,
-  `use`; inside a world `bind`, `entry`, `graft`, `state`, and `tape` in
-  the machine block).
+- **Top-level and world-item position** — reserved words legal there
+  (`alphabet`, `export`, `graph`, `machine`, `map`, `namespace`,
+  `routine`, `use`; inside a world `bind`, `entry`, `graft`, `state`, and
+  `tape` and `volatile` in the machine block). `set` is not offered.
 - **`use` paths** — the importable alphabet and world names.
 - **An alphabet reference** — the declared alphabet names.
 - **A vector cell** — the enclosing world's tape at *that* vector
-  position supplies its alphabet's symbols, spelled the way source spells
-  them, alongside the vector's own literal vocabulary: `*` in a pattern,
+  position supplies its alphabet's symbols — a symbol whose label names a
+  number spelled bare whatever quotes the alphabet gave it (`'7'` and `7`
+  are one symbol), a member a glyph set brought in included, and every
+  other symbol quoted — alongside the vector's own literal vocabulary: `*` in a pattern,
   `-` in a write vector, and the closed, tape-independent `<` / `>` / `.`
-  in a move vector.
+  in a move vector. At the start of a cell the tapes of the world are
+  also offered as `name: ` labels for the named form — all of them in the
+  first cell, only those not yet named once the vector is named, and none
+  once the vector is positional. After a label, that tape's alphabet
+  supplies the symbols whatever the cell's position; in a named vector a
+  cell start offers labels only.
 - **An action, a `goto` target, or a continuation** — the enclosing
   world's states, state parameters and graft instances, plus the action
   keywords and the `halt` / `return` / `stop` terminators.
@@ -340,7 +347,9 @@ guessing a word boundary; clients that do not declare it get a plain
 location. Every service answers this way.
 
 **`.tmc`** resolves alphabet references, world (routine/graph) names, a
-world's states, its bind and graft instances, its tapes, and a signature
+world's states, its bind and graft instances, its tapes (including the
+tape named by a cell label in a named vector, `[tape: cell, …]`; a label
+naming no tape of the world has no target), and a signature
 parameter named on a binding argument's left-hand side. Every `as NAME`
 is a declaration: a reference to a graft instance, a bind instance, or a
 `use` alias lands on that `as NAME`, and the thing it stands for is one
@@ -404,7 +413,7 @@ location to open.
 
 **`.tmc`** answers on the same references its go-to-definition resolves,
 and leads with a **signature line** — an alphabet with its glyphs, a world
-with its parameters and their alphabets (any DECLARED `writes`/`preserves`
+with its parameters and their alphabets (any DECLARED `writes`/`never writes`
 clause on a tape parameter included, in fmt's own canonical spelling —
 `docs/tmt/language.md (contract clauses)`, `docs/tmt/fmt.md`), a bind
 instance with the mangled routine it targets and each argument's bound
@@ -438,7 +447,7 @@ tape directly but hands it to a callee under a symbol map still shows
 whatever the callee's write set maps back onto it, since a caller's write
 set is host-independent — it depends only on what the callee, and
 everything the callee in turn calls, provably writes. A callee in the
-standard library contributes what it *declares*: its `writes`/`preserves`
+standard library contributes what it *declares*: its `writes`/`never writes`
 clauses are a promise its own compile enforced, so a call into a library
 routine that declares `writes {}` adds nothing to the caller's line, and
 one that declares no clause adds the whole alphabet. A callee whose
@@ -446,7 +455,7 @@ signature is not visible at all — a library object at the link boundary —
 adds the whole alphabet too.
 
 **Declared and inferred are two different statements, and a hover can
-show both at once.** When a tape parameter carries a `writes`/`preserves`
+show both at once.** When a tape parameter carries a `writes`/`never writes`
 clause, that clause already appears in the signature line above this
 block — a DECLARED promise about the parameter. The `writes <tape>:
 {...}` line here is a separate, INFERRED computation over the body. The
@@ -456,7 +465,7 @@ subset of its own declared clause is legal, and the two lines can
 legitimately disagree — a hover is not restating one fact twice, it is
 answering two different questions about the same tape. The worked
 example below, a real declaration from the embedded standard library,
-shows the shape: a declared `preserves { '_' }` in the signature line,
+shows the shape: a declared `never writes { '_' }` in the signature line,
 and the inferred set the checker actually computed underneath it.
 
 The block appears only on a **declaration** hover — the routine's or
@@ -475,7 +484,7 @@ declaration hover against that document's own resolved module, so it
 does get the block, the same as any other `.tmc` file:
 
 ```
-routine std::binaryNumbersBare::invertNumber(tape num: symbols preserves { '_' })
+routine std::binaryNumbersBare::invertNumber(tape num: symbols never writes { '_' })
 
 writes num: {'0', '1'}
 
@@ -562,8 +571,10 @@ The outline, structural in every service and never gated on resolution.
 
 - **`.pmc`** — namespace blocks (reopened blocks stay separate siblings,
   as in source) containing functions, with nested functions as children.
-- **`.tmc`** — alphabets, namespaces (their items as children), routines
-  and graphs (their world items as children), and the machine block.
+- **`.tmc`** — alphabets, glyph sets and named maps, namespaces (their
+  items as children), routines and graphs (their world items as
+  children), and the machine block. A set is a leaf, like an alphabet;
+  hover and go-to-definition do not resolve a reference to a set.
 - **`.pma`** — functions with their own labels as children.
 - **`.tma`** — one node per function with its code labels as children, one
   per `.routine` signature, and one per labeled table or frame descriptor.
@@ -635,8 +646,10 @@ everywhere above, unchanged.
 
 Within the overlay, a name resolves in exactly the order the linker
 resolves it: the document's own local declarations first, then the
-declared sources, then the declared libraries (first library wins on a
-name collision), and the embedded standard library **last**. What a
+declared sources, then the declared libraries, and the embedded standard
+library **last**. The order only decides what the editor shows when two
+of them define one name, which the linker refuses once the program
+reaches it (`docs/core.md (linking)`). What a
 declared source contributes is not simply "exported symbols" on both
 toolchains: for `.pmc` it is exactly that — an unexported function never
 crosses the boundary. For `.tmc` the rule is per world kind, since only
@@ -646,10 +659,13 @@ contributes, exported or not, because a graph is spliced into a world
 rather than called; and a `machine` world always contributes its `main`
 regardless of `export` — the grammar does not accept `export` on a
 `machine` block at all, and the linker reaches its `main` unconditionally.
-Because the standard library resolves last, a project that legitimately
-shadows it with its own `namespace std { export … }` gets an editor that
-follows the project's own definition, not the embedded one, the same way
-the linker would.
+A project that defines a `std::` name of its own sees its own definition
+in the editor; the linker refuses the pair once the program reaches the
+name. For `.tmc` that holds only when the project's definition has the
+standard library's own signature: with another signature it is
+`conflicting-declaration` at compile time
+(`docs/tmt/language.md (declarations)`), not something the editor shows
+in the library's place.
 
 A project may declare `"stdlib": false`; doing so removes the `std::`
 surface entirely — no completion candidates, no hover, and no
@@ -715,11 +731,12 @@ that is a documented policy choice, not a faithfulness gap.) Both crates
 carry a fixture that builds both sides of one small project — the
 overlay through the real service, the linker through the same
 effective-source-order dispatch the build driver uses — and compares
-them file-for-file, including the shadowed-stdlib case above.
+them file-for-file, and pins that a reached sibling-versus-standard-library
+collision is a link error.
 
 ### Caveats
 
-Five limitations are real and worth stating plainly rather than glossing
+Six limitations are real and worth stating plainly rather than glossing
 over:
 
 - **Lexical path identity.** Membership and sibling lookup compare paths
@@ -749,6 +766,9 @@ over:
   declared set at a time. A document belonging to two targets, where a
   name is declared only in one target's sources, can show no warning in
   the editor while building the other target alone would still emit one.
+- **Duplicate definitions are not reported yet.** A name a sibling and a
+  library (or the standard library) both define resolves to the sibling
+  here, while the linker refuses the program that reaches it.
 - **Silent degradation on a broken sibling or a missing library.** A
   declared sibling that fails to read from disk, or whose text fails to
   parse, contributes an *empty* export list to the overlay rather than
@@ -849,6 +869,15 @@ above resolves it first. The staged analysis runs lex → parse → resolve,
 each stage keeping its partial result, plus the expansion stage the
 service adds for its fatal (**Diagnostics**, above).
 
+The same service serves a `.tmh` header, which is `.tmc` text read for
+its declarations alone (`docs/tmt/language.md (headers)`). The document's
+extension picks the reading, ASCII case ignored: a header is analyzed
+declarations-only — a `machine` block or a bodied routine in it is the
+error the command line reports — the expansion stage is skipped, since a
+header has no bodies, and lint runs the header rule subset
+(`docs/tmt/lint.md (linting a header)`). Every other feature answers as
+it does for a source. A client registers `.tmh` under the `tmc` language.
+
 | Feature | Needs | Degrades to (when the tier fails) |
 |---|---|---|
 | Diagnostics: fatal error | the source lexes | one error at the failing stage, honest and singular |
@@ -893,9 +922,11 @@ never holds a stdlib entry to begin with.
 
 Both surfaces, and completion in a `use` path or a `call`/`bind` target,
 consult the project overlay FIRST (**Cross-file resolution**, above): a
-project that defines its own `namespace std { export routine … }` shadows
-the embedded routine of the same mangled name, exactly as the linker
-resolves it.
+project that defines its own `namespace std { export routine … }` is what
+the editor shows for that name — when its signature equals the standard
+library's; a definition with another signature is
+`conflicting-declaration` (`docs/tmt/language.md (declarations)`). The
+linker refuses the pair once the program reaches it.
 
 ## The `.tma` service
 
@@ -967,9 +998,10 @@ vim.lsp.config.tmt = {
 }
 vim.lsp.enable({ "pmt", "tmt" })
 
--- Recognize the four extensions (no bundled filetype plugin ships):
+-- Recognize the extensions (no bundled filetype plugin ships); a `.tmh`
+-- header is the `tmc` filetype:
 vim.filetype.add({
-  extension = { pmc = "pmc", pma = "pma", tmc = "tmc", tma = "tma" },
+  extension = { pmc = "pmc", pma = "pma", tmc = "tmc", tmh = "tmc", tma = "tma" },
 })
 ```
 
@@ -993,7 +1025,7 @@ language-servers = ["pmt-lsp"]
 [[language]]
 name = "tmc"
 scope = "source.tmc"
-file-types = ["tmc"]
+file-types = ["tmc", "tmh"]
 roots = ["tmt.json"]
 language-servers = ["tmt-lsp"]
 

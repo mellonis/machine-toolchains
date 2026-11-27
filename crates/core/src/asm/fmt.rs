@@ -497,8 +497,9 @@ fn render_routine(r: &RoutineDirectiveCst) -> Piece {
     let mut code = format!(".routine {}, tapes={}, alpha=({})", r.name, r.tapes, alpha);
     // The interface tail, in its one legal order (docs/formats.md
     // (routine interfaces)); absent fields print nothing.
-    if let Some((exits, _)) = r.exits {
-        code.push_str(&format!(", exits={exits}"));
+    if let Some((exits, _)) = &r.exits {
+        let names: Vec<&str> = exits.iter().map(|(name, _)| name.as_str()).collect();
+        code.push_str(&format!(", exits=({})", names.join(", ")));
     }
     if r.noreturn.is_some() {
         code.push_str(", noreturn");
@@ -1438,11 +1439,11 @@ loop:   nop
 
     #[test]
     fn the_routine_tail_survives_formatting() {
-        let src = ".routine main,tapes=1,alpha=(2),exits=2,noreturn\n";
+        let src = ".routine main,tapes=1,alpha=(2),exits=(e0, e1),noreturn\n";
         let once = format_asm_with(src, caps_interface()).unwrap();
         assert_eq!(
             once,
-            ".routine main, tapes=1, alpha=(2), exits=2, noreturn\n"
+            ".routine main, tapes=1, alpha=(2), exits=(e0, e1), noreturn\n"
         );
         assert_eq!(format_asm_with(&once, caps_interface()).unwrap(), once);
     }

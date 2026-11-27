@@ -41,7 +41,11 @@ head.
 
 ## Linking semantics
 
-- **Symbol resolution:** duplicate exported symbols across user objects are a link-time error; libraries resolve first-wins and may be shadowed by user objects.
+- **Symbol resolution:** an exported name has one definition per link.
+  Two user objects defining one name are a link-time error; so is a name
+  a library also defines (another library, or the embedded standard
+  library) once the program reaches it (`docs/core.md (linking)`). A name
+  nothing calls never collides.
 - **Implicit std:** after all user objects are collected and their symbol
   references resolved against each other, any remaining unresolved names
   are matched against `std.pmo` — familiar `libc` semantics. `--nostdlib`
@@ -50,18 +54,12 @@ head.
   `main` transitively reaches. An unreferenced std routine costs nothing
   in the final `.pmx` — the same dead-function elimination that applies
   to user objects (`docs/formats.md (.pmo)`).
-- **Overriding std:** shadowing is an OPT-IN property of exported names.
-  To override a namespaced std export, declare a same-named export inside
-  the same namespace in your own source:
-  ```c
-  namespace std {
-      export goToEnd() { /* your replacement */ }
-  }
-  ```
-  This is the same symbol, and user code beats the library in that
-  arbitration — accidental collision is impossible (local symbols are
-  invisible to cross-object resolution, `docs/pmt/language.md (visibility)`),
-  while a deliberate override is explicit.
+- **Replacing std:** a library routine cannot be replaced one at a
+  time — defining a `std::` name the program calls is a duplicate-symbol
+  link error. To replace the library, link without it (`--nostdlib`) and
+  supply your own set. Accidental collision is impossible in either case
+  (local symbols are invisible to cross-object resolution,
+  `docs/pmt/language.md (visibility)`).
 - **Both build columns ship:** the embedded library is one object,
   compiled once per process, and it carries both build columns
   (`docs/pmt/language.md (volatile programs)`) — so a volatile program
@@ -75,13 +73,5 @@ head.
   volatile program that reaches one of those three still links its gated
   body, and its image differs from the same program without the modifier
   (`docs/pmt/optimizer.md (volatile builds)`).
-- **Interposition vs optimization (semantic-binding caveat):** `-O1`'s
-  inline pass binds intra-module calls at compile time. That means
-  overriding one of a *library's own internal* callees only affects call
-  sites that are still calls after optimization — the linker guarantees
-  interposition only for the relocations it actually still sees, which is
-  the same semantic-binding default mainstream compilers use. Whether
-  `std.pmo` itself needs to be fully interposable (built with
-  `--fno-inline`) is a build-configuration decision, not a language rule;
-  see `docs/pmt/language.md (optimization)` for the general interposition
-  caveat.
+- **No interposition:** the library's own internal calls are bound inside
+  the library object, and nothing can interpose on them.

@@ -243,7 +243,9 @@ Each pass below is shown transforming a small program, and most examples
 follow the same recipe: compile once with `--emit-ir=lowered` for the
 graph as lowering produced it, once with `--emit-ir=after:<pass>` for
 the graph right after that pass last changed something, and render both
-with `tmt ir graph` (`docs/tmt/cli.md (ir)`). `-v` on the first compile
+with `tmt ir graph --raw` (`docs/tmt/cli.md (ir)`). The passes rewrite
+rows, so the examples draw the row-for-row raw view rather than the
+merged default, which would fold parallel rows together. `-v` on the first compile
 shows which passes fired and how often, which is how one can tell that a
 fragment shows what it claims to show.
 
@@ -273,20 +275,24 @@ tmt: unknown IR stage `after:dead_rows` (lowered | final | after:inline | after:
 In the rendered graphs one node is one **state**, not a block: `S<id>`
 is its dense id and the quoted text is its source name. Round nodes are
 shared terminal pseudo-nodes — `stp`, `hlt`, `ret`, `tail`, and
-`trap #0` / `trap #1` for the two synthesized trap kinds — declared once
-each and reused, so all of a world's control flow ends somewhere
-visible. Every edge is one match row, labelled with a compact summary of
-it: the match pattern in `[…]`, then the write vector as `w[…]` where
-the row writes and the move vector as `m[…]` where it moves, with `brk `
-prefixed on a `debugger` row and `call <target>` or `tail <target>`
-appended on a call.
+`trap #0` / `trap #1` / `trap #2` for the three synthesized trap kinds —
+declared once each and reused, so all of a world's control flow ends
+somewhere visible. In the raw view every edge is one match row,
+labelled with a compact summary of it: the match pattern in `[…]`, then
+the write vector as
+`w[…]` where the row writes and the move vector as `m[…]` where it
+moves, with `brk ` prefixed on a `debugger` row and `call <target>` or
+`tail <target>` appended on a call.
 
 Inside those vectors, `*` is a wildcard match cell, `-` is a keep write,
 and `<` / `>` / `.` are the three moves. Concrete cells render as
 **symbol indices, not glyphs** — the IR is index-only by contract, since
 the processor never sees glyphs either (`docs/formats.md (IR JSON)`) —
 so in a world whose tape carries `alphabet ab { '_', 'a', 'b' }` the row
-matching `'a'` renders as `[1]` and a write of `'b'` as `w[2]`.
+matching `'a'` renders as `[1]` and a write of `'b'` as `w[2]`. In the
+text itself `<` and `>` are written as Mermaid's entity codes `#lt;` and
+`#gt;`, which the diagram draws as the arrows
+(`docs/formats.md (graph label notation)`).
 
 `tmt ir graph` renders every world in the document; `--function NAME`
 keeps just one. The flag keeps the `pmt` spelling for cross-tool muscle
@@ -314,7 +320,9 @@ identity projection where the callee takes a prefix of the caller's
 tapes and the rest stay unbound. An explicit map is refused even when
 every pair is an identity, because a partial pair list encodes
 cardinality holes that the composition engine, not this pass, is the
-authority on. The callee must be a routine (never the `machine` world,
+authority on — and an open map (`*`, `docs/tmt/language.md (symbol
+maps)`) is an explicit map too, so a site that leaves its map open is
+never spliced. The callee must be a routine (never the `machine` world,
 which nothing calls), a leaf (no nested call of its own), and at most
 six rows in total. The candidate set is computed once from the state at
 the start of the pass, so a routine that becomes a leaf during this pass
@@ -348,7 +356,7 @@ opt: 2 round(s)
   jump-threading main: 1 change(s)
   dce main: 1 change(s)
   dispatch-select main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -363,7 +371,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:inline -o inlined.tmo inline.tmc
-$ tmt ir graph inlined.ir.json --function main
+$ tmt ir graph inlined.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -375,7 +383,7 @@ flowchart TD
     T_stp(("stp"))
     S0 -->|"[*]"| S2
     S1 -->|"[*]"| T_stp
-    S2 -->|"[2] w[1] m[<]"| S2
+    S2 -->|"[2] w[1] m[#lt;]"| S2
     S2 -->|"[*] w[2]"| S1
 ```
 
@@ -415,8 +423,9 @@ L001C:  stp
 A `brk` row inside a spliced callee is copied verbatim into every
 splice, so each instance keeps its own pause address — the same
 per-instance duplication a graft produces. Because inlining binds a call
-at compile time, a library meant to stay interposable should be built
-with `--fno-inline`.
+at compile time, a library built with `--fno-inline` keeps its internal
+calls as separate call sites; this does not make a routine replaceable,
+since a name has one definition per link (`docs/core.md (linking)`).
 
 **The inline-cap sweep.** `INLINE_MAX_RULES`, the six-row ceiling above,
 was re-measured against the hand-written universal Turing machine's
@@ -526,7 +535,7 @@ opt: 2 round(s)
   tail-merge main: 7 change(s)
   dce main: 6 change(s)
   dce main.outline0: 1 change(s)
-$ tmt ir graph on.ir.json --function main.outline0
+$ tmt ir graph on.ir.json --function main.outline0 --raw
 ```
 
 ```mermaid
@@ -540,13 +549,13 @@ flowchart TD
     S5["a5"]
     S6["a6"]
     T_ret(("ret"))
-    S0 -->|"[1] m[>]"| S1
+    S0 -->|"[1] m[#gt;]"| S1
     S0 -->|"[*]"| T_ret
-    S1 -->|"[*] m[>]"| S2
-    S2 -->|"[*] m[>]"| S3
-    S3 -->|"[*] m[>]"| S4
-    S4 -->|"[*] m[>]"| S5
-    S5 -->|"[*] m[>]"| S6
+    S1 -->|"[*] m[#gt;]"| S2
+    S2 -->|"[*] m[#gt;]"| S3
+    S3 -->|"[*] m[#gt;]"| S4
+    S4 -->|"[*] m[#gt;]"| S5
+    S5 -->|"[*] m[#gt;]"| S6
     S6 -->|"[*]"| S0
 ```
 
@@ -569,7 +578,7 @@ both of `start`'s arms now enter the same state:
 
 ```
 $ tmt compile -O1 --foutline --emit-ir=final -o final.tmo outline.tmc
-$ tmt ir graph final.ir.json --function main
+$ tmt ir graph final.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -676,7 +685,7 @@ opt: 2 round(s)
   tail-merge main: 1 change(s)
   dce main: 1 change(s)
   dispatch-select main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -691,12 +700,12 @@ flowchart TD
     S0 -->|"[*]"| S2
     S1 -->|"[*]"| S2
     S2 -->|"[*]"| S3
-    S3 -->|"[*] m[>]"| T_hlt
+    S3 -->|"[*] m[#gt;]"| T_hlt
 ```
 
 ```
 $ tmt compile -O1 --emit-ir=after:jump-threading -o threaded.tmo jump-threading.tmc
-$ tmt ir graph threaded.ir.json --function main
+$ tmt ir graph threaded.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -711,7 +720,7 @@ flowchart TD
     S0 -->|"[*]"| S3
     S1 -->|"[*]"| S3
     S2 -->|"[*]"| S3
-    S3 -->|"[*] m[>]"| T_hlt
+    S3 -->|"[*] m[#gt;]"| T_hlt
 ```
 
 Both of `start`'s rows now reach `work` directly, and so does the edge
@@ -721,7 +730,7 @@ the end of the round `dce` has removed them:
 
 ```
 $ tmt compile -O1 --emit-ir=final -o final.tmo jump-threading.tmc
-$ tmt ir graph final.ir.json --function main
+$ tmt ir graph final.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -732,7 +741,7 @@ flowchart TD
     T_hlt(("hlt"))
     S0 -->|"[1]"| S1
     S0 -->|"[*]"| S1
-    S1 -->|"[*] m[>]"| T_hlt
+    S1 -->|"[*] m[#gt;]"| T_hlt
 ```
 
 A *cycle* of empty forwarders is left exactly as written — it is a
@@ -906,6 +915,13 @@ bare jump would skip that push, and the callee's return would restore
 the wrong frame and desync the stack. Only a bindless call — a plain
 call the linker resolves — is safe to turn into a jump.
 
+A routine whose tape declares `leaves` loses the shape whenever its
+checks are built, by construction: the `leaves` check stands before every `return`
+(`docs/tmt/language.md (head-position clauses)`), so its `call … then
+return` continues into the check rather than returning, and there is no
+tail position left to rewrite. The same routine built with
+`--strip-asserts` has no check, and the pass applies as above.
+
 ```tmc
 alphabet ab { '_', 'a' }
 
@@ -925,7 +941,7 @@ machine {
 $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo tail-call.tmc
 opt: 2 round(s)
   tail-call caller: 1 change(s)
-$ tmt ir graph lowered.ir.json --function caller
+$ tmt ir graph lowered.ir.json --function caller --raw
 ```
 
 ```mermaid
@@ -938,7 +954,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:tail-call -o tailed.tmo tail-call.tmc
-$ tmt ir graph tailed.ir.json --function caller
+$ tmt ir graph tailed.ir.json --function caller --raw
 ```
 
 ```mermaid
@@ -991,7 +1007,7 @@ $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo tail-merge.tmc
 opt: 2 round(s)
   tail-merge main: 1 change(s)
   dispatch-select main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1004,14 +1020,14 @@ flowchart TD
     T_stp(("stp"))
     S0 -->|"[1]"| S1
     S0 -->|"[*]"| S2
-    S1 -->|"[*] w[2] m[>]"| S3
-    S2 -->|"[*] w[2] m[>]"| S3
+    S1 -->|"[*] w[2] m[#gt;]"| S3
+    S2 -->|"[*] w[2] m[#gt;]"| S3
     S3 -->|"[*]"| T_stp
 ```
 
 ```
 $ tmt compile -O1 --emit-ir=after:tail-merge -o merged.tmo tail-merge.tmc
-$ tmt ir graph merged.ir.json --function main
+$ tmt ir graph merged.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1023,7 +1039,7 @@ flowchart TD
     T_stp(("stp"))
     S0 -->|"[1]"| S1
     S0 -->|"[*]"| S1
-    S1 -->|"[*] w[2] m[>]"| S2
+    S1 -->|"[*] w[2] m[#gt;]"| S2
     S2 -->|"[*]"| T_stp
 ```
 
@@ -1076,10 +1092,10 @@ machine {
 
 ```
 $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo dce.tmc
-dce.tmc:5:9: warning: state `orphan` is unreachable in `main`
+dce.tmc:5:9: warning: state `orphan` is unreachable in `main` [unreachable-state]
 opt: 2 round(s)
   dce main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1090,15 +1106,15 @@ flowchart TD
     S2["done"]
     T_hlt(("hlt"))
     T_stp(("stp"))
-    S0 -->|"[*] m[>]"| S2
-    S1 -->|"[*] m[<]"| T_hlt
+    S0 -->|"[*] m[#gt;]"| S2
+    S1 -->|"[*] m[#lt;]"| T_hlt
     S2 -->|"[*]"| T_stp
 ```
 
 ```
 $ tmt compile -O1 --emit-ir=after:dce -o alive.tmo dce.tmc
-dce.tmc:5:9: warning: state `orphan` is unreachable in `main`
-$ tmt ir graph alive.ir.json --function main
+dce.tmc:5:9: warning: state `orphan` is unreachable in `main` [unreachable-state]
+$ tmt ir graph alive.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1107,7 +1123,7 @@ flowchart TD
     S0["start"]
     S1["done"]
     T_stp(("stp"))
-    S0 -->|"[*] m[>]"| S1
+    S0 -->|"[*] m[#gt;]"| S1
     S1 -->|"[*]"| T_stp
 ```
 
@@ -1165,7 +1181,7 @@ $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo dead-rows.tmc
 opt: 2 round(s)
   dead-rows main: 1 change(s)
   dispatch-select main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1173,14 +1189,14 @@ $ tmt ir graph lowered.ir.json --function main
 flowchart TD
     S0["s"]
     T_stp(("stp"))
-    S0 -->|"[1,*,*] m[>,.,.]"| S0
-    S0 -->|"[1,2,*] m[>,.,.]"| S0
+    S0 -->|"[1,*,*] m[#gt;,.,.]"| S0
+    S0 -->|"[1,2,*] m[#gt;,.,.]"| S0
     S0 -->|"[*,*,*]"| T_stp
 ```
 
 ```
 $ tmt compile -O1 --emit-ir=after:dead-rows -o trimmed.tmo dead-rows.tmc
-$ tmt ir graph trimmed.ir.json --function main
+$ tmt ir graph trimmed.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1188,7 +1204,7 @@ $ tmt ir graph trimmed.ir.json --function main
 flowchart TD
     S0["s"]
     T_stp(("stp"))
-    S0 -->|"[1,*,*] m[>,.,.]"| S0
+    S0 -->|"[1,*,*] m[#gt;,.,.]"| S0
     S0 -->|"[*,*,*]"| T_stp
 ```
 
@@ -1245,7 +1261,7 @@ machine {
 $ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo row-subsumption.tmc
 opt: 2 round(s)
   dead-rows main: 1 change(s)
-$ tmt ir graph lowered.ir.json --function main
+$ tmt ir graph lowered.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1261,7 +1277,7 @@ flowchart TD
 
 ```
 $ tmt compile -O1 --emit-ir=after:dead-rows -o dr.tmo row-subsumption.tmc
-$ tmt ir graph dr.ir.json --function main
+$ tmt ir graph dr.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1293,7 +1309,7 @@ machine {
 
 ```
 $ tmt compile -O1 --emit-ir=after:dead-rows -o dr2.tmo row-subsumption-keep.tmc
-$ tmt ir graph dr2.ir.json --function main
+$ tmt ir graph dr2.ir.json --function main --raw
 ```
 
 ```mermaid
@@ -1446,7 +1462,7 @@ job (`docs/tmt/cli.md (build)`).
 Disables one pass for the whole compile, and is repeatable — the names
 are the eight in the roster above. Two things it is good for: isolating
 a pass while reading IR or assembly, as several examples on this page
-do, and turning off `inline` for a library that must stay interposable.
+do, and turning off `inline` for a library whose routines should stay separate call sites.
 
 ```
 $ tmt compile -O1 -v --fno-dispatch-select -o dr.tmo dead-rows.tmc
@@ -1500,6 +1516,7 @@ written, but no `.ir.json` sidecar is. Both are errors rather than a
 silent fall-back, which is what lets an `after:<pass>` example on this
 page prove that its pass really ran.
 
-`tmt ir graph FILE.ir.json [--function NAME]` renders such a document as
-a Mermaid flowchart — one per world, or one named world — which is how
-every diagram on this page was produced (`docs/tmt/cli.md (ir)`).
+`tmt ir graph FILE.ir.json [--function NAME] [--raw|--shape]` renders
+such a document as a Mermaid flowchart — one per world, or one named
+world — which is how every diagram on this page was produced, in its
+row-for-row `--raw` view (`docs/tmt/cli.md (ir)`).

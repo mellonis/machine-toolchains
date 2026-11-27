@@ -11,14 +11,15 @@
 //! trigger a fix at all — a fixture that never produced a fix would pass the
 //! withhold assertion vacuously.
 //!
-//! Roster: eleven rules emit a `Fix`. Nine are pinned here; the other two
-//! are accounted for rather than skipped. `contract-clause-overlap` — the rule
-//! the guard was hoisted out of — keeps its withhold test in its own unit
-//! tests. `dead-map-pair` is exempt BY MECHANISM: its one edit replaces the
-//! pair's `->` arrow token with `=>`, and a span covering a single token can
-//! never contain a comment, so the guard has nothing to withhold there.
-//! `unused-map` (whole-declaration delete, same shape as `unused-alphabet`)
-//! is pinned here alongside its siblings.
+//! Roster: thirteen rules emit a `Fix`. Eleven are pinned here; the other
+//! two are accounted for rather than skipped. `contract-clause-overlap` —
+//! the rule the guard was hoisted out of — keeps its withhold test in its
+//! own unit tests. `dead-map-pair` is exempt BY MECHANISM: its one edit
+//! replaces the pair's `->` arrow token with `=>`, and a span covering a
+//! single token can never contain a comment, so the guard has nothing to
+//! withhold there. `unused-map`, `unused-set` (whole-declaration deletes,
+//! the same shape as `unused-alphabet`), and `unreachable-continuation`
+//! (the `then`-clause drop) are pinned here alongside their siblings.
 //!
 //! Comment placement is free: every span is a node range read off the
 //! green tree (`lint/rules/spans.rs`), so a comment anywhere inside a
@@ -217,6 +218,26 @@ machine {
     );
 }
 
+/// Mutation: an edit span narrower than the declaration (e.g. `set.name_span`
+/// alone) — the comment would then sit outside the span, and the guard
+/// would ship a fix that deletes the name but leaves the comment orphaned
+/// mid-declaration instead of withholding it.
+#[test]
+fn unused_set_withholds_the_fix_when_the_declaration_holds_a_comment() {
+    assert_guard_pair(
+        "\
+set dead { '_', 'x' }
+alphabet ab { '_', 'x' }
+machine {
+  tape t: ab;
+  entry state s { [*] -> stop; }
+}
+",
+        "'x' }",
+        "unused-set",
+    );
+}
+
 // --- duplicate-graft-instance -------------------------------------------------
 // The fix's first edit deletes the duplicate's whole `graft … ;` statement,
 // same node shape as `unused-graft-instance`'s own deletion — a comment in
@@ -266,6 +287,36 @@ machine {
 ",
         "as seek;",
         "unused-graft-name",
+    );
+}
+
+// --- unreachable-continuation --------------------------------------------
+// The fix drops the whole ` then …` clause, from the call's closing `)`
+// through the end of the transition, so a comment anywhere inside the
+// `then` clause (between the `then` keyword and its continuation target)
+// sits inside the span.
+
+/// Mutation: an edit span that stops at the `then` keyword instead of the
+/// transition's own end — the comment written between `then` and its
+/// continuation target would then sit outside the span, and the guard
+/// would ship a fix that deletes `then` but leaves the comment and the old
+/// continuation target behind instead of withholding it.
+#[test]
+fn unreachable_continuation_withholds_the_fix_when_the_then_clause_holds_a_comment() {
+    assert_guard_pair(
+        "\
+alphabet ab { '_', 'a' }
+routine forever(tape t: ab) noreturn {
+  entry state s { [*] -> goto s; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> call forever(t = t) then done; }
+  state done { [*] -> stop; }
+}
+",
+        "done;",
+        "unreachable-continuation",
     );
 }
 

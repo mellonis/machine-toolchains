@@ -69,6 +69,8 @@ pub(crate) const EXITS_OPERAND_WORD: &str = "exits";
 pub(crate) const PARAM_WORD: &str = ".param";
 pub(crate) const GRAPH_WORD: &str = ".graph";
 pub(crate) const GRAFTED_WORD: &str = ".grafted";
+/// The optional third operand of `.graph`: the record is not exported.
+pub(crate) const PRIVATE_WORD: &str = "private";
 
 /// The interface-tier directive family, shaped under
 /// [`AsmCaps::interface`] and reported precisely by lower when malformed
@@ -383,12 +385,14 @@ pub struct RoutineDirectiveCst {
     pub tapes_span: Span,
     pub alpha: Vec<u32>,
     pub alpha_span: Span,
-    /// `, exits=<int>` — the state parameters a caller supplies
-    /// (docs/formats.md (routine interfaces)). `None` = the field is
-    /// absent, which lowering reads as zero exits. Rides
-    /// [`AsmCaps::interface`]; without the cap the tail is not part of
-    /// the directive and the line degrades to a Line.
-    pub exits: Option<(u32, Span)>,
+    /// `, exits=(<name>, …)` — the state parameters a caller supplies,
+    /// each name with its own span, and the span of the parenthesized
+    /// list (docs/formats.md (routine interfaces)). `None` = the field is
+    /// absent, which lowering reads as no exits; a written `exits=()` is
+    /// `Some` of an empty list. Rides [`AsmCaps::interface`]; without the
+    /// cap the tail is not part of the directive and the line degrades
+    /// to a Line.
+    pub exits: Option<(Vec<(String, Span)>, Span)>,
     /// `, noreturn` — control never returns to the caller. The span
     /// covers the keyword; `None` = the routine returns.
     pub noreturn: Option<Span>,
@@ -433,6 +437,9 @@ pub struct ParamDirectiveCst {
 pub struct DigestDirectiveCst {
     /// `.grafted` (true) versus `.graph` (false).
     pub grafted: bool,
+    /// `.graph <name>, <digest>, private`: the record is not exported.
+    /// Always false for `.grafted`.
+    pub private: bool,
     pub name: String,
     pub name_span: Span,
     pub digest: u32,
@@ -1454,11 +1461,11 @@ fn routine_directive(
     })
 }
 
-/// A `.routine`'s parsed interface tail: the `exits=` value with its
-/// span, and the `noreturn` keyword's span.
-type RoutineTail = (Option<(u32, Span)>, Option<Span>);
+/// A `.routine`'s parsed interface tail: the `exits=` names with the
+/// list's span, and the `noreturn` keyword's span.
+type RoutineTail = (Option<(Vec<(String, Span)>, Span)>, Option<Span>);
 
-/// The `.routine` line's optional interface tail: `[, exits=<int>]
+/// The `.routine` line's optional interface tail: `[, exits=(<name>, …)]
 /// [, noreturn]`, in that fixed order and each at most once
 /// (docs/formats.md (routine interfaces)). An empty tail is the
 /// signature-only form every dialect writes. `None` = anything else,
@@ -1474,13 +1481,42 @@ fn routine_tail(tail: &[AsmToken], interface: bool) -> Option<RoutineTail> {
     }
     let mut rest = tail;
     let mut exits = None;
-    if let [comma, kw, eq, value, after @ ..] = rest
+    if let [comma, kw, eq, lparen, after @ ..] = rest
         && matches!(comma.kind, AsmTokenKind::Comma)
         && word_text(kw) == Some("exits")
         && matches!(eq.kind, AsmTokenKind::Eq)
     {
-        exits = Some(canonical_u32(value)?);
-        rest = after;
+        // Past `exits=` the field is committed: anything but a
+        // parenthesized name list degrades the line. A bare count is not
+        // a spelling of this field.
+        if !matches!(lparen.kind, AsmTokenKind::LParen) {
+            return None;
+        }
+        let close = after
+            .iter()
+            .position(|t| matches!(t.kind, AsmTokenKind::RParen))?;
+        let (inner, rparen) = (&after[..close], &after[close]);
+        let mut names = Vec::with_capacity(inner.len() / 2 + 1);
+        if !inner.is_empty() {
+            if inner.len().is_multiple_of(2) {
+                return None; // a trailing comma, or a doubled one
+            }
+            for (i, tok) in inner.iter().enumerate() {
+                if i % 2 == 0 {
+                    names.push((word_text(tok)?.to_string(), tok.span()));
+                } else if !matches!(tok.kind, AsmTokenKind::Comma) {
+                    return None;
+                }
+            }
+        }
+        let span = Span::new(
+            lparen.line,
+            lparen.col,
+            rparen.line,
+            rparen.col + rparen.len,
+        );
+        exits = Some((names, span));
+        rest = &after[close + 1..];
     }
     let noreturn = match rest {
         [] => None,
@@ -1612,8 +1648,17 @@ fn digest_directive(
     span: Span,
     trailing: &Option<TrailingComment>,
 ) -> Option<DigestDirectiveCst> {
-    let [name_tok, comma, digest_tok] = &body[1..] else {
-        return None;
+    // `.graph` alone may carry a third operand, the word `private`.
+    let (name_tok, comma, digest_tok, private) = match &body[1..] {
+        [name_tok, comma, digest_tok] => (name_tok, comma, digest_tok, false),
+        [name_tok, comma, digest_tok, comma2, flag]
+            if !grafted
+                && matches!(comma2.kind, AsmTokenKind::Comma)
+                && word_text(flag) == Some(PRIVATE_WORD) =>
+        {
+            (name_tok, comma, digest_tok, true)
+        }
+        _ => return None,
     };
     let name = word_text(name_tok)?;
     if !matches!(comma.kind, AsmTokenKind::Comma) {
@@ -1622,6 +1667,7 @@ fn digest_directive(
     let (digest, digest_span) = canonical_u32(digest_tok)?;
     Some(DigestDirectiveCst {
         grafted,
+        private,
         name: name.to_string(),
         name_span: name_tok.span(),
         digest,
@@ -2712,19 +2758,28 @@ L1:     rgt
 
     #[test]
     fn shapes_the_routine_tail() {
-        let src = ".routine main, tapes=1, alpha=(2), exits=3, noreturn ; sig\n";
+        let src = ".routine main, tapes=1, alpha=(2), exits=(e0, e1, e2), noreturn ; sig\n";
         let cst = parse_asm_cst_with(src, caps_interface());
         let AsmItemKind::RoutineDirective(r) = &cst.items[0].kind else {
             panic!("not a routine directive: {:?}", cst.items[0].kind)
         };
-        assert_eq!(r.exits, Some((3, Span::new(1, 42, 1, 43))));
-        assert_eq!(r.noreturn, Some(Span::new(1, 45, 1, 53)));
-        assert_eq!(r.span, Span::new(1, 1, 1, 53)); // excludes the comment
+        let (names, list_span) = r.exits.as_ref().expect("the exits field");
+        assert_eq!(
+            names,
+            &[
+                ("e0".to_string(), Span::new(1, 43, 1, 45)),
+                ("e1".to_string(), Span::new(1, 47, 1, 49)),
+                ("e2".to_string(), Span::new(1, 51, 1, 53)),
+            ]
+        );
+        assert_eq!(*list_span, Span::new(1, 42, 1, 54));
+        assert_eq!(r.noreturn, Some(Span::new(1, 56, 1, 64)));
+        assert_eq!(r.span, Span::new(1, 1, 1, 64)); // excludes the comment
         assert_eq!(trailing_text(&r.trailing), Some("; sig"));
 
         // Each half on its own, and the tail-less form.
         for (src, exits, noreturn) in [
-            (".routine m, tapes=1, alpha=(2), exits=0\n", Some(0), false),
+            (".routine m, tapes=1, alpha=(2), exits=()\n", Some(0), false),
             (".routine m, tapes=1, alpha=(2), noreturn\n", None, true),
             (".routine m, tapes=1, alpha=(2)\n", None, false),
         ] {
@@ -2732,7 +2787,7 @@ L1:     rgt
             let AsmItemKind::RoutineDirective(r) = &cst.items[0].kind else {
                 panic!("not a routine directive: {src:?}")
             };
-            assert_eq!(r.exits.map(|(v, _)| v), exits, "{src:?}");
+            assert_eq!(r.exits.as_ref().map(|(v, _)| v.len()), exits, "{src:?}");
             assert_eq!(r.noreturn.is_some(), noreturn, "{src:?}");
         }
     }
@@ -2742,7 +2797,7 @@ L1:     rgt
         // Without the cap the fields are not part of the directive at
         // all: the line degrades to a Line, exactly as any other tail.
         for src in [
-            ".routine m, tapes=1, alpha=(2), exits=1\n",
+            ".routine m, tapes=1, alpha=(2), exits=(e0)\n",
             ".routine m, tapes=1, alpha=(2), noreturn\n",
         ] {
             let cst = parse_asm_cst_with(src, caps_all());
@@ -2758,12 +2813,16 @@ L1:     rgt
     #[test]
     fn malformed_routine_tails_stay_lines() {
         for src in [
-            ".routine m, tapes=1, alpha=(2), noreturn, exits=1", // wrong order
-            ".routine m, tapes=1, alpha=(2), exits=1, exits=2",  // twice
+            ".routine m, tapes=1, alpha=(2), noreturn, exits=(e0)", // wrong order
+            ".routine m, tapes=1, alpha=(2), exits=(e0), exits=(e0, e1)", // twice
             ".routine m, tapes=1, alpha=(2), noreturn, noreturn",
-            ".routine m, tapes=1, alpha=(2), exits=01", // non-canonical
-            ".routine m, tapes=1, alpha=(2), exits",    // no value
-            ".routine m, tapes=1, alpha=(2) noreturn",  // no comma
+            ".routine m, tapes=1, alpha=(2), exits=2", // a count is not a name list
+            ".routine m, tapes=1, alpha=(2), exits=(a,)", // trailing comma
+            ".routine m, tapes=1, alpha=(2), exits=(a b)", // no comma
+            ".routine m, tapes=1, alpha=(2), exits=(a", // unclosed
+            ".routine m, tapes=1, alpha=(2), exits=(1)", // not a name
+            ".routine m, tapes=1, alpha=(2), exits",   // no value
+            ".routine m, tapes=1, alpha=(2) noreturn", // no comma
         ] {
             let cst = parse_asm_cst_with(src, caps_interface());
             assert!(
@@ -2866,15 +2925,28 @@ L1:     rgt
     }
 
     #[test]
+    fn a_graph_directive_may_carry_the_private_flag() {
+        let cst = parse_asm_cst_with(".graph lib::g, 42, private ; d\n", caps_interface());
+        let AsmItemKind::DigestDirective(d) = &cst.items[0].kind else {
+            panic!("{:?}", cst.items[0].kind);
+        };
+        assert!(d.private && !d.grafted);
+        assert_eq!(d.digest, 42);
+    }
+
+    #[test]
     fn malformed_digest_directives_stay_lines() {
         for src in [
-            ".graph g",             // no digest
-            ".graph g 1",           // no comma
-            ".graph g, 007",        // non-canonical spelling
-            ".graph g, 0x2A",       // the asm lexer has no hex literal
-            ".grafted g, 1, 2",     // one digest only
-            ".grafted 1, 2",        // the name is a word
-            ".graph g, 4294967296", // one past the u32 ceiling
+            ".graph g",                // no digest
+            ".graph g 1",              // no comma
+            ".graph g, 007",           // non-canonical spelling
+            ".graph g, 0x2A",          // the asm lexer has no hex literal
+            ".grafted g, 1, 2",        // one digest only
+            ".grafted 1, 2",           // the name is a word
+            ".graph g, 4294967296",    // one past the u32 ceiling
+            ".graph g, 1, public",     // the only third operand is `private`
+            ".graph g, 1, private, x", // and nothing follows it
+            ".grafted g, 1, private",  // `.grafted` takes no flag
         ] {
             let cst = parse_asm_cst_with(src, caps_interface());
             assert!(

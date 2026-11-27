@@ -240,8 +240,9 @@ fn compile_spec() -> CommandSpec {
             FlagSpec::boolean("-O1", "optimization level O1 (full pass pipeline)")
                 .exclusive("opt-level"),
             FlagSpec::boolean("--strip-debugger", "drop `brk` at codegen"),
+            FlagSpec::boolean("--strip-asserts", "drop contract-check states"),
             FlagSpec::boolean("--debug", "preset: -g -O0"),
-            FlagSpec::boolean("--release", "preset: -O1 --strip-debugger"),
+            FlagSpec::boolean("--release", "preset: -O1 --strip-debugger --strip-asserts"),
             FlagSpec::boolean("-S", "emit the generated .tma instead of an object"),
             FlagSpec::boolean(
                 "--stamped-asm",
@@ -278,6 +279,12 @@ fn compile_spec() -> CommandSpec {
                 "--nostdlib",
                 "do not read the embedded standard library's declarations",
             ),
+            FlagSpec::value(
+                "--allow",
+                "suppress a compile warning code (repeatable)",
+                ValueHint::Text,
+            )
+            .repeatable(),
             FlagSpec::boolean("-Werror", "treat warnings as errors"),
             FlagSpec::boolean("-v", "render the compile report (passes, rounds)"),
             FlagSpec::value("-o", "output path", ValueHint::File(any_file())),
@@ -366,12 +373,16 @@ fn build_spec() -> CommandSpec {
         ]))),
         flags: vec![
             FlagSpec::boolean("--debug", "preset/profile: -g -O0").exclusive("profile"),
-            FlagSpec::boolean("--release", "preset/profile: -O1 --strip-debugger")
-                .exclusive("profile"),
+            FlagSpec::boolean(
+                "--release",
+                "preset/profile: -O1 --strip-debugger --strip-asserts",
+            )
+            .exclusive("profile"),
             FlagSpec::boolean("-O0", "optimization level O0").exclusive("opt-level"),
             FlagSpec::boolean("-O1", "optimization level O1").exclusive("opt-level"),
             FlagSpec::boolean("-g", "record debug info"),
             FlagSpec::boolean("--strip-debugger", "drop `brk` at codegen"),
+            FlagSpec::boolean("--strip-asserts", "drop contract-check states"),
             FlagSpec::suffix_family(
                 "--fno-",
                 "disable one optimizer pass (repeatable)",
@@ -381,7 +392,7 @@ fn build_spec() -> CommandSpec {
             FlagSpec::boolean("-Werror", "treat post-refinement warnings as errors"),
             FlagSpec::value(
                 "--allow",
-                "suppress a link warning code (repeatable)",
+                "suppress a compile or link warning code (repeatable)",
                 ValueHint::Text,
             )
             .repeatable(),
@@ -425,12 +436,12 @@ fn build_spec() -> CommandSpec {
     }
 }
 
-/// A `.tmc`/`.tma`-filtered `FileHint` that ALSO accepts directories:
-/// `lint` and `fmt` both walk directories recursively for `*.tmc` and
-/// `*.tma`.
+/// A `.tmc`/`.tmh`/`.tma`-filtered `FileHint` that ALSO accepts
+/// directories: `lint` and `fmt` both walk directories recursively for
+/// `*.tmc`, `*.tmh` and `*.tma`.
 fn source_or_dir() -> FileHint {
     FileHint {
-        extensions: strings(&["tmc", "tma"]),
+        extensions: strings(&["tmc", "tmh", "tma"]),
         dirs: true,
     }
 }
@@ -517,7 +528,17 @@ fn interface_spec() -> CommandSpec {
         path: strings(&["interface"]),
         positional: Positional::One(PositionalHint::File(ext(&["tmc", "tmo"]))),
         flags: vec![
-            FlagSpec::value("-o", "output path", ValueHint::File(any_file())),
+            FlagSpec::value("-o", "output path", ValueHint::File(any_file()))
+                .exclusive("interface-output"),
+            // A CI/pre-commit guard: exit 1 when the committed header no
+            // longer matches what this invocation would render
+            // (docs/tmt/cli.md (tmt interface)).
+            FlagSpec::value(
+                "--check",
+                "compare a committed header; exit 1 if it differs",
+                ValueHint::File(ext(&["tmh"])),
+            )
+            .exclusive("interface-output"),
             // Same meaning as `tmt compile`'s own pair (`compile_spec`
             // above) — a library that itself depends on another unit's
             // declarations needs them to header at all.
@@ -531,6 +552,7 @@ fn interface_spec() -> CommandSpec {
                 "--nostdlib",
                 "do not read the embedded standard library's declarations",
             ),
+            FlagSpec::boolean("-v", "with --check, also list the differing lines"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
@@ -675,6 +697,9 @@ fn ir_graph_spec() -> CommandSpec {
                 "restrict output to one world",
                 ValueHint::Text,
             ),
+            FlagSpec::boolean("--raw", "draw one arrow per row").exclusive("graph-view"),
+            FlagSpec::boolean("--shape", "draw one arrow per pair of states")
+                .exclusive("graph-view"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }

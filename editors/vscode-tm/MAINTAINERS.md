@@ -15,10 +15,10 @@ npm run package
 
 `npm run package` copies in the shared `.tmc` and `.tma` TextMate grammars
 from `editors/grammars/`, compiles the extension, and runs `vsce package`,
-producing `tmc-0.1.0.vsix` in this directory. Install it into VS Code:
+producing `tmc-0.2.1.vsix` in this directory. Install it into VS Code:
 
 ```sh
-code --install-extension tmc-0.1.0.vsix
+code --install-extension tmc-0.2.1.vsix
 ```
 
 Reload the window (or restart VS Code) after installing or upgrading.
@@ -70,6 +70,12 @@ machine {
       by `copy-assets.js`. Confirm **two** squiggles appear without any
       manual trigger: one on `unusedHelper` (`unused-routine`) and one on
       the `debugger` marker (`leftover-debugger`).
+- [ ] **Header**: save the text `tmt interface check.tmc` prints as
+      `check.tmh` and open it. Confirm the status bar names the language
+      TMC, it colors like `check.tmc`, a bodiless `routine …;` line
+      carries no squiggle, adding a `machine { }` block raises an error,
+      and **Tasks: Run Task → tmt** offers `lint` and `fmt-check` for it
+      but no `compile`.
 - [ ] **Completion**: put the cursor at the start of an action, after a
       `->`, and press Ctrl+Space. Confirm the action keywords appear
       (`write`, `move`, `goto`, `call`, `return`, `stop`, `halt`,

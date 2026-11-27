@@ -106,9 +106,9 @@ cross-target build order for a bare `pmt build`.
 | `output` | string | `"<target-name>.pmx"` | Output path, resolved against the manifest's directory. Two targets whose (normalized) output paths collide is a manifest error. |
 | `run` | object | absent | Optional run settings for `pmt build --run` — see The `run` block below. |
 
-Library resolution is **first-wins** in declared order, and a user
-definition of the same exported symbol silently shadows a library's — no
-warning is emitted (`docs/core.md (linking)`). Linking is lazy by
+A name a declared library defines may not also be defined by a source, or
+by an earlier library, once the program reaches it
+(`docs/core.md (linking)`). Linking is lazy by
 reachability, so a declared library that no effective source references
 contributes nothing to the output.
 

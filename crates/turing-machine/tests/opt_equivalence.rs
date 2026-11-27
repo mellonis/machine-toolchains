@@ -26,7 +26,7 @@ use mtc_core::linker::{CallMech, LinkOptions};
 use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, Trap, WideTape};
 use mtc_turing_machine::arch::Tm1;
 use mtc_turing_machine::asm::link;
-use mtc_turing_machine::compiler::{CompileOptions, CompileOutput, compile};
+use mtc_turing_machine::compiler::{CompileOptions, CompileOutput, Declarations, compile};
 use mtc_turing_machine::ir::IrTransition;
 use mtc_turing_machine::optimizer::{OptLevel, pass_names};
 use mtc_turing_machine::stdlib;
@@ -99,6 +99,7 @@ fn trap_kind(t: Trap) -> &'static str {
         Trap::UnmappedWrite { .. } => "unmapped-write",
         Trap::ExitOutOfRange { .. } => "exit-out-of-range",
         Trap::ProfileViolation { .. } => "profile-violation",
+        Trap::Contract { .. } => "contract",
     }
 }
 
@@ -312,6 +313,26 @@ fn nested_graft_is_equivalent() {
     assert_equivalent(
         &golden_src("nested_graft.tmc"),
         &[&[(&[1, 2], 0)], &[(&[1], 0)]],
+    );
+}
+
+#[test]
+fn glyph_sets_is_equivalent() {
+    // A digit run (seed "12", the call walks it and '+' is written) and a
+    // non-digit start (seed "+", stop at once).
+    assert_equivalent(
+        &golden_src("glyph_sets.tmc"),
+        &[&[(&[2, 3], 0)], &[(&[11], 0)]],
+    );
+}
+
+#[test]
+fn named_map_foreign_alphabets_is_equivalent() {
+    // "^10$" inverted through the named map, entered from the '^' and
+    // from the '$'.
+    assert_equivalent(
+        &golden_src("named_map_foreign_alphabets.tmc"),
+        &[&[(&[1, 4, 3, 2], 0)], &[(&[1, 4, 3, 2], 3)]],
     );
 }
 
@@ -901,6 +922,97 @@ machine {
   state done { [*, *] -> halt; }
 }";
 
+/// A routine whose tape parameter declares BOTH head-position clauses, so
+/// a debug build plants a check state at the entry and another before the
+/// return (docs/tmt/language.md (head-position clauses)). The whole matrix
+/// has to agree on which seeds keep the promise and which break it — and
+/// the `leaves` check, standing between the body and the `return`, is a
+/// shape no other roster program has: a state the SOURCE never wrote,
+/// which every pass must treat as an ordinary one.
+///
+/// The contracted routine leaves through a CALL's continuation rather than
+/// a `return` row of its own, so the check displaces a `then return` into
+/// a `then goto` — the one rewrite that changes what the `tail_call` pass
+/// can see, and the reason this program is worth a matrix column at all.
+///
+/// Carried here rather than by relaxing the stdlib floor below: the
+/// library compiles with its asserts stripped, so its `-O1` floor is not
+/// the place a contract-bearing program's new slack could show up.
+const HEAD_CONTRACT: &str = "\
+alphabet sym { '_', 'a', 'b' }
+routine step(tape num: sym) {
+  entry state s {
+    [*] -> move [>] return;
+  }
+}
+routine walk(tape num: sym enters { '_' } leaves { 'b' }) {
+  entry state go {
+    [*] -> call step(num = num) then return;
+  }
+}
+machine {
+  tape t: sym;
+  entry state s { [*] -> call walk(num = t) then done; }
+  state done { [*] -> stop; }
+}";
+
+/// An OPEN binding written in `.tmc`: a five-symbol caller band bound into
+/// a three-symbol callee through `with map { …, * }`, so the two caller
+/// glyphs the map does not name arrive as the callee's opaque index. The
+/// callee's one state dispatches every glyph it knows AND carries a `*`
+/// row, which is what makes it opaque and the binding legal
+/// (docs/formats.md (bound calls)).
+///
+/// Worth a matrix column because the three mechanisms reach the opaque
+/// index by three different routes — frames through the composite's dense
+/// read map, mono through the stamped copy's row rewriting, hybrid by
+/// routing the site to frames because an open binding is not a bijection —
+/// and only a seeded run can say they agree. The `.tma` twin in
+/// `tests/link_matrix.rs` pins the hand-authored form; this is the same
+/// shape reached from the language.
+const OPEN_BINDING: &str = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', 'a', 'b' }
+routine swapABopen(tape n: three) {
+  entry state walk {
+    ['_'] -> return;
+    ['a'] -> write ['b'] move [>] goto walk;
+    ['b'] -> write ['a'] move [>] goto walk;
+    [*]   -> move [>] goto walk;
+  }
+}
+machine {
+  tape t: five;
+  entry state go {
+    [*] -> call swapABopen(n = t with map { 'a' -> 'a', 'b' -> 'b', * }) then done;
+  }
+  state done { [*] -> stop; }
+}";
+
+/// The pairless open map, `with map { * }`, on EQUAL alphabets: every
+/// caller glyph but the blank is unlisted, so each arrives as the callee's
+/// opaque index and only its `*` row can match. The callee's concrete
+/// `['a']` row must therefore never fire — seeding `'a'` is what tells an
+/// open binding from an identity one.
+///
+/// Worth its own column because this is the one shape an optimizer can
+/// mistake for a pass-through: no pairs and matching cardinalities look
+/// exactly like an omitted map, and a splice that reads it that way hands
+/// the callee's concrete rows the caller's real glyphs.
+const OPEN_BINDING_PAIRLESS: &str = "\
+alphabet three { '_', 'a', 'b' }
+routine r(tape n: three) {
+  entry state s {
+    ['a'] -> halt;
+    [*]   -> return;
+  }
+}
+machine {
+  tape t: three;
+  entry state go { [*] -> call r(n = t with map { * }) then done; }
+  state done { [*] -> stop; }
+}";
+
 #[test]
 fn inline_arity_reducing_projection_is_equivalent_across_the_matrix() {
     // Three cases across the full 2×3 matrix. The last two carry data on the
@@ -1092,12 +1204,60 @@ fn stdlib_object_bytes(level: OptLevel) -> Vec<u8> {
         CompileOptions {
             opt_level: level,
             strip_debugger: true,
+            // Both levels strip contract-check states too, isolating opt
+            // level as the only variable this byte comparison exercises —
+            // a later round's synthesized states must not leak a false
+            // divergence in here (docs/tmt/cli.md (compile)).
+            strip_asserts: true,
             ..Default::default()
         },
     )
     .expect("the embedded stdlib compiles")
     .object
     .to_bytes()
+}
+
+/// [`stdlib::object()`] caches ONE compile, built from a `CompileOptions`
+/// literal in `stdlib/mod.rs` — this test is the TM crate's own guard that
+/// the shipped preset stays that same one. The literal below is copied
+/// field-for-field from `stdlib/mod.rs`'s `object()`, spelled out rather
+/// than `..Default::default()` so it reads as a line-by-line match against
+/// the shipped preset (a `..Default::default()` tail would hide which
+/// fields the shipped preset actually pins) and so a new `CompileOptions`
+/// field breaks THIS build too, forcing the copy to stay current. A change
+/// to any field that reaches the object's bytes turns this red. Watched
+/// fail on `strip_asserts: false` (the wasm crate's twin preset is
+/// currently the only thing that would otherwise catch a flip here, and
+/// gate-cost discipline runs this crate alone far more often than the
+/// workspace-wide suite).
+#[test]
+fn stdlib_object_matches_the_shipped_preset() {
+    let shipped = stdlib::object().to_bytes();
+    let rebuilt = compile(
+        stdlib::SOURCE,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            strip_debugger: true,
+            strip_asserts: true,
+            externals: Declarations::none(),
+            debug_info: false,
+            disabled_passes: Vec::new(),
+            capture_ir: false,
+            outline: false,
+            stamped_asm: false,
+            inline_cap: None,
+        },
+    )
+    .expect("the embedded stdlib compiles")
+    .object
+    .to_bytes();
+    assert_eq!(
+        shipped, rebuilt,
+        "stdlib::object()'s cached bytes must match a fresh compile of \
+         stdlib::SOURCE under the same preset stdlib/mod.rs::object() ships \
+         — a diff here means the shipped preset and this test's copy of it \
+         have drifted"
+    );
 }
 
 /// THE PHASE-6b MILESTONE. One test that aggregates the whole optimizer
@@ -1236,14 +1396,41 @@ fn everything_matrix_is_green() {
             EXIT_FACADE.to_string(),
             vec![&[(&[], 0), (&[], 0)], &[(&[2], 0), (&[], 0)]],
         ),
+        (
+            // All three outcomes of a planted head-contract check, seeded:
+            // the entry glyph outside `enters`, the leaving glyph outside
+            // `leaves`, and a seed that keeps both promises.
+            "head_contract",
+            HEAD_CONTRACT.to_string(),
+            vec![&[(&[1], 0)], &[(&[0, 1], 0)], &[(&[0, 2], 0)]],
+        ),
+        (
+            // An open binding, seeded so the walk reaches all three of
+            // the callee's answers: the two glyphs the map names (which
+            // swap) and one it does not (which arrives opaque and is
+            // walked past untouched by the `*` row).
+            "open_binding",
+            OPEN_BINDING.to_string(),
+            vec![&[(&[1, 2, 3], 0)], &[(&[3, 4], 0)], &[(&[], 0)]],
+        ),
+        (
+            // The pairless open map on equal alphabets, seeded on the glyph
+            // the callee's concrete row names: an open binding stops, an
+            // identity one halts.
+            "open_binding_pairless",
+            OPEN_BINDING_PAIRLESS.to_string(),
+            vec![&[(&[1], 0)], &[(&[2], 0)], &[(&[], 0)]],
+        ),
     ];
     assert_eq!(
         roster.len(),
-        15,
+        18,
         "the single-source pass-exercise roster: 6 Appendix A + nested graft + \
-         8 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
-         dead-rows, inline ×2, the brk barrier, the exit-bearing call and \
-         the facade that forwards its exits)"
+         11 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
+         dead-rows, inline ×2, the brk barrier, the exit-bearing call, the \
+         facade that forwards its exits, the planted head-contract checks, \
+         the open binding whose unlisted glyphs arrive opaque, and the \
+         pairless open map an inliner could mistake for a pass-through)"
     );
     for (label, src, cases) in &roster {
         assert!(!src.is_empty(), "roster program `{label}` has a source");
@@ -1290,6 +1477,10 @@ fn everything_matrix_is_green() {
         CompileOptions {
             opt_level: OptLevel::O1,
             strip_debugger: true,
+            // Matches `stdlib_object_bytes`'s O0 side below: both strip
+            // contract-check states, so this stays the same opt-level-only
+            // comparison it was before any assert existed.
+            strip_asserts: true,
             ..Default::default()
         },
     )

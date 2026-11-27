@@ -248,7 +248,8 @@ fn compute_inbound(w: &IrWorld) -> HashMap<u32, Vec<u32>> {
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
+                | IrTransition::TrapWrite
+                | IrTransition::TrapContract => {}
             }
         }
     }
@@ -492,7 +493,7 @@ fn build_routine(w: &IrWorld, members: &[u32], name: &str) -> IrWorld {
         states,
         local: true,
         line: 0,
-        exits: 0,
+        exits: Vec::new(),
         returns: true,
     }
 }

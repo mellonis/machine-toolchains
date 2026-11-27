@@ -265,6 +265,31 @@ pub fn number(v: &JsValue, key: &str) -> Option<f64> {
     field(v, key).and_then(|x| x.as_f64())
 }
 
+/// `None` when the key is absent (or null); an error when it is present
+/// but not a string.
+pub fn string(v: &JsValue, key: &str) -> Result<Option<String>, String> {
+    field(v, key)
+        .map(|x| {
+            x.as_string()
+                .ok_or_else(|| format!("`{key}` must be a string"))
+        })
+        .transpose()
+}
+
+/// `[{ name, mermaid }]`, one per graph.
+pub fn ir_graphs(graphs: &[(String, String)]) -> JsValue {
+    graphs
+        .iter()
+        .map(|(name, mermaid)| {
+            let o = obj();
+            set(&o, "name", name.as_str());
+            set(&o, "mermaid", mermaid.as_str());
+            JsValue::from(o)
+        })
+        .collect::<Array>()
+        .into()
+}
+
 /// `cells` as a `Uint8Array` or a number array.
 fn cells(v: &JsValue, who: &str) -> Result<Vec<u8>, String> {
     let cells_val = field(v, "cells").ok_or_else(|| format!("{who}: missing `cells`"))?;

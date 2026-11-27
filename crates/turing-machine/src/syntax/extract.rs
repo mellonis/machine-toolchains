@@ -62,14 +62,14 @@ use mtc_core::syntax::{
 use super::kinds::TmcKind;
 use super::views::{
     AlphabetView, BindView, DocRunView, GraftView, MachineView, MapDeclView, ReuseKind, ReuseView,
-    RootView, RuleView, StateView, TapeView, TopView, UsePathView, WorldView,
+    RootView, RuleView, SetDeclView, StateView, TapeView, TopView, UsePathView, WorldView,
 };
 use crate::lexer::{Comment, CommentKind, GLYPH_ESCAPES, Token, TokenKind, normalize_doc_payload};
 use crate::parser::{
     Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, MapDecl, Program, Routine, Rule,
-    Signature, State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems,
-    reparse_binding_arg, reparse_doc_items, reparse_map_pairs, reparse_move_vec, reparse_pattern,
-    reparse_qual_name, reparse_sig_param, reparse_transition, reparse_write_vec,
+    SetDecl, Signature, State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems,
+    reparse_binding_arg, reparse_doc_items, reparse_guard, reparse_map_pairs, reparse_move_vec,
+    reparse_pattern, reparse_qual_name, reparse_sig_param, reparse_transition, reparse_write_vec,
 };
 use crate::parser::{DocRunItem, DocRunKind};
 
@@ -229,6 +229,12 @@ pub(crate) fn token_from_syntax(t: &SyntaxToken, index: &TextLineIndex) -> Token
         // because either is exercised.
         k if k == TmcKind::At.into() => TokenKind::At,
         k if k == TmcKind::Bang.into() => TokenKind::Bang,
+        k if k == TmcKind::EqEq.into() => TokenKind::EqEq,
+        k if k == TmcKind::NotEq.into() => TokenKind::NotEq,
+        k if k == TmcKind::LtEq.into() => TokenKind::LtEq,
+        k if k == TmcKind::GtEq.into() => TokenKind::GtEq,
+        k if k == TmcKind::AmpAmp.into() => TokenKind::AmpAmp,
+        k if k == TmcKind::PipePipe.into() => TokenKind::PipePipe,
         k if k == TmcKind::DocLine.into() => {
             TokenKind::DocLine(normalize_doc_payload(&text[sigil_len(text)..]))
         }
@@ -678,6 +684,29 @@ pub(crate) fn extract_alphabet(
     }
 }
 
+/// One `export? set NAME { … }` — [`extract_alphabet`]'s shape exactly,
+/// the same two normalisations included (`line` the NAME's, `col` the
+/// HEADER's), its body reparsed through the same element production.
+pub(crate) fn extract_set_decl(
+    view: &SetDeclView,
+    ns: &[String],
+    source: &str,
+    index: &TextLineIndex,
+) -> SetDecl {
+    let name = view.name_token();
+    let header = header_token(view.syntax());
+    SetDecl {
+        name: name.text().to_string(),
+        name_span: index.span(name.text_range()),
+        line: index.line_col(name.text_range().start).0,
+        col: index.line_col(header.text_range().start).1,
+        exported: view.exported(),
+        ns: ns.to_vec(),
+        elems: reparse_alphabet_elems(&sig_tokens(view.syntax(), index)),
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
 /// One `export? map NAME: SRC -> DST { pairs }` — mirrors
 /// [`extract_alphabet`]'s own shape: `line` is the NAME's line, `col` the
 /// HEADER's column, `src`/`dst` the two alphabet references' own spans
@@ -843,6 +872,9 @@ pub(crate) fn extract_rule(view: &RuleView, index: &TextLineIndex) -> Rule {
     Rule {
         line: pattern.span.start.line,
         pattern,
+        guard: view
+            .guard()
+            .map(|g| reparse_guard(&sig_tokens(g.syntax(), index))),
         debugger,
         write: view
             .write_vec()
@@ -1118,6 +1150,7 @@ fn extract_items(
             TopView::Alphabet(a) => program
                 .alphabets
                 .push(extract_alphabet(&a, ns, source, index)),
+            TopView::SetDecl(s) => program.sets.push(extract_set_decl(&s, ns, source, index)),
             TopView::MapDecl(m) => program.maps.push(extract_map_decl(&m, ns, source, index)),
             TopView::Namespace(nsv) => {
                 let mut child = ns.to_vec();
@@ -1173,6 +1206,7 @@ pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
     let mut program = Program {
         imports: Vec::new(),
         alphabets: Vec::new(),
+        sets: Vec::new(),
         maps: Vec::new(),
         routines: Vec::new(),
         graphs: Vec::new(),
@@ -1269,6 +1303,7 @@ mod tests {
                    \x20 entry state s {\n\
                    \x20   ['0'] -> write [-, {(v+1)%6}, {v-1}] move [<, >, .] goto s;\n\
                    \x20   [*] -> stop;\n\
+                   \x20   ['0' as gv] where { gv == gv && gv != gv || gv <= gv && gv >= gv || gv in qq } -> stop;\n\
                    \x20 }\n\
                    \x20 graft g(t = t with map { '0'->'1', '2'=>'3' }) as inst;\n\
                    }\n\
@@ -1306,6 +1341,12 @@ mod tests {
                     TokenKind::Comma => "Comma",
                     TokenKind::Semi => "Semi",
                     TokenKind::Colon => "Colon",
+                    TokenKind::EqEq => "EqEq",
+                    TokenKind::NotEq => "NotEq",
+                    TokenKind::LtEq => "LtEq",
+                    TokenKind::GtEq => "GtEq",
+                    TokenKind::AmpAmp => "AmpAmp",
+                    TokenKind::PipePipe => "PipePipe",
                     TokenKind::DocLine(_) => "DocLine",
                     TokenKind::AttentionLine(_) => "AttentionLine",
                     TokenKind::At | TokenKind::Bang | TokenKind::Eof | TokenKind::Comment(_) => {
@@ -1339,23 +1380,29 @@ mod tests {
             "Comma",
             "Semi",
             "Colon",
+            "EqEq",
+            "NotEq",
+            "LtEq",
+            "GtEq",
+            "AmpAmp",
+            "PipePipe",
             "DocLine",
             "AttentionLine",
         ] {
             assert!(seen.contains(kind), "fixture is missing a {kind} token");
         }
         // Proves only that THIS fixture's own kind set is exactly these
-        // 26 names — no fewer (the loop above already checked that),
-        // and no unlisted 27th kind smuggled in alongside them. It is
+        // 32 names — no fewer (the loop above already checked that),
+        // and no unlisted kind smuggled in alongside them. It is
         // NOT independent evidence that the reachable domain's true
-        // size is 26; that count comes from the empirical grep census
-        // this module's own doc comments describe (`token_kind`'s 28
+        // size is 32; that count comes from the empirical grep census
+        // this module's own doc comments describe (`token_kind`'s 34
         // significant `TmcKind` variants minus the two, `At` and
         // `Bang`, no production ever matches).
         assert_eq!(
             seen.len(),
-            26,
-            "this fixture's own token-kind set must be exactly the 26 named above"
+            32,
+            "this fixture's own token-kind set must be exactly the 32 named above"
         );
 
         let root = SyntaxNode::new_root(parse_green(src).expect("parses"));
@@ -1552,6 +1599,7 @@ mod tests {
                     }],
                     span: Span::new(5, 22, 5, 38),
                     named: None,
+                    open: None,
                 }),
             },
             span: Span::new(5, 11, 5, 38),
@@ -1620,6 +1668,7 @@ mod tests {
             ],
             span: Span::new(5, 22, 5, 48),
             named: None,
+            open: None,
         };
 
         let root =
@@ -1641,10 +1690,46 @@ mod tests {
         assert_eq!(green_map, expected_map);
     }
 
+    /// A `set` declaration extracts to the written-out `SetDecl` below: the
+    /// NAME's line with the HEADER's column (`export`, not `set`), its
+    /// namespace path, and its body through the shared element production —
+    /// a literal and a qualified set reference, each with its own span.
+    /// Mutation: a `TopView::SetDecl` arm that drops the declaration (or a
+    /// view reading the wrong header IDENT as the name) — `program.sets`
+    /// then differs from the literal.
+    #[test]
+    fn a_set_declaration_extracts_to_the_expected_set_decl() {
+        let src = "namespace n {\n  ? d\n  export set s { 'a', m::t }\n}\n";
+        let program = crate::parser::parse(src).expect("parses");
+        assert_eq!(program.sets.len(), 1, "{:?}", program.sets);
+        let got = &program.sets[0];
+        assert!(got.doc.is_some(), "the bound doc run is carried");
+        let expected = SetDecl {
+            name: "s".to_string(),
+            name_span: Span::new(3, 14, 3, 15),
+            line: 3,
+            col: 3,
+            exported: true,
+            ns: vec!["n".to_string()],
+            elems: vec![
+                crate::parser::AlphabetElem::Single(SymLit::Glyph {
+                    value: "a".to_string(),
+                    span: Span::new(3, 18, 3, 21),
+                }),
+                crate::parser::AlphabetElem::SetRef {
+                    name: "m::t".to_string(),
+                    span: Span::new(3, 23, 3, 27),
+                },
+            ],
+            doc: got.doc.clone(),
+        };
+        assert_eq!(*got, expected);
+    }
+
     /// Retokenizing a REUSE's own SIG_PARAM node and reparsing it
     /// through `Parser::sig_param` reproduces the exact `SigParam`s
     /// written below, across BOTH shapes the production itself branches
-    /// on: `Tape` (`writes`/`preserves` clauses included) and the plain
+    /// on: `Tape` (`writes`/`never writes` clauses included) and the plain
     /// `State` parameter — a fixture with only the `Tape` shape would
     /// leave the `State` arm of `Parser::sig_param` entirely unpinned.
     /// The expected values are literals captured from the retired
@@ -1652,7 +1737,7 @@ mod tests {
     /// still callable.
     #[test]
     fn reparsed_sig_param_equals_the_expected_sig_param_for_both_shapes() {
-        let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \
+        let src = "routine r(tape t: ab writes { '0' } never writes { '1' }, state s) {\n  \
                    entry state a {\n    [*] -> stop;\n  }\n}\n";
 
         let expected_params = vec![
@@ -1661,32 +1746,34 @@ mod tests {
                     alphabet: "ab".to_string(),
                     alphabet_span: Span::new(1, 19, 1, 21),
                     volatile: false,
-                    writes: Some(crate::parser::ContractClause {
+                    writes: Some(Box::new(crate::parser::ContractClause {
                         elems: vec![crate::parser::AlphabetElem::Single(SymLit::Glyph {
                             value: "0".to_string(),
                             span: Span::new(1, 31, 1, 34),
                         })],
                         kw_span: Span::new(1, 22, 1, 28),
                         span: Span::new(1, 22, 1, 36),
-                    }),
-                    preserves: Some(crate::parser::ContractClause {
+                    })),
+                    never_writes: Some(Box::new(crate::parser::ContractClause {
                         elems: vec![crate::parser::AlphabetElem::Single(SymLit::Glyph {
                             value: "1".to_string(),
-                            span: Span::new(1, 49, 1, 52),
+                            span: Span::new(1, 52, 1, 55),
                         })],
-                        kw_span: Span::new(1, 37, 1, 46),
-                        span: Span::new(1, 37, 1, 54),
-                    }),
+                        kw_span: Span::new(1, 37, 1, 49),
+                        span: Span::new(1, 37, 1, 57),
+                    })),
+                    enters: None,
+                    leaves: None,
                 },
                 name: "t".to_string(),
                 name_span: Span::new(1, 16, 1, 17),
-                span: Span::new(1, 11, 1, 54),
+                span: Span::new(1, 11, 1, 57),
             },
             crate::parser::SigParam {
                 kind: SigParamKind::State,
                 name: "s".to_string(),
-                name_span: Span::new(1, 62, 1, 63),
-                span: Span::new(1, 56, 1, 63),
+                name_span: Span::new(1, 65, 1, 66),
+                span: Span::new(1, 59, 1, 66),
             },
         ];
 
@@ -2546,7 +2633,7 @@ mod tests {
                    \n\
                    alphabet nm { 0..9 }\n\
                    \n\
-                   export graph gr(tape t: ab writes { '0'..'5' } preserves { '_' }, state k) {\n\
+                   export graph gr(tape t: ab writes { '0'..'5' } never writes { '_' }, state k) {\n\
                    \x20 entry state a {\n\
                    \x20   ['0'] -> write ['1'] move [>] goto a;\n\
                    \x20   ['1'] -> a;\n\
@@ -2952,26 +3039,31 @@ mod tests {
     /// hypothetical shapes — a smoke test that the whole crate's own
     /// `Program` type still round-trips through `parse` on one of them
     /// AND that the fixture's every declared feature actually landed (a
-    /// wrong implementation dropping, say, the `preserves` clause or the
+    /// wrong implementation dropping, say, the `never writes` clause or the
     /// second sig param would still leave `routines.len() == 1`, so that
     /// alone proves nothing).
 
     #[test]
     fn fixture_smoke_check_parses_to_a_program() {
-        let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \
+        let src = "routine r(tape t: ab writes { '0' } never writes { '1' }, state s) {\n  \
                    entry state a {\n    [*] -> stop;\n  }\n}\n";
         let program: Program = crate::parser::parse(src).unwrap();
         assert_eq!(program.routines.len(), 1);
         let r = &program.routines[0];
         assert_eq!(r.sig.params.len(), 2, "both sig params must survive");
         let SigParamKind::Tape {
-            writes, preserves, ..
+            writes,
+            never_writes,
+            ..
         } = &r.sig.params[0].kind
         else {
             panic!("expected a tape param");
         };
         assert!(writes.is_some(), "the writes clause must survive");
-        assert!(preserves.is_some(), "the preserves clause must survive");
+        assert!(
+            never_writes.is_some(),
+            "the `never writes` clause must survive"
+        );
         assert_eq!(r.states.len(), 1, "the entry state must survive");
     }
 }

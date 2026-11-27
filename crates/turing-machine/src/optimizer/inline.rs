@@ -152,6 +152,13 @@ fn is_full_passthrough(binding: &[IrTapeBinding], caller: &IrWorld, callee: &IrW
         && binding.iter().enumerate().all(|(k, tb)| {
             tb.caller_tape as usize == k
                 && tb.pairs.is_empty()
+                // An OPEN map is never a pass-through, even with no pairs
+                // on equal alphabets: every unlisted caller glyph must
+                // arrive as the callee's opaque index, which only the
+                // link engine's composition produces. Spliced, the
+                // callee's concrete rows would read the caller's real
+                // glyphs instead (docs/formats.md (bound calls)).
+                && !tb.open
                 && k < callee.tapes.len()
                 && (tb.caller_tape as usize) < caller.tapes.len()
                 && caller.tapes[k].cardinality == callee.tapes[k].cardinality
@@ -172,7 +179,7 @@ pub fn run(ir: &mut IrProgram, options: &OptOptions) -> u32 {
             w.kind == IrWorldKind::Routine
                 && Some(*i) != entry
                 // Exit-free callees only — see the module doc.
-                && w.exits == 0
+                && w.exits.is_empty()
                 && is_leaf(w)
                 && rule_count(w) <= cap
         })
@@ -298,17 +305,23 @@ fn widen_rule(r: &mut IrRule, n: usize) {
 /// copied).
 ///
 /// `then: None` is a tail-position site — legal only against a callee KNOWN
-/// to be `noreturn`, which by that very fact has NO `return` transition
-/// anywhere in its body, dead or live (`ir::body_can_return`). A candidate
-/// spliced from such a callee therefore never reaches the `Return` arm
-/// below in practice. It is handled rather than `unreachable!`ing anyway:
-/// a future unsoundness in `body_can_return` would otherwise turn a wrong
-/// BIT into an `-O1` panic on ordinary user input instead of a diagnosable
-/// stop, and the whole point of this task's `trap`-after-tail-call
-/// decision (`codegen.rs`) is that a `noreturn` claim proving false is a
-/// controlled trap everywhere else it can surface — this is the one
-/// remaining place it could surface as a panic instead, so it gets the
-/// same treatment: a synthesized `trap #0`, never a crash.
+/// to be `noreturn`. The `Return` arm's `None` case below is therefore
+/// **unreachable for any well-formed compilation**, and the chain is closed
+/// at every link: an in-unit routine declaring `noreturn` over a body that
+/// can return is refused outright, a `then`-less call into an in-unit
+/// callee that can return is refused as well, candidates are in-unit
+/// worlds only, and both production sites that build an
+/// `IrTransition::Return` are seen by the body scan the "known" fact comes
+/// from — so reaching it would take a callee that both can and cannot
+/// return.
+///
+/// It is handled rather than `unreachable!`ing anyway: a future unsoundness
+/// in that scan would otherwise turn a wrong BIT into an `-O1` panic on
+/// ordinary user input instead of a diagnosable stop. The kind matches the
+/// `trap`-after-tail-call emission (`codegen.rs`) so the defensive path
+/// tells the same story as the live one rather than reporting a map fault
+/// for a broken `noreturn` claim. Being unreachable, it is deliberately
+/// unpinned — no test can construct the input that would exercise it.
 fn remap_transition(t: &IrTransition, base: u32, then: Option<IrThen>) -> (IrTransition, bool) {
     match t {
         IrTransition::Goto { state } => (
@@ -325,12 +338,13 @@ fn remap_transition(t: &IrTransition, base: u32, then: Option<IrThen>) -> (IrTra
             Some(IrThen::ReturnExit { exit }) => (IrTransition::ReturnExit { exit }, false),
             Some(IrThen::Stop) => (IrTransition::Stop, false),
             Some(IrThen::Halt) => (IrTransition::Halt, false),
-            None => (IrTransition::TrapRead, true),
+            None => (IrTransition::TrapContract, true),
         },
         IrTransition::Stop => (IrTransition::Stop, false),
         IrTransition::Halt => (IrTransition::Halt, false),
         IrTransition::TrapRead => (IrTransition::TrapRead, false),
         IrTransition::TrapWrite => (IrTransition::TrapWrite, false),
+        IrTransition::TrapContract => (IrTransition::TrapContract, false),
         IrTransition::CallThen { .. } | IrTransition::TailCall { .. } => {
             unreachable!("inline candidates are leaves — no nested call to remap")
         }
@@ -420,38 +434,6 @@ machine {
         validate_world(main).unwrap();
     }
 
-    /// A call into an out-of-unit routine can never be a splice candidate —
-    /// it has no body in this unit to splice. Structural, not a special
-    /// case: `candidates` is built from `ir.worlds` (this unit's own emitted
-    /// worlds only), and an external target never names one of them, so
-    /// `find_site` never even reaches `is_full_passthrough` for it. Pins
-    /// that with a symbolic (named, bindless) entry — the shape a bound
-    /// call into a routine with no declarations lowers to — which would
-    /// otherwise look tantalizingly close to the bindless-identity case
-    /// `a_bindless_call_is_inlined` splices. Mutation: keying `candidates`
-    /// on `resolved.worlds` (which, unlike `ir.worlds`, could in principle
-    /// grow an external entry) instead of `ir.worlds`; this test would then
-    /// need the splice to fail for a DIFFERENT reason, not fail to find one.
-    #[test]
-    fn an_external_callee_is_never_a_splice_candidate() {
-        let mut ir = ir_of(
-            "alphabet ab { '_', 'a' }
-use mylib::helper;
-machine {
-  tape t: ab;
-  entry state m { [*] -> call mylib::helper(t = t) then done; }
-  state done     { [*] -> stop; }
-}",
-        );
-        assert_eq!(run(&mut ir, &OptOptions::default()), 0, "nothing to inline");
-        let main = world(&ir, "main");
-        assert!(
-            any_callthen(main),
-            "the call into the external routine is untouched"
-        );
-        validate_world(main).unwrap();
-    }
-
     #[test]
     fn a_widened_arity_call_pads_the_unbound_tape() {
         // A 2-tape machine calls a 1-tape helper binding its tape `x` (tape 0).
@@ -501,6 +483,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }];
         let machine = IrWorld {
             name: "main".into(),
@@ -549,7 +534,7 @@ machine {
             ],
             local: false,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let routine = IrWorld {
@@ -576,7 +561,7 @@ machine {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mut ir = IrProgram {
@@ -614,6 +599,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }];
         let callee_tapes = vec![IrTape {
             name: "t".into(),
@@ -622,6 +610,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }];
         let machine = IrWorld {
             name: "main".into(),
@@ -670,7 +661,7 @@ machine {
             ],
             local: false,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let routine = IrWorld {
@@ -697,7 +688,7 @@ machine {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mut ir = IrProgram {
@@ -783,6 +774,9 @@ machine {
             volatile: false,
             glyphs: Vec::new(),
             writes: None,
+            enters: None,
+            leaves: None,
+            opaque: false,
         }];
         let stop_state = |id: u32, name: &str| IrState {
             id,
@@ -809,7 +803,7 @@ machine {
             states: vec![stop_state(0, "m")],
             local: false,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let routine = IrWorld {
@@ -841,7 +835,7 @@ machine {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mut ir = IrProgram {
@@ -874,6 +868,9 @@ machine {
                 volatile: true,
                 glyphs: Vec::new(),
                 writes: None,
+                enters: None,
+                leaves: None,
+                opaque: false,
             }],
             entry: 0,
             states: vec![
@@ -917,7 +914,7 @@ machine {
             ],
             local: false,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let routine = IrWorld {
@@ -931,6 +928,9 @@ machine {
                 volatile: false,
                 glyphs: Vec::new(),
                 writes: None,
+                enters: None,
+                leaves: None,
+                opaque: false,
             }],
             entry: 0,
             states: vec![IrState {
@@ -951,7 +951,7 @@ machine {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mut ir = IrProgram {

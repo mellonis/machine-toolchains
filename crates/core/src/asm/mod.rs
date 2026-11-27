@@ -92,6 +92,15 @@ pub enum AsmErrorKind {
     /// unpins blank (index 0 must map to 0), or an exit label absent from
     /// the owning function. The carried string is the full message.
     BadFrame(String),
+    /// A routine whose `.routine` line declares `exits=N` and whose body
+    /// executes a multi-exit return through an index `k >= N`
+    /// (docs/core.md (error codes)). The span is the offending
+    /// instruction's.
+    UndeclaredExit {
+        routine: String,
+        exit: u8,
+        declared: u8,
+    },
 }
 
 /// Binds each [`AsmErrorKind`] variant to its stable code exactly once,
@@ -137,6 +146,7 @@ impl AsmErrorKind {
         AsmErrorKind::UnknownTableLabel(_) => "unknown-table-label",
         AsmErrorKind::BadSignature(_) => "bad-signature",
         AsmErrorKind::BadFrame(_) => "bad-frame",
+        AsmErrorKind::UndeclaredExit { .. } => "undeclared-exit",
     }
 }
 
@@ -171,6 +181,14 @@ impl std::fmt::Display for AsmErrorKind {
             // Frame-directive messages are composed in full at the raise
             // site (they often name the offending `k`, label, or bound).
             AsmErrorKind::BadFrame(m) => write!(f, "{m}"),
+            AsmErrorKind::UndeclaredExit {
+                routine,
+                exit,
+                declared,
+            } => write!(
+                f,
+                "`{routine}` returns through exit {exit}, but its signature declares {declared} exit(s)"
+            ),
         }
     }
 }
@@ -250,6 +268,11 @@ mod tests {
             AsmErrorKind::UnknownTableLabel("x".into()),
             AsmErrorKind::BadSignature("x".into()),
             AsmErrorKind::BadFrame("x".into()),
+            AsmErrorKind::UndeclaredExit {
+                routine: "x".into(),
+                exit: 1,
+                declared: 1,
+            },
         ];
         let witnessed: Vec<&str> = kinds.iter().map(|k| k.code()).collect();
         assert_eq!(

@@ -91,7 +91,7 @@ const SOURCE: &str = "\
 .param ctl, ('_', '1')
 .func f
         stop
-.routine main, tapes=2, alpha=(5, 3), exits=2, noreturn
+.routine main, tapes=2, alpha=(5, 3), exits=(e0, e1), noreturn
 .param data, ('_', 'a', 'b', '0', '1'), writes=('0', '1'), enters=('a'), leaves=('0', '1'), opaque
 .param ctl, ('_', '0', '1')
 .func main
@@ -114,7 +114,7 @@ const CANONICAL: &str = "\
 .param ctl, ('_', '1')
 .func f
         stop
-.routine main, tapes=2, alpha=(5, 3), exits=2, noreturn
+.routine main, tapes=2, alpha=(5, 3), exits=(e0, e1), noreturn
 .param data, ('_', 'a', 'b', '0', '1'), writes=('0', '1'), enters=('a'), leaves=('0', '1'), opaque
 .param ctl, ('_', '0', '1')
 .func main
@@ -144,7 +144,7 @@ fn interface_surface_round_trips_byte_identically() {
         Some(&["0".to_string(), "1".to_string()][..])
     );
     assert!(main.opaque[0] && !main.opaque[1]);
-    assert_eq!(main.exits, 2);
+    assert_eq!(main.exits, ["e0".to_string(), "e1".to_string()]);
     assert!(!main.returns);
 
     let bc = &obj.bound_calls[0];
@@ -220,7 +220,7 @@ fn param_suffixes_print_only_when_they_carry_something() {
     assert!(text.contains("\n.param ctl, ('_', '0', '1')\n"), "{text}");
     assert!(!text.contains("writes=()"), "{text}");
     assert!(
-        text.contains("\n.routine main, tapes=2, alpha=(5, 3), exits=2, noreturn\n"),
+        text.contains("\n.routine main, tapes=2, alpha=(5, 3), exits=(e0, e1), noreturn\n"),
         "{text}"
     );
     assert!(
@@ -235,11 +235,14 @@ fn param_suffixes_print_only_when_they_carry_something() {
 #[test]
 fn the_routine_tail_prints_its_two_fields_independently() {
     for (tail, expected) in [
-        (", exits=1", ".routine f, tapes=1, alpha=(2), exits=1\n"),
+        (
+            ", exits=(e0)",
+            ".routine f, tapes=1, alpha=(2), exits=(e0)\n",
+        ),
         (", noreturn", ".routine f, tapes=1, alpha=(2), noreturn\n"),
         (
-            ", exits=1, noreturn",
-            ".routine f, tapes=1, alpha=(2), exits=1, noreturn\n",
+            ", exits=(e0), noreturn",
+            ".routine f, tapes=1, alpha=(2), exits=(e0), noreturn\n",
         ),
         ("", ".routine f, tapes=1, alpha=(2)\n"),
     ] {

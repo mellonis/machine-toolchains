@@ -506,9 +506,9 @@ mod tests {
     fn dirs_true_renders_a_zsh_alternative_of_glob_and_directory() {
         let script = render(&registry());
         // `lint` and `fmt` each have a positional and an `--exclude` that
-        // both accept a `.tmc`/`.tma` file OR a directory as a complete
+        // both accept a `.tmc`/`.tmh`/`.tma` file OR a directory as a complete
         // answer — 2 commands x 2 sites = 4 occurrences.
-        let expected = "_alternative \"files:file:_files -g \\\"*.(tmc|tma)\\\"\" \"dirs:directory:_files -/\"";
+        let expected = "_alternative \"files:file:_files -g \\\"*.(tmc|tmh|tma)\\\"\" \"dirs:directory:_files -/\"";
         assert!(
             script.contains(expected),
             "missing dirs-aware _alternative: {script}"

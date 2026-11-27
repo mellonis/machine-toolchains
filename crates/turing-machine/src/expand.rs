@@ -40,7 +40,10 @@ use crate::declarations::Declarations;
 use crate::parser::{
     BindingArg, BindingValue, Continuation, FoldExprKind, FoldExprNode, FoldOp, MapArrow, MoveCell,
     MoveDir, MoveVec, PatternCell, PatternCellKind, Rule, SymLit, SymMap as SrcSymMap, TermKind,
-    Transition, WriteCell, WriteCellKind, WriteVec,
+    Transition, WriteCell, WriteCellKind, WriteVec, char_arithmetic_span,
+};
+use crate::patterns::{
+    DeclaredRangeMiss, declared_range, label_number, label_spelling, written_spelling,
 };
 
 // ---------------------------------------------------------------------------
@@ -65,7 +68,21 @@ pub(crate) struct Expanded {
     /// first-encountered order — `compiler::compile`'s own input for the
     /// `.grafted <name>, <digest>` lines it writes (docs/formats.md (routine
     /// interfaces)).
-    pub spliced_external_graphs: Vec<String>,
+    pub spliced_external_graphs: Vec<SplicedGraph>,
+}
+
+/// One library graph a compile spliced, as the body was spliced: its name,
+/// the digest stamped on the owning module's copy of it (`None` only if a
+/// declarations producer failed to stamp it), the index of that module in
+/// the external-module list, and the span of the graft that first brought
+/// it in. Two records of one name differ in digest, and
+/// `compiler::compile` refuses that case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SplicedGraph {
+    pub name: String,
+    pub digest: Option<u32>,
+    pub module: usize,
+    pub span: Span,
 }
 
 /// One emitted world — a machine block or a routine, after expansion.
@@ -223,26 +240,64 @@ impl SymMap {
 
 /// One bound graph tape's absolute placement onto a host tape, plus its
 /// read map (host → graph) and write map (graph → host) and the two
-/// cardinalities the hole checks need.
+/// cardinalities the hole checks need. `open` marks a site map that ended
+/// with the `*` marker: its unlisted host symbols are the OPAQUE class
+/// (docs/tmt/language.md (open grafts)) — never a hole and never an alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TapeMap {
     /// Host tape index this graph tape projects onto.
     phys: usize,
     host_card: usize,
     graph_card: usize,
+    /// The site map left open with `*` (read direction only).
+    open: bool,
     /// host symbol → graph symbol (the binding's read direction).
     rmap: SymMap,
     /// graph symbol → host symbol (bidirectional pairs' inverses).
     wmap: SymMap,
 }
 
+/// How one host symbol reads under a [`TapeMap`]. `Image` is a graph glyph;
+/// `Hole` is a closed map's unmapped symbol (the read-trap machinery's
+/// input); `Opaque` is an open map's unlisted symbol — "anything else", which
+/// only the graph's `*` rows match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadClass {
+    Image(u16),
+    Opaque,
+    Hole,
+}
+
 impl TapeMap {
-    /// The graph symbol host symbol `p` reads as, or `None` (a read hole) when
-    /// its image falls outside the graph tape's alphabet.
-    fn read_image(&self, p: u16) -> Option<u16> {
+    /// The one classification both [`Self::read_image`] and [`Self::holes`]
+    /// draw from. On a closed map this is exactly today's `read_image`
+    /// classification; on an open map the blank stays pinned, a listed source
+    /// reads as its (bounds-checked) destination, and anything unlisted is
+    /// `Opaque`.
+    fn read_class(&self, p: u16) -> ReadClass {
+        if self.open {
+            if p == 0 {
+                return ReadClass::Image(0);
+            }
+            return match self.rmap.pairs.get(&p).copied() {
+                Some(v) if usize::from(v) < self.graph_card => ReadClass::Image(v),
+                Some(_) => ReadClass::Hole,
+                None => ReadClass::Opaque,
+            };
+        }
         match self.rmap.apply(p) {
-            Some(v) if usize::from(v) < self.graph_card => Some(v),
-            _ => None,
+            Some(v) if usize::from(v) < self.graph_card => ReadClass::Image(v),
+            _ => ReadClass::Hole,
+        }
+    }
+
+    /// The graph symbol host symbol `p` reads as, or `None` when its image
+    /// is no graph glyph — a read hole on a closed map, the opaque class on
+    /// an open one.
+    fn read_image(&self, p: u16) -> Option<u16> {
+        match self.read_class(p) {
+            ReadClass::Image(v) => Some(v),
+            ReadClass::Opaque | ReadClass::Hole => None,
         }
     }
 
@@ -262,10 +317,11 @@ impl TapeMap {
             .collect()
     }
 
-    /// The ascending host symbols that read as no graph symbol (read holes).
+    /// The ascending host symbols that read as no graph symbol (read holes) —
+    /// excluding an open map's opaque symbols, which are not holes.
     fn holes(&self) -> Vec<u16> {
         (0..self.host_card as u16)
-            .filter(|&p| self.read_image(p).is_none())
+            .filter(|&p| self.read_class(p) == ReadClass::Hole)
             .collect()
     }
 }
@@ -279,6 +335,8 @@ struct Composite {
 
 impl Composite {
     /// A deterministic dedup key over the projection and both maps per tape.
+    /// Openness rides per tape: two splices differing in openness never share
+    /// a key.
     fn key(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&(self.tapes.len() as u32).to_le_bytes());
@@ -286,6 +344,7 @@ impl Composite {
             out.extend_from_slice(&(t.phys as u32).to_le_bytes());
             out.extend_from_slice(&(t.host_card as u32).to_le_bytes());
             out.extend_from_slice(&(t.graph_card as u32).to_le_bytes());
+            out.push(u8::from(t.open));
             t.rmap.write_key(&mut out);
             t.wmap.write_key(&mut out);
         }
@@ -447,8 +506,12 @@ fn splice_state(
             // Every read cell had a host preimage EXCEPT this rule's — the
             // graft binds a symbol the host tape can never read as, so the
             // generically-written rule can never fire in this instance. A
-            // warning, not an error, mirroring the range-expansion case
-            // (docs/tmt/language.md (rules)); the graft-site is legal.
+            // warning, not an error: the graph's author could not know the
+            // binding, the body itself matched only symbols of its own
+            // alphabet, and the graft site is legal. One of two places
+            // `empty-expansion` fires — the other is a guard filtering
+            // every row of its own rule (`expand_rule`;
+            // docs/tmt/language.md (rule guards)).
             warn.push(Diagnostic {
                 code: "empty-expansion",
                 span: r.span,
@@ -473,8 +536,8 @@ fn splice_state(
 // varies slowest, rightmost fastest — matching the linker's preimage
 // cartesian); a `{…}` substitution folds per row — a bare name passes the
 // bound glyph through, any operator applies numeric i64 arithmetic
-// (`+ - * %`, bounds-checked against the tape alphabet); a range value with no
-// glyph on the tape drops that alternative. Product over 256 warns.
+// (`+ - * %`, bounds-checked against the tape alphabet); a symbol the tape
+// lacks is an error, never a dropped alternative. Product over 256 warns.
 // ---------------------------------------------------------------------------
 
 /// The product-count above which a rule's expansion warns. Shared with the
@@ -482,19 +545,27 @@ fn splice_state(
 /// this same warning, so the two agree on the cutoff.
 pub(crate) const PRODUCT_THRESHOLD: usize = 256;
 
-/// One tape's resolution context: the inverse lookup (glyph → index).
+/// One tape's resolution context: its alphabet's name and glyphs in
+/// declared order (what a pattern cell's range walks, and what a strictness
+/// error names), plus the inverse lookup (glyph → index).
 struct TapeInfo {
+    alphabet: String,
+    glyphs: Vec<String>,
     index: HashMap<String, u16>,
 }
 
 impl TapeInfo {
-    fn new(glyphs: &[String]) -> Self {
+    fn new(alphabet: &str, glyphs: &[String]) -> Self {
         let index = glyphs
             .iter()
             .enumerate()
             .map(|(i, g)| (g.clone(), i as u16))
             .collect();
-        Self { index }
+        Self {
+            alphabet: alphabet.to_string(),
+            glyphs: glyphs.to_vec(),
+            index,
+        }
     }
 
     fn idx(&self, glyph: &str) -> Option<u16> {
@@ -503,11 +574,14 @@ impl TapeInfo {
 }
 
 /// A symbol bound by a pattern cell's `as v`. `glyph` is what a bare `{v}`
-/// passthrough writes; `value` is the number fold arithmetic reads (`None` for
-/// glyph bindings — the parser forbids arithmetic on those).
+/// passthrough writes; `value` is the number fold arithmetic reads — the
+/// number the label names (`label_number`), `None` when it names none, and a
+/// fold over such a binding is refused before any evaluation.
 #[derive(Debug, Clone)]
-struct BoundVal {
-    glyph: String,
+pub(crate) struct BoundVal {
+    /// The glyph label as the alphabet names it — the identity a pattern
+    /// writes and a guard compares (`expand::glyph_label`'s canon).
+    pub(crate) glyph: String,
     value: Option<i64>,
 }
 
@@ -519,100 +593,121 @@ fn glyph_label(s: &SymLit) -> String {
     }
 }
 
-/// A symbol literal's numeric value, if it is a number literal.
-fn numeric_value(s: &SymLit) -> Option<i64> {
-    match s {
-        SymLit::Number { value, .. } => Some(i64::from(*value)),
-        SymLit::Glyph { .. } => None,
-    }
-}
-
-/// Enumerate a pattern range's `(glyph, value)` members, inclusive/ascending.
-/// Numeric ranges mint decimal glyphs with their value; glyph ranges walk
-/// scalar succession with no value. Descending or non-scalar endpoints error
-/// at `span`.
-fn enumerate_range(
-    lo: &SymLit,
-    hi: &SymLit,
-    span: Span,
-) -> Result<Vec<(String, Option<i64>)>, CompileError> {
-    match (lo, hi) {
-        (SymLit::Number { value: l, .. }, SymLit::Number { value: h, .. }) => {
-            if l > h {
-                return Err(CompileError {
-                    span,
-                    kind: CompileErrorKind::RangeDescending,
-                });
-            }
-            Ok((*l..=*h)
-                .map(|v| (v.to_string(), Some(i64::from(v))))
-                .collect())
-        }
-        (SymLit::Glyph { value: l, .. }, SymLit::Glyph { value: h, .. }) => {
-            let (Some(lc), Some(hc)) = (single_scalar(l), single_scalar(h)) else {
-                return Err(CompileError {
-                    span,
-                    kind: CompileErrorKind::RangeEndpointNotScalar,
-                });
-            };
-            if lc as u32 > hc as u32 {
-                return Err(CompileError {
-                    span,
-                    kind: CompileErrorKind::RangeDescending,
-                });
-            }
-            Ok((lc as u32..=hc as u32)
-                .filter_map(char::from_u32)
-                .map(|c| (c.to_string(), None))
-                .collect())
-        }
-        _ => Err(CompileError {
-            span,
-            kind: CompileErrorKind::RangeEndpointNotScalar,
-        }),
-    }
-}
-
-/// The single Unicode scalar of a glyph, or `None` if it is not exactly one.
-fn single_scalar(g: &str) -> Option<char> {
-    let mut chars = g.chars();
-    let first = chars.next()?;
-    chars.next().is_none().then_some(first)
-}
-
 /// One pattern cell's expansion alternatives: `(concrete cell, optional
-/// binding)`. A wildcard, single symbol, or one row per range member; a range
-/// value with no glyph on the tape drops silently.
+/// binding)`. A wildcard, single symbol, or one row per range or set member.
 type CellOpt = (Cell, Option<(String, BoundVal)>);
 
+/// Every symbol a pattern cell names must be a symbol of the alphabet of the
+/// tape it reads, so no alternative is ever dropped here: a single symbol or
+/// a set member the tape lacks, a range with no walk over the alphabet, and
+/// a set with no members at all are each a compile error naming the symbol
+/// and the alphabet (docs/tmt/language.md (rules)). A rule that vanishes
+/// only at a graft splice is a different fact, found later, and stays a
+/// warning (`splice_state`).
+///
+/// A range walks the tape alphabet's declared order from its first endpoint
+/// to its second ([`declared_range`], docs/tmt/language.md (pattern ranges)) — never
+/// Unicode succession, which only an alphabet or set body walks — so its
+/// rows come out in the alphabet's own order and a bound member carries its
+/// label, with a value only when the label names a number.
 fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, CompileError> {
     let binding = cell.binding.as_ref().map(|b| b.name.clone());
+    let lookup = |label: &str, outside: &dyn Fn() -> CompileErrorKind| {
+        ti.idx(label).ok_or_else(|| CompileError {
+            span: cell.span,
+            kind: outside(),
+        })
+    };
     match &cell.kind {
         PatternCellKind::Wildcard => Ok(vec![(Cell::Wild, None)]),
         PatternCellKind::Single(s) => {
-            let Some(i) = ti.idx(&glyph_label(s)) else {
-                // A single concrete symbol not on this tape can never match —
-                // the rule is dead; drop it (no valid index to lower).
-                return Ok(Vec::new());
-            };
+            let glyph = glyph_label(s);
+            let i = lookup(&glyph, &|| CompileErrorKind::SymbolOutsideAlphabet {
+                glyph: written_spelling(s),
+                alphabet: ti.alphabet.clone(),
+            })?;
             let bv = binding.map(|n| {
                 (
                     n,
                     BoundVal {
-                        glyph: glyph_label(s),
-                        value: numeric_value(s),
+                        glyph: glyph.clone(),
+                        value: label_number(&glyph),
                     },
                 )
             });
             Ok(vec![(Cell::Sym(i), bv)])
         }
         PatternCellKind::Range { lo, hi } => {
-            let mut opts = Vec::new();
-            for (glyph, value) in enumerate_range(lo, hi, cell.span)? {
-                if let Some(i) = ti.idx(&glyph) {
-                    let bv = binding.clone().map(|n| (n, BoundVal { glyph, value }));
-                    opts.push((Cell::Sym(i), bv));
-                }
+            let members = declared_range(lo, hi, &ti.glyphs).map_err(|miss| CompileError {
+                span: cell.span,
+                kind: CompileErrorKind::RangeOutsideAlphabet {
+                    lo: written_spelling(lo),
+                    hi: written_spelling(hi),
+                    alphabet: ti.alphabet.clone(),
+                    missing: match miss {
+                        DeclaredRangeMiss::Endpoint(label) => Some(if glyph_label(lo) == label {
+                            written_spelling(lo)
+                        } else {
+                            written_spelling(hi)
+                        }),
+                        DeclaredRangeMiss::Reversed => None,
+                    },
+                },
+            })?;
+            let mut opts = Vec::with_capacity(members.len());
+            for glyph in members {
+                let i = lookup(glyph, &|| {
+                    CompileErrorKind::Internal(format!(
+                        "range member `{glyph}` is not on the alphabet it was walked over"
+                    ))
+                })?;
+                let bv = binding.clone().map(|n| {
+                    (
+                        n,
+                        BoundVal {
+                            glyph: glyph.clone(),
+                            value: label_number(glyph),
+                        },
+                    )
+                });
+                opts.push((Cell::Sym(i), bv));
+            }
+            Ok(opts)
+        }
+        // One row per member, in the set's own member order — the order an
+        // alphabet body naming the set lists them in.
+        PatternCellKind::SetRef { name, resolved, .. } => {
+            let Some(resolved) = resolved else {
+                return Err(CompileError {
+                    span: cell.span,
+                    kind: CompileErrorKind::Internal(format!(
+                        "the set `{name}` in a pattern cell reached expansion unresolved"
+                    )),
+                });
+            };
+            if resolved.members.is_empty() {
+                return Err(CompileError {
+                    span: cell.span,
+                    kind: CompileErrorKind::EmptySetInPattern(resolved.set.clone()),
+                });
+            }
+            let mut opts = Vec::with_capacity(resolved.members.len());
+            for member in &resolved.members {
+                let i = lookup(&member.label, &|| CompileErrorKind::SetOutsideAlphabet {
+                    glyph: label_spelling(&member.label),
+                    set: resolved.set.clone(),
+                    alphabet: ti.alphabet.clone(),
+                })?;
+                let bv = binding.clone().map(|n| {
+                    (
+                        n,
+                        BoundVal {
+                            glyph: member.label.clone(),
+                            value: label_number(&member.label),
+                        },
+                    )
+                });
+                opts.push((Cell::Sym(i), bv));
             }
             Ok(opts)
         }
@@ -643,6 +738,25 @@ fn expand_rule(
         per_cell.push(cell_options(cell, &tapes[i])?);
     }
 
+    // A binding folds only when every symbol it can bind names a number.
+    // A range's members are known only here, against its tape's declared
+    // order — `[0..9 as d]` over an alphabet declaring a glyph between the
+    // two binds that glyph too — so this is where a fold over such a name is
+    // refused, as the parser refuses one it can already see.
+    let glyph_bound: Vec<&str> = per_cell
+        .iter()
+        .flatten()
+        .filter_map(|(_, b)| b.as_ref())
+        .filter(|(_, v)| v.value.is_none())
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if let Some(span) = char_arithmetic_span(rule.write.as_ref(), &glyph_bound) {
+        return Err(CompileError {
+            span,
+            kind: CompileErrorKind::CharArithmetic,
+        });
+    }
+
     // Cartesian product, leftmost tape varying slowest (rightmost fastest).
     let mut combos: Vec<Vec<CellOpt>> = vec![Vec::new()];
     for opts in &per_cell {
@@ -657,20 +771,9 @@ fn expand_rule(
         combos = next;
     }
 
-    if combos.is_empty() {
-        // Every match alternative fell outside a tape alphabet, so the rule
-        // expands to no rows and can never fire. A warning, not an error:
-        // dropping absent range members is documented behaviour, and this is
-        // only its degenerate all-dropped case (docs/tmt/language.md (rules)).
-        warn.push(Diagnostic {
-            code: "empty-expansion",
-            span: rule.span,
-            message: "this rule expands to no rows — every match alternative falls outside the \
-                      tape alphabet; the rule can never fire"
-                .to_string(),
-            fix: None,
-        });
-    } else if combos.len() > PRODUCT_THRESHOLD {
+    // Every cell has at least one alternative (`cell_options` refuses one
+    // with none), so the product is never empty here.
+    if combos.len() > PRODUCT_THRESHOLD {
         warn.push(Diagnostic {
             code: "expansion-threshold",
             span: rule.span,
@@ -683,6 +786,10 @@ fn expand_rule(
     }
 
     let transition = lower_tr(&rule.transition);
+    let guard_ctx = crate::guard::GuardContext {
+        tape_labels: tapes.iter().map(|t| t.glyphs.clone()).collect(),
+        tape_alphabets: tapes.iter().map(|t| t.alphabet.clone()).collect(),
+    };
     let mut out = Vec::with_capacity(combos.len());
     for combo in combos {
         let pattern: Vec<Cell> = combo.iter().map(|(c, _)| *c).collect();
@@ -690,6 +797,12 @@ fn expand_rule(
             .iter()
             .filter_map(|(_, b)| b.as_ref().map(|(n, v)| (n.as_str(), v)))
             .collect();
+        // A `where` guard drops rows HERE, before the write/move folds see
+        // the env: what survives is indistinguishable from a hand-written
+        // product (docs/tmt/language.md (rule guards)).
+        if !crate::guard::row_matches(rule, &env, &guard_ctx) {
+            continue;
+        }
         let write = resolve_write(rule.write.as_ref(), tapes, &env)?;
         let moves = resolve_moves(rule.mov.as_ref(), arity);
         out.push(ExpandedRule {
@@ -699,6 +812,22 @@ fn expand_rule(
             moves,
             transition: transition.clone(),
             span: rule.span,
+        });
+    }
+    // The product is never empty (`cell_options` refuses a cell with no
+    // alternative), so an empty `out` here can only mean a guard filtered
+    // every row of this rule away. A warning of the existing
+    // `empty-expansion` kind — the rows are the author's to prune
+    // deliberately, but a rule that can never fire says so
+    // (docs/tmt/language.md (rule guards)).
+    if rule.guard.is_some() && out.is_empty() {
+        warn.push(Diagnostic {
+            code: "empty-expansion",
+            span: rule.span,
+            message: "this rule's guard keeps no rows — every expanded row fails the predicate, \
+                      so the rule can never fire"
+                .to_string(),
+            fix: None,
         });
     }
     Ok(out)
@@ -1052,37 +1181,61 @@ fn build_tapemap(
             phys,
             host_card,
             graph_card,
+            open: false,
             rmap: SymMap::identity(),
             wmap: SymMap::identity(),
         });
     };
 
+    // The open marker makes this map's unlisted host symbols the OPAQUE
+    // class (docs/tmt/language.md (open grafts)): they name no graph glyph,
+    // sit in no preimage and mint no holes, and only the graph's `*` rows
+    // match them. Openness is a READ-side fact — the write half below is
+    // built exactly as a closed map's.
+    let open = m.open.is_some();
     let (mut rmap, mut wmap, bidir) = build_symbol_maps(&m.pairs, host_glyphs, graph_glyphs)?;
     // Closed-on-unequal (docs/formats.md (bound calls)): identity completion
-    // exists only for equal-size alphabets. Across differently-sized tapes
-    // every non-blank source the map does not name is a hole — computed from
-    // the explicit srcs still in `pairs`, before the identity-pair retain
-    // below, so an explicit `k->k` survives as identity while a truly absent
-    // symbol traps. A NAMED map's own declaration checks the opposite way
+    // exists only for equal-size alphabets. On a CLOSED map, every non-blank
+    // source the map does not name is a hole — computed from the explicit
+    // srcs still in `pairs`, before the identity-pair retain below, so an
+    // explicit `k->k` survives as identity while a truly absent symbol traps.
+    // An OPEN map mints none of these on the read side: its unlisted source is
+    // the opaque class by `read_class`, which reads `pairs` directly and never
+    // consults `holes`, so a hole entry would be dead state contradicting
+    // that model and riding along in the dedup key.
+    // A NAMED map's own declaration checks the opposite way
     // (`check_named_map_decl` REQUIRES every non-blank source to be named
     // on unequal cardinalities) — a graft is one splice,
     // one visible use, so a silent hole here is not the same hazard a
     // reused declaration's silent gap would be.
-    if host_card != graph_card {
+    if !open && host_card != graph_card {
         close_unlisted(&mut rmap, host_card);
+    }
+    // ...and an OPEN map closes its WRITE half whatever the cardinalities:
+    // the graph writes back only what the pairs map, so an unnamed glyph
+    // never lands through identity (docs/tmt/language.md (open grafts)).
+    if open || host_card != graph_card {
         close_unlisted(&mut wmap, graph_card);
     }
-    // Canonical: drop identity pairs (stable dedup keys).
-    rmap.pairs.retain(|s, d| s != d);
+    // Canonical: drop identity pairs (stable dedup keys) — except on an open
+    // READ map, where a named `'0' -> '0'` must keep telling itself apart from
+    // an unlisted (opaque) symbol: the retained pairs are exactly that line.
+    if !open {
+        rmap.pairs.retain(|s, d| s != d);
+    }
     wmap.pairs.retain(|s, d| s != d);
 
-    if host_card == graph_card {
+    // Open maps have no identity completion to protect: unlisted symbols are
+    // opaque, never aliases, and pairs-only injectivity is `map-conflict`'s
+    // job at insert time.
+    if host_card == graph_card && !open {
         check_injective_completion(&bidir, host_card, graph_glyphs, span)?;
     }
     Ok(TapeMap {
         phys,
         host_card,
         graph_card,
+        open: m.open.is_some(),
         rmap,
         wmap,
     })
@@ -1095,8 +1248,8 @@ fn build_tapemap(
 /// own map, [`build_tapemap`], through [`build_symbol_maps`] and
 /// [`check_injective_completion`]), and — the one check unique to a named
 /// declaration — CLOSED on unequal cardinalities: every non-blank SOURCE
-/// symbol must be explicitly named. A graft's own inline map silently
-/// holes an unnamed source across unequal cardinalities
+/// symbol must be explicitly named. A graft's own CLOSED inline map
+/// silently holes an unnamed source across unequal cardinalities
 /// (`build_tapemap`'s `close_unlisted`) because a graft is one splice, one
 /// visible use; a NAME is checked once and reused at every site that
 /// names it, so an unnamed source there would be a silent runtime trap
@@ -1128,8 +1281,14 @@ pub(crate) fn check_named_map_decl(
 
 /// Build a graft's [`Composite`] (per graph tape) plus its continuation
 /// substitution (graph state-param → the host continuation the graft binds).
-/// The T4 world checks guarantee every parameter is bound with a
-/// kind-correct argument, so the "impossible" branches are invariants.
+/// The argument list is checked first, against `graph` itself — the very
+/// graph being spliced ([`crate::compiler::check_graft_args`]). The world
+/// checks already ran that check when the graft was read, but a nested
+/// graft inside a library graph was checked against the graph ITS unit's
+/// declarations named, while the splice looks the target up in this
+/// compile's table, which may name a different graph. Checking here makes
+/// every parameter bound with a kind-correct argument by construction, so
+/// the "impossible" branches below are invariants.
 /// `host_owner`/`graph_owner`: the modules `host` and `graph` respectively
 /// belong to — usually the SAME module (an in-unit graft, or a nested graft
 /// inside one library graph reaching a sibling of the same library), but
@@ -1143,6 +1302,7 @@ fn build_composite(
     graph: &ResolvedWorld,
     graph_owner: &Resolved,
 ) -> Result<(Composite, HashMap<String, Transition2>), CompileError> {
+    crate::compiler::check_graft_args(graft, host, graph)?;
     let args: HashMap<&str, &BindingArg> =
         graft.args.iter().map(|a| (a.name.as_str(), a)).collect();
 
@@ -1150,15 +1310,15 @@ fn build_composite(
     for gt in &graph.tapes {
         let arg = args
             .get(gt.name.as_str())
-            .expect("T4 binds every tape parameter");
+            .expect("the world checks bind every tape parameter");
         let BindingValue::Named { target, map, .. } = &arg.value else {
-            unreachable!("T4 gives a tape parameter a named tape target");
+            unreachable!("the world checks give a tape parameter a named tape target");
         };
         let phys = host
             .tapes
             .iter()
             .position(|t| &t.name == target)
-            .expect("T4 resolves the tape target to a host tape");
+            .expect("the world checks resolve the tape target to a host tape");
         let host_glyphs = alphabet_glyphs(&host.tapes[phys].alphabet, host_owner)?;
         // The graph's OWN tape alphabet resolves in the GRAPH's own owner —
         // local for an in-unit graph (where `graph_owner` IS `host_owner`),
@@ -1177,7 +1337,7 @@ fn build_composite(
     for sp in &graph.state_params {
         let arg = args
             .get(sp.as_str())
-            .expect("T4 binds every state parameter");
+            .expect("the world checks bind every state parameter");
         let t2 = match &arg.value {
             BindingValue::Named { target, .. } => Transition2::Goto(target.clone()),
             BindingValue::Terminator { kind, .. } => match kind {
@@ -1414,7 +1574,12 @@ fn tape_infos(world: &ResolvedWorld, owner: &Resolved) -> Result<Vec<TapeInfo>, 
     world
         .tapes
         .iter()
-        .map(|t| Ok(TapeInfo::new(alphabet_glyphs(&t.alphabet, owner)?)))
+        .map(|t| {
+            Ok(TapeInfo::new(
+                &t.alphabet,
+                alphabet_glyphs(&t.alphabet, owner)?,
+            ))
+        })
         .collect()
 }
 
@@ -1528,6 +1693,7 @@ fn expand_own_states(
 fn expand_grafts_into<'a>(
     host: &ResolvedWorld,
     resolved: &'a Resolved,
+    root: &'a Resolved,
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
     ext_modules: &[&'a Resolved],
     memo: &mut HashMap<(usize, String), GraphExpansion>,
@@ -1535,18 +1701,21 @@ fn expand_grafts_into<'a>(
     namegen: &mut NameGen,
     out: &mut Vec<ExpandedState>,
     alias: &mut HashMap<String, String>,
-    spliced_external: &mut Vec<String>,
+    spliced_external: &mut Vec<SplicedGraph>,
 ) -> Result<Option<String>, CompileError> {
     let mut dedup: HashMap<Vec<u8>, String> = HashMap::new();
     let mut graft_entry: Option<String> = None;
 
     for graft in &host.grafts {
-        // A target absent from THIS unit's own graph map was resolved
+        // A target absent from the host's own graph map was resolved
         // through the declarations table (`compiler::resolve_world_reuse`'s
         // own check already proved it is present one place or the other) —
         // a library graph read from a header, `docs/tmt/language.md
-        // (headers)`. Record it (deduped) so `compiler::compile` can emit
-        // its `.grafted` digest line. `graph_owner` is the module `graph`
+        // (headers)`. Every graph owned by a module other than `root` (the
+        // unit being compiled) is a library graph, however deep in a
+        // library's own nesting it sits: record it (deduped, first
+        // encountered) so `compiler::compile` can emit its `.grafted`
+        // digest line. `graph_owner` is the module `graph`
         // itself belongs to — `resolved` (this function's own, i.e. the
         // HOST's owner) for a local target, the declaring library's module
         // for an external one — never assumed to be `resolved` once the
@@ -1565,27 +1734,54 @@ fn expand_grafts_into<'a>(
         let (graph, graph_owner) = match graphs.get(graft.target.as_str()) {
             Some(&g) => (g, resolved),
             None => {
-                if !spliced_external.iter().any(|n| n == &graft.target) {
-                    spliced_external.push(graft.target.clone());
-                }
                 match crate::compiler::find_external_graph(ext_modules, graft.target.as_str()) {
                     Some((owner, g)) => (g, owner),
                     None => {
                         return Err(CompileError {
                             span: graft.target_span,
                             kind: CompileErrorKind::UndefinedGraph(
-                                GraphMiss::DeclarationsNotGiven(graft.target.clone()),
+                                match crate::compiler::external_kind(ext_modules, &graft.target) {
+                                    Some(k) => GraphMiss::WrongKind {
+                                        name: graft.target.clone(),
+                                        found: k.noun(),
+                                    },
+                                    None => GraphMiss::DeclarationsNotGiven(graft.target.clone()),
+                                },
                             ),
                         });
                     }
                 }
             }
         };
+        if !std::ptr::eq(graph_owner, root)
+            && let Some(module) = ext_modules
+                .iter()
+                .position(|m| std::ptr::eq(*m, graph_owner))
+        {
+            // The digest is the one stamped on the body ACTUALLY spliced —
+            // taken from its owning module here, never looked up by name
+            // afterwards, since two modules may carry different graphs
+            // under one name. The same body reached again (a diamond, or
+            // two modules publishing it identically) is one record.
+            let digest = graph.digest;
+            if !spliced_external
+                .iter()
+                .any(|s| s.name == graft.target && s.digest == digest)
+            {
+                spliced_external.push(SplicedGraph {
+                    name: graft.target.clone(),
+                    digest,
+                    module,
+                    span: graft.target_span,
+                });
+            }
+        }
         let gx = expand_graph(
             graft.target.as_str(),
             graphs,
             ext_modules,
             resolved,
+            root,
             memo,
             warn,
             spliced_external,
@@ -1603,6 +1799,57 @@ fn expand_grafts_into<'a>(
             });
         }
         let (comp, cont) = build_composite(graft, host, resolved, graph, graph_owner)?;
+        // Coverage: under an open map an unlisted host symbol is opaque, and
+        // no row may decide a match on it. The law is the routine-side
+        // single-row cover (docs/tmt/language.md (open grafts)), reused over
+        // the graph's own expanded rows — the first state that would let the
+        // opaque index decide is refused by name: the first state in source
+        // order that has an uncovered open tape, and within it the first
+        // such tape.
+        for st in &gx.states {
+            for (k, tm) in comp.tapes.iter().enumerate() {
+                if !tm.open {
+                    continue;
+                }
+                // Nothing to protect where the map names every symbol: the opaque
+                // class is empty, so no row can ever decide on a member of it.
+                if !(0..tm.host_card as u16).any(|p| tm.read_class(p) == ReadClass::Opaque) {
+                    continue;
+                }
+                // A row whose read cells have no host preimage is dropped at
+                // the splice (`map_rule`) and cannot decide anything — only
+                // rows that will actually exist enter the cover question.
+                let rows: Vec<&[Cell]> = st
+                    .rules
+                    .iter()
+                    .filter(|r| {
+                        r.pattern.iter().enumerate().all(|(i, c)| match c {
+                            Cell::Wild => true,
+                            Cell::Sym(v) => !comp.tapes[i].preimage(*v).is_empty(),
+                        })
+                    })
+                    .map(|r| r.pattern.as_slice())
+                    .collect();
+                if !crate::ir::rows_admit_opaque_index_over_rows(&[rows.as_slice()], k, |c| {
+                    *c == Cell::Wild
+                }) {
+                    let tape = graph.tapes[k].name.clone();
+                    let span = graft
+                        .args
+                        .iter()
+                        .find(|a| a.name == tape)
+                        .map(|a| a.span)
+                        .unwrap_or(graft.target_span);
+                    return Err(CompileError {
+                        span,
+                        kind: CompileErrorKind::OpenGraftUncovered {
+                            state: st.name.clone(),
+                            tape,
+                        },
+                    });
+                }
+            }
+        }
         let key = graft_site_key_bytes(graft.target.as_str(), &comp, &cont);
 
         let instance = match &graft.as_name {
@@ -1715,14 +1962,16 @@ fn module_id(owner: &Resolved) -> usize {
 /// completes) would not catch one if it existed. `name` may be a LOCAL graph
 /// (in `graphs`) or a library graph reached only through `ext_modules` —
 /// either way a miss in `graphs` falls back to the declarations table.
+#[allow(clippy::too_many_arguments)]
 fn expand_graph<'a>(
     name: &str,
     graphs: &HashMap<&'a str, &'a ResolvedWorld>,
     ext_modules: &[&'a Resolved],
     resolved: &'a Resolved,
+    root: &'a Resolved,
     memo: &mut HashMap<(usize, String), GraphExpansion>,
     warn: &mut Vec<Diagnostic>,
-    spliced_external: &mut Vec<String>,
+    spliced_external: &mut Vec<SplicedGraph>,
 ) -> Result<GraphExpansion, CompileError> {
     // `owner`: the module `world` itself belongs to — `resolved` (this
     // call's own host scope) for a local target, or the declaring
@@ -1780,6 +2029,7 @@ fn expand_graph<'a>(
     let graft_entry = expand_grafts_into(
         world,
         owner,
+        root,
         &owner_graphs,
         ext_modules,
         memo,
@@ -1864,10 +2114,42 @@ fn render_pattern(pattern: &[Cell], glyphs: &[Vec<String>]) -> String {
     format!("[{}]", cells.join(", "))
 }
 
+/// One shadowing pair of SOURCE rules within a world: the earlier rule's
+/// span, the later rule's span, and every distinct expanded pattern of the
+/// later rule an identical earlier row shadows, in first-seen order. Keyed
+/// on the pair across the whole world, so a range rule's many expanded
+/// rows, and a graph's body spliced by several grafts, each warn once
+/// (docs/tmt/language.md (which rule fires)).
+struct Shadow {
+    earlier: Span,
+    later: Span,
+    patterns: Vec<String>,
+}
+
+/// One `shadowed-rule` warning per [`Shadow`], at the later rule, naming
+/// the earlier rule's position and the first shadowed row.
+fn shadow_warnings(shadows: Vec<Shadow>, warn: &mut Vec<Diagnostic>) {
+    for s in shadows {
+        let more = match s.patterns.len() - 1 {
+            0 => String::new(),
+            n => format!(" and {n} more rows"),
+        };
+        warn.push(Diagnostic {
+            code: "shadowed-rule",
+            span: s.later,
+            message: format!(
+                "this rule is unreachable — the rule at {}:{} already matches {}{more}",
+                s.earlier.start.line, s.earlier.start.col, s.patterns[0]
+            ),
+            fix: None,
+        });
+    }
+}
+
 fn check_state_rows(
     state: &ExpandedState,
     glyphs: &[Vec<String>],
-    warn: &mut Vec<Diagnostic>,
+    shadows: &mut Vec<Shadow>,
 ) -> Result<(), CompileError> {
     for j in 0..state.rules.len() {
         let pj = &state.rules[j].pattern;
@@ -1875,16 +2157,25 @@ fn check_state_rows(
             if state.rules[i].pattern == *pj {
                 if is_all_wild(pj) || pj.iter().any(|c| matches!(c, Cell::Wild)) {
                     // A partial/full wildcard duplicate is a shadow (the later
-                    // row is unreachable); warn, don't fail.
-                    warn.push(Diagnostic {
-                        code: "shadowed-rule",
-                        span: state.rules[j].span,
-                        message: format!(
-                            "this rule is unreachable — an earlier rule has the same pattern {}",
-                            render_pattern(pj, glyphs)
-                        ),
-                        fix: None,
-                    });
+                    // row is unreachable); recorded against its pair of
+                    // source rules, warned once per pair by the caller.
+                    let (earlier, later) = (state.rules[i].span, state.rules[j].span);
+                    let pattern = render_pattern(pj, glyphs);
+                    match shadows
+                        .iter_mut()
+                        .find(|s| s.earlier == earlier && s.later == later)
+                    {
+                        Some(s) => {
+                            if !s.patterns.contains(&pattern) {
+                                s.patterns.push(pattern);
+                            }
+                        }
+                        None => shadows.push(Shadow {
+                            earlier,
+                            later,
+                            patterns: vec![pattern],
+                        }),
+                    }
                 } else {
                     // Two exact (wildcard-free) rows matching the same tuple.
                     return Err(CompileError {
@@ -1934,7 +2225,7 @@ pub(crate) fn expand(
     // nested grafts — recorded once, first-encountered order
     // (`expand_grafts_into`'s own doc). `compiler::compile` turns this into
     // the `.grafted` digest lines.
-    let mut spliced_external_graphs: Vec<String> = Vec::new();
+    let mut spliced_external_graphs: Vec<SplicedGraph> = Vec::new();
 
     for (idx, world) in resolved.worlds.iter().enumerate() {
         if world.kind == WorldKind::Graph {
@@ -1950,6 +2241,7 @@ pub(crate) fn expand(
         let mut alias = HashMap::new();
         let graft_entry = expand_grafts_into(
             world,
+            resolved,
             resolved,
             &graphs,
             &ext_modules,
@@ -1973,9 +2265,13 @@ pub(crate) fn expand(
             .iter()
             .map(|t| Ok(alphabet_glyphs(&t.alphabet, resolved)?.to_vec()))
             .collect::<Result<_, CompileError>>()?;
+        // Shadows collect across the whole world before any warns, so a
+        // graph spliced by several grafts reports its pair once.
+        let mut shadows = Vec::new();
         for st in &states {
-            check_state_rows(st, &per_tape_glyphs, &mut diagnostics)?;
+            check_state_rows(st, &per_tape_glyphs, &mut shadows)?;
         }
+        shadow_warnings(shadows, &mut diagnostics);
 
         worlds.push(ExpandedWorld {
             kind: world.kind,
@@ -2031,6 +2327,7 @@ mod map_tests {
             phys: 0,
             host_card: 5,
             graph_card: 3,
+            open: false,
             rmap,
             wmap: m(&[(1, 3), (2, 4)]),
         };
@@ -2055,12 +2352,155 @@ mod map_tests {
             phys: 0,
             host_card: 4,
             graph_card: 3,
+            open: false,
             rmap,
             wmap: SymMap::identity(),
         };
         assert_eq!(t.read_image(0), Some(0));
         assert_eq!(t.read_image(1), None);
         assert_eq!(t.holes(), vec![1, 2, 3]);
+    }
+
+    /// An OPEN map over host `_ 0 1 x` onto graph `_ 0 1`: `'0' -> '0'` and
+    /// `'1' -> '1'` are named, everything else the map leaves opaque — not a
+    /// hole and not an alias (docs/tmt/language.md (open grafts)).
+    fn open_tm() -> TapeMap {
+        TapeMap {
+            phys: 0,
+            host_card: 4,
+            graph_card: 3,
+            open: true,
+            rmap: m(&[(1, 1), (2, 2)]),
+            wmap: m(&[(1, 1), (2, 2)]),
+        }
+    }
+
+    #[test]
+    fn open_map_makes_unlisted_symbols_opaque_not_holes() {
+        let t = open_tm();
+        assert_eq!(t.read_class(0), ReadClass::Image(0)); // blank pinned
+        assert_eq!(t.read_class(1), ReadClass::Image(1));
+        assert_eq!(t.read_class(2), ReadClass::Image(2));
+        assert_eq!(t.read_class(3), ReadClass::Opaque); // unlisted ≠ hole
+        assert!(t.holes().is_empty());
+        assert_eq!(t.read_image(3), None); // Opaque names no graph glyph
+    }
+
+    #[test]
+    fn open_map_preimage_excludes_opaque() {
+        let t = open_tm();
+        assert_eq!(t.preimage(0), vec![0]);
+        assert_eq!(t.preimage(1), vec![1]);
+        assert_eq!(t.preimage(2), vec![2]);
+        // Host 3 is opaque: it reads as no graph glyph and sits in no preimage.
+        for v in 0..3 {
+            assert!(!t.preimage(v).contains(&3));
+        }
+    }
+
+    #[test]
+    fn openness_is_in_the_dedup_key() {
+        let open = open_tm();
+        let mut closed = open_tm();
+        closed.open = false;
+        assert_ne!(
+            Composite { tapes: vec![open] }.key(),
+            Composite {
+                tapes: vec![closed]
+            }
+            .key()
+        );
+    }
+
+    /// An open map with one pair `'a' -> '0'` plus the `*` marker, built the
+    /// way `build_tapemap` builds it; the alphabets belong to each CALLER.
+    /// A host symbol the pairs do not name is opaque by `read_class`, which
+    /// reads the pairs directly on an open map and never consults `holes`; a
+    /// read hole minted for it would be dead state contradicting that model
+    /// and riding along in the dedup key (docs/tmt/language.md (open grafts)).
+    fn open_single_pair_src_map() -> SrcSymMap {
+        let glyph = |v: &str| SymLit::Glyph {
+            value: v.to_string(),
+            span: Span::new(1, 1, 1, 2),
+        };
+        SrcSymMap {
+            pairs: vec![crate::parser::MapPair {
+                src: glyph("a"),
+                dst: glyph("0"),
+                arrow: MapArrow::Bidirectional,
+                span: Span::new(1, 1, 1, 2),
+            }],
+            span: Span::new(1, 1, 1, 2),
+            named: None,
+            open: Some(Span::new(1, 1, 1, 2)),
+        }
+    }
+
+    fn glyphs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|g| g.to_string()).collect()
+    }
+
+    #[test]
+    fn open_unequal_map_mints_no_read_holes() {
+        let t = build_tapemap(
+            Some(&open_single_pair_src_map()),
+            0,
+            &glyphs(&["_", "a", "b"]),
+            &glyphs(&["_", "0"]),
+            Span::new(1, 1, 1, 2),
+        )
+        .expect("tapemap");
+        assert!(t.open);
+        // The assert that guards the recorded mutation (minting holes again)
+        // is `rmap.holes` here; `t.holes()` below is vacuously true on an open
+        // map, since `holes()` filters `read_class == Hole` and unlisted
+        // sources classify `Opaque` even when `rmap.holes` is non-empty.
+        assert!(
+            t.rmap.holes.is_empty(),
+            "an open map mints no read holes, got {:?}",
+            t.rmap.holes
+        );
+        assert_eq!(t.holes(), Vec::<u16>::new());
+        // The named pair is not a hole either way; unlisted `b` stays opaque.
+        assert_eq!(t.read_class(1), ReadClass::Image(1));
+        assert_eq!(t.read_class(2), ReadClass::Opaque);
+    }
+
+    /// Equal cardinalities: the read-side close never ran there, open or not —
+    /// the regression half, holding that direction still.
+    #[test]
+    fn open_equal_map_never_minted_read_holes() {
+        let t = build_tapemap(
+            Some(&open_single_pair_src_map()),
+            0,
+            &glyphs(&["_", "a", "b"]),
+            &glyphs(&["_", "0", "x"]),
+            Span::new(1, 1, 1, 2),
+        )
+        .expect("tapemap");
+        assert!(t.rmap.holes.is_empty());
+        assert_eq!(t.read_class(2), ReadClass::Opaque);
+    }
+
+    /// The write half closes whatever the cardinalities: an open map's
+    /// unnamed graph glyph has no host image (its write becomes `trap #1`)
+    /// and must never land through identity (docs/tmt/language.md (open
+    /// grafts)). Runs the map over UNEQUAL alphabets, where the close rides
+    /// the cardinality disjunct alone — a copy of the read-side `!open &&`
+    /// guard on the write close redden this.
+    #[test]
+    fn open_unequal_map_still_closes_its_write_half() {
+        let t = build_tapemap(
+            Some(&open_single_pair_src_map()),
+            0,
+            &glyphs(&["_", "a", "x", "y"]),
+            &glyphs(&["_", "0", "1"]),
+            Span::new(1, 1, 1, 2),
+        )
+        .expect("tapemap");
+        assert_eq!(t.write_image(0), Some(0)); // blank pinned
+        assert_eq!(t.write_image(1), Some(1)); // the named pair
+        assert_eq!(t.write_image(2), None); // unnamed glyph: no host image
     }
 }
 
@@ -2078,7 +2518,10 @@ mod range_tests {
     }
 
     fn ti(glyphs: &[&str]) -> TapeInfo {
-        TapeInfo::new(&glyphs.iter().map(|g| g.to_string()).collect::<Vec<_>>())
+        TapeInfo::new(
+            "t",
+            &glyphs.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
+        )
     }
 
     /// A transition lowerer for own states (goto passes the name through).
@@ -2122,6 +2565,109 @@ machine {
         assert!(warn.is_empty());
     }
 
+    const DECLARED_ORDER: &str = "\
+alphabet w { '_', 'a', 'z', 'b' }
+machine {
+  tape t: w;
+  entry state s {
+    ['a'..'z' as c] -> write [{c}] stop;
+    [*]             -> stop;
+  }
+}
+";
+
+    /// A cell range walks the tape alphabet's declared order: over
+    /// `'_', 'a', 'z', 'b'`, `['a'..'z' as c]` is two rows, `'a'` then `'z'`,
+    /// each binding its own glyph — the declared order, not Unicode's.
+    /// Mutation: walking succession and keeping the members the tape carries
+    /// yields `'a', 'b', 'z'` — three rows, `'b'` among them.
+    #[test]
+    fn a_cell_range_expands_in_the_alphabets_declared_order() {
+        let rules = machine_rules(DECLARED_ORDER, 0);
+        let tapes = vec![ti(&["_", "a", "z", "b"])];
+        let mut warn = Vec::new();
+        let rows = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap();
+        let read: Vec<&Cell> = rows.iter().map(|r| &r.pattern[0]).collect();
+        assert_eq!(read, [&Cell::Sym(1), &Cell::Sym(2)]);
+        let written: Vec<&WriteOut> = rows.iter().map(|r| &r.write[0]).collect();
+        assert_eq!(written, [&WriteOut::Sym(1), &WriteOut::Sym(2)]);
+        // A body range is the other walk: it CREATES an order, by succession.
+        let a = crate::compiler::analyze("alphabet l { 'a'..'z' }\n").unwrap();
+        assert_eq!(a.resolved.alphabets["l"].glyphs.len(), 26);
+    }
+
+    /// The source-level reading lint and the static head checks take of a
+    /// cell (`patterns::cell_labels`) names exactly the symbols expansion
+    /// makes rows for, on the declared-order fixture where the two walks
+    /// differ. Mutation: `cell_labels` keeping succession answers `'b'` too.
+    #[test]
+    fn cell_labels_agrees_with_the_expansion_on_a_declared_order_range() {
+        let rules = machine_rules(DECLARED_ORDER, 0);
+        let glyphs: Vec<String> = ["_", "a", "z", "b"].iter().map(|g| g.to_string()).collect();
+        let cell = &rules[0].pattern.cells[0];
+        let expanded: Vec<String> = cell_options(cell, &ti(&["_", "a", "z", "b"]))
+            .unwrap()
+            .into_iter()
+            .map(|(c, _)| match c {
+                Cell::Sym(i) => glyphs[usize::from(i)].clone(),
+                Cell::Wild => panic!("a range expands to symbols"),
+            })
+            .collect();
+        assert_eq!(crate::patterns::cell_labels(cell, &glyphs), Some(expanded));
+    }
+
+    /// Three sites decide whether a bound symbol folds, and each is driven
+    /// here through its own real entry: the parser, refusing a fold over a
+    /// single-symbol cell; resolution, refusing one over a set cell from the
+    /// set's members; and expansion, giving a bound symbol the value fold
+    /// arithmetic reads (`eval_fold` only asserts it never meets one without
+    /// a value). All three must answer "the label names a number" — quotes
+    /// never matter, so `'7'`, `7` and `007` (all the label `7`) fold, while
+    /// `'07'`, `'+7'`, `'-1'`, an over-`u32` string and a letter do not.
+    /// Mutation: any one site deciding by quotes (`'7'` splits it from the
+    /// other two) or by a looser parse (`'+7'` or `'07'` does).
+    #[test]
+    fn the_three_foldability_sites_agree_on_every_spelling() {
+        let matrix: &[(&str, &str, Option<i64>)] = &[
+            ("'7'", "7", Some(7)),
+            ("7", "7", Some(7)),
+            ("007", "7", Some(7)),
+            ("'0'", "0", Some(0)),
+            ("'07'", "07", None),
+            ("'+7'", "+7", None),
+            ("'-1'", "-1", None),
+            ("'4294967296'", "4294967296", None),
+            ("'x'", "x", None),
+        ];
+        let program = |decls: &str, cell: &str, action: &str| {
+            format!(
+                "{decls}machine {{\n  tape t: w;\n  entry state s {{ [{cell} as d] -> {action}; }}\n}}\n"
+            )
+        };
+        for &(lit, label, number) in matrix {
+            let alphabet = format!("alphabet w {{ '_', {lit} }}\n");
+            let refused_as_glyph = |r: Result<(), CompileError>| match r {
+                Ok(()) => false,
+                Err(e) if e.kind == CompileErrorKind::CharArithmetic => true,
+                Err(e) => panic!("`{lit}`: {e}"),
+            };
+            let parser = !refused_as_glyph(
+                parse(&program(&alphabet, lit, "write [{d+0}] stop")).map(|_| ()),
+            );
+            let with_set = format!("set s {{ {lit} }}\n{alphabet}");
+            let resolution = !refused_as_glyph(
+                crate::compiler::analyze(&program(&with_set, "s", "write [{d+0}] stop"))
+                    .map(|_| ()),
+            );
+            let rules = machine_rules(&program(&alphabet, lit, "stop"), 0);
+            let opts = cell_options(&rules[0].pattern.cells[0], &ti(&["_", label])).unwrap();
+            let (_, bound) = opts[0].1.as_ref().expect("the cell binds `d`");
+            assert_eq!(bound.value, number, "`{lit}`: the expansion's value");
+            assert_eq!(parser, number.is_some(), "`{lit}`: the parser");
+            assert_eq!(resolution, number.is_some(), "`{lit}`: resolution");
+        }
+    }
+
     #[test]
     fn numeric_range_folds_arithmetic_per_row() {
         // A.4's `[1..125 as v] -> write [{v+1}] stop` on `bytes = 0..126`.
@@ -2138,7 +2684,7 @@ machine {
 ";
         let rules = machine_rules(src, 0);
         let glyphs: Vec<String> = (0..=126).map(|v| v.to_string()).collect();
-        let tapes = vec![TapeInfo::new(&glyphs)];
+        let tapes = vec![TapeInfo::new("t", &glyphs)];
         let mut warn = Vec::new();
         let rows = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap();
         assert_eq!(rows.len(), 125);
@@ -2163,7 +2709,7 @@ machine {
 }
 ";
         let rules = machine_rules(src, 0);
-        let tapes = vec![TapeInfo::new(&["0".into(), "1".into(), "2".into()])];
+        let tapes = vec![TapeInfo::new("t", &["0".into(), "1".into(), "2".into()])];
         let mut warn = Vec::new();
         let err = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap_err();
         assert_eq!(err.kind.code(), "fold-out-of-alphabet");
@@ -2182,7 +2728,7 @@ machine {
 ";
         let rules = machine_rules(src, 0);
         let glyphs: Vec<String> = (0..=5).map(|v| v.to_string()).collect();
-        let tapes = vec![TapeInfo::new(&glyphs)];
+        let tapes = vec![TapeInfo::new("t", &glyphs)];
         let mut warn = Vec::new();
         let rows = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap();
         assert_eq!(rows.len(), 6);
@@ -2212,8 +2758,8 @@ machine {
 ";
         let rules = machine_rules(src, 0);
         let tapes = vec![
-            TapeInfo::new(&["0".into(), "1".into(), "2".into()]),
-            TapeInfo::new(&["0".into(), "1".into()]),
+            TapeInfo::new("t", &["0".into(), "1".into(), "2".into()]),
+            TapeInfo::new("t", &["0".into(), "1".into()]),
         ];
         let mut warn = Vec::new();
         let rows = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap();
@@ -2388,6 +2934,7 @@ mod oracle_tests {
             phys,
             host_card,
             graph_card,
+            open: false,
             rmap,
             wmap,
         }
@@ -2613,6 +3160,67 @@ machine {
     }
 
     #[test]
+    fn an_open_graft_synthesizes_no_trap_read_rows() {
+        // The `a_holey_graft_synthesizes_trap_read_rows` fixture with the map
+        // left open: the unlisted `q` is opaque, not a hole, so NO trap-read
+        // row is synthesized anywhere (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet bits { '_', '0', '1' }
+alphabet quad { '_', '0', '1', 'q' }
+graph flip(tape t: bits, state done) {
+  entry state go { ['0'] -> write ['1'] done; ['1'] -> write ['0'] done; [*] -> done; }
+}
+machine {
+  tape data: quad;
+  entry graft flip(t = data with map { '0'->'0', '1'->'1', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let f = state(m, "f");
+        assert!(
+            !f.rules
+                .iter()
+                .any(|r| r.transition == Transition2::TrapRead),
+            "{:?}",
+            f.rules
+        );
+    }
+
+    #[test]
+    fn an_open_graft_holes_a_map_out_of_range_write() {
+        // Openness does not soften the WRITE half — it hardens it: the graph
+        // writes back only what the pairs map, whatever the cardinalities.
+        // The row reads a NAMED glyph (so it survives) and writes the unlisted
+        // one — no host image, so the row becomes `trap #1` (TrapWrite). On a
+        // closed map these equal-sized alphabets would identity-complete the
+        // write; an open map must not (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet alp { '_', '0', '1' }
+alphabet cot { '_', 'a', 'b' }
+graph burn(tape t: alp, state done) {
+  entry state go { ['0'] -> write ['1'] done; [*] -> done; }
+}
+machine {
+  tape data: cot;
+  entry graft burn(t = data with map { 'a'->'0', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let f = state(m, "f");
+        assert!(
+            f.rules
+                .iter()
+                .any(|r| r.transition == Transition2::TrapWrite),
+            "{:?}",
+            f.rules
+        );
+    }
+
+    #[test]
     fn a_holey_graft_synthesizes_trap_read_rows() {
         // Host tape `quad` (4 symbols) grafts a graph over `bits` (3 symbols).
         // Across the unequal alphabets there is no identity completion, so the
@@ -2829,6 +3437,412 @@ machine {{ tape w: ha; entry graft g(t = w{map}, done = fin) as x; state fin {{ 
             .unwrap_err()
             .kind
             .code()
+    }
+
+    /// Like [`graft_err`] but returning the whole error — for assertions on
+    /// the typed fields.
+    fn expand_err(src: &str) -> CompileError {
+        let a = analyze(src).expect("analyze");
+        expand(&a.resolved, &Declarations::stdlib()).unwrap_err()
+    }
+
+    #[test]
+    fn an_opaque_symbol_survives_a_graft_inside_a_graft() {
+        // Nested law: the outer open map makes host 'b'/'c'/'d' opaque, and
+        // that class must still be "anything else" through the inner splice —
+        // matched only by `*` rows at every depth, never holed, never aliased.
+        // The inner map is omitted (identity: both tapes are `three`).
+        let src = "\
+alphabet wide { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph inner(tape n: three, state done) {
+  entry state deep {
+    ['0'] -> done;
+    [*]   -> move [>] goto deep;
+  }
+}
+
+graph outer(tape n: three, state fin) {
+  entry graft inner(n = n, done = fin) as scan;
+}
+
+machine {
+  tape t: wide;
+  entry graft outer(n = t with map { 'a' -> '0', * }, fin = win) as run;
+  state win { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        // No trap row anywhere, at either depth.
+        assert!(
+            !m.states.iter().any(|s| {
+                s.rules
+                    .iter()
+                    .any(|r| matches!(r.transition, Transition2::TrapRead | Transition2::TrapWrite))
+            }),
+            "{:?}",
+            m.states
+        );
+        // The innermost fragment still carries the `*` row that catches the
+        // outer map's opaque symbols.
+        assert!(
+            m.states
+                .iter()
+                .any(|s| { s.rules.iter().any(|r| r.pattern == vec![Cell::Wild]) }),
+            "{:?}",
+            m.states
+        );
+        // And the named pair still reads: the inner `['0']` row is alive over
+        // host 'a' (index 1).
+        assert!(
+            m.states
+                .iter()
+                .any(|s| { s.rules.iter().any(|r| r.pattern == vec![Cell::Sym(1)]) }),
+            "{:?}",
+            m.states
+        );
+    }
+
+    #[test]
+    fn openness_is_part_of_the_graft_instance_key() {
+        // Two sites with IDENTICAL pairs and continuations over equal-sized
+        // alphabets, one map open and one closed: open is part of the dedup
+        // key, so the second site keeps its own fragment instead of aliasing
+        // the first. (Semantically the site maps coincide HERE — the named
+        // pairs cover every non-blank symbol — but the key law is stricter on
+        // purpose.) Mutation it catches: drop the openness byte from
+        // `Composite::key` and `second` disappears into `first`.
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+
+graph swap(tape n: alp, state done) {
+  entry state go { ['0'] -> write ['1'] done; [*] -> done; }
+}
+
+machine {
+  tape data: cot;
+  entry graft swap(n = data with map { 'a' -> '1', 'b' -> '0' }, done = fin) as first;
+  graft swap(n = data with map { 'a' -> '1', 'b' -> '0', * }, done = fin) as second;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        assert!(m.states.iter().any(|s| s.name == "first"));
+        assert!(
+            m.states.iter().any(|s| s.name == "second"),
+            "openness must keep the two instances apart: {:?}",
+            m.states
+        );
+    }
+
+    #[test]
+    fn a_one_way_pair_stays_closed_for_writes_under_an_open_map() {
+        // A one-way `=>` pair reads through but never writes back — and the
+        // open map's hard-closed write half holes the pair's destination
+        // anyway, so the graph's `write ['0']` has no host image and the row
+        // becomes `trap #1` (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+
+graph burn(tape n: alp, state done) {
+  entry state go { ['0'] -> write ['0'] done; [*] -> done; }
+}
+
+machine {
+  tape data: cot;
+  entry graft burn(n = data with map { 'a' => '0', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let f = state(m, "f");
+        assert!(
+            f.rules
+                .iter()
+                .any(|r| r.transition == Transition2::TrapWrite),
+            "{:?}",
+            f.rules
+        );
+    }
+
+    #[test]
+    fn an_open_map_with_no_pairs_kills_unnamed_glyph_rows() {
+        // Under an open map a glyph the pairs do not name is opaque: no host
+        // symbol reads as it, so a rule whose cells are all unnamed dies and
+        // warns `empty-expansion`. Its message ("the binding maps no host
+        // symbol to a match cell") reads true for the opaque class too — the
+        // whole class is precisely "no match cell".
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+
+graph mark(tape n: alp, state done) {
+  entry state go {
+    ['0'] -> done;
+    ['1'] -> done;
+    [*]   -> done;
+  }
+}
+
+machine {
+  tape data: cot;
+  entry graft mark(n = data with map { * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let dying: Vec<_> = ex
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "empty-expansion")
+            .collect();
+        assert_eq!(dying.len(), 2, "{:?}", ex.diagnostics);
+    }
+
+    #[test]
+    fn an_open_graft_map_that_names_every_symbol_needs_no_wildcard() {
+        // The map names every non-blank host symbol, so the opaque class is
+        // EMPTY — nothing can decide a row match on a symbol that does not
+        // exist here, and the coverage refusal must not fire. (It did before:
+        // the check asked about "a symbol this open map leaves opaque" while
+        // leaving none.)
+        let src = "\
+alphabet cot { '_', 'a', 'b' }
+alphabet alp { '_', '0', '1' }
+
+graph both(tape n: alp, state done) {
+  entry state go {
+    ['0'] -> done;
+    ['1'] -> done;
+    ['_'] -> done;
+  }
+}
+
+machine {
+  tape data: cot;
+  entry graft both(n = data with map { 'a' -> '0', 'b' -> '1', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let _ = expand_ok(src);
+    }
+
+    #[test]
+    fn a_state_whose_rows_all_die_needs_no_cover() {
+        // The state's only row reads a glyph no pair maps — no host symbol
+        // reads as it, so `map_rule` DROPS the row at the splice and no row
+        // can ever decide on an opaque symbol. Refusing it would be refusing
+        // nothing; the row must be filtered out of the cover question.
+        let src = "\
+alphabet wide { '_', 'a', 'b', 'c' }
+alphabet alp { '_', '0', '1' }
+
+graph ghost(tape n: alp, state done) {
+  entry state go {
+    ['1'] -> done;
+  }
+}
+
+machine {
+  tape data: wide;
+  entry graft ghost(n = data with map { 'a' -> '0', * }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let _ = expand_ok(src);
+    }
+
+    #[test]
+    fn a_state_without_a_covering_wildcard_is_refused() {
+        // The open map makes unlisted `five` symbols opaque; the graph's state
+        // has no `*` row on the bound tape, so an opaque symbol would decide
+        // whether a row matches — refused, naming the state and the tape
+        // parameter (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph only(tape n: three, state done) {
+  entry state scan { ['0'] -> done; ['_'] -> done; }
+}
+
+machine {
+  tape t: five;
+  entry graft only(n = t with map { 'a' -> '0', * }, done = s2) as inst;
+  state s2 { [*] -> stop; }
+}
+";
+        let err = expand_err(src);
+        assert!(
+            matches!(
+                &err.kind,
+                CompileErrorKind::OpenGraftUncovered { state, tape }
+                    if state == "scan" && tape == "n"
+            ),
+            "{:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn two_open_tapes_need_joint_row_cover() {
+        // Rows `[0, *]` and `[*, 1]` over two open-bound tapes: per-position
+        // reading would call both tapes covered, but one opaque symbol at `p`
+        // matches NEITHER row when `q` sits on `'0'` — single-row cover is the
+        // law (the `ir.rs` doc example), so the graft is refused at `p`.
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph two(tape p: three, tape q: three, state done) {
+  entry state mix {
+    ['0', *] -> done;
+    [*, '1'] -> done;
+  }
+}
+
+machine {
+  tape x: five;
+  tape y: five;
+  entry graft two(p = x with map { 'a' -> '0', * }, q = y with map { 'a' -> '0', 'b' -> '1', * }, done = s2) as inst;
+  state s2 { [*, *] -> stop; }
+}
+";
+        let err = expand_err(src);
+        assert!(
+            matches!(
+                &err.kind,
+                CompileErrorKind::OpenGraftUncovered { state, tape }
+                    if state == "mix" && tape == "p"
+            ),
+            "{:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_first_state_then_its_first_uncovered_tape() {
+        // Two reading states, crossed failures: `one` leaves only `q`
+        // uncovered, `two` only `p`. State-major selection names `one`/`q`
+        // (the first state in source order that has an uncovered open tape,
+        // and within it the first such tape); a tape-major scan would name
+        // `two`/`p`, so this discriminates the two orders.
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph crossed(tape p: three, tape q: three, state done) {
+  entry state one {
+    [*, '1'] -> done;
+  }
+  state two {
+    ['0', *] -> done;
+  }
+}
+
+machine {
+  tape x: five;
+  tape y: five;
+  entry graft crossed(p = x with map { 'a' -> '0', * }, q = y with map { 'a' -> '0', 'b' -> '1', * }, done = s2) as inst;
+  state s2 { [*, *] -> stop; }
+}
+";
+        let err = expand_err(src);
+        assert!(
+            matches!(
+                &err.kind,
+                CompileErrorKind::OpenGraftUncovered { state, tape }
+                    if state == "one" && tape == "q"
+            ),
+            "{:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn a_wholly_covered_state_is_passed_over() {
+        // The first state shadows on both tapes; the refusal falls through to
+        // the second, naming its uncovered tape. Both selection orders agree
+        // here — the regression half.
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph mixed(tape p: three, tape q: three, state done) {
+  entry state one {
+    [*, *] -> done;
+  }
+  state two {
+    ['0', *] -> done;
+  }
+}
+
+machine {
+  tape x: five;
+  tape y: five;
+  entry graft mixed(p = x with map { 'a' -> '0', * }, q = y with map { 'a' -> '0', 'b' -> '1', * }, done = s2) as inst;
+  state s2 { [*, *] -> stop; }
+}
+";
+        let err = expand_err(src);
+        assert!(
+            matches!(
+                &err.kind,
+                CompileErrorKind::OpenGraftUncovered { state, tape }
+                    if state == "two" && tape == "p"
+            ),
+            "{:?}",
+            err.kind
+        );
+    }
+
+    #[test]
+    fn a_vacuously_opaque_graph_is_accepted() {
+        // A rowless state reads nothing (it traps on entry, whatever the tape
+        // holds), so a graph whose states have no rules is opaque VACUOUSLY —
+        // the universal quantifier over an empty set holds.
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', '0', '1' }
+
+graph quiet(tape n: three, state done) {
+  entry state s { }
+}
+
+machine {
+  tape t: five;
+  entry graft quiet(n = t with map { 'a' -> '0', * }, done = s2) as q;
+  state s2 { [*] -> stop; }
+}
+";
+        let _ = expand_ok(src);
+    }
+
+    #[test]
+    fn an_open_site_map_stops_being_refused() {
+        // The `*` marker in a GRaFT's map is accepted: unlisted host symbols
+        // are the opaque class, not holes (docs/tmt/language.md (open grafts)).
+        let src = "\
+alphabet five { '_', 'a', 'b', 'c', 'd' }
+alphabet three { '_', 'a', 'b' }
+
+graph g(tape n: three, state done) {
+  entry state s { [*] -> goto done; }
+}
+
+machine {
+  tape t: five;
+  entry graft g(n = t with map { 'a' -> 'a', * }, done = s2) as inst;
+  state s2 { [*] -> stop; }
+}
+";
+        let _ = expand_ok(src);
     }
 
     #[test]

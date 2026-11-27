@@ -400,15 +400,15 @@ fn wildcard_binding_is_rejected() {
     );
 }
 
+/// A mixed-spelling range (`'a'..3`) is grammar in every position: a cell
+/// or clause range looks each endpoint up by label, and a body range's
+/// need for one kind is resolution's refusal (`range-kind-mismatch`,
+/// pinned in `tests/alphabet_strictness.rs`), not the parser's. Mutation:
+/// the parser refusing a mixed pair again — both parses fail.
 #[test]
-fn count_form_range_is_rejected() {
-    // `'a'..3` — a mixed glyph/number range (there is no count form).
-    assert_eq!(err_code("alphabet x { 'a'..3 }"), "range-kind-mismatch");
-    // Also in a pattern position.
-    assert_eq!(
-        err_code("machine { entry state s { ['a'..3] -> stop; } }"),
-        "range-kind-mismatch"
-    );
+fn a_mixed_spelling_range_parses() {
+    parse("alphabet x { 'a'..3 }").expect("a body range parses");
+    parse("machine { entry state s { ['a'..3] -> stop; } }").expect("a cell range parses");
 }
 
 #[test]
@@ -564,18 +564,20 @@ fn volatile_state_parameter_is_an_error() {
 }
 
 // ---------------------------------------------------------------------------
-// `writes`/`preserves` contract clauses on signature tape parameters.
+// `writes`/`never writes` contract clauses on signature tape parameters.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn contract_clauses_round_trip_on_a_tape_param() {
-    let src = "routine r(tape t: bits writes { 'a', 'b'..'c' } preserves { 'd' }) \
+    let src = "routine r(tape t: bits writes { 'a', 'b'..'c' } never writes { 'd' }) \
                { entry state s { [*] -> stop; } }";
     let p = parse_src(src).expect("parses");
     let r = &p.routines[0];
     assert_eq!(r.sig.params.len(), 1);
     let SigParamKind::Tape {
-        writes, preserves, ..
+        writes,
+        never_writes,
+        ..
     } = &r.sig.params[0].kind
     else {
         panic!("expected a tape parameter");
@@ -584,31 +586,34 @@ fn contract_clauses_round_trip_on_a_tape_param() {
     assert_eq!(writes.elems.len(), 2);
     assert!(matches!(writes.elems[0], AlphabetElem::Single(_)));
     assert!(matches!(writes.elems[1], AlphabetElem::Range { .. }));
-    let preserves = preserves.as_ref().expect("a `preserves` clause");
-    assert_eq!(preserves.elems.len(), 1);
-    assert!(matches!(preserves.elems[0], AlphabetElem::Single(_)));
+    let never_writes = never_writes.as_ref().expect("a `never writes` clause");
+    assert_eq!(never_writes.elems.len(), 1);
+    assert!(matches!(never_writes.elems[0], AlphabetElem::Single(_)));
 
-    // `kw_span` pins to the keyword token itself; each clause's span starts
-    // there and extends past it (through the closing `}`); `preserves`
-    // starts only after `writes` closes; `SigParam.span` reaches the last
-    // clause's close.
+    // `kw_span` pins to the keyword itself — for `never writes`, both of
+    // its words, `never` through the second `writes`; each clause's span
+    // starts there and extends past it (through the closing `}`); `never
+    // writes` starts only after `writes` closes; `SigParam.span` reaches
+    // the last clause's close.
     let tokens = lex(src).unwrap();
-    let writes_tok = tokens
+    let writes_toks: Vec<_> = tokens
         .iter()
-        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "writes"))
-        .expect("a `writes` token in the stream");
-    assert_eq!(writes.kw_span, writes_tok.span());
-    let preserves_tok = tokens
+        .filter(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "writes"))
+        .collect();
+    assert_eq!(writes_toks.len(), 2, "one `writes` per clause");
+    assert_eq!(writes.kw_span, writes_toks[0].span());
+    let never_tok = tokens
         .iter()
-        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "preserves"))
-        .expect("a `preserves` token in the stream");
-    assert_eq!(preserves.kw_span, preserves_tok.span());
+        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "never"))
+        .expect("a `never` token in the stream");
+    assert_eq!(never_writes.kw_span.start, never_tok.span().start);
+    assert_eq!(never_writes.kw_span.end, writes_toks[1].span().end);
     assert_eq!(writes.span.start, writes.kw_span.start);
     assert!(writes.span.end > writes.kw_span.end);
-    assert!(preserves.kw_span.start >= writes.span.end);
-    assert_eq!(preserves.span.start, preserves.kw_span.start);
-    assert!(preserves.span.end > preserves.kw_span.end);
-    assert_eq!(r.sig.params[0].span.end, preserves.span.end);
+    assert!(never_writes.kw_span.start >= writes.span.end);
+    assert_eq!(never_writes.span.start, never_writes.kw_span.start);
+    assert!(never_writes.span.end > never_writes.kw_span.end);
+    assert_eq!(r.sig.params[0].span.end, never_writes.span.end);
 }
 
 #[test]
@@ -617,30 +622,34 @@ fn writes_clause_may_be_empty() {
     let p = parse_src(src).expect("an empty `writes {}` clause parses");
     let r = &p.routines[0];
     let SigParamKind::Tape {
-        writes, preserves, ..
+        writes,
+        never_writes,
+        ..
     } = &r.sig.params[0].kind
     else {
         panic!("expected a tape parameter");
     };
     let writes = writes.as_ref().expect("a `writes` clause");
     assert!(writes.elems.is_empty());
-    assert!(preserves.is_none());
+    assert!(never_writes.is_none());
 }
 
 #[test]
-fn preserves_clause_may_be_empty() {
-    let src = "routine r(tape t: bits preserves {}) { entry state s { [*] -> stop; } }";
-    let p = parse_src(src).expect("an empty `preserves {}` clause parses");
+fn never_writes_clause_may_be_empty() {
+    let src = "routine r(tape t: bits never writes {}) { entry state s { [*] -> stop; } }";
+    let p = parse_src(src).expect("an empty `never writes {}` clause parses");
     let r = &p.routines[0];
     let SigParamKind::Tape {
-        writes, preserves, ..
+        writes,
+        never_writes,
+        ..
     } = &r.sig.params[0].kind
     else {
         panic!("expected a tape parameter");
     };
     assert!(writes.is_none());
-    let preserves = preserves.as_ref().expect("a `preserves` clause");
-    assert!(preserves.elems.is_empty());
+    let never_writes = never_writes.as_ref().expect("a `never writes` clause");
+    assert!(never_writes.elems.is_empty());
 }
 
 #[test]
@@ -649,26 +658,72 @@ fn a_tape_param_with_no_clauses_leaves_both_fields_none() {
         parse_src("routine r(tape t: bits) { entry state s { [*] -> stop; } }").expect("parses");
     let r = &p.routines[0];
     let SigParamKind::Tape {
-        writes, preserves, ..
+        writes,
+        never_writes,
+        ..
     } = &r.sig.params[0].kind
     else {
         panic!("expected a tape parameter");
     };
     assert!(writes.is_none());
-    assert!(preserves.is_none());
+    assert!(never_writes.is_none());
 }
 
 #[test]
-fn preserves_before_writes_is_a_targeted_order_error() {
+fn never_writes_before_writes_is_a_targeted_order_error() {
     let err = parse_src(
-        "routine r(tape t: bits preserves { 'a' } writes { 'b' }) \
+        "routine r(tape t: bits never writes { 'a' } writes { 'b' }) \
          { entry state s { [*] -> stop; } }",
     )
     .unwrap_err();
     assert_eq!(err.kind.code(), "contract-clause-order");
+    assert!(
+        matches!(
+            &err.kind,
+            CompileErrorKind::ContractClauseOrder { what, before }
+                if *what == "writes" && *before == "never writes"
+        ),
+        "{:?}",
+        err.kind
+    );
     assert_eq!(
         err.kind.to_string(),
-        "`writes` must come before `preserves`"
+        "`writes` must come before `never writes` (canonical order: `writes` < `never writes` < `enters` < `leaves`)"
+    );
+}
+
+/// A violation between the two NEW keywords — `never writes` after `enters`,
+/// with no `writes` clause anywhere in the source — must name the pair
+/// that actually collided (`never writes`, `enters`), never fall back to the
+/// `writes`/`never writes` wording from the two-clause era.
+///
+/// Mutation this catches: hard-coding the message to the fixed
+/// `` `writes` must come before `never writes` `` string regardless of which
+/// pair actually violated the order.
+#[test]
+fn enters_before_never_writes_names_the_actual_pair() {
+    let err = parse_src(
+        "routine r(tape t: bits enters { 'a' } never writes { 'a' }) \
+         { entry state s { [*] -> stop; } }",
+    )
+    .unwrap_err();
+    assert_eq!(err.kind.code(), "contract-clause-order");
+    assert!(
+        matches!(
+            &err.kind,
+            CompileErrorKind::ContractClauseOrder { what, before }
+                if *what == "never writes" && *before == "enters"
+        ),
+        "{:?}",
+        err.kind
+    );
+    // The message names the pair that actually collided — the canonical
+    // order it also states mentions `writes` too, but only as the fixed
+    // reference line, never as the offending clause.
+    let msg = err.kind.to_string();
+    assert!(
+        msg.starts_with("`never writes` must come before `enters`"),
+        "{msg}"
     );
 }
 
@@ -684,14 +739,14 @@ fn duplicate_writes_clause_is_an_error() {
 }
 
 #[test]
-fn duplicate_preserves_clause_is_an_error() {
+fn duplicate_never_writes_clause_is_an_error() {
     let err = parse_src(
-        "routine r(tape t: bits preserves { 'a' } preserves { 'b' }) \
+        "routine r(tape t: bits never writes { 'a' } never writes { 'b' }) \
          { entry state s { [*] -> stop; } }",
     )
     .unwrap_err();
     assert_eq!(err.kind.code(), "duplicate-contract-clause");
-    assert_eq!(err.kind.to_string(), "duplicate `preserves` clause");
+    assert_eq!(err.kind.to_string(), "duplicate `never writes` clause");
 }
 
 #[test]
@@ -770,12 +825,10 @@ fn writes_is_reserved_as_a_name() {
 }
 
 #[test]
-fn preserves_is_reserved_as_a_name() {
-    // A tape may not be NAMED preserves — the word is reserved.
-    assert_eq!(
-        err_code("machine { tape preserves: bits; }"),
-        "reserved-name"
-    );
+fn never_is_reserved_as_a_name() {
+    // A tape may not be NAMED never — the word is reserved (the first
+    // word of the `never writes` clause keyword).
+    assert_eq!(err_code("machine { tape never: bits; }"), "reserved-name");
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,4 +1279,375 @@ fn significant_tokens_is_the_comment_free_lex() {
          widened filter would wrongly drop"
     );
     assert_eq!(significant_tokens(&raw), lex(src).expect("lexes"));
+}
+
+// ---------------------------------------------------------------------------
+// Named, sparse vector cells: a cell may name its tape (`king: 'x'`), the
+// name is pure spelling, and it disturbs nothing that exists (set refs,
+// the `* as` refusal, span precision) (docs/tmt/language.md (named vector
+// cells)).
+// ---------------------------------------------------------------------------
+
+/// The 1-based position of the first occurrence of `needle` in `src`.
+fn at(src: &str, needle: &str) -> mtc_core::diagnostics::Pos {
+    for (i, line) in src.lines().enumerate() {
+        if let Some(col) = line.find(needle) {
+            return mtc_core::diagnostics::Pos {
+                line: i as u32 + 1,
+                col: col as u32 + 1,
+            };
+        }
+    }
+    panic!("`{needle}` not in fixture");
+}
+
+/// The half-open span covering the first occurrence of `needle`.
+fn cover(src: &str, needle: &str) -> Span {
+    let p = at(src, needle);
+    Span::new(p.line, p.col, p.line, p.col + needle.len() as u32)
+}
+
+const NAMED_ALL: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    [t: 'a'] -> write [u: 'b'] move [t: >] stop;
+  }
+}
+";
+
+#[test]
+fn a_rule_vector_cell_may_name_its_tape() {
+    let p = parse_src(NAMED_ALL).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    let pn = r.pattern.cells[0]
+        .name
+        .as_ref()
+        .expect("a pattern cell names its tape");
+    assert_eq!(pn.name, "t");
+    let wv = r.write.as_ref().expect("write");
+    let wn = wv.cells[0]
+        .name
+        .as_ref()
+        .expect("a write cell names its tape");
+    assert_eq!(wn.name, "u");
+    let mv = r.mov.as_ref().expect("move");
+    let mn = mv.cells[0]
+        .name
+        .as_ref()
+        .expect("a move cell names its tape");
+    assert_eq!(mn.name, "t");
+    // The cell span covers the name THROUGH the content, and the name's own
+    // span is just the name — what a diagnostic about the name points at.
+    assert_eq!(r.pattern.cells[0].span, cover(NAMED_ALL, "t: 'a'"));
+    assert_eq!(
+        pn.span,
+        Span::point(at(NAMED_ALL, "t: 'a'").line, at(NAMED_ALL, "t: 'a'").col)
+    );
+    assert_eq!(wv.cells[0].span, cover(NAMED_ALL, "u: 'b'"));
+    assert_eq!(mv.cells[0].span, cover(NAMED_ALL, "t: >"));
+    assert_eq!(
+        mv.cells[0].name.as_ref().unwrap().span,
+        Span::point(at(NAMED_ALL, "t: >").line, at(NAMED_ALL, "t: >").col)
+    );
+}
+
+#[test]
+fn a_positional_cell_keeps_no_name() {
+    let p = parse_src(A1).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    assert!(r.pattern.cells.iter().all(|c| c.name.is_none()));
+    assert!(
+        r.write
+            .as_ref()
+            .map(|w| w.cells.iter().all(|c| c.name.is_none()))
+            .unwrap_or(true)
+    );
+    assert!(
+        r.mov
+            .as_ref()
+            .map(|m| m.cells.iter().all(|c| c.name.is_none()))
+            .unwrap_or(true)
+    );
+}
+
+const NAMED_SET: &str = "\
+alphabet ab { '_', 'a', 'b' }
+set pair { 'a', 'b' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    [t: pair as d] -> stop;
+    [pair as e, *] -> stop;
+  }
+}
+";
+
+#[test]
+fn a_name_does_not_disturb_set_cells() {
+    let p = parse_src(NAMED_SET).expect("parses");
+    let rules = &machine(&p).states[0].rules;
+    let named = &rules[0].pattern.cells[0];
+    assert_eq!(named.name.as_ref().map(|n| n.name.as_str()), Some("t"));
+    assert!(matches!(
+        &named.kind,
+        PatternCellKind::SetRef { name, .. } if name == "pair"
+    ));
+    assert_eq!(named.binding.as_ref().map(|b| b.name.as_str()), Some("d"));
+    let bare = &rules[1].pattern.cells[0];
+    assert!(bare.name.is_none());
+    assert!(matches!(
+        &bare.kind,
+        PatternCellKind::SetRef { name, .. } if name == "pair"
+    ));
+}
+
+const NAMED_WILD: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+  entry state s {
+    [t: * as v] -> stop;
+  }
+}
+";
+
+#[test]
+fn a_named_wildcard_binding_is_still_refused() {
+    assert_eq!(err_code(NAMED_WILD), "wildcard-binding");
+}
+
+const NAMED_CHAR: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+  entry state s {
+    ['a' as v] -> write [t: {v + 1}] stop;
+  }
+}
+";
+
+#[test]
+fn a_name_leaves_char_arithmetic_pointing_at_the_variable() {
+    let e = parse_src(NAMED_CHAR).unwrap_err();
+    assert_eq!(e.kind.code(), "char-arithmetic");
+    // The span is the offending reference's own, name prefix or not.
+    assert_eq!(
+        e.span,
+        Span::point(at(NAMED_CHAR, "v + 1").line, at(NAMED_CHAR, "v + 1").col)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Rule guards: `where { … }` between a rule's pattern and `->` — a
+// predicate over the rule's bindings, stored as written. The AST shape is
+// pinned field-by-field here; typing and evaluation live downstream
+// (docs/tmt/language.md (rule guards)).
+// ---------------------------------------------------------------------------
+
+fn bind(t: &GuardTerm) -> &str {
+    match &t.base {
+        GuardBase::Binding(n) => &n.name,
+        other => panic!("not a binding term: {other:?}"),
+    }
+}
+
+const GRD: &str = "\
+alphabet ab { '_', 'a', 'z' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['a'..'z' as x, 'a'..'z' as y] where { x == y /* keep */ || x == y - 1 } -> stop;
+  }
+}
+";
+
+#[test]
+fn a_guard_parses_to_its_ast() {
+    let p = parse_src(GRD).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    let g = r.guard.as_ref().expect("the rule carries its guard");
+    // `x == y || x == y - 1`: Or(Cmp(Eq), Cmp(Eq with the right side one
+    // behind)) — every operand a binding, offsets 0 / 0 / 0 / -1.
+    let (a, b) = match &g.expr {
+        GuardExpr::Or(a, b) => (a, b),
+        other => panic!("not an Or: {other:?}"),
+    };
+    match a.as_ref() {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Eq);
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(bind(&c.right), "y");
+            assert_eq!(c.left.offset, 0);
+            assert_eq!(c.right.offset, 0);
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+    match b.as_ref() {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Eq);
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(bind(&c.right), "y");
+            assert_eq!(c.left.offset, 0);
+            assert_eq!(c.right.offset, -1);
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+    // The guard's span is its keyword-decided extent: `where` through `}`.
+    let w = at(GRD, "where");
+    assert_eq!(g.span.start, w);
+    assert_eq!(
+        g.span.end.col,
+        w.col + "where { x == y /* keep */ || x == y - 1 }".len() as u32
+    );
+}
+
+const GRD_IN: &str = "\
+alphabet ab { '_', 'a', 'z' }
+
+machine {
+  tape t: ab;
+  tape u: ab;
+  entry state s {
+    ['a' as x, 'z' as y] where { x in qq && y in qq || x == y } -> stop;
+  }
+}
+";
+
+#[test]
+fn membership_and_conjunction_parse_with_and_binding_tighter() {
+    let p = parse_src(GRD_IN).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    let g = r.guard.as_ref().expect("guard");
+    // `x in qq && y in qq || x == y` == `(x in qq && y in qq) || (x == y)`.
+    let (a, b) = match &g.expr {
+        GuardExpr::Or(a, b) => (a.as_ref(), b.as_ref()),
+        other => panic!("not an Or: {other:?}"),
+    };
+    let (l, r2) = match a {
+        GuardExpr::And(l, r2) => (l.as_ref(), r2.as_ref()),
+        other => panic!("not an And: {other:?}"),
+    };
+    match l {
+        GuardExpr::In(i) => {
+            assert_eq!(i.binding.name, "x");
+            assert_eq!(i.set.name, "qq");
+        }
+        other => panic!("not an In: {other:?}"),
+    }
+    match r2 {
+        GuardExpr::In(i) => {
+            assert_eq!(i.binding.name, "y");
+            assert_eq!(i.set.name, "qq");
+        }
+        other => panic!("not an In: {other:?}"),
+    }
+    match b {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Eq);
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(bind(&c.right), "y");
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+}
+
+const GRD_TERM: &str = "\
+alphabet ab { '_', 'a', 'z' }
+
+machine {
+  tape t: ab;
+  entry state s {
+    ['a' as x] where { x + 1 == 'z' - 2 && x < 'a' && x >= x } -> stop;
+  }
+}
+";
+
+#[test]
+fn terms_carry_offsets_and_literals() {
+    let p = parse_src(GRD_TERM).expect("parses");
+    let r = &machine(&p).states[0].rules[0];
+    let g = r.guard.as_ref().expect("guard");
+    let (a, rest) = match &g.expr {
+        GuardExpr::And(a, rest) => (a.as_ref(), rest.as_ref()),
+        other => panic!("not an And: {other:?}"),
+    };
+    // `x + 1 == 'z' - 2`
+    let (l, r2) = match a {
+        GuardExpr::And(l, r2) => (l.as_ref(), r2.as_ref()),
+        other => panic!("not an And: {other:?}"),
+    };
+    match l {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(c.left.offset, 1);
+            match &c.right.base {
+                GuardBase::Lit(SymLit::Glyph { value, .. }) => assert_eq!(value, "z"),
+                other => panic!("not a glyph term: {other:?}"),
+            }
+            assert_eq!(c.right.offset, -2);
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+    // `x < 'a'` and `x >= x`
+    match r2 {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Lt);
+            assert_eq!(bind(&c.left), "x");
+            match &c.right.base {
+                GuardBase::Lit(SymLit::Glyph { value, .. }) => assert_eq!(value, "a"),
+                other => panic!("not a glyph term: {other:?}"),
+            }
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+    match rest {
+        GuardExpr::Cmp(c) => {
+            assert_eq!(c.op, CmpOp::Ge);
+            assert_eq!(bind(&c.left), "x");
+            assert_eq!(bind(&c.right), "x");
+        }
+        other => panic!("not a Cmp: {other:?}"),
+    }
+}
+
+const GRD_ERR: &str = "\
+alphabet ab { '_', 'a' }
+
+machine {
+  tape t: ab;
+  entry state s {
+    ['a' as x] where { x == } -> stop;
+  }
+}
+";
+
+#[test]
+fn a_broken_guard_is_a_typed_error_with_its_span() {
+    let e = parse_src(GRD_ERR).unwrap_err();
+    let w = at(GRD_ERR, "where");
+    assert_eq!(e.span.start.line, w.line, "the span is on the guard's line");
+    assert!(
+        e.span.start.col >= w.col,
+        "the span sits inside the guard: {:?}",
+        e.span
+    );
+    // A typed parse refusal, not a panic: the same `unexpected-token`
+    // family the rest of the grammar produces (`Self::expected`'s code).
+    assert_eq!(e.kind.code(), "unexpected-token");
+}
+
+#[test]
+fn the_green_tree_keeps_a_guard_verbatim() {
+    let root = SyntaxNode::new_root(parse_green(GRD).unwrap());
+    assert_eq!(root.text(), GRD, "a comment inside a guard is not dropped");
 }
