@@ -6,12 +6,12 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 ## Current state
 
-**v0.5.0, released 2026-09-02** (two same-day release candidates preceded it: rc.1 cut for the browser demo's integration, rc.2 folding in the three surfaces the demo-side design asked for; the final adds nothing over rc.2) — "the browser release": `mtc-wasm` and the release-attached bundle (`docs/wasm.md`) — four languages, the tape-block codec, the stdlib with lines — one parse path per source language (the hand-written CSTs deleted), fmt's never-move comment rule on both languages, the lint-fix comment guard, exact stdlib `writes` contracts, the as-name navigation rule, JetBrains 0.2.1. Previous: v0.4.0 (2026-08-17), the debugging release.
+**v0.6.0, released 2026-11-28** — "the language release" for TM-1: a `.tmc` program is no longer one file (declarations, `.tmh` headers, `tmt interface`, cross-unit calls, alphabets, sets, maps and grafts, re-checked at link); signatures carry `state` parameters, `noreturn` and head contracts; rules gain guards, named cells, glyph sets and open maps; a good deal of what 0.5.0 accepted silently is a named error, the no-shadowing link rule on both toolchains included; prebuilt binaries for five targets ride every release. Previous: v0.5.0 (2026-09-02), the browser release.
 
 | Contract | Version |
 |---|---|
-| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.6.0-dev on `next` (last release 0.5.0) |
-| `mtc-wasm` crate / JS API | 0.6.0-dev on `next` (last release 0.5.0) |
+| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.6.0 |
+| `mtc-wasm` crate / JS API | 0.6.0 |
 | `.pmc` language / PM-1 `.pma` dialect | 0.4 / 0.3 |
 | `.tmc` language / TM-1 `.tma` dialect | 0.2 / 0.4 (`.tmc` 0.2 reserves 32 words; a version space moves once between two releases — work landing later in the cycle folds into that step) |
 | PM IR / TM IR | 4 / 4 |
@@ -21,7 +21,7 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 **Both toolchain arcs are complete.** PM-1/`pmt` and TM-1/`tmt` each ship the whole chain — compiler, assembler, disassembler, linker, VM, lint, fmt, LSP, DAP, a project manifest with a `build` driver, an embedded stdlib, and a two-plugin editor pair. The TM-1 flagship `docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma` — a hand-written universal Turing machine interpreting brainfuck — assembles, links and runs, proven by derivation-first goldens.
 
-**Open work.** #6 the browser arc — the `mtc-wasm` crate and bundle have landed; what remains is the demo-side round in `machines-demo`; #87 a hardware PM-1 RTL core against the bus contract; #30 a tape-machine testing library (`pmt test`/`tmt test`); #9 a post-machine-js dialect front end; #94 letting a tapeblock buffer a step's per-tape commands and run them in parallel, instead of the bus serializing one device at a time. The C2 green-tree migration (#14) is MERGED and its follow-ups #100–#108 are closed (formatter comment-layout bugs, review quality findings, error-resilient parsing, the asm green tree, lint spans off the tree); #109 (incremental reparse) was closed on measurements 2026-09-02: a full reparse is 4–7% of a keystroke; `expand` dominates, 75% of it on the widest `.tmc` (`rpnwide.tmc`).
+**Open work.** #6 the browser arc — the `mtc-wasm` crate and bundle have landed; what remains is the demo-side round in `machines-demo`; #139 the default `hybrid` call mechanism links the rpn examples at `mono`'s size and cost while `frames` is half the bytes and 10–50 % fewer tacts (measured 2026-11-27, default left as it is, revisit with a broader corpus); #135 a cell-preserving `preserves` clause (deferred: no consumer yet) and its head-position half, which waits for #30, a tape-machine testing library (`pmt test`/`tmt test`); #134 an `enters-unmet` quickfix by contract search; #136 the IR node id per address in the debug map; #126 an `assert` construct; #118 shared grafts; #99 the Homebrew tap and the Windows manifests (step one, release binaries, shipped with 0.6.0); #87 a hardware PM-1 RTL core against the bus contract; #9 a post-machine-js dialect front end; #94 parallel per-tape execution; #55 a brainfuck runner example. Sideload verification of the 0.2.1 / 0.2.2 plugins in a running IDE is still the maintainer's.
 
 **Where the history lives.** How the repo got here — the phase-by-phase trace, and the things that were probed and rejected — is `docs/internal/build-history.md`, deliberately not loaded into every session. Per-release facts: `CHANGELOG.md`. Design rationale: `docs/internal/specs/`. **Keep this file at standing state** — current versions, live constraints, open work. A finished round's story goes to the history file, not back into this preamble.
 

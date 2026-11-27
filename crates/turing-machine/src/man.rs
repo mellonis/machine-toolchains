@@ -28,7 +28,7 @@ use crate::completions::registry::{Positional, PositionalHint, registry};
 /// beyond its version, so the date is a literal — bumped with the version
 /// at each release, and held against the CHANGELOG's heading for that
 /// version by this module's tests so it cannot go stale unnoticed.
-pub const RELEASE_DATE: &str = "2026-09-02";
+pub const RELEASE_DATE: &str = "2026-11-28";
 
 pub fn render() -> String {
     let reg = registry();

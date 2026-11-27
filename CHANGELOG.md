@@ -7,11 +7,7 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
-## [Unreleased]
-
-The entry the next release takes. Until the cut the crates report
-`0.6.0-dev`; at the cut this heading becomes `[0.6.0]` with its date and
-the crates drop the suffix. Nothing below changes with it.
+## [0.6.0] - 2026-11-28
 
 The language release for TM-1. A `.tmc` program stops being one file:
 a unit publishes its declarations, a header carries them, and a routine,
