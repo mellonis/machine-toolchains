@@ -762,6 +762,67 @@ fn more_than_255_state_parameters_is_a_typed_error() {
     );
 }
 
+/// A signature lists its tapes first: a `tape` parameter after a `state`
+/// one is refused at the tape's name, on a routine and on a graph alike —
+/// an object keeps the two kinds in two lists, so a header rendered from
+/// it could not print any other order.
+///
+/// Mutation: drop the order check where a signature is resolved; both
+/// sources compile.
+#[test]
+fn a_tape_parameter_after_a_state_parameter_is_refused() {
+    for (world, body) in [
+        ("routine", "entry state s { [*, *] -> goto done; }"),
+        ("graph", "entry state s { [*, *] -> goto done; }"),
+    ] {
+        let src = format!(
+            "\
+alphabet ab {{ '_', '0' }}
+
+{world} r(tape a: ab, state done, tape b: ab) {{
+  {body}
+}}
+
+machine {{
+  tape d: ab;
+  entry state m {{ [*] -> stop; }}
+}}
+"
+        );
+        let err = compile(&src, CompileOptions::default())
+            .expect_err("a tape after a state parameter is refused");
+        assert_eq!(err.kind.code(), "tape-after-state-param", "{world}: {err}");
+        assert_eq!(
+            (err.span.start.line, err.span.start.col),
+            (3, world.len() as u32 + 33),
+            "{world}: the diagnostic points at the late tape's name: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("tape parameter `b` follows state parameter `done`"),
+            "{world}: {err}"
+        );
+    }
+}
+
+/// The near miss: tapes first, then the `state` parameters, compiles.
+#[test]
+fn tapes_before_state_parameters_compile() {
+    let src = "\
+alphabet ab { '_', '0' }
+
+routine r(tape a: ab, tape b: ab, state done) {
+  entry state s { [*, *] -> goto done; }
+}
+
+machine {
+  tape d: ab;
+  entry state m { [*] -> stop; }
+}
+";
+    compile(src, CompileOptions::default()).unwrap_or_else(|e| panic!("{e}"));
+}
+
 /// The near miss: exactly 255 is the widest signature the wire can carry,
 /// and it compiles and publishes every name, in order.
 #[test]

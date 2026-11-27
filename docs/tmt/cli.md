@@ -367,6 +367,7 @@ subsection.
 | `guard-set-outside-alphabet` | `in S` on a guard whose set `S` names a symbol the binding's own tape alphabet cannot hold. The set name as written and the alphabet are the ones reported. |
 | `guard-constant-comparison` | A guard comparison with no binding operand — nothing a rule could ever match differently varies with it. Write it as rows. |
 | `too-many-state-params` | A signature declares more than 255 `state` parameters — the published exit count is one byte wide. |
+| `tape-after-state-param` | A `routine` or `graph` signature writes a `tape` parameter after a `state` parameter. The tapes come first, then the `state` parameters. |
 | `state-args-need-declarations` | A `call` supplies `state` arguments to a routine whose declarations were not given — an exits vector is positional, so the callee's own parameter order is needed (declare it locally, or supply its declarations to this compile). |
 | `noreturn-violated` | A routine's signature declares `noreturn`, but its body has a way to return — a `return` transition, a `then return`, or `return` handed to a callee as a `state` argument, counted conservatively over the whole body. |
 | `then-required` | A `call`/bind site omits `then`, but its callee is not known (declared to this unit) to be `noreturn` — `then` stays mandatory against an unknown callee or one that can return, since the linker never checks it either way. |

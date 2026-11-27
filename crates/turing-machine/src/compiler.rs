@@ -442,6 +442,11 @@ pub enum CompileErrorKind {
     /// (docs/formats.md (routine interfaces)), so 255 is the ceiling. The
     /// payload is the declared count.
     TooManyStateParams(usize),
+    /// A signature writes a `tape` parameter after a `state` parameter.
+    /// The tapes come first: an object's interface keeps the two kinds in
+    /// two lists (docs/formats.md (routine interfaces)), so a declaration
+    /// read back from it could not reproduce any other order.
+    TapeAfterStateParam { tape: String, state: String },
     /// A `call` supplies `state` arguments to a routine whose declarations
     /// this unit does not have. The exits vector travels POSITIONALLY and
     /// carries no parameter names, so without the callee's own signature
@@ -712,6 +717,7 @@ impl CompileErrorKind {
         CompileErrorKind::DuplicateNamedCell { .. } => "duplicate-named-cell",
         CompileErrorKind::MixedCellForms => "mixed-cell-forms",
         CompileErrorKind::TooManyStateParams(_) => "too-many-state-params",
+        CompileErrorKind::TapeAfterStateParam { .. } => "tape-after-state-param",
         CompileErrorKind::StateArgsNeedDeclarations(_) => "state-args-need-declarations",
         CompileErrorKind::NoreturnViolated(_) => "noreturn-violated",
         CompileErrorKind::ThenRequired(_) => "then-required",
@@ -1274,6 +1280,12 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::TooManyStateParams(n) => {
                 write!(f, "{n} `state` parameters — a signature has at most 255")
+            }
+            CompileErrorKind::TapeAfterStateParam { tape, state } => {
+                write!(
+                    f,
+                    "tape parameter `{tape}` follows state parameter `{state}` — a signature lists its tapes first, then its `state` parameters"
+                )
             }
             CompileErrorKind::StateArgsNeedDeclarations(name) => {
                 write!(
@@ -3840,7 +3852,21 @@ fn resolve_world(
     let mut tapes: Vec<ResolvedTape> = Vec::new();
     let mut state_params: Vec<String> = Vec::new();
     let mut param_kinds: Vec<ParamKind> = Vec::with_capacity(sig.params.len());
-    for p in &sig.params {
+    for (k, p) in sig.params.iter().enumerate() {
+        // Tapes first (docs/tmt/language.md (`state` parameters)).
+        if matches!(p.kind, SigParamKind::Tape { .. })
+            && let Some(earlier) = sig.params[..k]
+                .iter()
+                .find(|q| matches!(q.kind, SigParamKind::State))
+        {
+            return Err(CompileError {
+                span: p.name_span,
+                kind: CompileErrorKind::TapeAfterStateParam {
+                    tape: p.name.clone(),
+                    state: earlier.name.clone(),
+                },
+            });
+        }
         param_kinds.push(match p.kind {
             SigParamKind::Tape { .. } => ParamKind::Tape,
             SigParamKind::State => ParamKind::State,
@@ -6034,6 +6060,10 @@ mod tests {
             CompileErrorKind::DuplicateNamedCell { name: "x".into() },
             CompileErrorKind::MixedCellForms,
             CompileErrorKind::TooManyStateParams(256),
+            CompileErrorKind::TapeAfterStateParam {
+                tape: "x".into(),
+                state: "y".into(),
+            },
             CompileErrorKind::StateArgsNeedDeclarations("x".into()),
             CompileErrorKind::NoreturnViolated("x".into()),
             CompileErrorKind::ThenRequired("x".into()),

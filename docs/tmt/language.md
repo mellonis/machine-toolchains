@@ -1075,6 +1075,11 @@ The rules:
 - A signature may declare at most **255** `state` parameters; the 256th
   is `too-many-state-params`, since the published exit count is one byte
   wide.
+- The tapes come first, on a `routine` and on a `graph` alike: a `tape`
+  parameter written after a `state` parameter is
+  `tape-after-state-param`. A compiled object keeps a routine's tapes and
+  its exits as two lists, so this is the one order a declaration read
+  back from it can reproduce.
 - An exit-bearing call into a routine defined in ANOTHER unit needs that
   unit's declarations, because an exits vector is positional and only the
   callee's own parameter order says which exit is which. Without them the

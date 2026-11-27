@@ -2151,18 +2151,18 @@ machine {
     }
 }
 
-/// A declared graph whose signature interleaves tape and state parameters.
-const INTERLEAVED_LIB_TMC: &str = "\
+/// A library graph taking two tapes and two exits.
+const TWO_KIND_LIB_TMC: &str = "\
 namespace il {
   export alphabet bits { '_', '0', '1' }
-  export graph g(tape a: bits, state s1, tape b: bits, state s2) {
+  export graph g(tape a: bits, tape b: bits, state s1, state s2) {
     entry state s { ['0', *] -> goto s1; [*, *] -> goto s2; }
   }
 }
 ";
 
-/// Grafts `il::g` leaving BOTH `s1` (a state) and `b` (a tape) unbound.
-const INTERLEAVED_CONSUMER: &str = "\
+/// Grafts `il::g` leaving BOTH `b` (a tape) and `s1` (a state) unbound.
+const TWO_KIND_CONSUMER: &str = "\
 use il::bits;
 use il::g;
 machine {
@@ -2173,11 +2173,11 @@ machine {
 }
 ";
 
-/// [`INTERLEAVED_CONSUMER`]'s in-unit twin, the graft on the same line and
+/// [`TWO_KIND_CONSUMER`]'s in-unit twin, the graft on the same line and
 /// column.
-const INTERLEAVED_LOCAL: &str = "\
+const TWO_KIND_LOCAL: &str = "\
 alphabet bits { '_', '0', '1' }
-graph g(tape a: bits, state s1, tape b: bits, state s2) { entry state s { ['0', *] -> goto s1; [*, *] -> goto s2; } }
+graph g(tape a: bits, tape b: bits, state s1, state s2) { entry state s { ['0', *] -> goto s1; [*, *] -> goto s2; } }
 machine {
   tape x: bits;
   tape y: bits;
@@ -2187,19 +2187,18 @@ machine {
 ";
 
 /// With parameters of both kinds unbound, `missing-arg` names the first one
-/// in SIGNATURE order — `s1`, a state written before the tape `b` — for a
-/// graph read from its header and from its source alike, exactly as the
-/// local graft does: same position AND same message. Mutation: stop
-/// recording the signature's parameter order on the resolved world (the
-/// declared signature listing tapes first) — the library graft then names
-/// `b` and the message differs.
+/// in SIGNATURE order — the tape `b`, written before the state `s1` — for
+/// a graph read from its header and from its source alike, exactly as the
+/// local graft does: same position AND same message. Mutation: walk the
+/// declared signature's state parameters before its tapes — the library
+/// graft then names `s1` and the message differs.
 #[test]
 fn a_library_graft_names_the_first_unbound_parameter_in_signature_order() {
-    let dir = scratch("lib_graft_interleaved");
-    let lib_src = write_file(&dir, "il.tmc", INTERLEAVED_LIB_TMC);
+    let dir = scratch("lib_graft_two_kinds");
+    let lib_src = write_file(&dir, "il.tmc", TWO_KIND_LIB_TMC);
     let header = interface(&dir, &lib_src, "il.tmh");
 
-    let local_src = write_file(&dir, "loc.tmc", INTERLEAVED_LOCAL);
+    let local_src = write_file(&dir, "loc.tmc", TWO_KIND_LOCAL);
     let out = dir.join("loc.tmo");
     let local = execute(&args(&[
         "compile",
@@ -2212,13 +2211,13 @@ fn a_library_graft_names_the_first_unbound_parameter_in_signature_order() {
     let local = local.replace(local_src.to_str().unwrap(), "<src>");
     assert!(local.contains("<src>:6:17: error:"), "{local}");
     assert!(
-        local.contains("missing binding argument for parameter `s1`"),
+        local.contains("missing binding argument for parameter `b`"),
         "{local}"
     );
 
     for (route, decls) in [("header", &header), ("source", &lib_src)] {
         let name = format!("ext_{route}.tmc");
-        let err = compile_extern_err(&dir, &name, INTERLEAVED_CONSUMER, decls);
+        let err = compile_extern_err(&dir, &name, TWO_KIND_CONSUMER, decls);
         let err = err.replace(dir.join(&name).to_str().unwrap(), "<src>");
         assert_eq!(
             err, local,
