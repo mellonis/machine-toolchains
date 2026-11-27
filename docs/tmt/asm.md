@@ -112,8 +112,8 @@ set)`. What belongs here is how they are *spelled*:
 - **`trap` and `retx` take an immediate.** `#<n>` is a single unsigned
   byte, `0`..=`255`, written with a leading `#` (`trap #0`, `retx #1`).
   It is distinct from a symbol or a label — it carries a raw number.
-  In a routine whose `.routine` line declares `exits=N`, `retx #k` needs
-  `k < N`; otherwise the file does not assemble (`undeclared-exit`). A
+  In a routine whose `.routine` line declares `exits=(…)` with `N`
+  names, `retx #k` needs `k < N`; otherwise the file does not assemble (`undeclared-exit`). A
   routine with `.param` lines and NO `exits=` declares zero exits, so
   every `retx` in it is refused; a `.routine` line with no `.param` lines
   declares no interface and is not checked.
@@ -144,7 +144,7 @@ file, in the spelling `tmt dis` prints:
 ```asm
 .graph lib::findAGraph, 42
 .grafted std::binaryNumbers::plusOneGraph, 7
-.routine main, tapes=2, alpha=(3, 6), exits=1, noreturn
+.routine main, tapes=2, alpha=(3, 6), exits=(found), noreturn
 .param ctl, ('_', '0', '1'), opaque
 .param data, ('_', 'a', 'b', '0', '1', '$'), writes=('0', '1'), enters=('$'), leaves=('$')
 .func main

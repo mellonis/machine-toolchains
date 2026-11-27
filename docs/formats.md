@@ -246,7 +246,8 @@ interface (present iff flags bit 5 is set; requires flags bit 1), once
                 (bit 0 = enters present, bit 1 = leaves present,
                 bit 2 = opaque), then when bit 0: u8 count, count × u32
                 glyph, then when bit 1: the same;
-                then per blob: u8 exits (the state-parameter count),
+                then per blob: u8 exit count, count × u32 exit name
+                (the state parameters, in declaration order),
                 u8 returns (0 = noreturn)
                 then once: u32 alphabet count, per alphabet: u32 name,
                 u8 glyph count, count × u32 glyph;
@@ -362,9 +363,9 @@ case, which is exactly the case that forces version 4.
   clause (the glyphs the head may stand on when the routine is entered
   and when it leaves), and an **opaque** bit saying that every state
   reading this tape reads it as a wildcard, so the routine never
-  discriminates its glyphs. Per routine it then carries the number of
-  **exits** — the state parameters a caller must supply — and a
-  **returns** flag, false for a routine control never comes back from.
+  discriminates its glyphs. Per routine it then carries the names of
+  its **exits** — the state parameters a caller must supply, in
+  declaration order — and a **returns** flag, false for a routine control never comes back from.
   One record per code blob, parallel to the blobs like the signatures,
   which is why the section is **all-or-none**: an object describes every
   function's interface or none at all.
@@ -607,7 +608,7 @@ default section is `code`, so a file may omit `.section code`. Only table
 directives are legal in the tables section, and only functions/code in the
 code section.
 
-`.routine <name>, tapes=<N>, alpha=(<c1>, …, <cN>)[, exits=<K>][, noreturn]`
+`.routine <name>, tapes=<N>, alpha=(<c1>, …, <cN>)[, exits=(<name>, …)][, noreturn]`
 declares a function's
 generic-routine signature: `tapes` is the tape count (1..=16), and `alpha`
 lists one alphabet cardinality per tape (each at least 1; the list length
@@ -617,16 +618,22 @@ entry routine's signature fixes the executable image's tape count and
 per-tape alphabets, which a run validates its tape band against.
 
 The two optional tail fields belong to the routine's **interface**, not to
-its signature, and ride the interface capability: `exits=<K>` is the
-number of state parameters the routine leaves through (`0..=255`, default
-`0`), and `noreturn` states that control never comes back to the caller
-(the default is that it does). They are written in that fixed order, each
-at most once, and each is independent of the other. Both live *inside* the
-interface record on the wire, so a `.routine` line carrying a non-zero
-`exits=` or `noreturn` needs the `.param` lines below — there is nowhere
-else for the fields to go. A written `exits=0` alone is the exception: it
-is accepted without them and, being the field's default, produces the
-same object either way and is never printed back.
+its signature, and ride the interface capability: `exits=(<name>, …)`
+names the state parameters the routine leaves through, in declaration
+order (at most 255, default none), and `noreturn` states that control
+never comes back to the caller (the default is that it does). They are
+written in that fixed order, each at most once, and each is independent of
+the other. The exit names are part of what a caller sees — a declaration
+read back from the object offers them exactly as the source declared them
+— so they are pairwise distinct and none repeats the name of one of the
+routine's `.param` tapes; `retx #k` leaves through the `k`-th of them. A
+bare count is not a spelling of the field: the names are what the record
+holds. Both fields live *inside* the interface record on the wire, so a
+`.routine` line carrying a non-empty `exits=` or `noreturn` needs the
+`.param` lines below — there is nowhere else for the fields to go. A
+written `exits=()` alone is the exception: it is accepted without them
+and, being the field's default, produces the same object either way and
+is never printed back.
 
 Disassembling a linked image recovers a non-entry callee's signature
 only when it is reached through a `.frame` descriptor: `tapes` comes
@@ -645,7 +652,7 @@ what the routine promises about them.
 ```asm
 .graph lib::findAGraph, 42
 .grafted std::binaryNumbers::plusOneGraph, 7
-.routine main, tapes=2, alpha=(3, 6), exits=1, noreturn
+.routine main, tapes=2, alpha=(3, 6), exits=(found), noreturn
 .param ctl, ('_', '0', '1'), opaque
 .param data, ('_', 'a', 'b', '0', '1', '$'), writes=('0', '1'), enters=('$'), leaves=('$')
 ```
@@ -1397,7 +1404,8 @@ pre-version-4 document has neither field.
   and `synthesized` row flags are the shapes only the optimizer or the
   compiler's own splicing produce; a `-O0` document carries none of them but
   `synthesized`.
-- Per-world, `exits` (a `.routine`'s declared exit count) and `returns`
+- Per-world, `exits` (the names of a `.routine`'s declared exits, in
+  signature order; absent when it declares none) and `returns`
   (`false` only for a `noreturn` routine) round out the same reserved
   vocabulary. `returns` carries the INFERRED fact — whether the source body
   has any way to return, counted conservatively over the whole body (dead

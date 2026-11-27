@@ -1961,15 +1961,11 @@ beside an exported graph of the same name is always refused. Two units'
 PRIVATE declarations of one name, with no source publishing it, are not
 compared with each other: each is its own unit's business.
 
-A declaration read from a compiled object compares its state
-parameters by position, since an object keeps no names for them; two
-readings that both carry names must agree on them. A name conflicts when
-ANY two of its readings disagree in this way, whatever the order they are
-given in.
-When a routine is declared both by a header or source and by an object,
-callers use the names the text declaration gives, whatever the order the
-declarations are given in; an object alone offers only the names its
-generated header prints.
+A declaration read from a compiled object is compared like any other:
+the object records its state parameters' names, so two readings of a
+routine must agree on them whatever each was read from. A name conflicts
+when ANY two of its readings disagree in this way, whatever the order they
+are given in.
 To resolve the error, keep one declaration per name: regenerate a header
 with `tmt interface` after changing its unit, or remove the stale or
 duplicate declaration.
@@ -2123,10 +2119,10 @@ prints as a plain `set` because the graph's body names it.
 A header printed from a compiled OBJECT rather than from source is
 narrower, because an object carries less: routine signatures and
 alphabets, but no graph body, no named map and no doc line, since none of
-those exist on the wire. Two further consequences of reading an object:
-its `state` parameters have no names on the wire, so they print
-positionally as `exit0`, `exit1`, …; and the entry world is skipped
-entirely, since a `machine` is never a callee.
+those exist on the wire. Its routine signatures print as the source
+declared them — tape and `state` parameter names included, the tapes
+first — and the entry world is skipped entirely, since a `machine` is
+never a callee.
 
 ### What a header is trusted for
 

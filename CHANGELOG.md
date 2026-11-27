@@ -83,6 +83,40 @@ suppressible in the shared allow namespace.
 | `.tmc` language | **0.3, no movement** — the acceptance addition folds into the standing bump: a language version bumps once per `next` cycle relative to `master`, the minimal bump | 0.3 |
 | everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
 
+### State-parameter names in the object — 2026-11-27
+
+A routine's interface record now carries the NAME of each state
+parameter, in declaration order, where it carried only their number. A
+declaration read back from a compiled object therefore offers exactly
+what the source declared: `tmt interface` on an object prints `state
+won, state lost` instead of positional stand-ins, a caller may name an
+exit against an object alone, and an object reading is compared with a
+header or source reading of the same routine like any other — state
+names included, whatever order the readings are given in. The rule that
+preferred a text declaration over an object's is gone with the reason
+for it.
+
+The assembly spelling follows the record: a `.routine` line's exit field
+is `exits=(<name>, …)`, and the numeric form `exits=<K>` is no longer a
+spelling of it — a file still writing a count does not assemble. The
+names are pairwise distinct and none repeats one of the routine's
+`.param` tapes; `exits=()` is accepted wherever the default is, and is
+never printed back. In the TM-1 compiler IR a world's `exits` is the
+list of names rather than a count.
+
+Neither the record nor the spelling had been released: both arrived
+after 0.5.0, inside container MO 4, the TM-1 `.tma` dialect 0.5 and TM
+IR 4, which this cycle had already opened. An object, `.tma` file or IR
+document produced by an earlier build of this development branch that
+declares an exit has to be rebuilt.
+
+| Version space | This change | Previous |
+|---|---|---|
+| container MO | **4, no movement** — the change folds into the revision this cycle already opened | 4 |
+| TM-1 `.tma` dialect | **0.5, no movement** — likewise | 0.5 |
+| TM IR | **4, no movement** — likewise | 4 |
+| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, `.tmc` 0.3, PM IR 4, containers MX / MT 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+
 ## [0.5.0] - 2026-09-02
 
 Two release candidates preceded this cut on the same day: the first so

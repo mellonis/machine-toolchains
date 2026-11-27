@@ -225,8 +225,8 @@ declarations of one name are not compared
 one declaration per name: after changing a unit, regenerate its header
 with `tmt interface` (a stale header beside its unit is the usual cause),
 or drop the file that declares the name differently. A declaration read
-from a compiled object compares its state parameters by position, since an
-object keeps no names for them.
+from a compiled object is compared the same way, state-parameter names
+included.
 
 `--nostdlib` drops the embedded standard library from that lookup —
 `std::…` names then behave like any other external, contributing the
