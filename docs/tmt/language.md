@@ -2260,14 +2260,16 @@ text, and it remains available as an ordinary identifier.
 
 - **0.1** — the language's first cut, and the baseline the version
   scheme measures from.
-- **0.2** — declarations and headers, head contracts, glyph sets and
-  open maps. A unit can be read for its declarations alone, and `.tmh`
+- **0.2** — declarations and headers, head contracts, glyph sets, open
+  maps, rule guards and named vector cells. A unit can be read for its declarations alone, and `.tmh`
   is the file that carries them ("Declarations and headers"). With them
   in hand: a `call`/`bind` may bind tapes into a routine defined in
   another unit ("Calls across units"), an alphabet, a glyph set, a named
   map or a graph may be named across a unit boundary ("Alphabets, maps
   and graphs across units"), and a graph from another unit may be
-  grafted.
+  grafted. Within a unit, a rule filters its own cartesian expansion, a
+  rule vector names the tapes its cells speak of, and a graft's symbol
+  map may leave an opaque class unaliased.
 
   **New grammar:**
 
@@ -2281,8 +2283,19 @@ text, and it remains available as an ordinary identifier.
   - `set NAME { … }` declarations, and a set's name as an element of an
     alphabet body, a set body, a contract clause or a pattern cell
     ("Glyph sets");
-  - `*` as the last entry of a `call`'s or a `bind`'s map, leaving it
-    open ("Open maps: `*`");
+  - `*` as the last entry of a `call`'s, a `bind`'s or a `graft`'s map,
+    leaving it open ("Open maps: `*`", "Open grafts");
+  - `where { … }`, a rule guard between the pattern vector and the
+    arrow: glyph-identity and sequence-position tests over the pattern's
+    bindings, `in`-set narrowings under the `&&`-cone rule, `&&`/`||`
+    with parentheses, and constant offsets counting positions
+    ("Rule guards");
+  - `name:` on a rule vector cell, naming the tape a cell speaks of —
+    pure spelling, two spellings of one rule compile to the same rows;
+    one vector mixing named and positional cells, one tape named twice
+    in a vector, or a name that is no tape of the world are refused
+    (`mixed-cell-forms`, `duplicate-named-cell`,
+    `unresolved-tape-target`) ("Named vector cells");
   - in a pattern cell or a contract clause, a range whose endpoints are
     multi-character glyphs or are spelled one quoted and one bare
     (`'0'..9`) ("Pattern ranges");
@@ -2293,13 +2306,18 @@ text, and it remains available as an ordinary identifier.
   **Acceptance changes** — source 0.1 accepted that 0.2 refuses or reads
   differently:
 
-  - the reserved words go from twenty-seven to thirty-one: `noreturn`,
-    `enters`, `leaves`, `set` and `never` join them, and `preserves`
-    leaves them and is an ordinary name again ("Reserved keywords"). A
-    0.1 program using any of the five as a tape, state, world, namespace,
-    alias, binding or graft-instance name no longer compiles;
+  - the reserved words go from twenty-seven to thirty-two: `noreturn`,
+    `enters`, `leaves`, `set`, `never` and `where` join them, and
+    `preserves` leaves them and is an ordinary name again; `in` stays a
+    contextual word, reserved only where a guard reads it ("Reserved
+    keywords"). A 0.1 program using any of the six as a tape, state,
+    world, namespace, alias, binding or graft-instance name no longer
+    compiles;
   - `main` is reserved for the entry world in a library as well as in a
     program ("Program structure");
+  - one binding name written on two cells of a pattern is an error
+    (`duplicate-pattern-binding`) where 0.1 accepted it and let the
+    rightmost cell win ("Substitution");
   - the contract clause 0.1 spelled `preserves { … }` is spelled
     `never writes { … }` ("Contract clauses") — the same symbols, the
     same effective-set arithmetic, the same diagnostics, under a name
@@ -2352,39 +2370,3 @@ text, and it remains available as an ordinary identifier.
     whose prose was corrected in four places where it described the head
     on exit more narrowly than the bodies behave (`docs/tmt/stdlib.md`).
 
-- **0.3** — rule guards, named vector cells, and open graft maps. A rule
-  filters its own cartesian expansion, a rule vector names the tapes its
-  cells speak of, and a graft's symbol map may leave an opaque class
-  unaliased.
-
-  **New grammar:**
-
-  - `where { … }`, a rule guard between the pattern vector and the
-    arrow: glyph-identity and sequence-position tests over the pattern's
-    bindings, `in`-set narrowings under the `&&`-cone rule, `&&`/`||`
-    with parentheses, and constant offsets counting positions
-    ("Rule guards");
-  - `name:` on a rule vector cell, naming the tape a cell speaks of —
-    pure spelling, two spellings of one rule compile to the same rows
-    ("Named vector cells");
-  - `*` as the last entry of a `graft`'s symbol map, leaving it open
-    ("Open grafts").
-
-  **Acceptance changes** — source 0.2 accepted that 0.3 refuses or reads
-  differently:
-
-  - the reserved words go from thirty-one to thirty-two: `where` joins
-    them, and `in` stays a contextual word, reserved only where a guard
-    reads it. A 0.2 program naming a tape, state, world, namespace,
-    alias, binding or graft instance `where` no longer compiles
-    ("Reserved keywords");
-  - a graft whose map holds symbols its host alphabet lacks — or one
-    mixing listed pairs with a symbol the graph's own alphabet lacks —
-    finds its new readings and refusals in "Open grafts"; the 0.2
-    refusal `open-graft-unsupported` is gone;
-  - one rule vector mixing named and positional cells, one tape named
-    twice in a vector, or a name that is no tape of the world are
-    refused (`mixed-cell-forms`, `duplicate-named-cell`,
-    `unresolved-tape-target`) ("Named vector cells").
-
-  Everything else 0.2 accepted, 0.3 accepts.
