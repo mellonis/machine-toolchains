@@ -41,6 +41,19 @@ built executable at source or instruction granularity with tapes and
 registers in the variables view; see `docs/dap.md` for the launch
 schema and protocol surface.
 
+## Install
+
+Each release carries prebuilt binaries, one archive per tool per
+platform: `pmt-<version>-<target>` and `tmt-<version>-<target>`, a
+`.tar.gz` for Linux (x86_64, aarch64) and macOS (Apple silicon, Intel)
+and a `.zip` for Windows (x86_64), each with a `.sha256` beside it. An
+archive holds the one binary; put it on `PATH`. The two tools are
+separate downloads — an editor integration needs only its own.
+
+Shell completions and the manual page come out of the binary itself:
+`pmt completions zsh` (or `bash`, `fish`) and `pmt man`, likewise for
+`tmt`.
+
 ## Build
 
 ```

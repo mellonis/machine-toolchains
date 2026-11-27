@@ -275,8 +275,14 @@ man page; a test holds it against the CHANGELOG heading for the crate
 version, so a bump without it is red) in one commit with the CHANGELOG
 entry; merge, tag `vX.Y.Z`, `gh release create` with
 the freshly built plugin artifacts attached. The tag push also triggers
-`release.yml`, which builds the wasm bundle on CI and attaches it to the
-release; `gh release create` should run first (it creates the tag), and
+`release.yml`, which builds the wasm bundle and the prebuilt binaries
+on CI and attaches them to the release — ten binary archives, `pmt` and
+`tmt` separately for five targets (Linux x86_64/aarch64, macOS
+arm64/x86_64, Windows x86_64), each with a `.sha256`. **Before tagging,
+run the workflow by hand (`gh workflow run release.yml --ref next`): a
+manual run builds and packages everything and uploads nothing**, so a
+runner label that has gone away or a target that no longer builds shows
+up before the tag exists, not after; `gh release create` should run first (it creates the tag), and
 the job waits up to 30 minutes for the release otherwise. **Plugin
 artifacts attach to final release tags only, and only when a plugin's
 own version moved** (ruled 2026-09-02 at the v0.5.0-rc.1 cut): the

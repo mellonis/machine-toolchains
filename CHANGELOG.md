@@ -182,6 +182,33 @@ refresh had left them newer than the floor, which the packager refuses.
 | tested floors | `MIN_TESTED_TMT` **0.6.0**; `MIN_TESTED_PMT` `unchanged` at 0.4.0 | 0.4.0 |
 | everything else | `unchanged` | — |
 
+### A lint finding names its rule — 2026-11-27
+
+`pmt lint` and `tmt lint` print each finding as
+`FILE:LINE:COL: lint: MESSAGE [CODE]`, where they printed the message
+alone. The code is the rule's name — exactly what `--allow` and a
+manifest's `lint.allow` take — so a finding now says how to silence it,
+as a compile warning already did. A script matching the old line to its
+end has to admit the suffix; the VS Code problem matchers already did.
+
+| Version space | This change | Previous |
+|---|---|---|
+| everything | `unchanged` | — |
+
+### Prebuilt binaries — 2026-11-27
+
+A release now carries `pmt` and `tmt` built for five platforms — Linux
+on x86_64 and aarch64, macOS on Apple silicon and Intel, Windows on
+x86_64 — so neither the tools nor the editor integrations that launch
+them need a Rust toolchain any more. One archive per tool per platform,
+each holding the binary with the licence and the readme, and a `.sha256`
+beside it; the two tools download separately. They are built by the
+release workflow from the tagged commit with the pinned compiler.
+
+| Version space | This change | Previous |
+|---|---|---|
+| everything | `unchanged` | — |
+
 ## [0.5.0] - 2026-09-02
 
 Two release candidates preceded this cut on the same day: the first so
