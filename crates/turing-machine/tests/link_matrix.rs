@@ -122,7 +122,7 @@ fn closure_fold() -> String {
 .param t, ('_', 'x', 'y', 'z')
 .routine outer, tapes=1, alpha=(4)
 .param u, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .section code
 .func main
@@ -220,7 +220,7 @@ fn a_closure_fold_program_agrees_across_mechanisms() {
 const ONE_EXIT_SITE: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine pick, tapes=1, alpha=(3), exits=2
+.routine pick, tapes=1, alpha=(3), exits=(e0, e1)
 .param n, ('_', '0', '1')
 .section tables
 T0:     .row    [0]
@@ -251,7 +251,7 @@ two:    ret
 const THREE_EXIT_SITES: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine pick, tapes=1, alpha=(3), exits=1
+.routine pick, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', '0', '1')
 .section tables
 T0:     .row    [0]
@@ -408,7 +408,7 @@ fn a_cross_object_program_agrees_across_mechanisms() {
 const MIXED_SPLICE_AND_FRAME: &str = "\
 .routine main, tapes=1, alpha=(5)
 .param t, ('_', 'a', 'b', 'c', 'd')
-.routine pick, tapes=1, alpha=(5), exits=1
+.routine pick, tapes=1, alpha=(5), exits=(e0)
 .param n, ('_', 'a', 'b', 'c', 'd')
 .routine holey, tapes=1, alpha=(3)
 .param m, ('_', 'a', 'b')
@@ -480,7 +480,7 @@ fn shared_under_frame() -> String {
 .param t, ('_', 'x', 'y', 'z')
 .routine outer, tapes=1, alpha=(4)
 .param u, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .routine holey, tapes=1, alpha=(3)
 .param m, ('_', 'x', 'y')
@@ -575,9 +575,9 @@ fn twice_spliced_callee(body: usize) -> String {
 .param t, ('_', 'x', 'y', 'z')
 .routine outer, tapes=1, alpha=(4)
 .param u, ('_', 'x', 'y', 'z')
-.routine mid, tapes=1, alpha=(4), exits=1
+.routine mid, tapes=1, alpha=(4), exits=(e0)
 .param v, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .section code
 .func main
@@ -692,9 +692,9 @@ fn a_site_inside_each_copy_of_a_twice_spliced_callee_is_counted() {
 const NESTED_UNDER_EXIT_BEARING: &str = "\
 .routine main, tapes=1, alpha=(4)
 .param t, ('_', 'x', 'y', 'z')
-.routine mid, tapes=1, alpha=(4), exits=1
+.routine mid, tapes=1, alpha=(4), exits=(e0)
 .param v, ('_', 'x', 'y', 'z')
-.routine big, tapes=1, alpha=(4), exits=1
+.routine big, tapes=1, alpha=(4), exits=(e0)
 .param n, ('_', 'x', 'y', 'z')
 .section code
 .func main
@@ -733,7 +733,7 @@ const BROKEN_CYCLE: &str = "\
 .param t, ('_', 'x', 'y')
 .routine outer, tapes=1, alpha=(3)
 .param u, ('_', 'x', 'y')
-.routine b, tapes=1, alpha=(3), exits=1
+.routine b, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', 'x', 'y')
 .routine c, tapes=1, alpha=(3)
 .param m, ('_', 'x', 'y')
@@ -854,7 +854,7 @@ const EXITS_UNDER_FRAME: &str = "\
 .param t, ('_', 'a', 'b', 'c', 'd')
 .routine outer, tapes=1, alpha=(3)
 .param u, ('_', 'x', 'y')
-.routine pick, tapes=1, alpha=(3), exits=1
+.routine pick, tapes=1, alpha=(3), exits=(e0)
 .param n, ('_', 'x', 'y')
 .section tables
 T0:     .row    [0]
@@ -1033,7 +1033,7 @@ fn a_tail_position_framed_call_is_observed() {
 const TAIL_POSITION_NORETURN: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine pick, tapes=1, alpha=(3), exits=2, noreturn
+.routine pick, tapes=1, alpha=(3), exits=(e0, e1), noreturn
 .param n, ('_', '0', '1')
 .section tables
 T0:     .row    [0]

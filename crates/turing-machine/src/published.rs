@@ -1,8 +1,9 @@
 //! The published form of a declaration (docs/tmt/language.md
 //! (declarations)): what another unit sees of an exported alphabet, set,
 //! map, routine or graph, and so what two readings of one name must agree
-//! on. One comparison, [`PublishedForm::agrees`], serves every place that
-//! asks whether two readings are the same declaration.
+//! on. Two readings are the same declaration exactly when their forms are
+//! equal — whether a reading came from a source, a header or a compiled
+//! object, since the object records every name a form compares.
 //!
 //! The form deliberately leaves out what a caller cannot rely on:
 //! `volatile` and `opaque` are not published, `never writes` is folded
@@ -16,7 +17,7 @@ use std::collections::BTreeMap;
 use mtc_core::diagnostics::Span;
 
 use crate::compiler::{
-    CompileError, CompileErrorKind, ParamKind, Provenance, ReadMode, Resolved, ResolvedAlphabet,
+    CompileError, CompileErrorKind, ParamKind, ReadMode, Resolved, ResolvedAlphabet,
     ResolvedMapDecl, ResolvedSet, ResolvedWorld, WorldKind, clause_glyphs, declared_effective,
     full_name, symset_glyphs,
 };
@@ -58,43 +59,9 @@ pub(crate) enum ParamForm {
         enters: Option<Vec<String>>,
         leaves: Option<Vec<String>>,
     },
-    /// `None` for a reading taken from a compiled object, whose
-    /// interface carries no state-parameter names (the object arm of
-    /// `tmt interface` mints `exit0`, `exit1`, … for them).
-    State { name: Option<String> },
-}
-
-impl PublishedForm {
-    /// THE comparison of two published forms — the only one the corpus
-    /// guard and the conflict checks use. Equality, except that two state
-    /// parameters agree by position alone when either name is `None` (a
-    /// routine's parameter lists must still have the same length and agree
-    /// element by element). Never `==` between forms of two readings.
-    pub(crate) fn agrees(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                PublishedForm::Routine {
-                    params: a,
-                    noreturn: na,
-                },
-                PublishedForm::Routine {
-                    params: b,
-                    noreturn: nb,
-                },
-            ) => na == nb && a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.agrees(y)),
-            _ => self == other,
-        }
-    }
-}
-
-impl ParamForm {
-    fn agrees(&self, other: &Self) -> bool {
-        match (self, other) {
-            (ParamForm::State { name: Some(a) }, ParamForm::State { name: Some(b) }) => a == b,
-            (ParamForm::State { .. }, ParamForm::State { .. }) => true,
-            _ => self == other,
-        }
-    }
+    State {
+        name: String,
+    },
 }
 
 /// One declaration a module carries, as the lookups a consumer uses see
@@ -115,8 +82,7 @@ pub(crate) struct VisibleForm {
 /// printed private graph, a leniently read source's private routine and
 /// an alphabet a module merely copied in from another unit are all
 /// visible to a consumer when their module comes first in the table. A
-/// machine is never a declaration. A module with `from_object` set yields
-/// `State { name: None }` for every state parameter.
+/// machine is never a declaration.
 pub(crate) fn visible_forms(module: &Resolved) -> Vec<VisibleForm> {
     let mut forms = Vec::new();
     let mut push = |name: &str, published: bool, form: PublishedForm| {
@@ -177,7 +143,7 @@ pub(crate) fn readings_conflict(
     b_published: bool,
     b: &PublishedForm,
 ) -> bool {
-    (a_published || b_published) && !a.agrees(b)
+    (a_published || b_published) && a != b
 }
 
 pub(crate) fn alphabet_form(a: &ResolvedAlphabet) -> PublishedForm {
@@ -230,9 +196,7 @@ pub(crate) fn routine_form(w: &ResolvedWorld, module: &Resolved) -> PublishedFor
             }
             ParamKind::State => {
                 let Some(name) = states.next() else { continue };
-                params.push(ParamForm::State {
-                    name: (!module.from_object).then(|| name.clone()),
-                });
+                params.push(ParamForm::State { name: name.clone() });
             }
         }
     }
@@ -250,17 +214,14 @@ pub(crate) fn graph_form(w: &ResolvedWorld) -> PublishedForm {
 /// graph `program` declares, exported or not — each with its name span,
 /// whether the unit exports it, and its form, settled exactly as a
 /// declarations reading of it
-/// would be (`header::settle_declarations`). With [`Provenance::Object`]
-/// every state parameter's name is `None`.
+/// would be (`header::settle_declarations`).
 pub(crate) fn own_forms(
     program: &Program,
     resolved: &Resolved,
     externals: &Declarations,
     mode: ReadMode,
-    provenance: Provenance,
 ) -> BTreeMap<String, (Span, bool, PublishedForm)> {
     let mut settled = resolved.clone();
-    settled.from_object = provenance == Provenance::Object;
     crate::header::settle_declarations(program, &mut settled, externals, mode);
     let mut forms = BTreeMap::new();
     for a in &program.alphabets {
@@ -322,16 +283,15 @@ fn declares(module: &Resolved, name: &str) -> bool {
 /// side publishes it — the unit's private definition against a published
 /// declaration, and the unit's published definition against a declaration
 /// a module carries privately, since a consumer of both would be handed
-/// whichever came first. Two private ones are not compared. `agrees` is
-/// not transitive, so every reading is tested; the origin named is the
-/// first disagreeing one in table order. Two table modules disagreeing
+/// whichever came first. Two private ones are not compared. Every reading
+/// is tested; the origin named is the first disagreeing one in table
+/// order. Two table modules disagreeing
 /// with each other is [`Declarations::check_conflicts`]' business.
 pub(crate) fn check_own_against_table(
     program: &Program,
     resolved: &Resolved,
     externals: &Declarations,
     mode: ReadMode,
-    provenance: Provenance,
 ) -> Result<(), CompileError> {
     let own_names: Vec<String> = program
         .alphabets
@@ -352,8 +312,7 @@ pub(crate) fn check_own_against_table(
     if candidates.is_empty() {
         return Ok(());
     }
-    for (name, (span, published, own)) in own_forms(program, resolved, externals, mode, provenance)
-    {
+    for (name, (span, published, own)) in own_forms(program, resolved, externals, mode) {
         let clash = candidates.iter().find_map(|(origin, forms)| {
             forms
                 .iter()
@@ -452,11 +411,10 @@ mod tests {
         .object
     }
 
-    /// The object reading names its exit `exit0`, the source reading
-    /// `done`; they are one unit and must merge. The TEXT reading goes
-    /// first so the consumer's `done = …` binds against a named parameter.
-    /// Mutation: compare forms by derived `==` — they conflict on the
-    /// state name.
+    /// The object reading and the source reading of one unit both name
+    /// the exit `done`: one declaration, and they merge. Mutation: drop
+    /// the exit names from the object's interface (codegen printing a
+    /// count) — the object reading then fails to read at all.
     #[test]
     fn an_object_reading_and_a_source_reading_of_one_unit_merge() {
         let mut decls = table(&[("own.tmc", OWN)]);
@@ -468,8 +426,8 @@ mod tests {
     }
 
     /// The object read's OWN-definition check, against a table that
-    /// already holds the source reading. Mutation: `own_forms` ignoring
-    /// `Provenance`.
+    /// already holds the source reading: the same form, so no conflict.
+    /// Mutation: print minted names on the object arm of `header`.
     #[test]
     fn an_object_read_beside_its_source_reading_is_not_a_conflict() {
         let context = table(&[("own.tmc", OWN)]);
@@ -502,12 +460,10 @@ mod tests {
         crate::header::read_extern(Path::new(path), text, &Declarations::none()).expect("reads")
     }
 
-    /// Three readings of `lib::r` — an object's (nameless state
-    /// parameters), a text one naming it `done`, a text one naming it
-    /// `fin` — conflict wherever the object reading sits in the table:
-    /// `agrees` is not transitive, so every reading must be tested against
-    /// every other. Mutation: compare each reading only against the first
-    /// one seen (`Declarations::check_conflicts`).
+    /// Three readings of `lib::r` — an object's and a text one, both
+    /// naming the exit `done`, and a text one naming it `fin` — conflict
+    /// wherever the object reading sits in the table. Mutation: skip
+    /// object readings in `Declarations::check_conflicts`.
     #[test]
     fn three_readings_conflict_whatever_the_position_of_the_object_reading() {
         let others = [("own.tmc", OWN), ("own_fin.tmc", OWN_FIN)];
@@ -534,8 +490,8 @@ mod tests {
     }
 
     /// The near miss: the object reading and two text readings that agree
-    /// with each other merge, wherever the object sits. Mutation: treat
-    /// the object reading's nameless parameters as disagreeing.
+    /// with each other merge, wherever the object sits. Mutation: print
+    /// minted names on the object arm of `header`.
     #[test]
     fn an_object_reading_and_two_agreeing_text_readings_merge_in_any_position() {
         let others = [("own.tmc", OWN), ("own_copy.tmc", OWN)];
@@ -584,11 +540,10 @@ mod tests {
         decls
     }
 
-    /// A caller naming the text readings' state parameter compiles whatever
-    /// the position of the object reading: the argument check reads the
-    /// text reading, never the object's minted names. Mutation: take the
-    /// first reading regardless of provenance (`declarations::first_reading`
-    /// ignoring `from_object`) — position 0 reports `unknown-arg`.
+    /// A caller naming the state parameter compiles whatever the position
+    /// of the object reading: every reading carries the authored name.
+    /// Mutation: print minted names on the object arm of `header` —
+    /// position 0 reports `unknown-arg`.
     #[test]
     fn a_named_caller_compiles_whatever_the_position_of_the_object_reading() {
         for position in 0..3 {
@@ -599,30 +554,28 @@ mod tests {
         }
     }
 
-    /// With only the object reading, the minted name is the one on offer
-    /// and an authored name is not invented. Mutation: drop the object
-    /// fallback in `first_reading` (the minted-name caller then compiles
-    /// as an unchecked external and the authored-name one is not refused).
+    /// With only the object reading, the authored name is on offer and a
+    /// positional stand-in is not. Mutation: print minted names on the
+    /// object arm of `header`.
     #[test]
-    fn an_object_reading_alone_offers_only_its_minted_names() {
+    fn an_object_reading_alone_offers_the_authored_names() {
         let mut decls = Declarations::none();
         decls.push(Origin::Library("own".into()), object_reading());
-        let minted = C8_NAMED.replace("done", "exit0");
-        if let Err(e) = analyze_with(&minted, &decls) {
-            panic!("minted name refused: {e:?}");
+        if let Err(e) = analyze_with(C8_NAMED, &decls) {
+            panic!("authored name refused: {e:?}");
         }
-        let err = analyze_with(C8_NAMED, &decls).unwrap_err();
+        let minted = C8_NAMED.replace("done", "exit0");
+        let err = analyze_with(&minted, &decls).unwrap_err();
         assert!(
-            matches!(&err.kind, Kind::UnknownArg(n) if n == "done"),
+            matches!(&err.kind, Kind::UnknownArg(n) if n == "exit0"),
             "{err:?}"
         );
     }
 
     /// The IR lowering reads the same reading as the check: the compiled
     /// object is identical whichever position the object reading takes.
-    /// Mutation: revert the rule in `Declarations::routine` only — with the
-    /// object reading first, lowering sees the minted name and refuses
-    /// `done`.
+    /// Mutation: print minted names on the object arm of `header` — with
+    /// the object reading first, lowering refuses `done`.
     #[test]
     fn the_lowering_reads_the_same_reading_whatever_the_order() {
         let compile_at = |position: usize| {
@@ -641,25 +594,21 @@ mod tests {
         assert_eq!(first, format!("{:?}", compile_at(2)));
     }
 
-    /// The own-definition check tests the unit against EVERY reading of
-    /// the name: the object reading (nameless) agrees with a unit naming
-    /// its state `fin`, the text reading naming it `done` does not.
-    /// Mutation: compare only against the first reading of the name
-    /// (`check_own_against_table`).
+    /// The own-definition check reads an object's exit names like a text
+    /// reading's: a unit naming its state `fin` conflicts with an object
+    /// reading that names it `done`. Mutation: compare state parameters by
+    /// position only in `ParamForm`'s equality.
     #[test]
-    fn an_own_definition_is_tested_against_every_reading_of_its_name() {
+    fn an_own_definition_conflicts_with_an_object_reading_naming_the_exit_differently() {
         let mut decls = Declarations::none();
         decls.push(Origin::Library("own".into()), object_reading());
-        decls.push(
-            Origin::Extern(PathBuf::from("own.tmc")),
-            text_reading("own.tmc", OWN),
-        );
         let err = analyze_with(OWN_FIN, &decls).unwrap_err();
         assert!(
-            matches!(&err.kind, Kind::ConflictingDeclaration { first, second, .. }
-                if first == "this unit" && second == "`own.tmc`"),
+            matches!(&err.kind, Kind::ConflictingDeclaration { name, first, .. }
+                if name == "lib::r" && first == "this unit"),
             "{err:?}"
         );
+        assert!(analyze_with(OWN, &decls).is_ok());
     }
 
     /// A PRIVATE own routine, graph or set is a definition of its name
@@ -900,7 +849,6 @@ mod tests {
             "namespace lib {\n  export alphabet other { '_', 'a' }\n  export routine r(tape t: other writes { 'a' }) {\n    entry state s { [*] -> return; }\n  }\n}\n",
             "lib::r",
         );
-        assert!(a.agrees(&b), "{a:?} against {b:?}");
         assert_eq!(a, b);
     }
 
@@ -944,9 +892,9 @@ mod tests {
         }
     }
 
-    fn state(name: Option<&str>) -> ParamForm {
+    fn state(name: &str) -> ParamForm {
         ParamForm::State {
-            name: name.map(str::to_string),
+            name: name.to_string(),
         }
     }
 
@@ -957,19 +905,19 @@ mod tests {
         }
     }
 
-    /// State parameters agree by name when both are named, and by position
-    /// when either is unnamed — but never across a different count.
-    /// Mutation: derive the comparison (`==`) — the first pair then
-    /// disagrees; or ignore length — the third pair then agrees.
+    /// State parameters are compared by name, in order, like every other
+    /// parameter: a caller binds them by name. Mutation: compare state
+    /// parameters by count alone — the second pair then agrees.
     #[test]
-    fn state_parameters_agree_by_name_or_by_position_when_one_is_unnamed() {
-        let named = routine(vec![tape("t"), state(Some("done"))]);
-        let unnamed = routine(vec![tape("t"), state(None)]);
-        assert!(named.agrees(&unnamed));
-        assert!(unnamed.agrees(&named));
-        assert!(!routine(vec![state(Some("done"))]).agrees(&routine(vec![state(Some("fin"))])));
-        assert!(
-            !routine(vec![state(Some("done"))]).agrees(&routine(vec![state(None), state(None)]))
+    fn state_parameters_are_compared_by_name() {
+        assert_eq!(
+            routine(vec![tape("t"), state("done")]),
+            routine(vec![tape("t"), state("done")])
+        );
+        assert_ne!(routine(vec![state("done")]), routine(vec![state("fin")]));
+        assert_ne!(
+            routine(vec![state("done")]),
+            routine(vec![state("done"), state("fail")])
         );
     }
 
@@ -1029,9 +977,6 @@ mod tests {
             let from_header =
                 crate::header::read_extern(std::path::Path::new("unit.tmh"), &header, &context)
                     .unwrap_or_else(|e| panic!("{}: header: {e:?}", path.display()));
-            // Both readings are TEXT, so every state name is `Some` and
-            // `agrees` is plain equality here; it is used anyway, as the
-            // one comparison.
             let (a, b) = (module_forms(&from_source), module_forms(&from_header));
             assert_eq!(
                 a.keys().collect::<Vec<_>>(),
@@ -1041,7 +986,7 @@ mod tests {
             );
             for (name, form) in &a {
                 assert!(
-                    form.agrees(&b[name]),
+                    form == &b[name],
                     "{}: `{name}` differs between the source and its header:\n{form:?}\n{:?}",
                     path.display(),
                     b[name]

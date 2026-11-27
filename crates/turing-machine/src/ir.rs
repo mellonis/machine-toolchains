@@ -138,11 +138,12 @@ pub struct IrWorld {
     pub local: bool,
     /// Source line of the world's definition; `0` if unknown.
     pub line: u32,
-    /// The `.routine`'s declared exit count (its `exits=` clause) — `0` when
+    /// The `.routine`'s declared exits (its `exits=(…)` clause): the names
+    /// of the world's `state` parameters, in signature order — empty when
     /// none is declared, which is every `machine` and every routine whose
     /// signature takes no `state` parameter.
-    #[serde(default, skip_serializing_if = "is_zero_u8")]
-    pub exits: u8,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exits: Vec<String>,
     /// Whether the world can resume normally at a call site's `then` —
     /// `false` only for a `noreturn` routine. `true` (the only state a v3
     /// document ever meant) is the fill/deserialization default, so absence
@@ -157,10 +158,6 @@ fn default_true() -> bool {
 
 fn is_true(b: &bool) -> bool {
     *b
-}
-
-fn is_zero_u8(n: &u8) -> bool {
-    *n == 0
 }
 
 /// A world kind that survives to the IR (graphs are gone).
@@ -1043,12 +1040,12 @@ fn lower_world(
         states,
         local: rw.map(|w| w.local).unwrap_or(false),
         line: rw.map(|w| w.name_span.start.line).unwrap_or(0),
-        // A routine's `state` parameters ARE its exits, in signature order.
-        // The count was narrowed to its one wire byte where the signature
-        // was resolved (`compiler::ResolvedWorld::exits`) — the single
-        // place that check lives — so it is read here, never re-derived
-        // from the list.
-        exits: rw.map(|w| w.exits).unwrap_or(0),
+        // A routine's `state` parameters ARE its exits, in signature order,
+        // and their names travel to the object's interface. The list was
+        // held to the wire's one count byte where the signature was
+        // resolved (`compiler::ResolvedWorld::exits`) — the single place
+        // that check lives.
+        exits: rw.map(|w| w.state_params.clone()).unwrap_or_default(),
         // The inferred fact, computed once in `lower` over the EXPANDED
         // module before the optimizer runs — opt-independent by
         // construction (`body_can_return`'s own doc). A `machine` publishes
@@ -2026,10 +2023,13 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                         // exit of THIS world, so the number is bounded the
                         // same way the terminal form is.
                         Some(IrThen::ReturnExit { exit }) => {
-                            if *exit >= w.exits as u32 {
+                            if *exit >= w.exits.len() as u32 {
                                 return Err(format!(
                                     "{}: state {} resumes through exit {} (the world declares {})",
-                                    w.name, st.id, exit, w.exits
+                                    w.name,
+                                    st.id,
+                                    exit,
+                                    w.exits.len()
                                 ));
                             }
                         }
@@ -2063,10 +2063,13 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                 // `retx #k` leaves through exit `k` of THIS world, so the
                 // number must fall inside the count the world declares.
                 IrTransition::ReturnExit { exit } => {
-                    if *exit >= w.exits as u32 {
+                    if *exit >= w.exits.len() as u32 {
                         return Err(format!(
                             "{}: state {} returns through exit {} (the world declares {})",
-                            w.name, st.id, exit, w.exits
+                            w.name,
+                            st.id,
+                            exit,
+                            w.exits.len()
                         ));
                     }
                 }
@@ -2142,7 +2145,7 @@ mod tests {
             }],
             local: false,
             line: 1,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }
     }
@@ -2414,7 +2417,7 @@ machine {
                     }],
                     local: false,
                     line: 1,
-                    exits: 2,
+                    exits: vec!["e0".to_string(), "e1".to_string()],
                     returns: true,
                 },
                 IrWorld {
@@ -2453,7 +2456,7 @@ machine {
                     line: 1,
                     // A routine declared `noreturn` — it never resumes at an
                     // in-caller `then`.
-                    exits: 0,
+                    exits: Vec::new(),
                     returns: false,
                 },
             ],
@@ -2512,7 +2515,7 @@ machine {
         }"#;
         let ir = IrProgram::from_json(v3).unwrap();
         let w = &ir.worlds[0];
-        assert_eq!(w.exits, 0);
+        assert!(w.exits.is_empty());
         assert!(w.returns, "absent means returns — v3 knew no noreturn");
         let tape = &w.tapes[0];
         assert!(tape.glyphs.is_empty());
@@ -2610,7 +2613,7 @@ machine {
                     }],
                     local: false,
                     line: 1,
-                    exits: 0,
+                    exits: Vec::new(),
                     returns: true,
                 },
                 IrWorld {
@@ -2664,7 +2667,7 @@ machine {
                     }],
                     local: true,
                     line: 1,
-                    exits: 0,
+                    exits: Vec::new(),
                     returns: true,
                 },
             ],
@@ -3117,7 +3120,7 @@ machine {
 }";
         let (ir, _) = lower_of(src);
         let r = world(&ir, "r");
-        assert_eq!(r.exits, 2, "one exit per `state` parameter");
+        assert_eq!(r.exits.len(), 2, "one exit per `state` parameter");
         let exits: Vec<u32> = state(r, "s")
             .rules
             .iter()
@@ -3368,7 +3371,7 @@ machine {
             }],
             local: false,
             line: 1,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mer = w.to_mermaid();

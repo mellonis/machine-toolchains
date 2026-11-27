@@ -1791,15 +1791,15 @@ fn the_source_arm_prints_state_parameters_by_name() {
     assert_eq!(run_interface(&header_path).stdout, out.stdout);
 }
 
-/// The object arm has only the exit COUNT — a `state` parameter's name
-/// is compile-time material the wire never carries (docs/formats.md
-/// (routine interfaces)) — so it prints the exits positionally, one
-/// `state exit<k>` per declared exit, and that header re-parses too.
+/// The object arm prints each `state` parameter by the name the object
+/// records for it (docs/formats.md (routine interfaces)) — the same
+/// signature the source arm prints — and that header re-parses too.
 ///
-/// Mutation: printing the tape parameters alone; a caller reading the
-/// object's header would see a routine that takes no exits at all.
+/// Mutation: printing the tape parameters alone, or a positional
+/// stand-in for each exit; a caller naming `hit` against the object's
+/// header would be refused.
 #[test]
-fn the_object_arm_prints_state_parameters_positionally() {
+fn the_object_arm_prints_state_parameters_by_name() {
     let dir = scratch("header_object_state_params");
     let object = compile(
         STATE_PARAM_FIXTURE,
@@ -1816,7 +1816,7 @@ fn the_object_arm_prints_state_parameters_positionally() {
     let out = run_interface(&obj_path);
     assert!(
         out.stdout.contains(
-            "export routine pick(tape n: bits writes {}, state exit0, state exit1) noreturn;"
+            "export routine pick(tape n: bits writes {}, state hit, state miss) noreturn;"
         ),
         "{}",
         out.stdout
@@ -1827,16 +1827,14 @@ fn the_object_arm_prints_state_parameters_positionally() {
     assert_eq!(run_interface(&header_path).stdout, out.stdout);
 }
 
-/// The object arm's positional exit names are freshened against the tape
-/// parameters printed beside them: a routine whose tape is literally
-/// named `exit0` would otherwise produce a signature naming one parameter
-/// twice, which the strict reader rejects as `duplicate-param` — a header
-/// printed at exit 0 that cannot be read back.
+/// A tape parameter that happens to carry a positional-looking name
+/// takes nothing from the exits beside it: the object arm prints the
+/// authored names on both.
 ///
-/// Mutation: print `state exit{k}` unconditionally; the re-parse below
-/// fails.
+/// Mutation: mint `exit<k>` for the exits on the object arm; the
+/// signature names one parameter twice and the re-parse below fails.
 #[test]
-fn the_object_arms_exit_names_never_collide_with_a_tape_parameter() {
+fn the_object_arm_keeps_authored_names_beside_a_tape_named_like_an_exit() {
     const CLASH: &str = "\
 export alphabet bits { '_', '0', '1' }
 
@@ -1860,7 +1858,7 @@ export routine pick(tape exit0: bits, state hit) {
     let out = run_interface(&obj_path);
     assert!(
         out.stdout
-            .contains("export routine pick(tape exit0: bits writes {}, state exit0_1) noreturn;"),
+            .contains("export routine pick(tape exit0: bits writes {}, state hit) noreturn;"),
         "{}",
         out.stdout
     );

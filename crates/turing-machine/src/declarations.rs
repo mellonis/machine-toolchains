@@ -53,29 +53,22 @@ pub struct Declarations {
 }
 
 /// The reading of a declared world a caller is checked and lowered
-/// against: the first TEXT-provenance module's world satisfying `want`, in
-/// table order, and an object-rendered module's (`Resolved::from_object`)
-/// only when no text module has one. An object reading carries minted
-/// state-parameter names where a text reading carries the authored ones,
-/// and the table may hold both because they agree
-/// (`PublishedForm::agrees`); text readings of a name some module
-/// publishes agree on those names (`Declarations::check_conflicts`), so
-/// which text reading is taken is immaterial, and preferring
-/// text makes the result independent of `--extern`/library order
-/// (docs/tmt/language.md (declarations)). The one rule behind
-/// [`Declarations::routine`] and `compiler::find_external_routine`, so the
-/// argument check and the IR lowering can never read different readings.
+/// against: the first module's world satisfying `want`, in table order.
+/// Readings of a name some module publishes agree on everything a caller
+/// can name — a reading taken from a compiled object included, since the
+/// object records its parameters' names (`Declarations::check_conflicts`)
+/// — so which reading is taken is immaterial and the result is
+/// independent of `--extern`/library order (docs/tmt/language.md
+/// (declarations)). The one rule behind [`Declarations::routine`] and
+/// `compiler::find_external_routine`, so the argument check and the IR
+/// lowering can never read different readings.
 pub(crate) fn first_reading<'a>(
     modules: &[&'a Resolved],
     want: impl Fn(&ResolvedWorld) -> bool,
 ) -> Option<(&'a Resolved, &'a ResolvedWorld)> {
-    let find = |object: bool| {
-        modules
-            .iter()
-            .filter(|m| m.from_object == object)
-            .find_map(|m| m.worlds.iter().find(|w| want(w)).map(|w| (*m, w)))
-    };
-    find(false).or_else(|| find(true))
+    modules
+        .iter()
+        .find_map(|m| m.worlds.iter().find(|w| want(w)).map(|w| (*m, w)))
 }
 
 impl Declarations {
@@ -171,11 +164,11 @@ impl Declarations {
     /// by table order. Two modules' private declarations of one name are
     /// not compared with each other.
     ///
-    /// A name conflicts iff ANY such pair of its readings does —
-    /// `PublishedForm::agrees` is not transitive (a nameless state
-    /// parameter agrees with any name), so each new reading is tested
-    /// against every distinct reading already seen, never only the first;
-    /// a reading is distinct by its form AND its export status, so a
+    /// A name conflicts iff ANY such pair of its readings does: a private
+    /// reading is not compared with another private one, so the relation
+    /// is not transitive and each new reading is tested against every
+    /// distinct reading already seen, never only the first; a reading is
+    /// distinct by its form AND its export status, so a
     /// published reading equal to an earlier private one is kept. The
     /// origins named are the first conflicting pair in table order, the
     /// earlier origin first. Identical forms merge, whatever their
@@ -221,9 +214,8 @@ impl Declarations {
     }
 
     /// The declared ROUTINE named `name` (a graph of that name is not one), or `None` when no
-    /// module this compile was given declares it — exported or not. Text
-    /// readings come before an object reading ([`first_reading`]); among
-    /// text readings the first in table order is taken. For a name any
+    /// module this compile was given declares it — exported or not. The
+    /// first reading in table order is taken ([`first_reading`]). For a name any
     /// module publishes, every other module's declaration of it has the
     /// same form ([`check_conflicts`](Self::check_conflicts)), so the
     /// table's order decides nothing; it decides only between two

@@ -71,7 +71,7 @@ fn world(arity: u32, states: Vec<Vec<IrRule>>) -> IrWorld {
             .collect(),
         local: true,
         line: 1,
-        exits: 2,
+        exits: vec!["e0".to_string(), "e1".to_string()],
         returns: true,
     }
 }

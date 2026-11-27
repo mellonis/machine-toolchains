@@ -179,7 +179,7 @@ pub fn run(ir: &mut IrProgram, options: &OptOptions) -> u32 {
             w.kind == IrWorldKind::Routine
                 && Some(*i) != entry
                 // Exit-free callees only — see the module doc.
-                && w.exits == 0
+                && w.exits.is_empty()
                 && is_leaf(w)
                 && rule_count(w) <= cap
         })
@@ -534,7 +534,7 @@ machine {
             ],
             local: false,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let routine = IrWorld {
@@ -561,7 +561,7 @@ machine {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mut ir = IrProgram {
@@ -661,7 +661,7 @@ machine {
             ],
             local: false,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let routine = IrWorld {
@@ -688,7 +688,7 @@ machine {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mut ir = IrProgram {
@@ -803,7 +803,7 @@ machine {
             states: vec![stop_state(0, "m")],
             local: false,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let routine = IrWorld {
@@ -835,7 +835,7 @@ machine {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mut ir = IrProgram {
@@ -914,7 +914,7 @@ machine {
             ],
             local: false,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let routine = IrWorld {
@@ -951,7 +951,7 @@ machine {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         };
         let mut ir = IrProgram {

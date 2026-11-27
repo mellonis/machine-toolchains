@@ -493,7 +493,7 @@ fn build_routine(w: &IrWorld, members: &[u32], name: &str) -> IrWorld {
         states,
         local: true,
         line: 0,
-        exits: 0,
+        exits: Vec::new(),
         returns: true,
     }
 }

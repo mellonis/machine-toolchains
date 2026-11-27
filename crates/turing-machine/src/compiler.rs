@@ -1852,10 +1852,6 @@ pub(crate) struct Resolved {
     /// it). World-local state / graft / bind docs ride on the worlds' AST
     /// nodes, not here.
     pub docs: HashMap<String, Doc>,
-    /// Whether this module was read from a compiled object's interface
-    /// (`header::declarations_from_object`), whose state parameters carry
-    /// minted names rather than the author's (`published::module_forms`).
-    pub from_object: bool,
 }
 
 /// One resolved world (a `machine` block, a `routine`, or a `graph`).
@@ -2109,16 +2105,7 @@ pub(crate) fn analyze_with_mode(
     externals: &Declarations,
     mode: ReadMode,
 ) -> Result<Analysis, CompileError> {
-    analyze_with_provenance(source, externals, mode, Provenance::Text)
-}
-
-/// Where the text a reading parses came from: written, or printed from a
-/// source (`Text`), or rendered from a compiled object's interface
-/// (`Object`), whose state-parameter names are minted, not declared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Provenance {
-    Text,
-    Object,
+    analyze_reading(source, externals, mode, PeerChecks::Enforced)
 }
 
 /// Whether an analysis runs the checks whose verdict depends on what the
@@ -2144,32 +2131,18 @@ pub(crate) enum PeerChecks {
 pub(crate) const PEER_CHECK_CODES: [&str; 2] =
     ["conflicting-declaration", "writes-outside-contract"];
 
-/// [`analyze_with_mode`] with the reading's [`Provenance`] — what
-/// `header::read_declarations_with_mode` threads through; the object arm
-/// (`header::declarations_from_object`) is the one caller that passes
-/// [`Provenance::Object`].
-pub(crate) fn analyze_with_provenance(
-    source: &str,
-    externals: &Declarations,
-    mode: ReadMode,
-    provenance: Provenance,
-) -> Result<Analysis, CompileError> {
-    analyze_reading(source, externals, mode, provenance, PeerChecks::Enforced)
-}
-
-/// [`analyze_with_provenance`] with an explicit [`PeerChecks`] — the
+/// [`analyze_with_mode`] with an explicit [`PeerChecks`] — the
 /// declarations reader's entry point.
 pub(crate) fn analyze_reading(
     source: &str,
     externals: &Declarations,
     mode: ReadMode,
-    provenance: Provenance,
     checks: PeerChecks,
 ) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(Rc::clone(&green)), source);
-    let (resolved, diagnostics) = resolve_program(&program, externals, mode, provenance, checks)?;
+    let (resolved, diagnostics) = resolve_program(&program, externals, mode, checks)?;
     Ok(Analysis {
         resolved,
         diagnostics,
@@ -2193,7 +2166,6 @@ fn resolve_program(
     program: &Program,
     externals: &Declarations,
     mode: ReadMode,
-    provenance: Provenance,
     checks: PeerChecks,
 ) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
     let enforced = checks == PeerChecks::Enforced;
@@ -2236,7 +2208,7 @@ fn resolve_program(
     }
     check_head_contracts(&resolved)?;
     if enforced {
-        crate::published::check_own_against_table(program, &resolved, externals, mode, provenance)?;
+        crate::published::check_own_against_table(program, &resolved, externals, mode)?;
     }
     let WorldCtx {
         imports_used,
@@ -3069,13 +3041,7 @@ pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> Tmc
     };
     let green_retained = Some(Rc::clone(&green));
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
-    match resolve_program(
-        &program,
-        externals,
-        ReadMode::Program,
-        Provenance::Text,
-        PeerChecks::Enforced,
-    ) {
+    match resolve_program(&program, externals, ReadMode::Program, PeerChecks::Enforced) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,
@@ -3806,7 +3772,6 @@ fn resolve_module(
         worlds,
         entry_world,
         docs,
-        from_object: false,
     })
 }
 

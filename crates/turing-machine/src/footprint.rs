@@ -1079,7 +1079,7 @@ mod tests {
             }],
             local: true,
             line: 0,
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }
     }

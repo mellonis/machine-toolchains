@@ -328,7 +328,7 @@ fn declaring_exits(src: &str, routine: &str, exits: u8) -> ObjectFile {
         .as_mut()
         .expect("the object has an interface")
         .routines[blob as usize]
-        .exits = exits;
+        .exits = (0..exits).map(|k| format!("e{k}")).collect();
     obj
 }
 
@@ -341,7 +341,7 @@ T0:     .row    [0]
         .row    [*]
 D0:     .targets s__0, s__1
 .section code
-.routine sub, tapes=1, alpha=(3), exits=2, noreturn
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1), noreturn
 .param t, ('_', '0', '1'), opaque
 .func sub local
         rd
@@ -404,7 +404,7 @@ fn the_assembler_refuses_a_return_through_an_undeclared_exit() {
 #[test]
 fn the_linker_refuses_an_object_carrying_one_under_every_mechanism() {
     let dir = scratch("undeclared_exit_link");
-    let src = UNDECLARED_EXIT.replace("exits=2, noreturn", "exits=3, noreturn");
+    let src = UNDECLARED_EXIT.replace("exits=(e0, e1), noreturn", "exits=(e0, e1, e2), noreturn");
     let obj = declaring_exits(&src, "sub", 2);
     let path = dir.join("fire.tmo");
     std::fs::write(&path, obj.to_bytes()).unwrap();
@@ -436,7 +436,7 @@ const MAIN_PLAIN: &str = "\
 
 /// Declares three exits so it assembles; the test lowers the count to two.
 const SUB_OVER: &str = "\
-.routine sub, tapes=1, alpha=(3), exits=3
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1, e2)
 .param p, ('_', '0', '1')
 .func sub
         retx    #2

@@ -938,8 +938,8 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
     // `exits=` prints only for a routine that declares one, so a world
     // without `state` parameters emits the signature it always did
     // (docs/formats.md (routine interfaces)).
-    let exits = if w.exits > 0 {
-        format!(", exits={}", w.exits)
+    let exits = if !w.exits.is_empty() {
+        format!(", exits=({})", w.exits.join(", "))
     } else {
         String::new()
     };

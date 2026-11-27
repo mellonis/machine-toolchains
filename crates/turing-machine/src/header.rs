@@ -159,9 +159,9 @@ use mtc_core::formats::object::{
 
 use crate::codegen::{render_glyph_element, render_glyph_list};
 use crate::compiler::{
-    self, CompileError, CompileErrorKind, PeerChecks, Provenance, ReadMode, Resolved,
-    ResolvedCallTarget, ResolvedWorld, WorldKind, clause_glyphs, full_name, position_named_cells,
-    published_writes, symset_glyphs,
+    self, CompileError, CompileErrorKind, PeerChecks, ReadMode, Resolved, ResolvedCallTarget,
+    ResolvedWorld, WorldKind, clause_glyphs, full_name, position_named_cells, published_writes,
+    symset_glyphs,
 };
 use crate::declarations::{Declarations, Origin};
 use crate::footprint::{self, FootprintTable};
@@ -358,13 +358,7 @@ fn read_extern_with(
     externals: &Declarations,
     checks: PeerChecks,
 ) -> Result<Resolved, CompileError> {
-    read_declarations_with_mode(
-        source,
-        header_mode_for(path),
-        externals,
-        Provenance::Text,
-        checks,
-    )
+    read_declarations_with_mode(source, header_mode_for(path), externals, checks)
 }
 
 /// `.tmh` (case-insensitive) selects STRICT [`ReadMode::DeclarationsOnly`]
@@ -390,10 +384,9 @@ fn read_declarations_with_mode(
     source: &str,
     mode: ReadMode,
     externals: &Declarations,
-    provenance: Provenance,
     checks: PeerChecks,
 ) -> Result<Resolved, CompileError> {
-    let analysis = compiler::analyze_reading(source, externals, mode, provenance, checks)?;
+    let analysis = compiler::analyze_reading(source, externals, mode, checks)?;
     let mut resolved = analysis.resolved;
     settle_declarations(&analysis.program, &mut resolved, externals, mode);
     Ok(resolved)
@@ -516,26 +509,17 @@ fn declarations_from_object_with(
         message,
         code: OBJECT_INTERFACE_UNREADABLE,
     })?;
-    read_declarations_with_mode(
-        &text,
-        ReadMode::DeclarationsOnly,
-        externals,
-        Provenance::Object,
-        checks,
-    )
-    .map(|mut resolved| {
-        resolved.from_object = true;
-        resolved
-    })
-    .map_err(|e| UnresolvedSource {
-        message: format!(
-            "{}:{}: error: {} [{}]",
-            e.span.start.line,
-            e.span.start.col,
-            e.kind,
-            e.kind.code()
-        ),
-        code: e.kind.code(),
+    read_declarations_with_mode(&text, ReadMode::DeclarationsOnly, externals, checks).map_err(|e| {
+        UnresolvedSource {
+            message: format!(
+                "{}:{}: error: {} [{}]",
+                e.span.start.line,
+                e.span.start.col,
+                e.kind,
+                e.kind.code()
+            ),
+            code: e.kind.code(),
+        }
     })
 }
 
@@ -883,7 +867,6 @@ fn empty_resolved() -> Resolved {
         worlds: Vec::new(),
         entry_world: None,
         docs: HashMap::new(),
-        from_object: false,
     }
 }
 
@@ -976,19 +959,11 @@ pub(crate) fn from_object(obj: &ObjectFile) -> Result<String, String> {
                     leaves.as_deref(),
                 ));
             }
-            // The wire carries the exit COUNT and no names — a `state`
-            // parameter's name is compile-time material the object never
-            // holds (docs/formats.md (routine interfaces)) — so the exits
-            // print positionally. A caller reading this header binds them
-            // by position, which is exactly how the vector travels. The
-            // minted names are freshened against the tape parameters this
-            // routine already prints: a tape literally named `exit0` would
-            // otherwise yield a signature naming one parameter twice,
-            // which the strict reader rejects — a header that does not
-            // re-parse.
-            let mut taken: HashSet<String> = routine.params.iter().cloned().collect();
-            for k in 0..routine.exits {
-                params.push(format!("state {}", fresh_param_name(&mut taken, k)));
+            // The wire carries each `state` parameter's name
+            // (docs/formats.md (routine interfaces)), so the exits print
+            // as the source declared them, after the tapes.
+            for name in &routine.exits {
+                params.push(format!("state {name}"));
             }
             // `noreturn` reads straight off the wire's `returns` bit — the
             // one fact a bodiless header has no body to infer, so this arm
@@ -2201,25 +2176,6 @@ fn sig_param_text(
                 leaves.as_deref(),
             )
         }
-    }
-}
-
-/// The positional name exit `k` prints under on the object arm: `exit<k>`
-/// unless something already printed in this signature claims it, then
-/// `exit<k>_1`, `exit<k>_2`, … Deterministic given the signature, and
-/// distinct from every name beside it, so the rendered header re-parses.
-fn fresh_param_name(taken: &mut HashSet<String>, k: u8) -> String {
-    let base = format!("exit{k}");
-    if taken.insert(base.clone()) {
-        return base;
-    }
-    let mut i = 1;
-    loop {
-        let cand = format!("{base}_{i}");
-        if taken.insert(cand.clone()) {
-            return cand;
-        }
-        i += 1;
     }
 }
 

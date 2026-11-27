@@ -314,8 +314,8 @@ machine {
 fn a_state_parameter_lowers_to_retx() {
     let tma = assembly(&two_exits("-"), OptLevel::O0);
     assert!(
-        tma.contains(".routine sub, tapes=1, alpha=(3), exits=2"),
-        "the callee publishes its exit count:\n{tma}"
+        tma.contains(".routine sub, tapes=1, alpha=(3), exits=(hit, miss)"),
+        "the callee publishes its exits by name:\n{tma}"
     );
     assert!(
         tma.contains("retx    #0"),
@@ -402,7 +402,7 @@ fn an_exit_bearing_object_disassembles_back_to_itself() {
         .unwrap_or_else(|e| panic!("compile: {e}"))
         .object;
     let text = disassemble_object(&object);
-    assert!(text.contains("exits=2"), "{text}");
+    assert!(text.contains("exits=(hit, miss)"), "{text}");
     assert!(text.contains("retx    #0"), "{text}");
     assert!(text.contains("exits=("), "{text}");
     let again = assemble(&text, false).expect("the disassembly reassembles");
@@ -689,11 +689,11 @@ fn an_exit_bearing_callee_is_not_inlined() {
 
 /// A program that declares no `state` parameter emits exactly what it
 /// emitted before routines could have one: `exits=` prints only for a
-/// nonzero count, and no row lowers to `retx`. The embedded standard
+/// routine that declares one, and no row lowers to `retx`. The embedded standard
 /// library is the corpus program — its compiled object is byte-pinned by
 /// its own golden, so this test's job is the printer, at both opt levels.
 ///
-/// Mutation: print `exits=0` on every `.routine` (or print the clause
+/// Mutation: print `exits=()` on every `.routine` (or print the clause
 /// unconditionally); both halves go red, and the stdlib object's golden
 /// moves with them.
 #[test]
@@ -744,7 +744,7 @@ machine {{
 /// carries are the same check.
 ///
 /// Mutation: narrow that conversion with a bare `as u8`; the
-/// 256-parameter routine publishes `exits=0` while its body leaves
+/// 256-parameter routine publishes no exits while its body leaves
 /// through exit 0, and the compile fails as `internal-error` (the world
 /// invariants catch it) rather than naming the ceiling.
 #[test]
@@ -763,12 +763,16 @@ fn more_than_255_state_parameters_is_a_typed_error() {
 }
 
 /// The near miss: exactly 255 is the widest signature the wire can carry,
-/// and it compiles and publishes its count.
+/// and it compiles and publishes every name, in order.
 #[test]
 fn exactly_255_state_parameters_compiles() {
     let tma = assembly(&many_state_params(255), OptLevel::O0);
+    let names: Vec<String> = (0..255).map(|i| format!("p{i}")).collect();
     assert!(
-        tma.contains(".routine wide, tapes=1, alpha=(2), exits=255"),
+        tma.contains(&format!(
+            ".routine wide, tapes=1, alpha=(2), exits=({})",
+            names.join(", ")
+        )),
         "{tma}"
     );
 }
