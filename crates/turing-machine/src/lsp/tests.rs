@@ -756,7 +756,12 @@ machine {
     [*] -> move [";
     let tail = "] stop;\n  }\n}\n";
     let got = labels(&complete_typing(head, ".", tail));
-    assert_eq!(got, vec!["<", ">", "."]);
+    // The first cell may also open the named form, so it offers the tape.
+    assert_eq!(got, vec!["ctl: ", "<", ">", "."]);
+    // Past the first cell of a positional vector: the directions alone.
+    let tail = "] stop;\n  }\n}\n";
+    let later = labels(&complete_typing(&format!("{head}., "), ".", tail));
+    assert_eq!(later, vec!["<", ">", "."]);
 }
 
 #[test]
@@ -3752,4 +3757,147 @@ machine {
         .expect("tokens with an overlay");
 
     assert_eq!(without_overlay, with_overlay);
+}
+
+// -- named cells -----------------------------------------------------------
+
+/// Two tapes over different alphabets, every rule spelled with named cells
+/// in all three vectors.
+const NAMED_CELLS: &str = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b' }
+
+machine {
+  tape a: bits;
+  tape b: wide;
+
+  entry state s {
+    [a: '1', b: 'a'] -> write [b: 'b'] move [a: >] stop;
+    [*, *] -> stop;
+  }
+}
+";
+
+/// A label in each of the three vectors reaches its tape's declaration.
+/// Mutation: skip the cell labels in `reference_in_world`.
+#[test]
+fn goto_definition_on_a_cell_label_reaches_the_tape_declaration() {
+    let (mut service, uri) = opened(NAMED_CELLS);
+    for (anchor, tape) in [
+        ("[a: '1'", "a"),
+        (", b: 'a'", "b"),
+        ("write [b: 'b']", "b"),
+        ("move [a: >]", "a"),
+    ] {
+        let at = pos_after(NAMED_CELLS, anchor, anchor.find(tape).expect("label"));
+        let target = service
+            .definition(&uri, at)
+            .unwrap_or_else(|| panic!("a definition for {anchor}"));
+        let decl = pos_after(NAMED_CELLS, &format!("tape {tape}:"), 5);
+        assert_eq!(target.span.start, decl, "{anchor}");
+    }
+}
+
+/// Hover on a label shows the tape, as hover on the declaration does.
+/// Mutation: skip the cell labels in `reference_in_world`.
+#[test]
+fn hovering_a_cell_label_shows_the_tape() {
+    let (mut service, uri) = opened(NAMED_CELLS);
+    let hover = service
+        .hover(&uri, pos_after(NAMED_CELLS, "[a: '1'", 1))
+        .expect("a hover");
+    assert!(hover.text.contains("tape a: bits"), "{}", hover.text);
+}
+
+/// A label naming no tape has no target and does not disturb its
+/// neighbours, in the state where lowering failed and the program is the
+/// unlowered one. Mutation: return the first label of the vector whatever
+/// the cursor touches.
+#[test]
+fn a_cell_label_naming_an_unknown_tape_has_no_target_and_its_neighbours_still_do() {
+    let src = NAMED_CELLS.replace("[a: '1', b: 'a']", "[a: '1', zz: 'a']");
+    let (mut service, uri) = opened(&src);
+    assert!(
+        service
+            .definition(&uri, pos_after(&src, "zz:", 1))
+            .is_none()
+    );
+    assert!(service.hover(&uri, pos_after(&src, "zz:", 1)).is_none());
+    let target = service
+        .definition(&uri, pos_after(&src, "[a: '1'", 1))
+        .expect("the known label still resolves");
+    assert_eq!(target.span.start, pos_after(&src, "tape a:", 5));
+}
+
+const CELL_HEAD: &str = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b' }
+
+machine {
+  tape a: bits;
+  tape b: wide;
+
+  entry state s {
+    ";
+const CELL_TAIL: &str = " -> stop;\n  }\n}\n";
+
+/// In a vector already naming `a`, a cell start offers `b: ` and not `a: `.
+/// Mutation: drop the already-named filter.
+#[test]
+fn completion_at_a_cell_start_offers_the_tapes_not_yet_named() {
+    let got = labels(&complete_typing(
+        &format!("{CELL_HEAD}[a: '1', "),
+        "b: 'a'",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(got.contains(&"b: ".to_string()), "{got:?}");
+    assert!(!got.contains(&"a: ".to_string()), "{got:?}");
+}
+
+/// The first cell of a vector may still go either way: names are offered
+/// next to today's glyphs. Mutation: never offer names.
+#[test]
+fn completion_at_the_first_cell_offers_names_and_glyphs() {
+    let got = labels(&complete_typing(
+        &format!("{CELL_HEAD}["),
+        "*, *",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(got.contains(&"a: ".to_string()), "{got:?}");
+    assert!(got.contains(&"b: ".to_string()), "{got:?}");
+    assert!(got.contains(&"*".to_string()), "{got:?}");
+    assert!(got.contains(&"1".to_string()), "{got:?}");
+}
+
+/// A positional vector keeps today's candidates and gains no names.
+/// Mutation: offer names whatever the form.
+#[test]
+fn completion_in_a_positional_vector_offers_no_tape_names() {
+    let got = labels(&complete_typing(
+        &format!("{CELL_HEAD}['1', "),
+        "*",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(!got.iter().any(|l| l.ends_with(": ")), "{got:?}");
+    assert!(got.contains(&"'a'".to_string()), "{got:?}");
+}
+
+/// After `tape:` the label, not the position, picks the alphabet; and a
+/// named vector's cell start offers no bare glyphs. Mutation: pick the
+/// alphabet by position only.
+#[test]
+fn completion_after_a_label_draws_from_that_tapes_alphabet() {
+    let after_label = labels(&complete_typing(
+        &format!("{CELL_HEAD}[b: "),
+        "'a'",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(after_label.contains(&"'a'".to_string()), "{after_label:?}");
+    assert!(!after_label.contains(&"1".to_string()), "{after_label:?}");
+    let at_start = labels(&complete_typing(
+        &format!("{CELL_HEAD}[a: '1', "),
+        "b: 'a'",
+        &format!("]{CELL_TAIL}"),
+    ));
+    assert!(!at_start.contains(&"*".to_string()), "{at_start:?}");
 }

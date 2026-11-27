@@ -410,6 +410,37 @@ fn reference_in_world(
             ));
         }
         for rule in &state.rules {
+            // A cell label names a tape of this world — the same target a
+            // tape name in a binding resolves to. A label naming no tape of
+            // the world has no target.
+            let labels = rule
+                .pattern
+                .cells
+                .iter()
+                .filter_map(|c| c.name.as_ref())
+                .chain(
+                    rule.write
+                        .iter()
+                        .flat_map(|w| w.cells.iter().filter_map(|c| c.name.as_ref())),
+                )
+                .chain(
+                    rule.mov
+                        .iter()
+                        .flat_map(|m| m.cells.iter().filter_map(|c| c.name.as_ref())),
+                );
+            for label in labels {
+                if span_touches(label.span, pos)
+                    && let Some(tape) = world.tapes.iter().find(|t| t.name == label.name)
+                {
+                    return Some((
+                        Target::Tape {
+                            world: world.mangled.clone(),
+                            name: tape.name.to_string(),
+                        },
+                        label.span,
+                    ));
+                }
+            }
             match &rule.transition {
                 Transition::Goto { name, span, .. } => {
                     let at = name_span(*span, name);

@@ -43,6 +43,61 @@ pub(crate) enum VectorKind {
     Move,
 }
 
+/// What the cells before the cursor say about the vector's form, read off
+/// the tokens so it holds while the vector is still incomplete.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CellLabels {
+    /// The cursor is at the start of a cell: nothing of it is written yet.
+    pub(crate) at_cell_start: bool,
+    /// Tape names may be offered at a cell start: false once the vector is
+    /// positional (a later cell, its first not a label). The first cell may
+    /// still go either way, so it offers names.
+    pub(crate) offer_names: bool,
+    /// The vector's first cell is a label: the named form.
+    pub(crate) named: bool,
+    /// Tape names already used as labels in this vector.
+    pub(crate) used: Vec<String>,
+    /// The label of the cell under the cursor, once its `name:` is written.
+    pub(crate) current: Option<String>,
+}
+
+/// A cell's label, `ident :` opening its tokens.
+fn cell_label(cell: &[&Token]) -> Option<String> {
+    match cell {
+        [name, colon, ..] if matches!(colon.kind, TokenKind::Colon) => {
+            ident(name).map(String::from)
+        }
+        _ => None,
+    }
+}
+
+fn cell_labels(sig: &[Token], open: usize, idx: usize) -> CellLabels {
+    let mut cells: Vec<Vec<&Token>> = vec![Vec::new()];
+    let mut nested = 0i32;
+    for token in &sig[open + 1..idx] {
+        match token.kind {
+            TokenKind::LBracket | TokenKind::LParen | TokenKind::LBrace => nested += 1,
+            TokenKind::RBracket | TokenKind::RParen | TokenKind::RBrace => nested -= 1,
+            TokenKind::Comma if nested == 0 => {
+                cells.push(Vec::new());
+                continue;
+            }
+            _ => {}
+        }
+        cells.last_mut().expect("one cell at least").push(token);
+    }
+    let named = cell_label(&cells[0]).is_some();
+    let current = cell_label(cells.last().expect("one cell at least"));
+    let used: Vec<String> = cells.iter().filter_map(|c| cell_label(c)).collect();
+    CellLabels {
+        at_cell_start: cells.last().is_some_and(|c| c.is_empty()),
+        offer_names: named || cells.len() == 1,
+        named,
+        used,
+        current,
+    }
+}
+
 /// The kind of construct a call site's `(…)` belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CallKind {
@@ -65,7 +120,11 @@ pub(crate) enum Context {
     /// signature parameter — one shape, one context).
     AlphabetRef,
     /// A cell of a bracketed vector at vector position `index`.
-    VectorCell { kind: VectorKind, index: usize },
+    VectorCell {
+        kind: VectorKind,
+        index: usize,
+        cells: CellLabels,
+    },
     /// Just after `->`, or after a completed `write […]` / `move […]`:
     /// the action keywords plus the bare-name transition sugar.
     ActionStart,
@@ -492,6 +551,7 @@ fn classify_context(
         return Some(Context::VectorCell {
             kind: vector_kind(sig, open),
             index,
+            cells: cell_labels(sig, open, idx),
         });
     }
 

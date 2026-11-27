@@ -209,6 +209,21 @@ release workflow from the tagged commit with the pinned compiler.
 |---|---|---|
 | everything | `unchanged` | — |
 
+### Cell labels in the editor — 2026-11-28
+
+The `.tmc` language service knows the named form of a rule vector. At
+the start of a cell it offers the world's tapes as `name: ` labels — all
+of them in the first cell, only those not yet named once the vector is
+named, none once it is positional — and after a label the symbols it
+offers come from that tape's alphabet, whatever the cell's position.
+Go-to-definition and hover on a label reach the tape's declaration; a
+label naming no tape of the world has no target. The context is read off
+the tokens, so it holds while the vector is still being typed.
+
+| Version space | This change | Previous |
+|---|---|---|
+| everything | `unchanged` | — |
+
 ## [0.5.0] - 2026-09-02
 
 Two release candidates preceded this cut on the same day: the first so

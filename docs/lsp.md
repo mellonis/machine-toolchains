@@ -264,7 +264,12 @@ exactly when they are wanted. Its contexts:
   are one symbol), a member a glyph set brought in included, and every
   other symbol quoted — alongside the vector's own literal vocabulary: `*` in a pattern,
   `-` in a write vector, and the closed, tape-independent `<` / `>` / `.`
-  in a move vector.
+  in a move vector. At the start of a cell the tapes of the world are
+  also offered as `name: ` labels for the named form — all of them in the
+  first cell, only those not yet named once the vector is named, and none
+  once the vector is positional. After a label, that tape's alphabet
+  supplies the symbols whatever the cell's position; in a named vector a
+  cell start offers labels only.
 - **An action, a `goto` target, or a continuation** — the enclosing
   world's states, state parameters and graft instances, plus the action
   keywords and the `halt` / `return` / `stop` terminators.
@@ -342,7 +347,9 @@ guessing a word boundary; clients that do not declare it get a plain
 location. Every service answers this way.
 
 **`.tmc`** resolves alphabet references, world (routine/graph) names, a
-world's states, its bind and graft instances, its tapes, and a signature
+world's states, its bind and graft instances, its tapes (including the
+tape named by a cell label in a named vector, `[tape: cell, …]`; a label
+naming no tape of the world has no target), and a signature
 parameter named on a binding argument's left-hand side. Every `as NAME`
 is a declaration: a reference to a graft instance, a bind instance, or a
 `use` alias lands on that `as NAME`, and the thing it stands for is one

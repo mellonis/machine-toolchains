@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{Candidate, CandidateKind};
 
-use super::context::{CallKind, Context, Cursor, VectorKind, classify};
+use super::context::{CallKind, CellLabels, Context, Cursor, VectorKind, classify};
 use super::overlay::OverlaySym;
 use super::roster::{ParamKind, Roster};
 use super::{DocState, std_enabled};
@@ -79,7 +79,9 @@ fn candidates(cursor: &Cursor, roster: Option<&Roster>, state: &DocState) -> Vec
             ),
             None => Vec::new(),
         },
-        Context::VectorCell { kind, index } => vector_cell(*kind, *index, cursor, roster, span),
+        Context::VectorCell { kind, index, cells } => {
+            vector_cell(*kind, *index, cells, cursor, roster, span)
+        }
         Context::ActionStart => {
             let mut out = keywords(
                 &[
@@ -140,31 +142,65 @@ fn candidates(cursor: &Cursor, roster: Option<&Roster>, state: &DocState) -> Vec
 fn vector_cell(
     kind: VectorKind,
     index: usize,
+    cells: &CellLabels,
     cursor: &Cursor,
     roster: Option<&Roster>,
     span: Span,
 ) -> Vec<Candidate> {
+    let world = roster
+        .zip(cursor.world.as_deref())
+        .and_then(|(roster, name)| roster.worlds.get(name));
+    // At a cell start the tapes may be named instead of listed by position:
+    // every tape the vector has not named yet, unless the vector is
+    // already positional.
+    let mut out = Vec::new();
+    if cells.at_cell_start
+        && cells.offer_names
+        && let Some(world) = world
+    {
+        out.extend(
+            world
+                .tapes
+                .iter()
+                .filter(|(name, _)| !cells.used.contains(name))
+                .map(|(name, _)| {
+                    let text = format!("{name}: ");
+                    Candidate {
+                        label: text.clone(),
+                        kind: CandidateKind::Value,
+                        replace_span: span,
+                        insert_text: text,
+                        detail: Some("tape".to_string()),
+                        deprecated: false,
+                    }
+                }),
+        );
+    }
+    // A named vector's cell start takes a label, never a bare cell.
+    if cells.named && cells.at_cell_start {
+        return out;
+    }
     if kind == VectorKind::Move {
         // A move cell's vocabulary is closed and tape-independent.
-        return vec![
+        out.extend([
             literal("<", "move the head left", span),
             literal(">", "move the head right", span),
             literal(".", "keep the head where it is", span),
-        ];
+        ]);
+        return out;
     }
-    let mut out = match kind {
-        VectorKind::Pattern => vec![literal("*", "match any symbol", span)],
-        VectorKind::Write => vec![literal("-", "keep the cell's current symbol", span)],
-        VectorKind::Move => Vec::new(),
-    };
+    out.push(match kind {
+        VectorKind::Write => literal("-", "keep the cell's current symbol", span),
+        _ => literal("*", "match any symbol", span),
+    });
     let Some(roster) = roster else {
         return out;
     };
-    let alphabet = cursor
-        .world
-        .as_deref()
-        .and_then(|w| roster.worlds.get(w))
-        .and_then(|world| world.alphabet_at(index));
+    // After `tape:` the label picks the alphabet; otherwise the position.
+    let alphabet = match &cells.current {
+        Some(label) => world.and_then(|w| w.alphabet_of_param(label)),
+        None => world.and_then(|w| w.alphabet_at(index)),
+    };
     out.extend(glyph_candidates(roster, alphabet, span));
     out
 }
