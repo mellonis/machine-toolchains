@@ -150,6 +150,14 @@ fn a_dirty_tmc_file_reports_and_exits_one() {
         "{}",
         out.stdout
     );
+    // A finding names its rule, so the line itself says what `--allow`
+    // and `lint.allow` take. Mutation: print the message alone.
+    let finding = out
+        .stdout
+        .lines()
+        .find(|l| l.contains("lint: leftover 'debugger' marker"))
+        .expect("the finding's line");
+    assert!(finding.ends_with(" [leftover-debugger]"), "{finding}");
 }
 
 #[test]

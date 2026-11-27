@@ -742,7 +742,13 @@ fn lint_reports_findings_with_exit_1_and_fix_hints() {
     let out = execute(&args(&["lint", src.to_str().unwrap()])).unwrap();
     assert_eq!(out.code, 1);
     // unused-label on `5:` — gated fix hint.
-    assert!(out.stdout.contains("lint: label 5 is never referenced"));
+    // The finding names its rule — what `--allow` and `lint.allow` take.
+    assert!(
+        out.stdout
+            .contains("lint: label 5 is never referenced (function 'main') [unused-label]\n"),
+        "{}",
+        out.stdout
+    );
     assert!(
         out.stdout
             .contains("fix (requires --force): remove the label prefix '5:'")

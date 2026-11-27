@@ -7,7 +7,8 @@ generation) against the `.tmc` catalog below; a `.tma` file runs a full
 assemble against the arch-agnostic assembly rules (`docs/core.md`) plus
 the TM-1 additions further down this page; a `.tmh` header runs a
 subset of the `.tmc` catalog (see Linting a header). Whichever table
-runs, a finding prints as `FILE:LINE:COL: lint: MESSAGE`. Exit code 0
+runs, a finding prints as `FILE:LINE:COL: lint: MESSAGE [CODE]`, the code being the
+rule's name — what `--allow` and `lint.allow` take. Exit code 0
 means every file is clean, 1 means findings or errors somewhere. The command surface — the
 directory walk, `--exclude`, the per-file fatal that keeps a batch
 going — is `docs/tmt/cli.md`.
@@ -272,7 +273,7 @@ potential reference), so the rule can let a genuinely dead instance
 through rather than flag a live one.
 
 ```
-b.tmc:13:3: lint: graft instance `deadSplice` is never used
+b.tmc:13:3: lint: graft instance `deadSplice` is never used [unused-graft-instance]
 ```
 
 The fix deletes the whole `graft … ;` statement (doc run included). The
@@ -292,7 +293,7 @@ reachable-but-unreferenced gap `unused-graft-instance` structurally skips
 by entry-ness and never double-report.
 
 ```
-b.tmc:7:3: lint: entry graft instance name `seek` is never used
+b.tmc:7:3: lint: entry graft instance name `seek` is never used [unused-graft-name]
 ```
 
 The fix removes exactly the ` as NAME` clause, leaving a valid unnamed
@@ -312,7 +313,7 @@ two sites differing only in what each instance is called still
 duplicate.
 
 ```
-b.tmc:8:3: lint: graft instance `two` duplicates an earlier graft of `findX` with the same bindings and continuation
+b.tmc:8:3: lint: graft instance `two` duplicates an earlier graft of `findX` with the same bindings and continuation [duplicate-graft-instance]
 ```
 
 The fix deletes the duplicate's whole `graft … ;` statement and rewrites
@@ -336,7 +337,7 @@ units)`), which this rule cannot see, and the deletion fix would remove
 what a consumer needs.
 
 ```
-b.tmc:2:10: lint: alphabet `dead` is never used by any tape
+b.tmc:2:10: lint: alphabet `dead` is never used by any tape [unused-alphabet]
 ```
 
 The fix deletes the whole declaration, including any leading doc/attention
@@ -353,7 +354,7 @@ maps and graphs across units)`), which this rule cannot see, and the
 deletion fix would remove what a consumer needs.
 
 ```
-b.tmc:3:5: lint: map `dead` is never used by any binding
+b.tmc:3:5: lint: map `dead` is never used by any binding [unused-map]
 ```
 
 The fix deletes the whole declaration, including any leading doc/attention
@@ -378,7 +379,7 @@ actually deleted; deleting it is what surfaces the inner one in its turn,
 one report at a time.
 
 ```
-b.tmc:1:5: lint: set `dead` is never used by any alphabet, contract or pattern
+b.tmc:1:5: lint: set `dead` is never used by any alphabet, contract or pattern [unused-set]
 ```
 
 The fix deletes the whole declaration, including any leading doc/attention
@@ -396,7 +397,7 @@ argument-less `call`, `graft` or `bind` into another unit binds the
 machine's tapes by position, so a machine making one touches every tape.
 
 ```
-b.tmc:4:3: lint: tape `scratch` is never read, written, or moved
+b.tmc:4:3: lint: tape `scratch` is never read, written, or moved [unused-tape]
 ```
 
 `fix: None` — a tape is a vector position, so deleting one narrows the
@@ -417,7 +418,7 @@ constrains what a body does to the tape, and a body that never touches the
 tape has nothing to constrain.
 
 ```
-b.tmc:2:28: lint: tape parameter `u` of `r` is never read, written, moved, or passed on
+b.tmc:2:28: lint: tape parameter `u` of `r` is never read, written, moved, or passed on [unused-tape-parameter]
 ```
 
 `fix: None` — removing a parameter changes the signature every caller
@@ -429,7 +430,7 @@ A pattern binding (`as NAME`) its rule's write vector never reads — a read
 inside an arithmetic substitution (`{x + 1}`) counts.
 
 ```
-b.tmc:4:28: lint: pattern binding `x` is never read by this rule's write vector
+b.tmc:4:28: lint: pattern binding `x` is never read by this rule's write vector [unused-fold-variable]
 ```
 
 `fix: None` — a binding may be kept for readability.
@@ -443,7 +444,7 @@ glyphs. Source only — a header publishes each tape's effective set as one
 `writes` clause and never prints `never writes`.
 
 ```
-b.tmc:2:60: lint: '2' in `never writes` is not in `writes`, so excluding it changes nothing
+b.tmc:2:60: lint: '2' in `never writes` is not in `writes`, so excluding it changes nothing [inert-never-writes]
 ```
 
 `fix: None`.
@@ -458,7 +459,7 @@ site is still obliged to bind. It fires regardless of `export`: an exit no
 body rule targets cannot fire for any caller, exported or not.
 
 ```
-b.tmc:2:38: lint: graph `g` declares exit `miss`, which its body never targets
+b.tmc:2:38: lint: graph `g` declares exit `miss`, which its body never targets [unused-exit]
 ```
 
 `fix: None` — the exit is part of the graph's signature, so removing it is
@@ -472,7 +473,7 @@ attention line (`docs/tmt/language.md`). The finding names the verb and
 appends the attribute's own message when it carries one:
 
 ```
-b.tmc:15:14: lint: call to deprecated `oldHelper`: use newHelper instead
+b.tmc:15:14: lint: call to deprecated `oldHelper`: use newHelper instead [deprecated-call]
 ```
 
 Only locally-defined targets are checked — an imported target's doc map
@@ -503,7 +504,7 @@ The exact band is excluded outright: two wildcard-free rules that
 overlap are a conflict the compiler rejects, not a silent shadow.
 
 ```
-c.tmc:7:5: lint: this rule is unreachable — an earlier rule in `s` already covers it
+c.tmc:7:5: lint: this rule is unreachable — an earlier rule in `s` already covers it [dead-rule]
 ```
 
 `dead-rule` is lint's richer relative of three warnings the compiler
@@ -545,7 +546,7 @@ reads as the callee's opaque index rather than completing to itself, so
 deleting the pair would change what that glyph means to the callee.
 
 ```
-e.tmc:9:41: lint: identity pair `0 -> 0` is redundant — an identity mapping already supplies it
+e.tmc:9:41: lint: identity pair `0 -> 0` is redundant — an identity mapping already supplies it [redundant-identity-pairs]
 ```
 
 `fix: None` — unlike the `.tma` `duplicate-map-source`, whose shadowed pair
@@ -572,7 +573,7 @@ by running expansion, and sharing the expander's cutoff so the two
 always agree.
 
 ```
-d.tmc:7:5: lint: rule expands to 343 match rows (over 256) — the binding product is large
+d.tmc:7:5: lint: rule expands to 343 match rows (over 256) — the binding product is large [binding-product-threshold]
 ```
 
 `fix: None` — the report flags a size to be aware of, not a defect with one
@@ -595,7 +596,7 @@ something unintended; across unequal alphabets the maps complete closed,
 the glyph is a write hole, and crossing it traps.
 
 ```
-e.tmc:12:41: lint: one-way map collapses onto `0`, which `writer` writes — the write bypasses the collapse
+e.tmc:12:41: lint: one-way map collapses onto `0`, which `writer` writes — the write bypasses the collapse [writes-through-collapse]
 ```
 
 The rule fires only on a literal write the local callee provably makes
@@ -680,8 +681,8 @@ the stdlib deliberately avoids:
 
 ```
 $ tmt lint std.tmc
-std.tmc:263:39: lint: the write-back half of `'^' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
-std.tmc:263:51: lint: the write-back half of `'$' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
+std.tmc:263:39: lint: the write-back half of `'^' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_' [dead-map-pair]
+std.tmc:263:51: lint: the write-back half of `'$' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_' [dead-map-pair]
 ```
 
 The two digit pairs on the same call (`'0' -> '0'`, `'1' -> '1'`) stay
@@ -711,7 +712,7 @@ splitting a range into "the part that stays" and "the part that goes" is
 not a single whitespace-safe text edit:
 
 ```
-g.tmc:3:35: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert
+g.tmc:3:35: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert [contract-clause-overlap]
 ```
 
 An element every one of whose glyphs overlaps — a single symbol, or a
@@ -723,7 +724,7 @@ clause's only one. Removing an element takes its adjacent comma with it
 element of `writes {'0', '1', '2'} never writes {'1'}`:
 
 ```
-j.tmc:3:40: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert
+j.tmc:3:40: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert [contract-clause-overlap]
 ```
 
 Like every fix in this crate, it never appears on the command line
@@ -745,7 +746,7 @@ the overlapping element is the clause's only one, the fix removes the
 WHOLE clause instead. For `writes {'1'} never writes {'1'}`:
 
 ```
-i.tmc:3:35: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert
+i.tmc:3:35: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert [contract-clause-overlap]
 ```
 
 Again as a code-action title only, never on the command line:
@@ -772,7 +773,7 @@ reports in that case, same posture as the partial-range overlap — only
 the fix is missing:
 
 ```
-h.tmc:3:54: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert
+h.tmc:3:54: lint: '1' is in both `writes` and `never writes`; `never writes` wins, so the `writes` entry is inert [contract-clause-overlap]
 ```
 
 ### unreachable-continuation
@@ -791,7 +792,7 @@ nothing here can tell "unreachable" from "merely unproven", and `then`
 stays mandatory at such a site regardless.
 
 ```
-k.tmc:5:34: lint: this `then` is unreachable — `forever` is `noreturn`
+k.tmc:5:34: lint: this `then` is unreachable — `forever` is `noreturn` [unreachable-continuation]
 ```
 
 The fix drops the whole ` then …` clause, `MachineApplicable`: the
@@ -809,7 +810,7 @@ head-contract mistake before the first run — a `[*]` row in a machine's
 entry state, where nothing has constrained the head yet:
 
 ```
-l.tmc:13:26: lint: the head may be on '_' here, outside the `enters { '0', '1' }` that `plusOne`'s tape `num` declares
+l.tmc:13:26: lint: the head may be on '_' here, outside the `enters { '0', '1' }` that `plusOne`'s tape `num` declares [enters-unmet]
 ```
 
 The analysis is a forward dataflow over "where the head may be", one
@@ -858,7 +859,7 @@ can name, so a site where such a glyph may reach the call is reported,
 and the message says so rather than naming a glyph:
 
 ```
-m.tmc:12:25: lint: the head may be on '_', or a symbol this open map sends to the callee's opaque index here, outside the `enters { '0', '1' }` that `inc`'s tape `num` declares
+m.tmc:12:25: lint: the head may be on '_', or a symbol this open map sends to the callee's opaque index here, outside the `enters { '0', '1' }` that `inc`'s tape `num` declares [enters-unmet]
 ```
 
 A pattern cell that names a glyph set narrows the set by the set's
@@ -895,7 +896,7 @@ drops a row — and the guard reads the same with the conjunct removed
 finding:
 
 ```
-g.tmc:9:24: lint: this `in` narrows nothing here: the cell can only carry symbols already in `all`, and the guard reads the same without it
+g.tmc:9:24: lint: this `in` narrows nothing here: the cell can only carry symbols already in `all`, and the guard reads the same without it [redundant-guard-narrowing]
 ```
 
 **Restriction-inert.** The cell's produced symbols (the same facts
@@ -935,7 +936,7 @@ enable it with `--warn state-may-trap`.
 
 ```
 $ tmt lint b.tmc --warn state-may-trap
-b.tmc:18:9: lint: state `partial` may trap — its rules do not cover every input and there is no catch-all
+b.tmc:18:9: lint: state `partial` may trap — its rules do not cover every input and there is no catch-all [state-may-trap]
 ```
 
 The rule proves a gap before firing: it builds each rule's per-cell
@@ -965,7 +966,7 @@ first.
 
 ```
 $ tmt lint b.tmc --warn index-identity-map
-b.tmc:8:34: lint: call maps by index across differently-glyphed alphabets ('a' vs 'x' at index 1); glyphs change meaning here
+b.tmc:8:34: lint: call maps by index across differently-glyphed alphabets ('a' vs 'x' at index 1); glyphs change meaning here [index-identity-map]
 ```
 
 Only `call` and `bind` — a graft's omitted map means glyph identity and
@@ -1030,7 +1031,7 @@ sets). Row `W` covers row `R` when at every position `W`'s cell is a
 wildcard or exactly the index `R` has there.
 
 ```
-f.tma:5:5: lint: this row can never match — the earlier row at line 4 in the same match table already covers it
+f.tma:5:5: lint: this row can never match — the earlier row at line 4 in the same match table already covers it [shadowed-wildcard-rows]
 ```
 
 Consecutive `.row` directives form one table (a labeled row opens a new
@@ -1050,7 +1051,7 @@ exits is checked by the assembler itself (`undeclared-exit`,
 descriptor governs.
 
 ```
-f.tma:23:9: lint: retx #3 is out of range — the governing frame declares 1 exit(s) (valid #0..#0), so this return always traps
+f.tma:23:9: lint: retx #3 is out of range — the governing frame declares 1 exit(s) (valid #0..#0), so this return always traps [retx-exit-bounds]
 ```
 
 Resolution is in-file only. A routine reached solely from another
@@ -1067,7 +1068,7 @@ substituted in the body, so every iteration expands identically — a
 copy-paste count wearing a macro's clothes.
 
 ```
-f.tma:19:9: lint: the `.rept` loop variable `v` is never used in the body — every iteration expands identically
+f.tma:19:9: lint: the `.rept` loop variable `v` is never used in the body — every iteration expands identically [rept-var-unused]
 ```
 
 Substitution only touches `{…}` markers, so a bare mention of the
@@ -1088,7 +1089,7 @@ appearing once in each is not a repeat, while a `.map` duplicating in both
 yields one finding per clause.
 
 ```
-f.tma:5:28: lint: source symbol 1 mapped twice; the last mapping wins
+f.tma:5:28: lint: source symbol 1 mapped twice; the last mapping wins [duplicate-map-source]
 ```
 
 The finding spans the later (winning) pair; the fix removes the earlier
@@ -1110,10 +1111,10 @@ syntax. They are documented at `docs/core.md`; all five apply here:
 | `leftover-debugger` (`.tma`) | An instruction using the architecture's declared debugger-break opcode. TM-1 declares one (`brk`), so this rule is live here. |
 
 ```
-g.tma:4:9: lint: jump/branch to `nxt` targets the next instruction — fall-through is identical
-g.tma:5:1: lint: leftover debugger break left in source
-g.tma:7:9: lint: unreachable code: no label between here and the preceding unconditional jump/stop
-g.tma:8:81: lint: line is 110 characters long (limit 80)
+g.tma:4:9: lint: jump/branch to `nxt` targets the next instruction — fall-through is identical [redundant-jump-to-next]
+g.tma:5:1: lint: leftover debugger break left in source [leftover-debugger]
+g.tma:7:9: lint: unreachable code: no label between here and the preceding unconditional jump/stop [unreachable-code]
+g.tma:8:81: lint: line is 110 characters long (limit 80) [line-too-long]
 ```
 
 ### `unused-label` and table references

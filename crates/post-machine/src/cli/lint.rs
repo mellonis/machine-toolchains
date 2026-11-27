@@ -357,17 +357,19 @@ fn mask_gated_fixes(diagnostics: &[Diagnostic], force: bool) -> Vec<Diagnostic> 
         .collect()
 }
 
-/// `{file}:{line}:{col}: lint: {message}` plus an indented fix-hint line;
+/// `{file}:{line}:{col}: lint: {message} [{code}]` plus an indented
+/// fix-hint line — the code is the name `--allow` and `lint.allow` take;
 /// a gated fix names its gate so plain `--fix` runs explain themselves.
 pub(super) fn render_findings(out: &mut String, path: &Path, diags: &[Diagnostic]) {
     for d in diags {
         let _ = writeln!(
             out,
-            "{}:{}:{}: lint: {}",
+            "{}:{}:{}: lint: {} [{}]",
             path.display(),
             d.span.start.line,
             d.span.start.col,
-            d.message
+            d.message,
+            d.code
         );
         if let Some(fix) = &d.fix {
             let _ = match fix.applicability {

@@ -287,16 +287,18 @@ pub(super) fn render_fatal(
     );
 }
 
-/// `{file}:{line}:{col}: lint: {message}`, one line per finding.
+/// `{file}:{line}:{col}: lint: {message} [{code}]`, one line per finding —
+/// the code is the name `--allow` and `lint.allow` take.
 fn render_findings(out: &mut String, path: &Path, diags: &[Diagnostic]) {
     for d in diags {
         let _ = writeln!(
             out,
-            "{}:{}:{}: lint: {}",
+            "{}:{}:{}: lint: {} [{}]",
             path.display(),
             d.span.start.line,
             d.span.start.col,
-            d.message
+            d.message,
+            d.code
         );
     }
 }

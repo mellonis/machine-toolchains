@@ -1531,7 +1531,7 @@ the flag applies to the entire run rather than to one input.
 ```
 $ tmt lint prog.tmc
 $ tmt lint prog.tmc --warn state-may-trap
-prog.tmc:4:15: lint: state `s` may trap — its rules do not cover every input and there is no catch-all
+prog.tmc:4:15: lint: state `s` may trap — its rules do not cover every input and there is no catch-all [state-may-trap]
 ```
 
 ### Project configuration
