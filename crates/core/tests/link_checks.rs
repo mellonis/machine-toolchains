@@ -145,7 +145,7 @@ fn declaring_exits(src: &str, routine: &str, exits: u8) -> ObjectFile {
         .as_mut()
         .expect("the object has an interface")
         .routines[blob as usize]
-        .exits = exits;
+        .exits = (0..exits).map(|k| format!("e{k}")).collect();
     obj
 }
 
@@ -442,7 +442,7 @@ fn a_plain_call_into_an_exit_bearing_callee_is_refused() {
     const EXIT_CALLEE: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param x, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param p, ('_', '0', '1')
 .section code
 .func main
@@ -478,7 +478,7 @@ fn a_relocated_jump_into_an_exit_bearing_callee_is_refused() {
     const EXIT_JUMP: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param x, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param p, ('_', '0', '1')
 .section code
 .func main
@@ -1427,7 +1427,7 @@ fn an_exit_bearing_tail_position_bound_call_does_not_warn_under_frames() {
     const SRC: &str = "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=1
+.routine sub, tapes=1, alpha=(3), exits=(e0)
 .param p, ('_', '0', '1')
 .section code
 .func main
@@ -1455,7 +1455,7 @@ fn two_exit_callee(last: &str) -> String {
         "\
 .routine main, tapes=1, alpha=(3)
 .param t, ('_', '0', '1')
-.routine sub, tapes=1, alpha=(3), exits=2
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param p, ('_', '0', '1')
 .section code
 .func main
@@ -1475,7 +1475,7 @@ miss:   stp
 /// through exit 2 then assembles, and `declaring_exits(…, "sub", 2)` lowers
 /// the count back to what the call site's two labels bind.
 fn three_exit_callee(last: &str) -> String {
-    two_exit_callee(last).replace("exits=2", "exits=3")
+    two_exit_callee(last).replace("exits=(e0, e1)", "exits=(e0, e1, e2)")
 }
 
 /// A body returning through exit 2 of a callee that declares two is
@@ -1511,7 +1511,7 @@ fn a_return_through_an_undeclared_exit_is_refused_under_every_mechanism() {
 /// with nothing calling it.
 fn stray_overrunning_its_exits() -> String {
     "\
-.routine stray, tapes=1, alpha=(3), exits=3
+.routine stray, tapes=1, alpha=(3), exits=(e0, e1, e2)
 .param p, ('_', '0', '1')
 .section code
 .func stray
@@ -1570,7 +1570,7 @@ fn an_unreached_routine_returning_through_an_undeclared_exit_does_not_fail_the_l
 #[test]
 fn a_return_through_an_undeclared_exit_does_not_assemble() {
     const SRC: &str = "\
-.routine sub, tapes=1, alpha=(3), exits=2
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param p, ('_', '0', '1')
 .section code
 .func sub
@@ -1595,7 +1595,7 @@ fn a_return_through_an_undeclared_exit_does_not_assemble() {
 #[test]
 fn a_return_through_a_declared_exit_assembles() {
     const SRC: &str = "\
-.routine sub, tapes=1, alpha=(3), exits=2
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param p, ('_', '0', '1')
 .section code
 .func sub
@@ -1612,7 +1612,7 @@ fn a_return_through_a_declared_exit_assembles() {
 #[test]
 fn a_trap_with_an_exit_sized_immediate_assembles() {
     const SRC: &str = "\
-.routine sub, tapes=1, alpha=(3), exits=2
+.routine sub, tapes=1, alpha=(3), exits=(e0, e1)
 .param p, ('_', '0', '1')
 .section code
 .func sub

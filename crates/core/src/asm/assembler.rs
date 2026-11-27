@@ -254,7 +254,7 @@ pub(crate) fn assemble_lowered(
     // offending function in source order is the one reported.
     if let Some(iface) = &lowered.interface {
         for (function, routine) in functions.iter().zip(&iface.routines) {
-            let declared = routine.exits;
+            let declared = routine.exit_count();
             for item in &function.items {
                 if let SourceItem::Instr {
                     span,

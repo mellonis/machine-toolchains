@@ -79,7 +79,7 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     // transparent, and an exit-BEARING one is refused a few lines below
     // by `require_interface`, whose message names the missing interface
     // rather than a count mismatch (docs/core.md (symbolic resolution)).
-    let declared = usize::from(callee.interface.map_or(0, |i| i.exits));
+    let declared = callee.interface.map_or(0, |i| i.exits.len());
     if named == 0 && !labelled && !open && record.exits.is_empty() && declared == 0 {
         return Ok(record.clone());
     }
@@ -108,7 +108,7 @@ fn resolve_one(callee: &FuncRef, record: &BoundCall) -> Result<BoundCall, LinkEr
     // interfaceless callee is named as such rather than as "declares 0".
     if !record.exits.is_empty() {
         let iface = require_interface(callee, "an exit vector")?;
-        if record.exits.len() != usize::from(iface.exits) {
+        if record.exits.len() != iface.exits.len() {
             return Err(bad(
                 callee,
                 exit_count_mismatch(&callee.name, record.exits.len(), declared),
@@ -625,7 +625,7 @@ mod tests {
             enters: vec![None],
             leaves: vec![None],
             opaque: vec![false],
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }
     }
@@ -641,7 +641,7 @@ mod tests {
             enters: Vec::new(),
             leaves: Vec::new(),
             opaque: Vec::new(),
-            exits: 0,
+            exits: Vec::new(),
             returns: true,
         }
     }

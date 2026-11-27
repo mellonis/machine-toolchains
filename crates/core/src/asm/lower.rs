@@ -334,7 +334,9 @@ pub(crate) fn lower(
 /// tail, then one record per `.param` line in tape order.
 #[derive(Debug)]
 struct PendingInterface {
-    exits: u8,
+    /// The state-parameter names, each with its span on the `.routine`
+    /// line.
+    exits: Vec<(String, Span)>,
     /// A `noreturn` routine sets this false.
     returns: bool,
     /// The tail's span, for the diagnostic that reports `exits=`/
@@ -859,17 +861,25 @@ fn lower_routine_directive(d: &RoutineDirectiveCst, ctx: &mut LowerCtx) -> Resul
             AsmErrorKind::BadSignature("alphabet cardinalities are at least 1".to_string()),
         ));
     }
-    let exits = match d.exits {
-        Some((exits, span)) => match u8::try_from(exits) {
-            Ok(exits) => exits,
-            Err(_) => {
+    let exits = match &d.exits {
+        Some((names, span)) => {
+            if names.len() > usize::from(u8::MAX) {
                 return Err(err(
-                    span,
+                    *span,
                     AsmErrorKind::BadSignature("exits must be 0..=255".to_string()),
                 ));
             }
-        },
-        None => 0,
+            for (k, (name, name_span)) in names.iter().enumerate() {
+                if names[..k].iter().any(|(earlier, _)| earlier == name) {
+                    return Err(err(
+                        *name_span,
+                        AsmErrorKind::BadSignature(format!("exit `{name}` is named twice")),
+                    ));
+                }
+            }
+            names.clone()
+        }
+        None => Vec::new(),
     };
     let already_pending = ctx.pending_sigs.iter().any(|(n, _, _)| n.name == d.name);
     let already_attached = ctx
@@ -895,7 +905,7 @@ fn lower_routine_directive(d: &RoutineDirectiveCst, ctx: &mut LowerCtx) -> Resul
         PendingInterface {
             exits,
             returns: d.noreturn.is_none(),
-            tail_span: d.exits.map(|(_, span)| span).or(d.noreturn),
+            tail_span: d.exits.as_ref().map(|(_, span)| *span).or(d.noreturn),
             params: Vec::new(),
         },
     ));
@@ -1091,8 +1101,8 @@ fn lower_digest_directive(d: &DigestDirectiveCst, ctx: &mut LowerCtx) -> Result<
 /// `exits=`/`noreturn` must describe its tapes at all — the wire record
 /// carries those fields inside the interface, with nowhere else to live.
 ///
-/// That refusal is deliberately asymmetric: a written `exits=0` on an
-/// interface-less routine is accepted and dropped, while `exits=1` is an
+/// That refusal is deliberately asymmetric: a written `exits=()` on an
+/// interface-less routine is accepted and dropped, while `exits=(a)` is an
 /// error. Zero IS the field's default, so the object the assembler would
 /// write is the same either way, and nothing is lost — the text itself
 /// survives in the CST, which is what `fmt` reprints.
@@ -1105,7 +1115,7 @@ fn take_pending(
     };
     let (declared, sig, pending) = ctx.pending_sigs.remove(i);
     if pending.params.is_empty() {
-        if pending.exits != 0 || !pending.returns {
+        if !pending.exits.is_empty() || !pending.returns {
             return Err(err(
                 pending.tail_span.unwrap_or(declared.span),
                 AsmErrorKind::BadSignature("`exits=`/`noreturn` need `.param` lines".to_string()),
@@ -1130,9 +1140,23 @@ fn take_pending(
         enters: Vec::with_capacity(pending.params.len()),
         leaves: Vec::with_capacity(pending.params.len()),
         opaque: Vec::with_capacity(pending.params.len()),
-        exits: pending.exits,
+        exits: Vec::with_capacity(pending.exits.len()),
         returns: pending.returns,
     };
+    // A routine's parameters are one list of names to whoever reads its
+    // interface back as a declaration, so an exit may not repeat a tape's
+    // name (docs/formats.md (routine interfaces)).
+    for (exit, span) in pending.exits {
+        if pending.params.iter().any(|p| p.name == exit) {
+            return Err(err(
+                span,
+                AsmErrorKind::BadSignature(format!(
+                    "exit `{exit}` repeats the name of a `.param` tape"
+                )),
+            ));
+        }
+        iface.exits.push(exit);
+    }
     for param in pending.params {
         iface.params.push(param.name);
         iface.glyphs.push(param.glyphs);
@@ -2742,7 +2766,7 @@ L1:     nop
     #[test]
     fn param_lines_build_the_routine_interface() {
         let src = "\
-.routine f, tapes=2, alpha=(3, 2), exits=1, noreturn
+.routine f, tapes=2, alpha=(3, 2), exits=(e0), noreturn
 .param  num, ('_', '0', '1'), writes=('0', '1')
 .param  flag, ('_', 'x')
 .func f
@@ -2760,7 +2784,7 @@ stop
         assert_eq!(r.enters, vec![None, None]);
         assert_eq!(r.leaves, vec![None, None]);
         assert_eq!(r.opaque, vec![false, false]);
-        assert_eq!(r.exits, 1);
+        assert_eq!(r.exits, ["e0".to_string()]);
         assert!(!r.returns);
     }
 
@@ -2784,7 +2808,7 @@ stop
         );
         assert!(r.opaque[0]);
         // A routine with no tail returns and takes no exits.
-        assert_eq!(r.exits, 0);
+        assert!(r.exits.is_empty());
         assert!(r.returns);
     }
 
@@ -2881,7 +2905,7 @@ stop
 
     #[test]
     fn the_routine_tail_needs_param_lines() {
-        for tail in ["exits=1", "noreturn"] {
+        for tail in ["exits=(e0)", "noreturn"] {
             let src = format!(".routine f, tapes=1, alpha=(2), {tail}\n.func f\nstop\n");
             let e = lower_with(iface_caps(), &src).unwrap_err();
             assert!(
@@ -2893,25 +2917,69 @@ stop
     }
 
     #[test]
-    fn exits_is_a_u8_field() {
-        // The wire record carries one byte, so the directive's u32 value
-        // is range-checked rather than truncated.
-        let src =
-            ".routine f, tapes=1, alpha=(2), exits=256\n.param t, ('_', 'a')\n.func f\nstop\n";
-        let e = lower_with(iface_caps(), src).unwrap_err();
+    fn exits_fit_the_count_byte() {
+        // The wire record counts the exits in one byte, so a longer list
+        // is refused rather than truncated.
+        let list = |n: usize| {
+            (0..n)
+                .map(|k| format!("e{k}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let src = |n: usize| {
+            format!(
+                ".routine f, tapes=1, alpha=(2), exits=({})\n.param t, ('_', 'a')\n.func f\nstop\n",
+                list(n)
+            )
+        };
+        let e = lower_with(iface_caps(), &src(256)).unwrap_err();
         assert!(
             matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m == "exits must be 0..=255"),
             "{e}"
         );
-        // The last value that fits comes through.
-        let src =
-            ".routine f, tapes=1, alpha=(2), exits=255\n.param t, ('_', 'a')\n.func f\nstop\n";
-        let r = &lower_with(iface_caps(), src)
+        // The longest list that fits comes through, names in order.
+        let r = &lower_with(iface_caps(), &src(255))
             .unwrap()
             .interface
             .unwrap()
             .routines[0];
-        assert_eq!(r.exits, 255);
+        assert_eq!(r.exits.len(), 255);
+        assert_eq!(r.exits[254], "e254");
+    }
+
+    #[test]
+    fn exit_names_are_distinct_from_each_other_and_from_the_tapes() {
+        // Whoever reads the interface back as a declaration sees one
+        // parameter list; a repeated name there could not be re-read.
+        for (exits, message) in [
+            ("(done, done)", "exit `done` is named twice"),
+            ("(done, t)", "exit `t` repeats the name of a `.param` tape"),
+        ] {
+            let src = format!(
+                ".routine f, tapes=1, alpha=(2), exits={exits}\n.param t, ('_', 'a')\n.func f\nstop\n"
+            );
+            let e = lower_with(iface_caps(), &src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadSignature(ref m) if m == message),
+                "{exits}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_exit_list_needs_no_param_lines() {
+        // `exits=()` is the field's default written out: accepted on a
+        // routine that describes no interface, and it leaves none.
+        let src = ".routine f, tapes=1, alpha=(2), exits=()\n.func f\nstop\n";
+        assert!(lower_with(iface_caps(), src).unwrap().interface.is_none());
+    }
+
+    #[test]
+    fn a_bare_exit_count_is_refused() {
+        // The numeric tail is not a spelling of the field: the line is
+        // reported, never read as an exit-less routine.
+        let src = ".routine f, tapes=1, alpha=(2), exits=2\n.param t, ('_', 'a')\n.func f\nstop\n";
+        assert!(lower_with(iface_caps(), src).is_err());
     }
 
     #[test]

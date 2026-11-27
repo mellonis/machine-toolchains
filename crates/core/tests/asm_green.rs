@@ -144,7 +144,7 @@ fn tma_shapes_round_trip_under_full_caps() {
         ".section tables\n.row [1, 2, 3]\n.targets L1, L2,\n        L3\n",
         ".rept v, 0, 7\n        wr [{v}]\n.endr ; done\n",
         ".routine r, tapes=2, alpha=(3, 5)\n",
-        ".routine r, tapes=1, alpha=(3), exits=2, noreturn\n",
+        ".routine r, tapes=1, alpha=(3), exits=(e0, e1), noreturn\n",
         ".param num, ('_', '0', '1'), writes=('0'), enters=('1'), leaves=('0'), opaque\n",
         ".param wide, ('0'..'9') ; a range\n",
         ".graph lib::g, 42\n.grafted other::h, 7\n",
@@ -165,7 +165,7 @@ fn tma_shapes_round_trip_under_full_caps() {
 fn interface_directives_shape_and_carry_their_own_nodes() {
     use mtc_core::asm::kinds::kind_name;
     let src = "\
-.routine r, tapes=1, alpha=(3), exits=2, noreturn
+.routine r, tapes=1, alpha=(3), exits=(e0, e1), noreturn
 .param num, ('_', '0', '1'), writes=('0'), enters=('1'), leaves=('0'), opaque
 .graph lib::g, 42
 .grafted other::h, 7

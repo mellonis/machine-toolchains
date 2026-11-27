@@ -728,7 +728,7 @@ fn render_dispatch_table(
 /// width + 1)` with no other line's width to account for.
 ///
 /// `interface` is the blob's routine record when the object has one; the
-/// tail prints only what it carries — `, exits={k}` for a non-zero count
+/// tail prints only what it carries — `, exits=(<names>)` for a routine that declares exits
 /// and `, noreturn` for a routine that never returns, in that one legal
 /// order, each independent of the other (docs/formats.md (routine
 /// interfaces)). `None` — an object with no interface, and every linked
@@ -748,8 +748,8 @@ fn routine_line(
         .join(", ");
     let mut code = format!(".routine {name}, tapes={tapes}, alpha=({alpha})");
     if let Some(routine) = interface {
-        if routine.exits > 0 {
-            code.push_str(&format!(", exits={}", routine.exits));
+        if !routine.exits.is_empty() {
+            code.push_str(&format!(", exits=({})", routine.exits.join(", ")));
         }
         if !routine.returns {
             code.push_str(", noreturn");
@@ -3139,7 +3139,7 @@ A:      stp
         use crate::formats::object::{ExportedAlphabet, ExportedGraph, ImportedAlphabet};
         let src = concat!(
             ".grafted other::h, 42\n",
-            ".routine main, tapes=1, alpha=(2), exits=1, noreturn\n",
+            ".routine main, tapes=1, alpha=(2), exits=(e0), noreturn\n",
             ".param ctl, ('_', '1')\n.func main\n        stp\n"
         );
         let mut obj = assemble(&iface_syntax(), 0x7E, src, false).unwrap();
@@ -3179,7 +3179,7 @@ A:      stp
             ".grafted other::h, 42\n",
             "; alphabet bits: ('_')\n",
             "; import alphabet other::wide: ('_')\n",
-            ".routine main, tapes=1, alpha=(2), exits=1, noreturn\n",
+            ".routine main, tapes=1, alpha=(2), exits=(e0), noreturn\n",
             ".param ctl, ('_', '1')\n",
         ] {
             assert!(full.contains(present), "{present:?} missing from:\n{full}");

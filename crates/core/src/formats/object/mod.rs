@@ -246,10 +246,23 @@ pub struct RoutineInterface {
     /// Per-tape opacity: every state that reads this tape reads it as `*`,
     /// so the routine never discriminates its glyphs. len == arity.
     pub opaque: Vec<bool>,
-    /// Number of state parameters — the exits a caller must supply.
-    pub exits: u8,
+    /// State-parameter names, in declaration order — the exits a caller
+    /// must supply. At most 255; pairwise distinct and distinct from
+    /// `params` in an assembled object
+    /// (docs/formats.md (routine interfaces)).
+    pub exits: Vec<String>,
     /// False for a `noreturn` routine: control never returns to the caller.
     pub returns: bool,
+}
+
+impl RoutineInterface {
+    /// How many state parameters the routine declares. The wire holds the
+    /// count in one byte, and the assembler refuses a longer list, so the
+    /// count of a decoded or assembled record always fits; a hand-built
+    /// record past it saturates rather than wraps.
+    pub fn exit_count(&self) -> u8 {
+        u8::try_from(self.exits.len()).unwrap_or(u8::MAX)
+    }
 }
 
 /// An alphabet the unit exports by name, with its glyphs in band order.

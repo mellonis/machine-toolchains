@@ -401,7 +401,11 @@ impl ObjectFile {
                         glyphs.push(tape_glyphs);
                         writes.push(tape_writes);
                     }
-                    let exits = r.u8()?;
+                    let exit_count = r.u8()? as usize;
+                    let mut exits = Vec::with_capacity(exit_count);
+                    for _ in 0..exit_count {
+                        exits.push(name_of(r.u32()?)?);
+                    }
                     let returns = match r.u8()? {
                         0 => false,
                         1 => true,

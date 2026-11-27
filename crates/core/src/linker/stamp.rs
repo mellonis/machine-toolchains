@@ -1392,12 +1392,12 @@ pub(super) fn check_declared_exits(
         let Some(iface) = f.interface else { continue };
         if let Some((_, k)) = body_exits(syntax, &f.blob)
             .into_iter()
-            .find(|&(_, k)| k >= iface.exits)
+            .find(|&(_, k)| k >= iface.exit_count())
         {
             return Err(LinkError::UndeclaredExit {
                 routine: f.name.to_string(),
                 exit: k,
-                declared: iface.exits,
+                declared: iface.exit_count(),
             });
         }
     }

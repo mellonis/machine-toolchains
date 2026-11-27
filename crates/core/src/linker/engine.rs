@@ -790,7 +790,7 @@ pub(super) fn check_sites(
                     // (docs/formats.md (routine interfaces)), and a check
                     // sitting after the guard would quietly depend on that
                     // presupposition holding forever.
-                    let declared = usize::from(order[*callee].interface.map_or(0, |i| i.exits));
+                    let declared = order[*callee].interface.map_or(0, |i| i.exits.len());
                     if declared != 0 {
                         return Err(super::interface::bad(
                             &order[*callee],
