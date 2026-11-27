@@ -3,9 +3,8 @@
 //! `std.pmo` the linker adds implicitly; the SOURCE lives here as an
 //! embedded `.pmc` string (rather than a file in a data directory)
 //! because a cargo-installed binary has no data directory. Built with
-//! the release preset; see `docs/pmt/stdlib.md (interposition vs
-//! optimization)` for the semantic-binding caveat this implies for
-//! overriding std routines.
+//! the release preset; a program cannot replace one of its routines —
+//! see `docs/pmt/stdlib.md (linking semantics)`.
 //!
 //! The [`roster`] and [`materialized_std_uri`] below serve the LSP's
 //! go-to-definition on `std::` calls (docs/lsp.md (go-to-definition)): the

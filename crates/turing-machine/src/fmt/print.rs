@@ -3429,14 +3429,18 @@ mod tests {
     /// rather than exposed — the price of deleting the reference, and the
     /// reason the capture was mechanical rather than hand-written.
     ///
-    /// Deliberately NOT paired with an idempotency assertion: several
-    /// sources here are the formatter's mandated non-idempotent quirks
-    /// (docs/tmt/fmt.md (idempotency)), which such an assertion would
-    /// fail.
+    /// Each pin is also held to a second pass: the formatter is
+    /// idempotent unconditionally (docs/tmt/fmt.md (idempotent)), so
+    /// formatting the pinned output must return it unchanged.
     #[track_caller]
     fn pins(src: &str, expected: &str) {
         let out = format(src).expect("the printer formats");
         assert_eq!(out, expected, "for:\n{src}");
+        assert_eq!(
+            format(&out).expect("the output formats"),
+            out,
+            "a second pass moved something, for:\n{src}"
+        );
     }
 
     #[test]

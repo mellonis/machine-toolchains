@@ -332,7 +332,7 @@ pub(super) fn std_enabled(state: &DocState) -> bool {
 /// How a document is read, by its URI's extension: a `.tmh` header
 /// declarations-only, anything else as a program. ASCII case is ignored,
 /// like the routing that bound the document to this service
-/// (docs/lsp.md (multi-service routing)).
+/// (docs/lsp.md (routing)).
 fn read_mode_for(uri: &str) -> ReadMode {
     if uri.to_ascii_lowercase().ends_with(".tmh") {
         ReadMode::DeclarationsOnly
