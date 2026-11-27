@@ -10,8 +10,8 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 
 | Contract | Version |
 |---|---|
-| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.6.0 |
-| `mtc-wasm` crate / JS API | 0.6.0 |
+| crates — `mtc-core`, `mtc-post-machine`, `mtc-turing-machine` | 0.6.1-dev on `next` (last release 0.6.0) |
+| `mtc-wasm` crate / JS API | 0.6.1-dev on `next` (last release 0.6.0) |
 | `.pmc` language / PM-1 `.pma` dialect | 0.4 / 0.3 |
 | `.tmc` language / TM-1 `.tma` dialect | 0.2 / 0.4 (`.tmc` 0.2 reserves 32 words; a version space moves once between two releases — work landing later in the cycle folds into that step) |
 | PM IR / TM IR | 4 / 4 |
@@ -258,7 +258,7 @@ to a release commit, so a clone, the repository's front page and
 `cargo install --git` all see released behaviour and released docs.
 `next` is the development branch: feature branches start from it and
 merge into it, CI runs on it, and its crates carry a `-dev` version
-(`0.6.0-dev` after 0.5.0 — the smallest bump the work is known to earn,
+(`0.6.1-dev` after 0.6.0 — the smallest bump the work is known to earn,
 marked pre-release, replaced by the real number at the cut) paired with
 the CHANGELOG's `## [Unreleased]` heading, which the man-page date test
 accepts in place of a dated one. A nightly is a `v*` tag on a `next`

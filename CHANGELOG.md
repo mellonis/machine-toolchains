@@ -7,6 +7,13 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
+## [Unreleased]
+
+The development branch between releases. Its crates report a `-dev`
+version — `0.6.1-dev` after 0.6.0 — so a build from it names itself as
+unreleased; the entry for the next release assembles here at the cut and
+takes the version the work earned.
+
 ## [0.6.0] - 2026-11-28
 
 The language release for TM-1. A `.tmc` program stops being one file:
