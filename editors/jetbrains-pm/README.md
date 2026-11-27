@@ -25,12 +25,12 @@ plus run configurations and breakpoints.
   sideload this plugin (`MAINTAINERS.md`) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.2.1. It has been tested against `pmt` 0.4.0; on
+- This plugin is version 0.2.2. It has been tested against `pmt` 0.4.0; on
   startup it runs `pmt --version` and shows a warning notification (not a
   hard failure) if the binary reports something older, or an error
   notification if the binary can't be found at all. The plugin's own
   version number and the tested `pmt` version are independent numbers.
-- Built and verified against **LSP4IJ 0.20.1** on an IntelliJ Platform
+- Built against **LSP4IJ 0.30.1** on an IntelliJ Platform
   2024.3 baseline (IntelliJ IDEA Community works — no Ultimate-only APIs
   are used).
 
@@ -64,7 +64,7 @@ sideloaded plugin is installed from a local file, not from the
 Marketplace, so the IDE has no opportunity to resolve and auto-install a
 declared plugin dependency the way it would for a Marketplace install.
 Skipping this step leaves this plugin disabled with an unsatisfied-
-dependency error. The shipped build was verified against LSP4IJ 0.20.1;
+dependency error. The shipped build was compiled against LSP4IJ 0.30.1;
 a newer 0.x/1.x release should work unless its own compatibility range
 excludes this plugin's IntelliJ Platform baseline (2024.3).
 

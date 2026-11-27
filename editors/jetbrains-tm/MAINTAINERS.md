@@ -26,11 +26,11 @@ jvmToolchain(17) }` in `build.gradle.kts`), regardless of which JDK
 building under a JetBrains-bundled JBR newer than 17 (JBR 25); other
 JDKs as `JAVA_HOME` are untested.
 
-`buildPlugin` produces `build/distributions/tmc-0.2.1.zip`. Install it:
+`buildPlugin` produces `build/distributions/tmc-0.2.2.zip`. Install it:
 
 1. Settings → Plugins → the ⚙ (gear) icon in the top-right of the Plugins
    page → **Install Plugin from Disk…**
-2. Pick `build/distributions/tmc-0.2.1.zip`.
+2. Pick `build/distributions/tmc-0.2.2.zip`.
 3. Restart the IDE when prompted.
 
 The plugin is built against the IntelliJ Platform Community baseline and
@@ -102,6 +102,10 @@ machine {
       squiggles appear without any manual trigger: one on `unusedHelper`
       (`unused-routine`) and one on the `debugger` marker
       (`leftover-debugger`).
+- [ ] **Header**: save the text `tmt interface check.tmc` prints as
+      `check.tmh` and open it. Confirm it colors like `check.tmc`, shows
+      no squiggle on a bodiless `routine …;` line, and that adding a
+      `machine { }` block raises an error.
 - [ ] **LSP4IJ console**: open the **LSP Consoles** tool window and confirm
       a `tmt lsp` server is listed as started for this project, with no
       error traffic. This is the fastest way to distinguish "the binary

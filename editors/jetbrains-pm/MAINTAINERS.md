@@ -26,11 +26,11 @@ which JDK `JAVA_HOME` points at — Gradle auto-provisions JDK 17 via the
 building under a JetBrains-bundled JBR newer than 17 (JBR 25); other
 JDKs as `JAVA_HOME` are untested.
 
-`buildPlugin` produces `build/distributions/pmc-0.2.1.zip`. Install it:
+`buildPlugin` produces `build/distributions/pmc-0.2.2.zip`. Install it:
 
 1. Settings → Plugins → the ⚙ (gear) icon in the top-right of the
    Plugins page → **Install Plugin from Disk…**
-2. Pick `build/distributions/pmc-0.2.1.zip`.
+2. Pick `build/distributions/pmc-0.2.2.zip`.
 3. Restart the IDE when prompted.
 
 This works on Community editions — the plugin is built against the

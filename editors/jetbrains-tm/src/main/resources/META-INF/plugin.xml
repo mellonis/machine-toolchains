@@ -2,7 +2,7 @@
     <id>ru.mellonis.tmc</id>
     <name>TMC (Turing machine toolchain)</name>
     <vendor>mellonis</vendor>
-    <description>Language support for .tmc and .tma via tmt lsp (LSP4IJ): diagnostics,
+    <description>Language support for .tmc, .tmh headers and .tma via tmt lsp (LSP4IJ): diagnostics,
         completions, navigation, formatting, semantic tokens; tmt run
         configurations with manifest-target builds; TM-1 debugging via
         tmt dap (LSP4IJ DAP).</description>
@@ -14,7 +14,7 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <fileType name="TMC" implementationClass="ru.mellonis.tmc.TmcFileType"
-                  fieldName="INSTANCE" language="tmc" extensions="tmc"/>
+                  fieldName="INSTANCE" language="tmc" extensions="tmc;tmh"/>
         <fileType name="TMA" implementationClass="ru.mellonis.tmc.TmaFileType"
                   fieldName="INSTANCE" language="tma" extensions="tma"/>
         <textmate.bundleProvider implementation="ru.mellonis.tmc.TmcTextMateBundleProvider"/>

@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "ru.mellonis"
-version = "0.2.1"
+version = "0.2.2"
 
 kotlin {
     // Pinned, not just "any JDK 17+": the IntelliJ Platform Gradle Plugin
@@ -27,13 +27,13 @@ repositories {
 
 dependencies {
     intellijPlatform {
-        // 2024.3 (build 243) clears LSP4IJ 0.20.1's since-build=242.0 floor
+        // 2024.3 (build 243) clears LSP4IJ 0.30.1's since-build=242.0 floor
         // with room to spare — the lowest Community baseline verified
         // against the pinned LSP4IJ release at implementation time.
         intellijIdeaCommunity("2024.3")
         // Pinned to the latest stable release on the JetBrains Marketplace
         // as of implementation (verified via the plugin's updates API).
-        plugin("com.redhat.devtools.lsp4ij:0.20.1")
+        plugin("com.redhat.devtools.lsp4ij:0.30.1")
         bundledPlugin("org.jetbrains.plugins.textmate")
         // JSON schema contribution (pmt.json) — optional at runtime, the
         // extension lives behind an optional depends in plugin.xml.

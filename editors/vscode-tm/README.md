@@ -13,13 +13,20 @@ One `tmt lsp` process serves both languages. The server routes each open
 document to its own language service by file extension, so a `.tmc` file and
 a `.tma` file coexist in one session without perturbing each other.
 
+A `.tmh` header — the declarations of a unit, as `tmt interface` prints
+them — opens as the same language as `.tmc`. The server reads it
+declarations-only and lints it by the header rule subset, exactly as
+`tmt lint` does on the command line; the file-scoped `compile` task is
+not offered for one, since a header is not a compilation unit.
+
 ## Requirements
 
 - A `tmt` binary reachable on `PATH`, or pointed to with the `tmt.path`
   setting (below).
-- This extension is version 0.2.0, targeting `tmt` 0.4.0 as its tested
-  floor: on activation it runs `tmt --version` and shows a warning (not a
-  hard failure) if the binary reports something older. The extension's own
+- This extension is version 0.2.1, targeting `tmt` 0.6.0 as its tested
+  floor — the first `tmt` whose language server reads a `.tmh` header:
+  on activation it runs `tmt --version` and shows a warning (not a hard
+  failure) if the binary reports something older. The extension's own
   version number and the `tmt` floor version are independent numbers.
 
 ## Install the server

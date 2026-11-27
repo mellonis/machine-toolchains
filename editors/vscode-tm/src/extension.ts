@@ -9,7 +9,7 @@ import {
 // a thin client and an older server simply answers less. Bump this in the
 // same commit that raises the extension's own version whenever a newly
 // required server capability lands.
-const MIN_TESTED_TMT = '0.4.0';
+const MIN_TESTED_TMT = '0.6.0';
 let client: LanguageClient | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -175,8 +175,12 @@ class TmtTaskProvider implements vscode.TaskProvider {
     ];
     // Each language gets its own front end: `.tmc` compiles, `.tma`
     // assembles. Both are single-file commands, so both are offered.
+    // A `.tmh` header shares the `tmc` language but is not a compilation
+    // unit: it lints and formats, and that is all.
     if (doc.languageId === 'tmc') {
-      tasks.unshift(this.fileTask('compile', ['compile', file], file));
+      if (!file.toLowerCase().endsWith('.tmh')) {
+        tasks.unshift(this.fileTask('compile', ['compile', file], file));
+      }
     } else {
       tasks.unshift(this.fileTask('asm', ['asm', file], file));
     }

@@ -25,13 +25,13 @@ graph state whose rows would let the opaque class decide a match is refused
 at compile time — `open-graft-uncovered`, naming the state and the tape —
 rather than trapping at run time. The class survives a graft inside a graft,
 and openness is part of a graft instance's identity, so two sites differing
-only in `*` never share a spliced fragment. The 0.2 refusal named
-`open-graft-unsupported` is gone.
+only in `*` never share a spliced fragment. The refusal an
+earlier build of this branch named `open-graft-unsupported` is gone.
 
 | Version space | This change | Previous |
 |---|---|---|
-| `.tmc` language | **0.3** — a graft's map admits the open marker | 0.2 |
-| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+| `.tmc` language | **0.2, no movement** — the acceptance addition folds into the standing bump: a language version bumps once between two releases, the minimal bump | 0.2 |
+| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.4, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
 
 ### Named vector cells — 2026-11-22
 
@@ -49,8 +49,8 @@ form, like the disassembly.
 
 | Version space | This change | Previous |
 |---|---|---|
-| `.tmc` language | **0.3, no movement** — the acceptance addition folds into the standing bump: a language version bumps once per `next` cycle relative to `master`, the minimal bump | 0.3 |
-| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+| `.tmc` language | **0.2, no movement** — the acceptance addition folds into the standing bump: a language version bumps once between two releases, the minimal bump | 0.2 |
+| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.4, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
 
 ### Rule guards — 2026-11-22
 
@@ -80,8 +80,8 @@ suppressible in the shared allow namespace.
 
 | Version space | This change | Previous |
 |---|---|---|
-| `.tmc` language | **0.3, no movement** — the acceptance addition folds into the standing bump: a language version bumps once per `next` cycle relative to `master`, the minimal bump | 0.3 |
-| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.5, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+| `.tmc` language | **0.2, no movement** — the acceptance addition folds into the standing bump: a language version bumps once between two releases, the minimal bump | 0.2 |
+| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, TM-1 `.tma` 0.4, PM IR 4 / TM IR 4, containers MO / MX / MT 4 / 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
 
 ### State-parameter names in the object — 2026-11-27
 
@@ -105,7 +105,7 @@ never printed back. In the TM-1 compiler IR a world's `exits` is the
 list of names rather than a count.
 
 Neither the record nor the spelling had been released: both arrived
-after 0.5.0, inside container MO 4, the TM-1 `.tma` dialect 0.5 and TM
+after 0.5.0, inside container MO 4, the TM-1 `.tma` dialect 0.4 and TM
 IR 4, which this cycle had already opened. An object, `.tma` file or IR
 document produced by an earlier build of this development branch that
 declares an exit has to be rebuilt.
@@ -113,9 +113,74 @@ declares an exit has to be rebuilt.
 | Version space | This change | Previous |
 |---|---|---|
 | container MO | **4, no movement** — the change folds into the revision this cycle already opened | 4 |
-| TM-1 `.tma` dialect | **0.5, no movement** — likewise | 0.5 |
+| TM-1 `.tma` dialect | **0.4, no movement** — likewise | 0.4 |
 | TM IR | **4, no movement** — likewise | 4 |
-| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, `.tmc` 0.3, PM IR 4, containers MX / MT 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+| everything else — the toolchain crates (still `0.6.0-dev`), `.pmc` 0.4, PM-1 `.pma` 0.3, `.tmc` 0.2, PM IR 4, containers MX / MT 2 / 2, `pmt.json` / `tmt.json` 0.2 / 0.3 | `unchanged` | — |
+
+### Tapes before `state` parameters — 2026-11-27
+
+A `routine` or `graph` signature lists its tapes first: a `tape`
+parameter written after a `state` parameter is refused,
+`tape-after-state-param`, at the late tape's name. A compiled object
+keeps a routine's tapes and its exits as two lists, so a header rendered
+from an object could print no other order, and a unit that interleaved
+the two kinds read differently from its object than from its source.
+State parameters themselves arrived after 0.5.0, so no released program
+is affected.
+
+| Version space | This change | Previous |
+|---|---|---|
+| `.tmc` language | **0.2, no movement** — the tightening folds into the standing bump | 0.2 |
+| everything else | `unchanged` | — |
+
+### One version step per release — 2026-11-27
+
+A language, dialect or format version moves once between two releases,
+by the minimal bump; work that lands on the development branch after
+that step folds into it. Two spaces had moved twice since 0.5.0 and are
+restated: the `.tmc` language is **0.2** (it read 0.3 on this branch
+after the open-graft round) and the TM-1 `.tma` dialect is **0.4** (it
+read 0.5 after the glyph literal widened). Nothing a program can write
+changes — the two numbers are the only difference, in `tmt --version`,
+the reference pages' version histories and this file. Neither 0.3 nor
+0.5 was ever part of a release.
+
+| Version space | At the 0.6.0 cut | At 0.5.0 |
+|---|---|---|
+| `.tmc` language | **0.2** | 0.1 |
+| TM-1 `.tma` dialect | **0.4** | 0.3 |
+| TM IR | **4** | 3 |
+| container MO | **4** | 3 |
+| `tmt.json` `project` schema | **0.3** | 0.2 |
+| `.pmc` 0.4, PM-1 `.pma` 0.3, PM IR 4, containers MX / MT 2 / 2, `pmt.json` 0.2 | `unchanged` | — |
+
+### Headers in the editor, and the plugins brought current — 2026-11-27
+
+`tmt lsp` serves a `.tmh` header: the `.tmc` service claims the
+extension and reads such a document declarations-only, as `tmt lint` and
+`tmt interface` do — a `machine` block or a bodied routine in a header is
+an error in the editor too, the expansion stage is skipped, and lint runs
+the header rule subset. Formatting, navigation, hover, completion and the
+outline answer as they do for a source.
+
+The TM-1 plugins register `.tmh` under the `tmc` language (VS Code
+extension 0.2.1, JetBrains plugin 0.2.2); the VS Code extension offers
+no file-scoped `compile` task for a header. Their tested `tmt` floor is
+0.6.0, the first whose server reads a header. Both JetBrains plugins —
+PM-1's too, now 0.2.2 — build against LSP4IJ 0.30.1 where they pinned
+0.20.1; releases of it from 0.21.0 on can reach the debugger's
+Disassembly view on a 2026.x IDE. The VS Code PM-1 extension is 0.2.1
+for the language-client library it bundles, a major version newer than
+the one 0.2.0 shipped; nothing else in it moved, and the tested `pmt`
+floor stays 0.4.0. Both VS Code extensions declare their type
+definitions at the `engines.vscode` floor again, 1.91 — the dependency
+refresh had left them newer than the floor, which the packager refuses.
+
+| Version space | This change | Previous |
+|---|---|---|
+| editor plugins | VS Code PM and TM **0.2.1**; JetBrains PM and TM **0.2.2** | 0.2.0; 0.2.1 |
+| tested floors | `MIN_TESTED_TMT` **0.6.0**; `MIN_TESTED_PMT` `unchanged` at 0.4.0 | 0.4.0 |
+| everything else | `unchanged` | — |
 
 ## [0.5.0] - 2026-09-02
 

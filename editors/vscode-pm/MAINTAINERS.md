@@ -15,10 +15,10 @@ npm run package
 
 `npm run package` copies in the shared `.pmc` and `.pma` TextMate
 grammars, compiles the extension, and runs `vsce package`, producing
-`pmc-0.1.3.vsix` in this directory. Install it into VS Code:
+`pmc-0.2.1.vsix` in this directory. Install it into VS Code:
 
 ```sh
-code --install-extension pmc-0.1.3.vsix
+code --install-extension pmc-0.2.1.vsix
 ```
 
 Reload the window (or restart VS Code) after installing or upgrading.
