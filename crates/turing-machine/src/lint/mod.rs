@@ -274,7 +274,7 @@ pub(crate) fn run_rules(ctx: &LintContext, allow: &[String], warn: &[String]) ->
 
 /// [`run_rules`] restricted to the codes `applies` accepts — every code for
 /// a source, [`HEADER_RULES`] for a header.
-fn run_rules_where(
+pub(crate) fn run_rules_where(
     ctx: &LintContext,
     allow: &[String],
     warn: &[String],

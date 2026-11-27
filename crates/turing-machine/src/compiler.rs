@@ -3014,6 +3014,18 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
 /// [`analyze_staged`] with an explicit choice of the external modules whose
 /// declared write contracts the footprint inference believes.
 pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> TmcStagedAnalysis {
+    analyze_staged_in_mode(source, externals, ReadMode::Program)
+}
+
+/// [`analyze_staged_with`] with the reading mode chosen by the caller:
+/// [`ReadMode::DeclarationsOnly`] is how the language service reads a
+/// `.tmh` header, the same strict reading `tmt lint` and `tmt interface`
+/// give one (docs/tmt/language.md (headers)).
+pub(crate) fn analyze_staged_in_mode(
+    source: &str,
+    externals: &Declarations,
+    mode: ReadMode,
+) -> TmcStagedAnalysis {
     let tokens = match lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
         Err(fatal) => {
@@ -3053,7 +3065,7 @@ pub(crate) fn analyze_staged_with(source: &str, externals: &Declarations) -> Tmc
     };
     let green_retained = Some(Rc::clone(&green));
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
-    match resolve_program(&program, externals, ReadMode::Program, PeerChecks::Enforced) {
+    match resolve_program(&program, externals, mode, PeerChecks::Enforced) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
             green: green_retained,

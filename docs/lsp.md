@@ -862,6 +862,15 @@ above resolves it first. The staged analysis runs lex → parse → resolve,
 each stage keeping its partial result, plus the expansion stage the
 service adds for its fatal (**Diagnostics**, above).
 
+The same service serves a `.tmh` header, which is `.tmc` text read for
+its declarations alone (`docs/tmt/language.md (headers)`). The document's
+extension picks the reading, ASCII case ignored: a header is analyzed
+declarations-only — a `machine` block or a bodied routine in it is the
+error the command line reports — the expansion stage is skipped, since a
+header has no bodies, and lint runs the header rule subset
+(`docs/tmt/lint.md (linting a header)`). Every other feature answers as
+it does for a source. A client registers `.tmh` under the `tmc` language.
+
 | Feature | Needs | Degrades to (when the tier fails) |
 |---|---|---|
 | Diagnostics: fatal error | the source lexes | one error at the failing stage, honest and singular |
@@ -982,9 +991,10 @@ vim.lsp.config.tmt = {
 }
 vim.lsp.enable({ "pmt", "tmt" })
 
--- Recognize the four extensions (no bundled filetype plugin ships):
+-- Recognize the extensions (no bundled filetype plugin ships); a `.tmh`
+-- header is the `tmc` filetype:
 vim.filetype.add({
-  extension = { pmc = "pmc", pma = "pma", tmc = "tmc", tma = "tma" },
+  extension = { pmc = "pmc", pma = "pma", tmc = "tmc", tmh = "tmc", tma = "tma" },
 })
 ```
 
@@ -1008,7 +1018,7 @@ language-servers = ["pmt-lsp"]
 [[language]]
 name = "tmc"
 scope = "source.tmc"
-file-types = ["tmc"]
+file-types = ["tmc", "tmh"]
 roots = ["tmt.json"]
 language-servers = ["tmt-lsp"]
 

@@ -2634,9 +2634,94 @@ fn formatting_a_document_that_does_not_parse_returns_nothing() {
 fn the_service_declares_the_tmc_language_and_its_watched_config() {
     let service = TmcLanguageService::new();
     assert_eq!(service.language_id(), "tmc");
-    assert_eq!(service.extensions(), [".tmc"]);
+    assert_eq!(service.extensions(), [".tmc", ".tmh"]);
     assert_eq!(service.watched_globs(), ["**/tmt.json"]);
     assert!(!service.trigger_characters().is_empty());
+}
+
+// -- headers ---------------------------------------------------------------
+
+const HEADER: &str = "\
+namespace lib {
+  export alphabet ab { '_', 'a' }
+  export routine pick(tape t: ab writes {}, state hit, state miss) noreturn;
+}
+";
+
+/// A `.tmh` is read declarations-only, as `tmt lint`/`tmt interface` read
+/// it: a bodiless signature is its normal shape and raises nothing.
+/// Mutation: read every document as a program — the bodiless routine is
+/// then a parse-or-shape error.
+#[test]
+fn a_header_document_is_clean() {
+    let mut service = TmcLanguageService::new();
+    let diagnostics = service.did_update("untitled:lib.tmh", HEADER);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/// The same text under a `.tmc` name is a program, and a program's routine
+/// needs its body. Mutation: read every document declarations-only.
+#[test]
+fn the_same_text_as_a_source_is_refused() {
+    let mut service = TmcLanguageService::new();
+    let diagnostics = service.did_update("untitled:lib.tmc", HEADER);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == ServiceSeverity::Error),
+        "{diagnostics:?}"
+    );
+}
+
+/// What a header may not hold is reported in the editor as the CLI
+/// reports it: a `machine` block is an error there. The extension is
+/// matched without regard to case, like the routing that bound it.
+#[test]
+fn a_machine_block_in_a_header_is_an_error() {
+    let text = format!("{HEADER}machine {{ tape t: lib::ab; entry state s {{ [*] -> stop; }} }}\n");
+    for uri in ["untitled:lib.tmh", "untitled:LIB.TMH"] {
+        let mut service = TmcLanguageService::new();
+        let diagnostics = service.did_update(uri, &text);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.severity == ServiceSeverity::Error),
+            "{uri}: {diagnostics:?}"
+        );
+    }
+}
+
+/// Only the header rule subset runs on a header (docs/tmt/lint.md
+/// (linting a header)): an exported alphabet no tape of the header uses
+/// is a header's normal shape, while an unused import is still reported.
+/// Mutation: run every rule on a header — `unused-alphabet` fires.
+#[test]
+fn a_header_lints_by_the_header_rule_subset() {
+    let text = "\
+use std::binaryNumbers::plusOne;
+namespace lib {
+  alphabet spare { '_', 'z' }
+  export alphabet ab { '_', 'a' }
+  export routine pick(tape t: ab writes {});
+}
+";
+    let mut service = TmcLanguageService::new();
+    let codes: Vec<_> = service
+        .did_update("untitled:lib.tmh", text)
+        .into_iter()
+        .filter_map(|d| d.code)
+        .collect();
+    assert!(codes.contains(&"unused-import"), "{codes:?}");
+    assert!(!codes.contains(&"unused-alphabet"), "{codes:?}");
+}
+
+/// A header formats like any `.tmc` text: the printer never runs the
+/// program-shape checks.
+#[test]
+fn a_header_document_formats() {
+    let mut service = TmcLanguageService::new();
+    service.did_update("untitled:lib.tmh", HEADER);
+    assert_eq!(service.format("untitled:lib.tmh").as_deref(), Some(HEADER));
 }
 
 #[test]

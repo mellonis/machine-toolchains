@@ -40,11 +40,13 @@ use mtc_core::lsp::{
 };
 use mtc_core::syntax::{AstNode, GreenNode, SyntaxElement, SyntaxNode, TextLineIndex, TextRange};
 
-use crate::compiler::{CompileError, Resolved, analyze_staged};
+use crate::compiler::{CompileError, ReadMode, Resolved, analyze_staged_in_mode};
 use crate::config;
 use crate::declarations::Declarations;
 use crate::lexer::Token;
-use crate::lint::{LintContext, LintError, run_rules, validate_allow};
+use crate::lint::{
+    HEADER_RULES, LintContext, LintError, run_rules, run_rules_where, validate_allow,
+};
 use crate::parser::{Doc, Program};
 use crate::syntax::{
     BindView, GraftView, MachineView, NamespaceView, ReuseView, RootView, StateView, TmcKind,
@@ -327,6 +329,18 @@ pub(super) fn std_enabled(state: &DocState) -> bool {
 /// (`untitled:` buffers, …) → `None`. An authority component
 /// (`file://localhost/x`) is skipped — editors emit the empty-authority
 /// `file:///x` form, but the spelled-out host is legal URI syntax.
+/// How a document is read, by its URI's extension: a `.tmh` header
+/// declarations-only, anything else as a program. ASCII case is ignored,
+/// like the routing that bound the document to this service
+/// (docs/lsp.md (multi-service routing)).
+fn read_mode_for(uri: &str) -> ReadMode {
+    if uri.to_ascii_lowercase().ends_with(".tmh") {
+        ReadMode::DeclarationsOnly
+    } else {
+        ReadMode::Program
+    }
+}
+
 fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     let path = &rest[rest.find('/')?..];
@@ -722,7 +736,10 @@ impl LanguageService for TmcLanguageService {
     }
 
     fn extensions(&self) -> &'static [&'static str] {
-        &[".tmc"]
+        // A `.tmh` header is `.tmc` grammar read declarations-only
+        // (docs/tmt/language.md (headers)); `did_update` picks the
+        // reading by the document's own extension.
+        &[".tmc", ".tmh"]
     }
 
     fn trigger_characters(&self) -> &[char] {
@@ -785,10 +802,14 @@ impl LanguageService for TmcLanguageService {
         // 3. Staged analysis, then — only over a clean resolve — the
         //    expansion stage, for its fatal alone (the binding-map
         //    legality family lives there).
-        let staged = analyze_staged(text);
+        //    A header is read declarations-only, as the batch tools
+        //    read it, and has no bodies to expand.
+        let mode = read_mode_for(uri);
+        let staged = analyze_staged_in_mode(text, &Declarations::stdlib(), mode);
         let mut fatal = staged.fatal;
         if let Some(resolved) = &staged.resolved
             && fatal.is_none()
+            && mode == ReadMode::Program
             && let Err(e) = crate::expand::expand(resolved, &Declarations::stdlib())
         {
             fatal = Some(e);
@@ -822,7 +843,16 @@ impl LanguageService for TmcLanguageService {
                     comment_tokens: raw_tokens,
                     externals: &externals,
                 };
-                Some(run_rules(&ctx, &effective_allow, &effective_warn))
+                Some(match mode {
+                    ReadMode::Program => run_rules(&ctx, &effective_allow, &effective_warn),
+                    // The header rule subset, exactly as `lint_header`
+                    // runs it (docs/tmt/lint.md (linting a header)).
+                    ReadMode::DeclarationsOnly => {
+                        run_rules_where(&ctx, &effective_allow, &effective_warn, |code| {
+                            HEADER_RULES.contains(&code)
+                        })
+                    }
+                })
             }
             _ => None,
         };
